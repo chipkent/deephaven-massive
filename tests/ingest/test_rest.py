@@ -967,8 +967,9 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
+    refused = dm.EntitlementError("refused", status=403)
     if outcome == "fails":
-        future.set_exception(dm.EntitlementError("refused", status=403))
+        future.set_exception(refused)
     else:
         future.set_result({"X:DOTUSD": ("DOT", "USD")})
     waiter.join(30)
@@ -976,16 +977,21 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     if outcome == "fails":
         assert isinstance(result, dm.EntitlementError)
         assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+        # Each waiter raises a copy, so no exception object is raised on two threads.
+        assert isinstance(result.__cause__, dm.EntitlementError)
+        assert result.__cause__ is not refused
+        assert result.__cause__.status == 403
     else:
         assert result == ("DOT", "USD")
 
 
-class _PairLookup:
-    # A thread that splits X:DOTUSD, holding the update graph's shared lock as a console
+class _Caller:
+    # A thread that makes one call, holding the update graph's shared lock as a console
     # command holds its lock when `console` is set, and keeps what the call returned or raised.
-    def __init__(self, m: dm.MassiveSession, *, console: bool) -> None:
+    def __init__(self, m: dm.MassiveSession, call: Callable[[], object], *, console: bool) -> None:
         self.result: object = None
         self._m = m
+        self._call = call
         self._console = console
         self._thread = threading.Thread(target=self._run)
         self._thread.start()
@@ -994,15 +1000,14 @@ class _PairLookup:
         if self._console:
             # Deephaven's lock wraps an error raised inside it, so the call keeps its own.
             with shared_lock(self._m._core.exec_ctx.update_graph):
-                self._split()
+                self._make()
         else:
-            self._split()
+            self._make()
 
-    def _split(self) -> None:
-        reader = cast("Any", self._m._core.rest_transport())._reader("crypto pairs")
+    def _make(self) -> None:
         try:
-            self.result = reader.crypto_pair("X:DOTUSD")
-        except dm.MassiveError as error:
+            self.result = self._call()
+        except (dm.MassiveError, KeyboardInterrupt) as error:
             self.result = error
 
     def join(self) -> object:
@@ -1011,15 +1016,36 @@ class _PairLookup:
         return self.result
 
 
-@pytest.mark.parametrize("console", [True, False], ids=["console", "patient"])
-def test_a_read_joining_the_crypto_ticker_list_waits_with_its_own_patience(
-    *,
-    fake_rest: FakeRestServer,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    console: bool,
-) -> None:
-    # A manual clock: each pause of the lookup lasts until the test moves time past it.
+class _Listeners:
+    """Record the listeners subscribed to one governor bucket that are still subscribed."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.buckets: list[str] = []
+        self.live: list[Callable[[], None]] = []
+        subscribe = _massive.RequestGovernor.subscribe_bucket
+        unsubscribe = _massive.RequestGovernor.unsubscribe
+
+        def subscribing(
+            governor: _massive.RequestGovernor, bucket: str, listener: Callable[[], None]
+        ) -> None:
+            self.buckets.append(bucket)
+            self.live.append(listener)
+            subscribe(governor, bucket, listener)
+
+        def unsubscribing(governor: _massive.RequestGovernor, listener: Callable[[], None]) -> None:
+            if listener in self.live:
+                self.live.remove(listener)
+            unsubscribe(governor, listener)
+
+        monkeypatch.setattr(_massive.RequestGovernor, "subscribe_bucket", subscribing)
+        monkeypatch.setattr(_massive.RequestGovernor, "unsubscribe", unsubscribing)
+
+
+def _manual_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dm.MassiveSession, FakeClock]:
+    # A session whose governor runs on a manual clock: each pause lasts until the test moves
+    # time past it.
     clock = FakeClock(manual=True)
     create = functools.partial(
         _massive.RequestGovernor,
@@ -1030,52 +1056,155 @@ def test_a_read_joining_the_crypto_ticker_list_waits_with_its_own_patience(
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    refusal = Reply(
-        {"status": "ERROR", "message": "slow down"}, status=429, headers={"Retry-After": "60"}
-    )
-    fake_rest.reply(
-        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
-        refusal,
-        refusal,
-        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
-    )
-    fake_rest.reply(
-        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
-    )
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    return m, clock
+
+
+PAUSE = Reply(
+    {"status": "ERROR", "message": "slow down"}, status=429, headers={"Retry-After": "60"}
+)
+"""Massive's refusal of a request, asking for a pause of 60 s."""
+LIST_TARGET = "/v3/reference/tickers?market=crypto&active=true&limit=1000"
+"""The first page of Massive's list of listed crypto tickers."""
+DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
+"""The first page of Massive's list of delisted crypto tickers."""
+
+
+def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
+    # A call that splits X:DOTUSD from the session's crypto ticker list.
+    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    return functools.partial(reader.crypto_pair, "X:DOTUSD")
+
+
+def _gave_up_after_two_pauses(result: object) -> None:
+    # The caller holding the update graph's lock waits out 90 s of pauses: the second 60 s
+    # pause takes it past that, after it spent 60 s.
+    assert isinstance(result, dm.MassiveError)
+    assert result.status == 429
+    assert re.search(
+        r"rate limited: Massive is refusing .*this read waits out at most 90 s of pauses and "
+        r"has spent 60 s",
+        str(result),
+    )
+
+
+@pytest.mark.parametrize("console", ["joiner", "maker", "neither"])
+def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    console: str,
+) -> None:
+    # Two callers need the list at once; `console` names the one inside a console command
+    # (90 s of pauses), the other waits out 600 s. Massive pauses the list twice for 60 s.
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    listeners = _Listeners(monkeypatch)
+    fake_rest.reply(LIST_TARGET, PAUSE, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     caplog.set_level(logging.DEBUG, LOGGER)
     try:
-        starter = _PairLookup(m, console=False)  # ten minutes of pauses
-        clock.wait_for_deadlines([60.0])  # the lookup waits out Massive's first pause
-        joiner = _PairLookup(m, console=console)  # 90 s inside a console command, else 600 s
-        clock.wait_for_deadlines([60.0, math.inf])  # it shares the lookup, charged 60 s
-        clock.advance(60.0)  # the lookup's next request is refused: 60 s more, 120 s in all
-        if console:
-            failure = joiner.join()
-            assert isinstance(failure, dm.MassiveError)
-            assert failure.status == 429
-            assert re.search(
-                r"reading Massive's crypto tickers failed: rate limited: Massive is refusing "
-                r".*this read waits out at most 90 s of pauses and has spent 60 s",
-                str(failure),
-            )
-            clock.wait_for_deadlines([120.0])  # the lookup goes on for the read that started it
-        else:
+        maker = _Caller(m, _split_dot(m), console=console == "maker")
+        clock.wait_for_deadlines([60.0])  # the maker waits out Massive's first pause
+        joiner = _Caller(m, _split_dot(m), console=console == "joiner")
+        clock.wait_for_deadlines([60.0, math.inf])  # the joiner shares it, charged 60 s
+        clock.advance(60.0)  # the list's next request is refused: 60 s more, 120 s in all
+        if console == "neither":
             clock.wait_for_deadlines([120.0, math.inf])
+        else:
+            _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+            # The other caller reads on: the maker its own lookup, or the joiner a new one
+            # of its own, since the maker's giving up says nothing about the list.
+            clock.wait_for_deadlines([120.0])
         clock.advance(60.0)
-        assert starter.join() == ("DOT", "USD")
-        if not console:
+        if console != "maker":
+            assert maker.join() == ("DOT", "USD")
+        if console != "joiner":
             assert joiner.join() == ("DOT", "USD")
     finally:
         m.close()
-    assert len(sent(fake_rest)) == 4  # one lookup: three listed pages tried, one delisted
-    patience = 90 if console else 600
+    assert len(sent(fake_rest)) == 4  # the list's three attempts, then the delisted page
+    assert (listeners.buckets, listeners.live) == (["other"], [])  # heard, then removed
+    patience = 90 if console == "joiner" else 600
     assert (
-        f"{m._core.label}: waits for the crypto ticker list another read is making, through at "
-        f"most {patience} s of its pauses"
+        f"{m._core.label}: waits for the crypto ticker list another caller is making, through "
+        f"at most {patience} s of its pauses"
     ) in caplog.messages
     stopped = [r for r in caplog.records if "stops waiting for the crypto" in r.getMessage()]
-    assert [r.levelno for r in stopped] == ([logging.ERROR] if console else [])
+    assert [r.levelno for r in stopped] == ([logging.ERROR] if console == "joiner" else [])
+    retried = [r for r in caplog.records if "this caller tries again" in r.getMessage()]
+    assert [r.levelno for r in retried] == ([logging.INFO] if console == "maker" else [])
+
+
+def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    fake_rest.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
+    client = cast("rest.RestEndpoints", m._core.rest_transport())._state.client
+    pages = client.pages
+    claimed = threading.Event()
+    interrupt = threading.Event()
+
+    def interrupted(*args: object, **kwargs: object) -> Iterator[_massive.Page]:
+        if not claimed.is_set():  # the maker, interrupted (as by Ctrl-C) once a caller joined
+            claimed.set()
+            assert interrupt.wait(TIMEOUT)
+            raise KeyboardInterrupt
+        return pages(*cast("Any", args), **cast("Any", kwargs))
+
+    monkeypatch.setattr(client, "pages", interrupted)
+    caplog.set_level(logging.INFO, LOGGER)
+    try:
+        maker = _Caller(m, _split_dot(m), console=False)
+        assert claimed.wait(TIMEOUT)
+        joiner = _Caller(m, _split_dot(m), console=True)
+        clock.wait_for_deadlines([math.inf])  # the joiner waits on the maker's lookup
+        interrupt.set()
+        assert isinstance(maker.join(), KeyboardInterrupt)
+        assert joiner.join() == ("DOT", "USD")  # it read the list itself
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 2
+    assert any(
+        "the caller making the crypto ticker list stopped (KeyboardInterrupt())" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.parametrize("console", ["joiner", "maker"])
+def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    load_fixture: Callable[[str, str], bytes],
+    console: str,
+) -> None:
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    listeners = _Listeners(monkeypatch)
+    snapshot = Reply(load_fixture("ingest/hosts", "stocks_delayed.json"))
+    fake_rest.reply("/v3/snapshot", PAUSE, PAUSE, snapshot)
+
+    def decide() -> object:
+        return m._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+
+    try:
+        maker = _Caller(m, decide, console=console == "maker")
+        clock.wait_for_deadlines([60.0])
+        joiner = _Caller(m, decide, console=console == "joiner")
+        clock.wait_for_deadlines([60.0, math.inf])
+        clock.advance(60.0)
+        _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+        clock.wait_for_deadlines([120.0])  # the other caller decides on
+        clock.advance(60.0)
+        decision = (maker if console == "joiner" else joiner).join()
+    finally:
+        m.close()
+    assert isinstance(decision, HostDecision)
+    assert decision.host == "delayed.massive.com"
+    assert len(sent(fake_rest)) == 3
+    assert (listeners.buckets, listeners.live) == (["stocks"], [])
 
 
 def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
@@ -2235,7 +2364,7 @@ def test_waiters_get_a_copy_of_the_deciders_error(session: dm.MassiveSession) ->
     error = dm.EntitlementError("no", status=403, request_id="r1")
     future.set_exception(error)
     with pytest.raises(dm.EntitlementError, match=r"^no$") as info:
-        rest._waited(future)
+        rest._outcome(future)
     assert info.value is not error
     assert (info.value.status, info.value.request_id) == (403, "r1")
 

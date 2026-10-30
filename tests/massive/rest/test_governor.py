@@ -568,6 +568,27 @@ def test_listeners_hear_every_change_until_unsubscribed() -> None:
     assert len(heard) == 2
 
 
+def test_a_bucket_listener_hears_only_its_bucket() -> None:
+    governor = _governor()
+    heard: list[str] = []
+
+    def listener() -> None:
+        heard.append("x")
+
+    governor.subscribe_bucket("other", listener)
+    _requests(governor, "stocks", 1)  # another subscription's change
+    assert heard == []
+    _requests(governor, "other", 1)
+    assert len(heard) == 1
+    governor.declare({"stocks"})  # a declaration changes every bucket
+    assert len(heard) == 2
+    governor.unsubscribe(listener)
+    _requests(governor, "other", 1)
+    assert len(heard) == 2
+    with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
+        governor.subscribe_bucket("crypto", listener)
+
+
 # --- Many threads --------------------------------------------------------------------------------
 
 

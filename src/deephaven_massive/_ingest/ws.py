@@ -2313,8 +2313,11 @@ class WsConnections:
     def _change_pairs(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
         """Resolve a crypto stream's added pairs, then post the change; fail it if one fails.
 
-        Runs on the lookup worker, which makes no Deephaven call: a failed lookup goes to the
-        flush thread (`Flusher.fail`), and the change to the connection's loop thread.
+        Runs on the lookup worker. Its only Deephaven call is the check, when a lookup starts or
+        joins one already under way, of whether its thread holds the update graph's lock, which
+        sets how long the lookup waits out rate-limit pauses (`rate_limits.read_patience`; the
+        worker never holds it, so 10 minutes). A failed lookup goes to the flush thread
+        (`Flusher.fail`), and the change to the connection's loop thread.
 
         Args:
             stream_id: The stream.

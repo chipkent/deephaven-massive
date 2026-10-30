@@ -2687,8 +2687,9 @@ Resolution runs synchronously on the calling thread at the first stream verb for
 The REST transport is the one place the decision is cached, per session, for the session's
 life, and resolution is **single-flight**: the cache holds one future per (class, family),
 created under the transport's own leaf lock (never `registry_lock`); the first caller makes
-the REST call and completes the future, and later callers wait on it outside every lock. A
-failed resolution completes the future with the error and removes it, so nothing is cached.
+the REST call and completes the future, and later callers wait on it outside every lock, each
+within its own patience (section 13.4, Giving up). A failed resolution completes the future
+with the error and removes it, so nothing is cached; every waiting caller raises a copy of it.
 Each new decision writes the pair's `Transport=REST` row of `m.connections()`. The cache is
 the one place a decision lives: the explicit-verdict rule of
 [section 13.3](#133-connection-and-subscription-protocol) records its re-routed decision there
@@ -3118,10 +3119,16 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   governor); and gives the remedies: retry after that time, stop the other program, and, for
   a subscription, declare it Basic or upgrade it (none of these for `other`). Only that read
   stops; the requests of other reads, a stream's host decision and other sessions included,
-  keep their own patience. A read that joins a lookup another read started, such as the
-  session's crypto ticker list, sends no request of its own: it charges the lookup's pauses
-  to its own patience (`RequestGovernor.charge_pause`) and gives up with the same error, while
-  the lookup goes on for the read that started it. No setting changes the patience.
+  keep their own patience. Every lookup the session shares between the callers that need it
+  at once (the crypto ticker list and each WebSocket host decision) follows the same rule. A
+  caller that joins one another caller is making sends no request of its own: it charges the
+  pauses of the lookup's bucket to its own patience (`RequestGovernor.charge_pause`, woken by
+  a listener of that bucket alone, `subscribe_bucket`) and gives up with the same error, while
+  the lookup goes on for the caller making it. If that caller stops for a reason of its own
+  (its patience ran out, or it was interrupted, as by Ctrl-C), no waiter fails with it: each
+  tries again with the patience it has left, so one of them makes the lookup and the others
+  wait on that one. Any other failure reaches every waiter, each raising its own copy. No
+  setting changes the patience.
 - **Learning.** A 429 whose message names the per-minute maximum makes its bucket learned
   Basic, paced from then on, for the governor's life (see Sharing); any other 429 only
   pauses. `other` learns as a subscription does.
@@ -4157,7 +4164,8 @@ client.pages(rest_path, path_params, query_params, *, bucket, cancel=None,
              patience=UNLIMITED, limit=None) -> Iterator[Page]       # follows next_url
 RequestGovernor(buckets, *, learn_only=(), clock=SYSTEM_CLOCK, labels={})
     # declare, admission(bucket, *, lane, patience=UNLIMITED) -> Admission, done, release,
-    # refused, charge_pause, snapshot, next_change, estimate, idle, subscribe, unsubscribe
+    # refused, charge_pause, snapshot, next_change, estimate, idle, subscribe,
+    # subscribe_bucket, unsubscribe
 Admission.acquire(cancel) -> Permit   # inside `with governor.admission(...)`; exit reports it
 Patience(seconds)                     # one read's budget of pause time, shared by its requests
 Cancel(*parents)                                  # a threading.Event set once, following parents
@@ -6003,8 +6011,9 @@ document already reflects them.
     - A read's patience counts only time spent waiting out pauses, each stretch once; slot
       waits never count: the coordinator's reading of the owner's approval to give up after
       about 10 minutes paused.
-    - A read that joins a lookup another read started bounds its own wait with its own
-      patience and keeps sharing the lookup (issue #206).
+    - A caller that joins a shared lookup (the crypto ticker list, a host decision) bounds
+      its own wait with its own patience and keeps sharing the lookup, and tries again when
+      the caller making it gives up or is interrupted (issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
 
 ## 23. Open verification items

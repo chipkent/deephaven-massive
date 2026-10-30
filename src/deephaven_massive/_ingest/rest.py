@@ -69,6 +69,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/hosts.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
+- **Shared lookups.** The host decisions and the session's crypto ticker list are each made by
+  one caller while the others wait (`RestReader.wait_for_shared`). A waiting caller charges the
+  lookup's pauses to its own patience and gives up when they outlast it; if the caller making
+  the lookup gives up or is interrupted, each waiting caller tries again with what it has left.
 
 `RestState` is the part a session shares (the client, the host decisions, the live pollers,
 the once-per-session warnings); `SessionClients` creates it on first use and registers its
@@ -89,7 +93,7 @@ from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar, cast
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -213,6 +217,61 @@ CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
 
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
+
+T = TypeVar("T")
+"""The outcome of a shared lookup (`RestReader.wait_for_shared`)."""
+
+
+class _AbandonedError(Exception):
+    """What a shared lookup's future holds when the caller making it stopped for its own reason.
+
+    That caller gave up on a pause its own patience could not cover, or was interrupted (as
+    by Ctrl-C). Neither says anything about the lookup, so no caller waiting on it may fail
+    with it: each tries again with the patience it has left (`RestReader.wait_for_shared`).
+    Only ever set on a future, never raised; its text is the maker's error, for the log.
+    """
+
+
+def _shared_failure(error: BaseException, context: str) -> BaseException:
+    """Return what a failed shared lookup's future holds for the callers waiting on it.
+
+    Args:
+        error: What stopped the caller making the lookup: its public error, or the exception
+            that interrupted it.
+        context: What failed, for an unexpected error's message, such as `"the read failed"`.
+
+    Returns:
+        `_AbandonedError` when the maker stopped for its own reason: a `MassiveError` with
+        status 429 (its patience ran out; the client never gives up on a 429 otherwise) or an
+        interruption that is not an `Exception` (`KeyboardInterrupt`). Otherwise the
+        `MassiveError` itself, or for any other error a `MassiveError` naming it, which every
+        waiter raises a copy of (`_outcome`).
+    """
+    if isinstance(error, MassiveError):
+        if error.status == HTTPStatus.TOO_MANY_REQUESTS:
+            return _AbandonedError(str(error))
+        return error
+    if not isinstance(error, Exception):
+        return _AbandonedError(repr(error))
+    return MassiveError(f"{context}: {error!r}")
+
+
+def _outcome(future: Future[T]) -> T:
+    """Return a completed shared lookup's result, or raise a copy of its error.
+
+    Args:
+        future: A completed future that holds a result or a `MassiveError`.
+
+    Returns:
+        The result.
+
+    A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status, and
+    request id), so that no exception object is raised on two threads at once.
+    """
+    try:
+        return future.result()
+    except MassiveError as error:
+        raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
 
 
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
@@ -1153,7 +1212,7 @@ class RestReader:
         Basic subscription they wait their turn. Blocks the calling thread for that read, or
         while another thread makes it, sharing that read rather than starting a second one; a
         caller that shares it still waits out no more of its pauses than its own patience
-        covers (`_joined`). Holds no lock meanwhile. A failed read is not kept, so
+        covers (`wait_for_shared`). Holds no lock meanwhile. A failed read is not kept, so
         the next call tries again. A read that succeeds is kept for the session as it is, even
         when it lists no pair: every pair is then refused.
 
@@ -1189,24 +1248,52 @@ class RestReader:
     def _crypto_tickers(self) -> CryptoTickers:
         """Return the session's crypto ticker list, reading it on first need.
 
+        The first caller reads the list; a caller that arrives meanwhile waits for that read
+        within its own patience (`wait_for_shared`). If the caller reading it stops for a reason
+        of its own (it gave up on a pause, or was interrupted), each waiting caller tries again
+        with the patience it has left: one of them reads the list, and the others wait on it.
+
         Returns:
             Each crypto ticker Massive lists: its `(base, quote)`, or why its currencies
             cannot be used.
 
         A failed read raises its public `MassiveError` (`AuthenticationError`,
-        `EntitlementError`), also to every caller that waited on it; an unexpected error of
-        the reader propagates to it, and its waiters get a `MassiveError` naming it.
+        `EntitlementError`), and every caller that waited on it a copy of it; an unexpected
+        error of the reader propagates to it, and its waiters get a `MassiveError` naming it.
+        A waiting caller that gives up raises the error `wait_for_shared` describes.
         """
         future, created = self.state.crypto_future()
-        if not created:
-            # A list already read needs no wait, and so no patience (a Java call).
-            return future.result() if future.done() else self._joined(future)
+        if not created and future.done():
+            return future.result()  # a list already read needs no patience (a Java call)
+        patience = self.patience()
+        while not created:
+            if self.wait_for_shared(
+                future, bucket=OTHER, patience=patience, what="the crypto ticker list"
+            ):
+                return _outcome(future)
+            future, created = self.state.crypto_future()
+        return self._read_crypto_tickers(future, patience)
+
+    def _read_crypto_tickers(
+        self, future: Future[CryptoTickers], patience: Patience
+    ) -> CryptoTickers:
+        """Read the crypto ticker list for the session, completing the future others wait on.
+
+        Args:
+            future: The list's future, which this caller claimed.
+            patience: This caller's patience, for every page.
+
+        Returns:
+            The list.
+
+        A failed read is forgotten, so the next caller tries again, and raises as
+        `_crypto_tickers` describes; the future gets what its waiters need (`_shared_failure`).
+        """
         tickers: dict[str, tuple[str, str] | str] = {}
         try:
             # The list is reference data, which Massive counts in a bucket of its own. Its
             # pages share one lane of their own, so they wait their turn with other reads
             # instead of queueing behind them; closing the client still ends their waits.
-            patience = self.patience()
             with Cancel() as lane:
                 # Listed pairs first, then delisted ones, so that a past date of a delisted
                 # pair still splits; a ticker in both keeps its listed entry.
@@ -1227,62 +1314,80 @@ class RestReader:
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()
-            future.set_exception(public)
+            future.set_exception(_shared_failure(public, "the read failed"))
             raise public from error
         except BaseException as error:
-            # Every waiter gets a MassiveError; the reader's own unexpected error propagates.
+            # The reader's own unexpected error propagates; its waiters get a MassiveError.
             self.state.forget_crypto()
-            future.set_exception(MassiveError(f"the read failed: {error!r}"))
+            future.set_exception(_shared_failure(error, "the read failed"))
             raise
         future.set_result(tickers)
         return tickers
 
-    def _joined(self, future: Future[CryptoTickers]) -> CryptoTickers:
-        """Wait for the crypto ticker list another read is making, within this read's patience.
+    def wait_for_shared(
+        self, future: Future[T], *, bucket: str, patience: Patience, what: str
+    ) -> bool:
+        """Wait for a lookup another caller is making, within this caller's own patience.
 
-        The lookup is shared, but its pauses are not: this read charges each pause of the
-        lookup's bucket (`OTHER`) to its own patience (`RequestGovernor.charge_pause`), when
-        it starts waiting and after every change of the governor, and stops waiting once a
-        pause outlasts what its patience still covers. So a console command, which waits out
-        90 s of pauses, never waits out the ten minutes of the read it joined. The lookup goes
-        on for the read that started it and for every other read still waiting on it. Blocks
-        the calling thread; holds no lock meanwhile. Logs the wait at DEBUG, and giving up at
-        ERROR.
+        The session shares some lookups between the callers that need them at once: the crypto
+        ticker list (`_crypto_tickers`) and each WebSocket host decision
+        (`RestEndpoints.resolve_host`). The lookup is shared, but its pauses are not: this
+        caller charges each pause of the lookup's bucket to its own patience
+        (`RequestGovernor.charge_pause`), when it starts waiting and after every change of that
+        bucket, and stops waiting once a pause outlasts what its patience still covers. So a
+        console command, which waits out 90 s of pauses, never waits out the ten minutes of the
+        caller it joined; the lookup goes on for that caller and every other one still waiting.
+
+        Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
+        meanwhile, and leaves no listener behind. Logs the wait at DEBUG, a lookup abandoned by
+        its maker at INFO, and giving up at ERROR.
 
         Args:
-            future: The list's future, which the read that claimed it completes.
+            future: The lookup's future, which the caller making it completes.
+            bucket: The governor bucket the lookup's requests are charged to.
+            patience: This caller's patience; the pauses it waits out are charged to it.
+            what: The lookup, for the log, such as `"the crypto ticker list"`.
 
         Returns:
-            The list.
+            True when the future holds the lookup's outcome (`_outcome` returns or raises it);
+            False when the caller making it stopped for a reason of its own (it gave up on a
+            pause, or was interrupted; see `_shared_failure`), so this caller tries again.
 
-        Once a pause of the lookup outlasts this read's patience, it raises the public error
-        of a read that gives up (`_public`): `MassiveError("rate limited: ...")` with status
-        429, or `"... is closed"` if the session closed meanwhile. A failed lookup raises the
-        error its future holds, as `_crypto_tickers` describes.
+        Once a pause of the lookup outlasts this caller's patience, it raises the public error
+        of a request that gives up (`_public`): `MassiveError("rate limited: ...")` with status
+        429, or `"... is closed"` if the session closed meanwhile.
         """
-        patience = self.patience()
         logger.debug(
-            "%s: waits for the crypto ticker list another read is making, through at most "
-            "%.0f s of its pauses",
+            "%s: waits for %s another caller is making, through at most %.0f s of its pauses",
             self.state.label,
+            what,
             patience.seconds,
         )
         governor = self.state.client.governor
         changed = threading.Event()
         future.add_done_callback(lambda _: changed.set())
-        governor.subscribe(changed.set)
+        governor.subscribe_bucket(bucket, changed.set)
         try:
             while True:
                 changed.clear()  # before looking, so no change is missed
                 if future.done():
-                    return future.result()
-                failure = governor.charge_pause(OTHER, patience)
+                    abandoned = future.exception()
+                    if isinstance(abandoned, _AbandonedError):
+                        logger.info(
+                            "%s: the caller making %s stopped (%s); this caller tries again",
+                            self.state.label,
+                            what,
+                            abandoned,
+                        )
+                        return False
+                    return True
+                failure = governor.charge_pause(bucket, patience)
                 if failure is not None:
                     public = self._public(failure)
                     logger.error(
-                        "%s: stops waiting for the crypto ticker list, which goes on for the "
-                        "read making it: %s",
+                        "%s: stops waiting for %s, which goes on for the caller making it: %s",
                         self.state.label,
+                        what,
                         public,
                     )
                     raise public from failure
@@ -1672,7 +1777,7 @@ class RestReader:
             raise self._public(error) from error
 
     def probe(
-        self, probe: hosts.SnapshotProbe, *, asset_class: AssetClass
+        self, probe: hosts.SnapshotProbe, *, asset_class: AssetClass, patience: Patience
     ) -> list[dict[str, object]]:
         """Make a host-decision request and return its raw JSON rows.
 
@@ -1680,6 +1785,8 @@ class RestReader:
             probe: The request.
             asset_class: The class whose host is decided; the request is charged to its
                 subscription, whatever path it reads.
+            patience: The deciding caller's patience (`patience()`, taken on its thread
+                before it waited on another caller's decision, if it did).
 
         Returns:
             The rows, every key kept.
@@ -1687,7 +1794,6 @@ class RestReader:
         A failed request raises the public error of its `WireError` (`_public`):
         `AuthenticationError`, `EntitlementError`, or `MassiveError`.
         """
-        patience = self.patience()
         try:
             page = self.state.client.get(
                 self.rest_path(probe.path),
@@ -1976,9 +2082,12 @@ class RestEndpoints:
 
         The first caller for a pair decides (`hosts.decide`, at most one REST request) and
         records the decision in the pair's `Transport=REST` row of `m.connections()`; callers
-        that arrive meanwhile wait for that decision, outside every lock, and later callers
-        get it at once. A failed decision is not cached: its row shows `FAILED` and the error,
-        every waiting caller raises the same error, and the next call tries again.
+        that arrive meanwhile wait for that decision, outside every lock, each within its own
+        patience (`RestReader.wait_for_shared`), and later callers get it at once. A failed
+        decision is not cached: its row shows `FAILED` and the error, every waiting caller
+        raises a copy of the error, and the next call tries again. If the deciding caller
+        stopped for a reason of its own (it gave up on a pause, or was interrupted), each
+        waiting caller tries again instead, with the patience it has left.
 
         Args:
             asset_class: The asset class of the stream.
@@ -1989,18 +2098,27 @@ class RestEndpoints:
 
         Errors: `EntitlementError` when the plan has no WebSocket access for the class,
         `AuthenticationError` for a rejected key, and `MassiveError` for an undocumented
-        timeframe or a failed request; each is logged at ERROR by the deciding caller.
+        timeframe or a failed request; each is logged at ERROR by the deciding caller. A
+        waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
         future, owner = self._state.host_future(key)
-        if not owner:
-            return _waited(future)
+        if not owner and future.done():
+            return _outcome(future)  # a decision already made needs no patience (a Java call)
+        reader = self._reader("hosts")
+        patience = reader.patience()
+        bucket = bucket_of(subscription_of(asset_class))
+        while not owner:
+            what = f"the {asset_class.value} WebSocket host decision"
+            if reader.wait_for_shared(future, bucket=bucket, patience=patience, what=what):
+                return _outcome(future)
+            future, owner = self._state.host_future(key)
         try:
             decision = hosts.decide(
                 asset_class,
                 family,
                 ws_hosts=self._core.config.ws_hosts,
-                fetch=functools.partial(self._reader("hosts").probe, asset_class=asset_class),
+                fetch=functools.partial(reader.probe, asset_class=asset_class, patience=patience),
             )
         except BaseException as error:
             self._state.forget_host(key, future)
@@ -2011,7 +2129,9 @@ class RestEndpoints:
                     f"deciding the {asset_class.value} WebSocket host failed: {error!r}"
                 )
             )
-            future.set_exception(failure)
+            future.set_exception(
+                _shared_failure(error, f"deciding the {asset_class.value} WebSocket host failed")
+            )
             _report_host_failure(failure)
             self._core.diagnostics.write(
                 ConnectionRow(
@@ -2494,24 +2614,6 @@ def _history_calls(
         extra=order,
         split=split,
     )
-
-
-def _waited(future: Future[HostDecision]) -> HostDecision:
-    """Wait for another caller's host decision.
-
-    Args:
-        future: The decision's future.
-
-    Returns:
-        The decision.
-
-    A failed decision raises a copy of the deciding caller's `MassiveError` (its type, text,
-    status, and request id), so that no exception object is raised on two threads at once.
-    """
-    try:
-        return future.result()
-    except MassiveError as error:
-        raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
 
 
 _FLAT_FILES_REMEDY: Final = (
