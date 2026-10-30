@@ -429,6 +429,30 @@ def test_a_waiting_request_fails_when_a_refusal_pushes_the_pause_past_its_patien
     assert "Its next request, a probe, goes at" in str(impatient.error)
 
 
+def test_a_read_waiting_on_another_reads_requests_charges_their_pauses_to_its_own_patience() -> (
+    None
+):
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    patience = Patience(90.0)
+    assert governor.charge_pause("other", patience) is None  # no pause: nothing to charge
+    assert patience.spent == 0.0
+    _refuse(governor, governor.admission("other", lane=object()).acquire(Cancel()), retry_after=60)
+    assert governor.charge_pause("other", patience) is None
+    assert governor.charge_pause("other", patience) is None  # the same pause counts once
+    assert patience.spent == 60.0
+    clock.advance(60.0)
+    _refuse(governor, governor.admission("other", lane=object()).acquire(Cancel()), retry_after=60)
+    failure = governor.charge_pause("other", patience)  # 120 s in all: more than it waits out
+    assert failure is not None
+    assert failure.status == 429
+    assert "this read waits out at most 90 s of pauses and has spent 60 s" in str(failure)
+    assert patience.spent == 60.0  # nothing is charged for a pause it will not wait out
+    assert governor.charge_pause("other", Patience(600.0)) is None  # another read's own patience
+    with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
+        governor.charge_pause("crypto", patience)
+
+
 def test_the_bucket_never_gives_up_however_long_massive_refuses() -> None:
     # Ninety refusals take far longer than any read waits; a request with no deadline still
     # waits each pause out, so another session's reads never fail for this one's patience.
@@ -542,6 +566,27 @@ def test_listeners_hear_every_change_until_unsubscribed() -> None:
     governor.unsubscribe(listener)  # unknown now: ignored
     _requests(governor, "stocks", 1)
     assert len(heard) == 2
+
+
+def test_a_bucket_listener_hears_only_its_bucket() -> None:
+    governor = _governor()
+    heard: list[str] = []
+
+    def listener() -> None:
+        heard.append("x")
+
+    governor.subscribe_bucket("other", listener)
+    _requests(governor, "stocks", 1)  # another subscription's change
+    assert heard == []
+    _requests(governor, "other", 1)
+    assert len(heard) == 1
+    governor.declare({"stocks"})  # a declaration changes every bucket
+    assert len(heard) == 2
+    governor.unsubscribe(listener)
+    _requests(governor, "other", 1)
+    assert len(heard) == 2
+    with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
+        governor.subscribe_bucket("crypto", listener)
 
 
 # --- Many threads --------------------------------------------------------------------------------

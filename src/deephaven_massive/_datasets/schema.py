@@ -52,7 +52,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -581,28 +581,41 @@ _LIBRARY_TYPES: Final[Mapping[str, WireType]] = {
 others instants."""
 
 
+_Read: TypeAlias = "tuple[DatasetSpec, Transport, str, Source]"
+"""One source the merge walks: the member that reads it, its transport and key, and itself."""
+
+
 def _by_position(
-    member: DatasetSpec, source: Callable[[Transport, str], Source]
-) -> list[tuple[Transport, str, Source]]:
-    """Return a member's sources in the order of their positions in its kind's group.
+    members: Sequence[DatasetSpec], source: Callable[[Transport, str], Source]
+) -> list[_Read]:
+    """Return every member's sources, each group's in the order of their positions in it.
 
     The merge walks them in this order, so a schema's column order follows the generated
-    memberships, never the order of the spec's role paths or mappings. Every source of a
-    kind dataset holds a position (the kind-membership gate); a dataset in no kind has none,
-    so its sources keep their declared order.
+    memberships, never the order of the spec's role paths or mappings, nor how a group is
+    split over datasets: the trades of stocks give the same columns, in the same order,
+    whether `stocks.trades` reads the last-trade path or `stocks.last_trade` does. The
+    members come grouped (`Catalog.members` orders them by group), and within a group the
+    sources of all its members are ordered together. Every source of a kind dataset holds a
+    position (the kind-membership gate); a dataset in no kind has none, so its sources keep
+    their declared order.
 
     Args:
-        member: The dataset.
+        members: The datasets whose sources merge, grouped, in member order.
         source: Returns the generated source of a transport and key.
 
     Returns:
-        `(transport, key, source)` for every source of the member.
+        `(member, transport, key, source)` for every source of every member.
     """
-    found = [(transport, key, source(transport, key)) for transport, key in member.sources]
+    found = [
+        (member, transport, key, source(transport, key))
+        for member in members
+        for transport, key in member.sources
+    ]
+    groups = {member.group: rank for rank, member in reversed(list(enumerate(members)))}
 
-    def rank(item: tuple[int, tuple[Transport, str, Source]]) -> tuple[int, int]:
-        index, (_, _, generated) = item
-        return (_position(member, generated) or 0, index)
+    def rank(item: tuple[int, _Read]) -> tuple[int, int, int]:
+        index, (member, _, _, generated) = item
+        return (groups[member.group], _position(member, generated) or 0, index)
 
     return [entry for _, entry in sorted(enumerate(found), key=rank)]
 
@@ -1130,8 +1143,9 @@ def dataset_schema(
     """Merge the renamed columns of every member's sources into one dataset's schema.
 
     The ordered union by column name of `rename(member, s)` for every source `s` of every
-    member, in member order, then the order of the sources' positions in the kind's group
-    (declared order for a source without one), then field order, with the library's time
+    member, group by group in member order, each group's sources in their positions in it,
+    whichever member reads them (declared order for a source without one; `_by_position`),
+    then field order, with the library's time
     columns for the dataset's row times (`DatasetSpec.times`): `Date` for ticks, `Date`,
     `TimestampStart`, and `TimestampEnd` for bars and daily summaries, and `TimestampInsert` for
     every dataset. `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd` come
@@ -1198,25 +1212,24 @@ def dataset_schema(
     """
     types: dict[str, WireType] = {}
     suppliers: dict[str, list[str]] = {}
-    for member in members:
-        for transport, key, found in _by_position(member, source):
-            for contribution in rename(member, found):
-                prior = types.get(contribution.column)
-                joined = (
-                    contribution.wire_type
-                    if prior is None
-                    else prior.common_type(contribution.wire_type)
+    for member, transport, key, found in _by_position(members, source):
+        for contribution in rename(member, found):
+            prior = types.get(contribution.column)
+            joined = (
+                contribution.wire_type
+                if prior is None
+                else prior.common_type(contribution.wire_type)
+            )
+            if joined is None:
+                raise ValueError(
+                    f"member types: {spec.name}: column {contribution.column!r} is "
+                    f"{prior} elsewhere but {contribution.wire_type} in {member.name} "
+                    f"{transport.value} {key}"
                 )
-                if joined is None:
-                    raise ValueError(
-                        f"member types: {spec.name}: column {contribution.column!r} is "
-                        f"{prior} elsewhere but {contribution.wire_type} in {member.name} "
-                        f"{transport.value} {key}"
-                    )
-                types[contribution.column] = joined
-                named = suppliers.setdefault(contribution.column, [])
-                if member.name not in named:
-                    named.append(member.name)
+            types[contribution.column] = joined
+            named = suppliers.setdefault(contribution.column, [])
+            if member.name not in named:
+                named.append(member.name)
     library = _library_names(spec)
     for name in library:
         prior = types.get(name)

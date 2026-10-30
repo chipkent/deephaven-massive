@@ -1,20 +1,22 @@
-"""The `m.indices` namespace: index values, bars, snapshots, and daily open/close.
+"""The `m.indices` namespace: index values, bars, the previous day's bar, snapshots, and more.
 
 Each dataset is one factory method on `_Indices` that validates its arguments and returns a query;
 nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 
-The four datasets and what serves them:
+The five datasets and what serves them:
 
-- `indices.values`: index levels, streamed tick by tick from the WebSocket `V` channel,
-  fetched from the indices snapshot (only its `ticker`, `value`, and `last_updated` fields), and
+- `indices.values`: index levels, streamed tick by tick from the WebSocket `V` channel and
   read back from the `us_indices/values_v1` flat files. Massive has no REST history of index
-  values, so `history()` reads flat files only.
-- `indices.bars`: OHLC bars from the `A` (1 second) and `AM` (1 minute) channels, the
-  previous-session and range aggregates endpoints, and the minute and day aggregate flat files.
-  Index aggregates are computed from index values, so their volume columns are always null
-  and they are never adjusted: they take no `adjusted`.
+  values, so `history()` reads flat files only; an index's current level is in
+  `indices.snapshots`.
+- `indices.bars`: OHLC bars from the `A` (1 second) and `AM` (1 minute) channels, the range
+  aggregates endpoint, and the minute and day aggregate flat files. Index aggregates are
+  computed from index values, so their volume columns are always null and they are never
+  adjusted: they take no `adjusted`.
+- `indices.previous_day_bar`: each index's 1-day bar of the previous session, from the
+  previous-session aggregates endpoint, in the columns of the bars kind that its endpoint fills.
 - `indices.snapshots`: every field of the indices snapshot, one row per index.
 - `indices.daily_open_close`: one index's open, close, high, low, pre-market, and after-hours
   values for one day.
@@ -41,13 +43,11 @@ if TYPE_CHECKING:
 
     from deephaven_massive._enums import Order
     from deephaven_massive._query import (
-        HistoryLatestQuery,
         HistoryQuery,
         Query,
-        StreamHistoryLatestQuery,
         StreamHistoryQuery,
     )
-    from deephaven_massive._types import DateLike, DaySpan, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_Indices"]
 
@@ -74,23 +74,16 @@ VALUES: Final = DatasetSpec(
     summary="Index levels, tick by tick, as computed by the index providers.",
     asset_class=AssetClass.INDICES,
     kind="values",
-    fetch_path=_SNAPSHOT,
     channels={NotBars.ANY: "V"},
     flat_file_prefixes={NotBars.ANY: _VALUE_FILES},
     keys={
-        # The snapshot joins the values kind through a projection that keeps `ticker`,
-        # `value`, and `last_updated`, the last under the name `Timestamp`.
-        (_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("Timestamp")),
         (_WS, "indices/V"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("Timestamp")),
         (_FLAT_FILES, _VALUE_FILES): SourceKeys(
             symbol=KeySpec("Ticker"), time=KeySpec("Timestamp")
         ),
     },
-    symbol_param="ticker.any_of",
-    symbols_per_request=_SNAPSHOT_PAGE,
-    page_size=_SNAPSHOT_PAGE,
 )
-"""`m.indices.values`: index levels, streamed, fetched from the snapshot, and in flat files."""
+"""`m.indices.values`: index levels, streamed and in flat files."""
 
 _STREAM_BAR_KEYS: Final = SourceKeys(
     symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
@@ -103,12 +96,10 @@ BARS: Final = DatasetSpec(
     asset_class=AssetClass.INDICES,
     is_bars=True,
     kind="bars",
-    fetch_path=_PREVIOUS,
     history_path=_RANGE,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
-        (_REST, _PREVIOUS): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("WindowStart")),
         # The range endpoint's bars do not name their index; it is the path's ticker.
         (_REST, _RANGE): SourceKeys(
             symbol=KeySpec("indicesTicker", from_request=True), time=KeySpec("WindowStart")
@@ -125,6 +116,18 @@ BARS: Final = DatasetSpec(
     page_size=_AGGREGATES_PAGE,
 )
 """`m.indices.bars`: OHLC bars of every timespan; volume columns null, no `adjusted`."""
+
+PREVIOUS_DAY_BAR: Final = DatasetSpec(
+    name="indices.previous_day_bar",
+    summary="The previous trading day's open, high, low, and close of each index.",
+    asset_class=AssetClass.INDICES,
+    kind="bars",
+    fetch_path=_PREVIOUS,
+    keys={(_REST, _PREVIOUS): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"))},
+    per_symbol=True,
+    revision_keys=("TimestampStart",),
+)
+"""`m.indices.previous_day_bar`: each index's 1-day bar of the previous session, from `/prev`."""
 
 SNAPSHOTS: Final = DatasetSpec(
     name="indices.snapshots",
@@ -150,7 +153,13 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 )
 """`m.indices.daily_open_close`: one day's open, close, high, low, and extended-hours values."""
 
-DATASETS: Final[tuple[DatasetSpec, ...]] = (VALUES, BARS, SNAPSHOTS, DAILY_OPEN_CLOSE)
+DATASETS: Final[tuple[DatasetSpec, ...]] = (
+    VALUES,
+    BARS,
+    PREVIOUS_DAY_BAR,
+    SNAPSHOTS,
+    DAILY_OPEN_CLOSE,
+)
 """Every dataset of `m.indices`, one `DatasetSpec` each, in the order the reference lists them."""
 
 
@@ -173,28 +182,20 @@ class _Indices(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "indices"
 
-    def values(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+    def values(self, symbols: Symbols) -> StreamHistoryQuery:
         """Index levels, tick by tick, as computed by the index providers.
 
         Each row is one index level at one instant: `Symbol`, `Timestamp`, and `Value`, with its
         trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of `Timestamp`), and
         `TimestampInsert`, when the library received it. The stream verbs subscribe to the
-        WebSocket `V` channel. `fetch()` reads the current level of each index from the indices
-        snapshot (`/v3/snapshot/indices`), whose `last_updated` becomes `Timestamp`, so it
-        returns the same columns as the stream; the snapshot takes up to 250 indices per
-        request, so a list needs one request per 250 indices. The snapshot needs an Indices
-        Starter plan or above; on Indices Basic it raises `EntitlementError`, and
-        `m.indices.bars(symbols, dm.Timespan.DAY).fetch()` (the previous session's bar) and
-        `m.indices.daily_open_close()` are the REST alternatives. An index Massive does not
-        know, or that the plan does not include, is left out of the result, with one WARNING per
-        session and index that names it and Massive's reason. `history()` reads the
+        WebSocket `V` channel; each index's current level is in `m.indices.snapshots(symbols)`,
+        and its previous session in `m.indices.previous_day_bar(symbols)`. `history()` reads the
         `us_indices/values_v1` flat files, the only history Massive has for index values: it
         needs S3 credentials, and `source=dm.HistorySource.REST` raises `ValueError`. There is
         no `limit`; every verb returns every row it is asked for.
 
         `dm.ALL` is accepted by the stream verbs (every index on the stream) and by
-        `history()` (every index in the files). `fetch()` with `dm.ALL` raises `ValueError`;
-        `m.indices.snapshots(dm.ALL).fetch()` returns every index. The values stream is
+        `history()` (every index in the files). The values stream is
         served from the indices stream host the session resolved for your plan. If that host
         refuses the `V` topic, the stream fails with `EntitlementError`, whose message names
         the host, `MassiveConfig.ws_hosts[AssetClass.INDICES]`, and `business.massive.com`,
@@ -210,8 +211,8 @@ class _Indices(Namespace):
                 and removed; or `dm.ALL`.
 
         Returns:
-            A query with the stream verbs, `history()`, and `fetch()`. Nothing is requested
-            until a verb is called.
+            A query with the stream verbs and `history()`. Nothing is requested until a verb
+            is called.
 
         A symbol that is not a valid index symbol (one with another asset class's prefix, for
         example), an empty symbol list, or a table without a `Symbol` column raises
@@ -225,7 +226,7 @@ class _Indices(Namespace):
                 live = q.last_by()  # one row per index, updated as values arrive
                 june = q.history("2025-06-02", "2025-06-30")  # from flat files
         """
-        return cast("StreamHistoryLatestQuery", build_query(self._core, VALUES, symbols=symbols))
+        return cast("StreamHistoryQuery", build_query(self._core, VALUES, symbols=symbols))
 
     @overload
     def bars(
@@ -235,10 +236,6 @@ class _Indices(Namespace):
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self, symbols: Symbols, timespan: DaySpan, *, multiplier: Literal[1] = 1
-    ) -> HistoryLatestQuery: ...
     @overload
     def bars(
         self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
@@ -260,10 +257,8 @@ class _Indices(Namespace):
 
         - 1-second and 1-minute bars (`multiplier=1`) stream from the WebSocket `A` and `AM`
           channels and have `history()`: a `StreamHistoryQuery`.
-        - 1-day bars have `history()` and `fetch()`, which returns the bar of the previous
-          completed session from `/v2/aggs/ticker/{indicesTicker}/prev`: a
-          `HistoryLatestQuery`.
-        - Every other timespan and multiplier has `history()` only: a `HistoryQuery`.
+        - Every other timespan and multiplier has `history()` only: a `HistoryQuery`. Each
+          index's bar of the previous completed session is `previous_day_bar()`.
 
         `history()` reads the range aggregates endpoint
         (`/v2/aggs/ticker/{indicesTicker}/range/...`, one request series per index) or, for
@@ -273,30 +268,28 @@ class _Indices(Namespace):
         `TimestampEnd`: the current day's bar never appears, a day bar only from 01:00 New York
         time the next day, and a week bar only from a range that reaches its Sunday.
 
-        `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars.
-        An intraday bar ends its length after its start. A bar of a day or longer starts at
-        00:00 New York time of its window's first day, whatever the source: the range and the
-        day files stamp a 1-day bar at 01:00 New York time (midnight in Chicago) and `/prev` at
-        the 16:00 session close (13:00 on a short trading day), and each is moved to the day's
-        start. It ends an hour after the midnight that follows its window's last day, at 01:00
-        New York time, since whether an index day bar covers the New York or the Chicago day
-        is not verified. Since an index can update around the clock (`I:AAVE100`), a week or a
-        longer period covers its whole calendar period, weekends included: it starts at 00:00 of
-        its first calendar day (a week stamped on the Saturday or Sunday before its Monday, on
-        that day) and ends an hour after the midnight that follows its last.
-        A bar of several days counts trading days, ending as late as holidays could push it
-        (one weekday more, and one more for every five further days), since there is no
-        holiday calendar. A longer bar must be stamped at 00:00 or 01:00 on the day its period
-        starts: a week on its Monday or the Saturday or Sunday before, a month, quarter, or
-        year on its 1st. Any other stamp fails the call with `MassiveError` naming the source,
-        since the bar may cover other days than its label. `Date` is null for a bar that spans
-        more than one date.
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it (`aj(t,
+        bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars. An intraday
+        bar ends its length after its start. A bar of a day or longer starts at 00:00 New York time
+        of its window's first day, whatever the source: the range and the day files stamp a 1-day
+        bar at 01:00 New York time (midnight in Chicago), which is moved to the day's start. It ends
+        an hour after the midnight that follows its window's last day, at 01:00 New York time, since
+        whether an index day bar covers the New York or the Chicago day is not verified. Since an
+        index can update around the clock (`I:AAVE100`), a week or a longer period covers its whole
+        calendar period, weekends included: it starts at 00:00 of its first calendar day (a week
+        stamped on the Saturday or Sunday before its Monday, on that day) and ends an hour after the
+        midnight that follows its last. A bar of several days counts trading days, ending as late as
+        holidays could push it (one weekday more, and one more for every five further days), since
+        there is no holiday calendar. A longer bar must be stamped at 00:00 or 01:00 on the day its
+        period starts: a week on its Monday or the Saturday or Sunday before, a month, quarter, or
+        year on its 1st. Any other stamp fails the call with `MassiveError` naming the source, since
+        the bar may cover other days than its label. `Date` is null for a bar that spans more than
+        one date.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
-        and 1-day bars). `history()` over REST and `fetch()` take one index per request, so
-        `dm.ALL` raises `ValueError` there; `m.indices.snapshots(dm.ALL).fetch()` gives every
-        index's current session.
+        and 1-day bars). `history()` over REST takes one index per request, so `dm.ALL`
+        raises `ValueError` there; `m.indices.snapshots(dm.ALL).fetch()` gives every index's
+        current session.
 
         Each column is described in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.md#bars,
@@ -311,8 +304,8 @@ class _Indices(Namespace):
                 default. `multiplier=5` with `Timespan.MINUTE` is 5-minute bars.
 
         Returns:
-            A `StreamHistoryQuery`, `HistoryLatestQuery`, or `HistoryQuery`, as above. Nothing
-            is requested until a verb is called.
+            A `StreamHistoryQuery` or `HistoryQuery`, as above. Nothing is requested until a
+            verb is called.
 
         A `timespan` that is not a `dm.Timespan` (`dm.Timespan("minute")` converts text), a
         `multiplier` that is not an `int`, or `symbols` of an unsupported type raises
@@ -324,7 +317,6 @@ class _Indices(Namespace):
             ::
 
                 live = m.indices.bars(["I:SPX"]).append_only()  # 1-minute bars as they close
-                prev = m.indices.bars("I:SPX", dm.Timespan.DAY).fetch()
                 hourly = m.indices.bars("I:SPX", dm.Timespan.HOUR).history(
                     "2025-06-02", "2025-06-06"
                 )
@@ -335,6 +327,57 @@ class _Indices(Namespace):
                 self._core, BARS, symbols=symbols, timespan=timespan, multiplier=multiplier
             ),
         )
+
+    def previous_day_bar(self, symbols: Symbols) -> Query:
+        """The previous trading day's open, high, low, and close of each index.
+
+        One row per index: its 1-day bar of the previous completed session, which Massive documents
+        as "the prior session's open, high, low, close", in the columns of its kind that its
+        endpoint fills: `Symbol`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York time), its
+        window from `TimestampStart`, 00:00 New York time of the day, to the exclusive
+        `TimestampEnd`, 01:00 New York time the next day, its levels, and `TimestampInsert`, when
+        the library received it; the volume columns are always null, and there is no `adjusted`
+        argument. Served by REST (`/v2/aggs/ticker/{indicesTicker}/prev`) through `fetch()` and
+        `poll()`, one request per index; `poll()` replaces the table each cycle, keyed by `Symbol`,
+        and an explicit `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar
+        at the 16:00 session close (13:00 on a short trading day), which is moved to the day's
+        start; any other stamp raises `MassiveError` naming `bars(symbols,
+        dm.Timespan.DAY).history()` for that day. An index with no bar (HTTP 404) is left out, with
+        a WARNING.
+
+        `fetch()` and `poll()` take no `limit`: each index gives one row. `dm.ALL` is refused,
+        since the endpoint takes one index per request: use
+        `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`, which reads every index's
+        bar of a day from the flat files.
+
+        Each column is described in the column reference,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.md#previous_day_bar,
+        in the web UI's column tooltips, and by `columns()`.
+
+        Args:
+            symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` is refused),
+                or a Deephaven table with a `Symbol` column, re-read each `poll()` cycle.
+
+        Returns:
+            A query with `fetch()` and `poll()`. Nothing is requested until a verb is called.
+
+        `dm.ALL`, a symbol that is not a valid index symbol, an empty symbol list, or a table
+        without a `Symbol` column raises `ValueError`; `symbols` of any other type than a
+        `str`, a sequence of `str`, or a table raises `TypeError`.
+
+        Example:
+            ::
+
+                prev = m.indices.previous_day_bar(["I:SPX", "I:NDX"]).fetch()
+        """
+        query = build_query(
+            self._core,
+            PREVIOUS_DAY_BAR,
+            symbols=symbols,
+            all_alternative="m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            timespan=Timespan.DAY,
+        )
+        return cast("Query", query)
 
     def snapshots(
         self,
@@ -355,7 +398,7 @@ class _Indices(Namespace):
         interval, into a table keyed by `Symbol`. Each request names at most 250 indices, so a
         list of 250 or fewer takes one request a cycle.
         The snapshot needs an Indices Starter plan or above; on Indices Basic it raises
-        `EntitlementError`, and `m.indices.bars(symbols, dm.Timespan.DAY).fetch()` (the
+        `EntitlementError`, and `m.indices.previous_day_bar(symbols)` (the
         previous session's bar) and `m.indices.daily_open_close()` are the REST alternatives.
 
         `dm.ALL` is every index Massive publishes, paged 250 at a time. `limit` caps the

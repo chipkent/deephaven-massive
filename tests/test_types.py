@@ -9,7 +9,6 @@ import deephaven_massive as dm
 from deephaven_massive._types import (
     ALL,
     DateLike,
-    DaySpan,
     FilterValue,
     FuturesSpan,
     StreamSpan,
@@ -46,7 +45,6 @@ def test_date_and_filter_aliases() -> None:
 
 def test_bars_overload_aliases_are_enum_literals() -> None:
     assert typing.get_args(StreamSpan) == (dm.Timespan.SECOND, dm.Timespan.MINUTE)
-    assert typing.get_args(DaySpan) == (dm.Timespan.DAY,)
     futures = set(typing.get_args(FuturesSpan))
     assert futures == set(dm.Timespan) - {dm.Timespan.DAY}
 

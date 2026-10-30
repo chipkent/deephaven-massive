@@ -25,6 +25,7 @@ import functools
 import gc
 import gzip
 import importlib
+import inspect
 import os
 import re
 import sys
@@ -160,6 +161,69 @@ def pytest_configure(config: pytest.Config) -> None:
     if cycle != _CYCLE_MILLIS:
         raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
     _record_jvm_fatal_errors()
+    _record_unlocked_library_releases()
+
+
+_UNLOCKED_RELEASES: list[str] = []
+"""Each liveness-scope release the library made without the update graph's lock, not yet
+reported (`_record_unlocked_library_releases`); guarded by `_UNLOCKED_RELEASES_LOCK`."""
+
+_UNLOCKED_RELEASES_LOCK: Final = threading.Lock()
+
+
+def _record_unlocked_library_releases() -> None:
+    """Record each liveness-scope release the library makes without the update graph's lock.
+
+    Releasing a scope can destroy a refreshing table, and the library releases every scope
+    holding the update graph's shared lock (`release_scope`): destroyed between two update
+    cycles by a thread without the lock, a blink table with a failure queued can deliver it
+    twice, and the JVM exits. This wraps `LivenessScope.release` for the whole run. A release
+    called from library code (a module of the `deephaven_massive` package) on a thread that
+    holds neither the shared nor the exclusive lock is recorded with its caller's file, line,
+    and thread, and `_check_nothing_outlives_the_test` fails the test that made it. Tests and
+    fakes release their own scopes as they like. The suite runs every branch of the library,
+    so a clean run shows that every release site holds the lock.
+    """
+    liveness_scope = importlib.import_module("deephaven.liveness_scope")
+    locks = importlib.import_module("deephaven.update_graph")
+    execution_context = importlib.import_module("deephaven.execution_context")
+    update_graph = execution_context.get_exec_ctx().update_graph
+    package = importlib.import_module("deephaven_massive")
+    library = f"{Path(cast('str', package.__file__)).parent}{os.sep}"
+    real = liveness_scope.LivenessScope.release
+
+    def release(scope: object) -> None:
+        caller = cast("types.FrameType", cast("types.FrameType", inspect.currentframe()).f_back)
+        locked = locks.has_shared_lock(update_graph) or locks.has_exclusive_lock(update_graph)
+        if caller.f_code.co_filename.startswith(library) and not locked:
+            where = f"{caller.f_code.co_filename}:{caller.f_lineno} ({caller.f_code.co_name})"
+            with _UNLOCKED_RELEASES_LOCK:
+                _UNLOCKED_RELEASES.append(f"{where} on {threading.current_thread().name}")
+        real(scope)
+
+    liveness_scope.LivenessScope.release = release
+
+
+def _take_unlocked_releases() -> list[str]:
+    """Return the unlocked library releases recorded so far, and forget them.
+
+    Returns:
+        One line per release: its caller's file, line, and function, and its thread.
+    """
+    with _UNLOCKED_RELEASES_LOCK:
+        taken = list(_UNLOCKED_RELEASES)
+        _UNLOCKED_RELEASES.clear()
+    return taken
+
+
+def _fail_unlocked_releases() -> None:
+    """Fail the test if the library released a scope without the update graph's lock."""
+    unlocked = _take_unlocked_releases()
+    if unlocked:
+        pytest.fail(
+            "the library released a liveness scope without the update graph's lock: "
+            + "; ".join(unlocked)
+        )
 
 
 def _record_jvm_fatal_errors() -> None:
@@ -563,7 +627,9 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     too: the test's registry (`rest_clock`) must hold no more leases than when it began. A
     session the test created that is still alive at the end, in the live set or not, is held
     by something that should have let it go. Only what the test itself started counts, so one
-    leak fails its own test and not every test after it.
+    leak fails its own test and not every test after it. Once every library thread the test
+    started has ended, a release of a liveness scope the library made without the update
+    graph's lock during the test fails it too (`_record_unlocked_library_releases`).
 
     Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
     first and runs after every other fixture's teardown (a closed `massive_session` included).
@@ -577,6 +643,7 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     collection for what is still alive or running after a second.
     """
     before = _running()
+    _take_unlocked_releases()  # one made after the previous test's check is not this test's
     yield
     if request.node.stash.get(_CALL_FAILED, False):
         return  # its traceback holds the test's locals; the failure is already reported
@@ -622,6 +689,7 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
                 pause.wait(0.05)
         if cyclic:
             pytest.fail(f"freed only by the cyclic collector: sessions {sorted(cyclic)}")
+        _fail_unlocked_releases()
     finally:
         if enabled:
             gc.enable()

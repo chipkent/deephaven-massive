@@ -46,11 +46,9 @@ from deephaven_massive._massive import (
 from deephaven_massive._namespaces import stocks
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -114,6 +112,8 @@ LIST_VALUED = [
     "filings.insider_holdings",
 ]
 STREAMED = ["trades", "quotes", "bars", "luld", "imbalances", "fmv"]
+# The one-row REST datasets, each beside the stream and history dataset of its kind.
+ONE_ROW = {"last_trade": "trades", "last_quote": "quotes", "previous_day_bar": "bars"}
 
 # Each date-axis dataset: its `start`/`end` wire pair and the `LocalDate` column it bounds.
 AXES = {
@@ -229,6 +229,7 @@ def test_every_dataset_is_in_the_process_catalog() -> None:
     assert sorted(ALL_NAMES) == sorted(
         [
             *STREAMED,
+            *ONE_ROW,
             "snapshots",
             "movers",
             "daily_open_close",
@@ -268,10 +269,20 @@ def test_streamed_datasets_lead_with_symbol_date_and_their_instants(name: str) -
 
 
 @pytest.mark.parametrize(
-    "name", [n for n in ALL_NAMES if n not in STREAMED and n not in LIST_VALUED]
+    "name",
+    [n for n in ALL_NAMES if n not in STREAMED and n not in LIST_VALUED and n not in ONE_ROW],
 )
 def test_other_datasets_have_no_timestamp(name: str) -> None:
     assert "Timestamp" not in columns(name)
+
+
+@pytest.mark.parametrize(("name", "kind"), list(ONE_ROW.items()))
+def test_one_row_datasets_have_the_columns_of_their_kind(name: str, kind: str) -> None:
+    # The same kind merges the same sources, so the two tables merge without a mapping.
+    assert spec_of(name).kind == spec_of(kind).kind
+    assert list(columns(name)) == list(columns(kind))
+    assert type(spec_of(name).fetch_path) is str
+    assert spec_of(kind).fetch_path is None
 
 
 @pytest.mark.parametrize(
@@ -354,7 +365,11 @@ def test_ipos_are_upserted_by_symbol_and_issuer() -> None:
 @pytest.mark.parametrize("name", ALL_NAMES)
 def test_only_the_current_state_datasets_declare_a_revision(name: str) -> None:
     # An explicit APPEND poll of a snapshot appends each new update of a symbol.
-    revision = ("Updated",) if name in {"snapshots", "movers"} else ()
+    revision: tuple[str, ...] = ("Updated",) if name in {"snapshots", "movers"} else ()
+    if name in {"last_trade", "last_quote"}:
+        revision = ("Timestamp",)  # each new trade or quote
+    elif name == "previous_day_bar":
+        revision = ("TimestampStart",)  # each new day
     assert spec_of(name).revision_keys == revision
     assert set(revision) <= set(columns(name))
 
@@ -397,8 +412,8 @@ def test_replaced_polls_key_one_row_each(name: str, keys: tuple[str, ...]) -> No
 @pytest.mark.parametrize(
     ("name", "cls"),
     [
-        ("trades", StreamHistoryLatestQuery),
-        ("quotes", StreamHistoryLatestQuery),
+        ("trades", StreamHistoryQuery),
+        ("quotes", StreamHistoryQuery),
         ("luld", StreamQuery),
         ("imbalances", StreamQuery),
         ("fmv", StreamQuery),
@@ -433,7 +448,7 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
     [
         (dm.Timespan.SECOND, 1, StreamHistoryQuery),
         (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryLatestQuery),
+        (dm.Timespan.DAY, 1, HistoryQuery),
         (dm.Timespan.MINUTE, 5, HistoryQuery),
         (dm.Timespan.HOUR, 1, HistoryQuery),
         (dm.Timespan.WEEK, 1, HistoryQuery),
@@ -776,11 +791,62 @@ def new_york_midnight_ns(day: date) -> int:
     return int(moment.timestamp()) * 10**9
 
 
-def test_trades_fetch_reads_each_symbols_last_trade(
+@pytest.mark.parametrize(
+    ("name", "alternative"),
+    [
+        ("last_trade", r"m\.stocks\.snapshots\(dm\.ALL\)\.fetch\(\)"),
+        ("last_quote", r"m\.stocks\.snapshots\(dm\.ALL\)\.fetch\(\)"),
+        (
+            "previous_day_bar",
+            r"m\.stocks\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)",
+        ),
+    ],
+)
+def test_one_row_datasets_are_queries_that_refuse_all(
+    massive_session: dm.MassiveSession, name: str, alternative: str
+) -> None:
+    make = factory(massive_session, name)
+    query = make(["MSFT", "AAPL"])
+    assert type(query) is Query
+    assert query._request.symbols == ("AAPL", "MSFT")
+    with pytest.raises(
+        ValueError, match=rf"stocks\.{name} does not accept dm\.ALL; use {alternative}"
+    ):
+        make(dm.ALL)
+
+
+def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:
+    namespace = massive_session.stocks
+    for query in (
+        namespace.trades("AAPL"),
+        namespace.quotes("AAPL"),
+        namespace.bars("AAPL", dm.Timespan.DAY),
+    ):
+        assert not hasattr(query, "fetch")
+        assert not hasattr(query, "poll")
+    with pytest.raises(AttributeError, match=r"use m\.stocks\.last_trade\(\.\.\.\)\.fetch\(\)"):
+        cast("Any", namespace.trades("AAPL")).fetch()
+
+
+def test_previous_day_bar_is_one_adjusted_day_by_default(
+    massive_session: dm.MassiveSession,
+) -> None:
+    query = massive_session.stocks.previous_day_bar("AAPL")
+    assert query._request.timespan is dm.Timespan.DAY
+    assert query._request.multiplier == 1
+    assert query._request.adjusted is True
+    assert (
+        massive_session.stocks.previous_day_bar("AAPL", adjusted=False)._request.adjusted is False
+    )
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        massive_session.stocks.previous_day_bar("AAPL", adjusted=cast("Any", 1))
+
+
+def test_last_trade_fetch_reads_each_symbols_last_trade(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_trade="/v2/last/trade/AAPL")
-    out = table_rows(rest_session.stocks.trades("AAPL").fetch())
+    out = table_rows(rest_session.stocks.last_trade("AAPL").fetch())
     assert sent(fake_rest) == [("/v2/last/trade/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Size"]) for r in out] == [
         ("AAPL", 1617901342969834000, 129.8473, 25.0)
@@ -788,11 +854,11 @@ def test_trades_fetch_reads_each_symbols_last_trade(
     assert out[0]["ParticipantTimestamp"] == 1617901342968000000
 
 
-def test_quotes_fetch_reads_each_symbols_last_nbbo(
+def test_last_quote_fetch_reads_each_symbols_last_nbbo(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_quote="/v2/last/nbbo/AAPL")
-    out = table_rows(rest_session.stocks.quotes(["AAPL"]).fetch())
+    out = table_rows(rest_session.stocks.last_quote(["AAPL"]).fetch())
     assert sent(fake_rest) == [("/v2/last/nbbo/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["BidPrice"], r["AskPrice"]) for r in out] == [
         ("AAPL", 1617827221349730300, 127.96, 127.98)
@@ -816,7 +882,7 @@ def test_tick_history_over_rest_bounds_new_york_days(
     first: int,
 ) -> None:
     serve(fake_rest, load_fixture, **{name: path})
-    query = cast("StreamHistoryLatestQuery", factory(rest_session, name)("AAPL"))
+    query = cast("StreamHistoryQuery", factory(rest_session, name)("AAPL"))
     out = table_rows(query.history("2018-02-02", "2018-02-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [
         (
@@ -834,11 +900,11 @@ def test_tick_history_over_rest_bounds_new_york_days(
     assert out[0]["Timestamp"] == first
 
 
-def test_daily_bars_fetch_the_previous_session(
+def test_previous_day_bar_fetches_the_previous_session(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, bars_prev="/v2/aggs/ticker/AAPL/prev")
-    out = table_rows(rest_session.stocks.bars("AAPL", dm.Timespan.DAY).fetch())
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it, and its `Date` that day.
@@ -856,6 +922,70 @@ def test_daily_bars_fetch_the_previous_session(
         )
     ]
     assert out[0]["TimestampInsert"] is not None
+
+
+def test_previous_day_bar_sends_adjusted_false_when_asked(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    body = json.loads(load_fixture(FIXTURES, "bars_prev.json"))
+    fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "adjusted": False}))
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL", adjusted=False).fetch())
+    assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "false"})]
+    assert [r["Symbol"] for r in out] == ["AAPL"]
+
+
+def test_previous_day_bar_refuses_a_bar_on_another_split_basis(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # The default asks for an adjusted bar; an as-traded answer must not pass for one.
+    body = json.loads(load_fixture(FIXTURES, "bars_prev.json"))
+    fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "adjusted": False}))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.previous_day_bar: Massive answered .* with adjusted=False although "
+        r"adjusted=True was requested",
+    ):
+        rest_session.stocks.previous_day_bar("AAPL").fetch()
+
+
+def test_previous_day_bar_refuses_an_unknown_stamp_naming_the_daily_history(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # 14:30 New York time is no stamp Massive is known to give a stock 1-day bar.
+    stamp = new_york_midnight_ns(date(2020, 11, 10)) // 10**6 + 14 * 3_600_000 + 1_800_000
+    bar = {"T": "AAPL", "t": stamp, "c": 115.97}
+    fake_rest.reply(
+        "/v2/aggs/ticker/AAPL/prev", Reply({"status": "OK", "adjusted": True, "results": [bar]})
+    )
+    with pytest.raises(
+        dm.MassiveError, match=r"use bars\(symbols, dm\.Timespan\.DAY\)\.history\(\) for that day"
+    ):
+        rest_session.stocks.previous_day_bar("AAPL").fetch()
+
+
+@pytest.mark.parametrize(
+    ("name", "fixture", "path"),
+    [
+        ("last_trade", "last_trade", "/v2/last/trade/AAPL"),
+        ("last_quote", "last_quote", "/v2/last/nbbo/AAPL"),
+        ("previous_day_bar", "bars_prev", "/v2/aggs/ticker/AAPL/prev"),
+    ],
+)
+def test_one_row_datasets_poll_one_row_per_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+    fixture: str,
+    path: str,
+) -> None:
+    assert spec_of(name).poll_mode is dm.PollMode.REPLACE
+    assert spec_of(name).poll_keys == ("Symbol",)
+    serve(fake_rest, load_fixture, **{fixture: path})
+    table = cast("Query", factory(rest_session, name)("AAPL")).poll(60)
+    assert [row["Symbol"] for row in _rows_when(table, 1)] == ["AAPL"]
+    rest_session.release(table)
 
 
 def test_bars_history_over_rest_fills_the_range_path(
@@ -1575,7 +1705,7 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
             bars.history(day, day, source=dm.HistorySource.REST),
             every.history(day, day, source=dm.HistorySource.REST),
             bars.history(day, day, source=dm.HistorySource.FLAT_FILES),
-            m.stocks.bars("BCC", dm.Timespan.DAY).fetch(),
+            m.stocks.previous_day_bar("BCC").fetch(),
         ]
         stamped = [
             [

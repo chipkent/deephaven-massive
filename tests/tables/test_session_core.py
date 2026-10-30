@@ -859,8 +859,10 @@ def test_an_interrupt_after_make_result_releases_the_result_scope(
     real_entered = entered
     armed: list[bool] = []
 
-    def making(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
-        made = real_make(build)
+    def making(
+        exec_ctx: ExecutionContext, build: Callable[[], Table]
+    ) -> tuple[Table, LivenessScope]:
+        made = real_make(exec_ctx, build)
         armed.append(True)
         return made
 
@@ -1264,7 +1266,7 @@ def test_a_result_that_outlives_its_session_is_still_released() -> None:
     core = m._core
     released = threading.Event()
     with entered(core.exec_ctx):
-        result, scope = make_result(lambda: time_table("PT1S"))
+        result, scope = make_result(core.exec_ctx, lambda: time_table("PT1S"))
     core.results.track(result, scope, released.set)  # the callback holds nothing of the core
     alive = weakref.ref(core)
     reaper = core._reaper.thread
@@ -1728,9 +1730,9 @@ def test_a_diagnostics_view_that_races_close_raises_the_closed_error(
     core = massive_session._core
     build = make_result
 
-    def close_first(factory: Callable[[], Table]) -> object:
+    def close_first(exec_ctx: ExecutionContext, factory: Callable[[], Table]) -> object:
         massive_session.close()
-        return build(factory)
+        return build(exec_ctx, factory)
 
     monkeypatch.setattr(_core, "make_result", close_first)
     with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$") as caught:

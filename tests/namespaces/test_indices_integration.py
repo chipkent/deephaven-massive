@@ -123,7 +123,7 @@ def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     which excludes SPX. Passes when the library's `fetch()` returns one row for the index. A
     failure (no row, or a 404) means a colon must be sent unencoded.
     """
-    rows = table_rows(live_session.indices.bars(index_symbol, dm.Timespan.DAY).fetch())
+    rows = table_rows(live_session.indices.previous_day_bar(index_symbol).fetch())
     evidence(f"library fetch() of /prev for {index_symbol} (sent encoded): {rows}")
     assert [row["Symbol"] for row in rows] == [index_symbol]
 
@@ -173,8 +173,9 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         if page.rows:
             evidence(f"    first row keys and values: {page.rows[0]}")
     queries = {
-        "indices.values fetch()": live_session.indices.values(index_symbol).fetch,
-        "indices.bars(DAY) fetch()": live_session.indices.bars(index_symbol, dm.Timespan.DAY).fetch,
+        "indices.previous_day_bar fetch()": live_session.indices.previous_day_bar(
+            index_symbol
+        ).fetch,
         "indices.snapshots fetch()": live_session.indices.snapshots(index_symbol).fetch,
         "indices.daily_open_close fetch()": live_session.indices.daily_open_close(
             index_symbol, recent_monday
@@ -394,7 +395,8 @@ def _record_library_index_stamps(
         f"library {index} history(REST): "
         + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
     )
-    evidence(f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}")
+    prev_bar = session.indices.previous_day_bar(index)
+    evidence(f"library {index} previous_day_bar (/prev): {library_stamps(prev_bar.fetch)}")
     refused: list[dm.EntitlementError] = []
     for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)

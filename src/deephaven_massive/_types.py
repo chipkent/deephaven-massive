@@ -7,7 +7,7 @@
   or in the snapshot. It is the only instance of `_All`.
 - `DateLike` and `FilterValue` type the time-axis bounds and the `filters` mapping.
 - `override` marks the few dunder methods the library overrides, on every supported Python.
-- `StreamSpan`, `DaySpan`, and `FuturesSpan` are the `Literal` timespan sets the typed `bars()`
+- `StreamSpan` and `FuturesSpan` are the `Literal` timespan sets the typed `bars()`
   overloads use to pick a query class statically. They are `Literal`s of enum members, never of
   strings.
 
@@ -30,7 +30,6 @@ from deephaven_massive._enums import Timespan
 __all__ = [
     "ALL",
     "DateLike",
-    "DaySpan",
     "FilterValue",
     "FuturesSpan",
     "StreamSpan",
@@ -116,9 +115,6 @@ underscores, such as `strike_price_gte` or `ticker_any_of`."""
 
 StreamSpan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
 """Bar timespans that have a WebSocket channel (with `multiplier=1`)."""
-
-DaySpan: TypeAlias = Literal[Timespan.DAY]
-"""The bar timespan that has the previous-session `fetch()` endpoint."""
 
 FuturesSpan: TypeAlias = Literal[
     Timespan.SECOND,

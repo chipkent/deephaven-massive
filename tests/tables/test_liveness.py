@@ -25,9 +25,7 @@ from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
-from deephaven_massive._tables.execution_context import (
-    entered,
-)
+from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.liveness import (
     QueueWorker,
     Reaper,
@@ -35,6 +33,7 @@ from deephaven_massive._tables.liveness import (
     ResultRegistry,
     make_result,
     new_scope,
+    release_scope,
 )
 from deephaven_massive._types import override
 
@@ -72,8 +71,74 @@ def test_new_scope_is_a_liveness_scope() -> None:
     scope.release()
 
 
-def test_make_result_manages_the_result(dh_exec_ctx: object) -> None:
-    result, scope = make_result(lambda: empty_table(1).update("X = i"))
+class _RecordingScope:
+    # Stands in for a scope: records whether its release ran under the update graph's lock.
+    def __init__(self, exec_ctx: ExecutionContext, *, fail: bool = False) -> None:
+        self._exec_ctx = exec_ctx
+        self._fail = fail
+        self.locked: list[bool] = []
+
+    def release(self) -> None:
+        self.locked.append(holds_update_graph_lock(self._exec_ctx))
+        if self._fail:
+            raise RuntimeError("released twice")
+
+
+def test_release_scope_holds_the_update_graph_lock(dh_exec_ctx: ExecutionContext) -> None:
+    # A release can destroy a refreshing table; under the lock, no update cycle runs meanwhile.
+    scope = _RecordingScope(dh_exec_ctx)
+    release_scope(dh_exec_ctx, cast("LivenessScope", scope))
+    assert scope.locked == [True]
+    assert not holds_update_graph_lock(dh_exec_ctx)  # let go after the release
+    failing = _RecordingScope(dh_exec_ctx, fail=True)
+    with pytest.raises(RuntimeError, match=r"^released twice$"):  # its own error, not wrapped
+        release_scope(dh_exec_ctx, cast("LivenessScope", failing))
+    assert failing.locked == [True]
+    assert not holds_update_graph_lock(dh_exec_ctx)  # let go after a failed release too
+
+
+def test_release_scope_destroys_a_refreshing_table(dh_exec_ctx: ExecutionContext) -> None:
+    scope = new_scope()
+    with scope.open():
+        ticking = time_table("PT1S")
+    release_scope(dh_exec_ctx, scope)
+    assert not _alive(ticking)
+
+
+def test_release_scope_in_a_console_command_takes_the_lock_again(
+    dh_exec_ctx: ExecutionContext, console_command: Callable[[Callable[[], None]], None]
+) -> None:
+    # A console command holds the exclusive lock; it takes the shared lock again at once.
+    scope = _RecordingScope(dh_exec_ctx)
+    console_command(lambda: release_scope(dh_exec_ctx, cast("LivenessScope", scope)))
+    assert scope.locked == [True]
+
+
+def test_a_reaper_release_waits_for_a_console_command(
+    dh_exec_ctx: ExecutionContext, console_command: Callable[[Callable[[], None]], None]
+) -> None:
+    # The reaper takes the shared lock, so a release queued while a console command holds the
+    # exclusive lock runs once the command ends; no lock holder waits for the reaper.
+    reaper = Reaper(dh_exec_ctx, "test-reaper")
+    registry = ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)
+    released = threading.Event()
+    table, scope = make_result(dh_exec_ctx, lambda: time_table("PT1S").where("true"))
+    registry.track(table, scope, released.set)
+    during: list[bool] = []
+
+    def command() -> None:
+        assert registry.release(table)
+        during.append(released.is_set())
+
+    console_command(command)
+    assert during == [False]
+    assert released.wait(TIMEOUT)
+    assert not _alive(table)
+    reaper.stop()
+
+
+def test_make_result_manages_the_result(dh_exec_ctx: ExecutionContext) -> None:
+    result, scope = make_result(dh_exec_ctx, lambda: empty_table(1).update("X = i"))
     assert result.size == 1
     scope.release()
 
@@ -86,11 +151,11 @@ def _alive(table: Table) -> bool:
     return False
 
 
-def test_a_result_outlives_the_scope_of_its_source(dh_exec_ctx: object) -> None:
+def test_a_result_outlives_the_scope_of_its_source(dh_exec_ctx: ExecutionContext) -> None:
     user = new_scope()
     with user.open():
         source = time_table("PT1S")  # refreshing, so its liveness is observable
-    result, scope = make_result(lambda: source.where("true"))
+    result, scope = make_result(dh_exec_ctx, lambda: source.where("true"))
     assert result != source  # a new table, managed by the result scope
     user.release()
     assert _alive(result)  # the result scope now holds the only reference
@@ -99,7 +164,7 @@ def test_a_result_outlives_the_scope_of_its_source(dh_exec_ctx: object) -> None:
 
 
 def test_make_result_releases_the_scope_on_failure(
-    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scopes: list[LivenessScope] = []
     real = new_scope
@@ -115,14 +180,14 @@ def test_make_result_releases_the_scope_on_failure(
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):
-        make_result(fail)
+        make_result(dh_exec_ctx, fail)
     assert scopes[0].j_scope is None  # released
 
     def interrupted() -> Table:
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        make_result(interrupted)
+        make_result(dh_exec_ctx, interrupted)
     assert scopes[1].j_scope is None  # released on an interrupt too
 
 
@@ -151,9 +216,9 @@ def test_reaper_runs_jobs_in_order_and_survives_failures(
 
 def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None:
     reaper = Reaper(dh_exec_ctx, "test-reaper")
-    registry = ResultRegistry(threading.RLock(), reaper)
+    registry = ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)
     released: list[str] = []
-    table, scope = make_result(lambda: empty_table(1))
+    table, scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     registry.track(table, scope, lambda: released.append("released"))
     assert registry.held() == 1
     other = empty_table(1)
@@ -164,7 +229,7 @@ def test_registry_release_checks_identity(dh_exec_ctx: ExecutionContext) -> None
     assert registry.release(table)
     assert registry.release(table)  # a second release is a no-op
     # Collecting a wrapper whose id was re-registered leaves the newer record in place.
-    collected, collected_scope = make_result(lambda: empty_table(1))
+    collected, collected_scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     registry.track(collected, collected_scope, lambda: released.append("collected"))
     newer = registry._results[id(table)]
     registry._results[id(collected)] = newer
@@ -190,10 +255,10 @@ def test_an_interrupted_track_registers_nothing_and_never_releases(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
     reaper = Reaper(dh_exec_ctx, "test-reaper")
-    registry = ResultRegistry(threading.RLock(), reaper)
+    registry = ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)
     registry._results = _Interrupting()
     released: list[str] = []
-    table, scope = make_result(lambda: empty_table(1))
+    table, scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     with pytest.raises(KeyboardInterrupt):
         registry.track(table, scope, lambda: released.append("released"))
     assert registry.held() == 0
@@ -429,9 +494,9 @@ def test_collection_takes_no_lock(dh_exec_ctx: ExecutionContext) -> None:
     # it must not take registry_lock; it only queues the release on the reaper.
     reaper = Reaper(dh_exec_ctx, "test-reaper")
     lock = threading.RLock()
-    registry = ResultRegistry(lock, reaper)
+    registry = ResultRegistry(lock, reaper, dh_exec_ctx)
     released = threading.Event()
-    table, scope = make_result(lambda: empty_table(1))
+    table, scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     registry.track(table, scope, released.set)
     holding, done = threading.Event(), threading.Event()
 
@@ -452,7 +517,7 @@ def test_collection_takes_no_lock(dh_exec_ctx: ExecutionContext) -> None:
     reaper.stop()
 
 
-def test_a_failing_scope_release_still_notifies_the_owner() -> None:
+def test_a_failing_scope_release_still_notifies_the_owner(dh_exec_ctx: ExecutionContext) -> None:
     class BrokenScope:
         def release(self) -> None:
             raise RuntimeError("cannot release")
@@ -462,7 +527,7 @@ def test_a_failing_scope_release_still_notifies_the_owner() -> None:
         1, cast("LivenessScope", BrokenScope()), lambda: notified.append("released")
     )
     with pytest.raises(RuntimeError, match="cannot release"):
-        ResultRegistry._reap(record)
+        ResultRegistry(threading.RLock(), cast("Reaper", None), dh_exec_ctx)._reap(record)
     assert notified == ["released"]
 
 
@@ -574,8 +639,8 @@ def test_collection_removes_the_record_and_keeps_a_newer_one(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
     reaper = Reaper(dh_exec_ctx, "test-reaper")
-    registry = ResultRegistry(threading.RLock(), reaper)
-    table, scope = make_result(lambda: empty_table(1))
+    registry = ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)
+    table, scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     key = id(table)
     registry.track(table, scope, lambda: None)
     del table
@@ -585,9 +650,9 @@ def test_collection_removes_the_record_and_keeps_a_newer_one(
     assert done.wait(TIMEOUT)
     assert key not in registry._results  # a collected result leaves no record behind
     # A recycled id: the collected wrapper's key now belongs to a newer record.
-    old, old_scope = make_result(lambda: empty_table(1))
+    old, old_scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     registry.track(old, old_scope, lambda: None)
-    newer, newer_scope = make_result(lambda: empty_table(1))
+    newer, newer_scope = make_result(dh_exec_ctx, lambda: empty_table(1))
     newer_record = registry.track(newer, newer_scope, lambda: None)
     recycled = id(old)
     registry._results[recycled] = newer_record

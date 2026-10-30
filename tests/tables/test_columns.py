@@ -9,7 +9,7 @@ stream's `on_shutdown_callback`, alive exactly as long as it lives.
 
 import threading
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pytest
@@ -36,6 +36,9 @@ from deephaven_massive._tables.columns import (
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
+
+if TYPE_CHECKING:
+    from deephaven.liveness_scope import LivenessScope
 
 TIMEOUT = 10.0
 
@@ -142,14 +145,14 @@ class Stream:
 
     def __init__(self) -> None:
         self.shutdown = threading.Event()
-        self.deferred: list[Callable[[], None]] = []  # a failure's pin release, as on the reaper
+        self.deferred: list[LivenessScope] = []  # a failure's pin, released on the reaper
         self.scope = new_scope()
         with self.scope.open():
             self.blink, self.publisher = blink_publisher(
                 "massive.test",
                 col_defs(SCHEMA),
                 on_shutdown=self.shutdown.set,
-                defer=self.deferred.append,
+                release_later=self.deferred.append,
             )
 
 
@@ -254,8 +257,8 @@ def test_a_failed_blink_table_cannot_be_described(dh_exec_ctx: ExecutionContext)
     scope.release()
     stream.scope.release()
     assert stream.shutdown.wait(TIMEOUT)  # the failure's delivery shut it down
-    for release in stream.deferred:
-        release()
+    for pin in stream.deferred:
+        pin.release()
 
 
 def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) -> None:

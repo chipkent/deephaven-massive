@@ -202,10 +202,13 @@ class DatasetSpec:
     The transports decide the dataset's query class (`query_class` in `_namespaces/base.py`).
     With S meaning the spec has channels, H that it has a history source (a history path, a
     grouped-daily path, or flat-file prefixes), and F that it has a fetch path: F alone gives
-    `Query`, S alone `StreamQuery`, H alone `HistoryQuery`, S and H `StreamHistoryQuery`, and
-    S, H, and F `StreamHistoryLatestQuery`. A `bars` dataset needs H; its class is picked per
-    call from the timespan and multiplier (`bar_query_class`). Every other combination is
-    rejected when the spec is created.
+    `Query`, S alone `StreamQuery`, H alone `HistoryQuery`, and S and H `StreamHistoryQuery`.
+    A fetch path is never combined with channels or a history source, so `fetch()` always
+    returns every row its endpoint returns: a REST endpoint that answers one row per symbol
+    (the last trade, the previous day's bar) is a one-row dataset of its own, in the same kind
+    as the stream and history dataset of its class. A `bars` dataset needs H and no F; its
+    class is picked per call from the timespan and multiplier (`bar_query_class`). Every other
+    combination is rejected when the spec is created.
 
     Example:
         ::
@@ -214,20 +217,16 @@ class DatasetSpec:
             from deephaven_massive._enums import AssetClass, NotBars
             from deephaven_massive._massive import Transport
 
-            # Channels, history, and a fetch path: a StreamHistoryLatestQuery.
+            # Channels and history: a StreamHistoryQuery.
             STOCK_TRADES = DatasetSpec(
                 name="stocks.trades",
                 summary="Trades of US-listed stocks, tick by tick.",
                 asset_class=AssetClass.STOCKS,
                 kind="trades",
-                fetch_path="/v2/last/trade/{stocksTicker}",
                 history_path="/v3/trades/{stockTicker}",
                 channels={NotBars.ANY: "T"},
                 flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
                 keys={
-                    (Transport.REST, "/v2/last/trade/{stocksTicker}"): SourceKeys(
-                        symbol=KeySpec("Ticker"), time=KeySpec("SipTimestamp")
-                    ),
                     (Transport.REST, "/v3/trades/{stockTicker}"): SourceKeys(
                         symbol=KeySpec("stockTicker", from_request=True),
                         time=KeySpec("SipTimestamp"),
@@ -242,6 +241,21 @@ class DatasetSpec:
                 time_axis=("timestamp.gte", "timestamp.lt"),
             )
 
+            # The same kind's one-row endpoint: a Query of its own.
+            STOCK_LAST_TRADE = DatasetSpec(
+                name="stocks.last_trade",
+                summary="The latest trade of each US-listed stock.",
+                asset_class=AssetClass.STOCKS,
+                kind="trades",
+                fetch_path="/v2/last/trade/{stocksTicker}",
+                keys={
+                    (Transport.REST, "/v2/last/trade/{stocksTicker}"): SourceKeys(
+                        symbol=KeySpec("Ticker"), time=KeySpec("SipTimestamp")
+                    ),
+                },
+                revision_keys=("Timestamp",),
+            )
+
     Attributes:
         name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`.
         summary: What the dataset holds, in one sentence ending in a period, such as
@@ -254,14 +268,17 @@ class DatasetSpec:
             the WebSocket cluster of the channels and the group of the dataset's kind.
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
-            multiplier. False datasets key them by `NotBars.ANY`.
+            multiplier. False datasets key them by `NotBars.ANY`; a one-row dataset of the
+            `bars` kind (`previous_day_bar`) is False too, though its rows are bars
+            (`holds_bars`).
         kind: The dataset kind its rows share a schema with, across asset classes and
             transports (`"trades"`, `"quotes"`, `"bars"`, `"values"`, `"luld"`,
             `"imbalances"`, `"fmv"`), or None for a dataset in no kind. The sources of a kind
             dataset are exactly those holding a membership of `(kind, asset class)` in the
             generated files (the kind-membership gate).
         fetch_path: The REST path behind `fetch()` and `poll()`, such as
-            `"/v2/last/trade/{stocksTicker}"`.
+            `"/v2/last/trade/{stocksTicker}"`; never set together with channels or a history
+            source.
         history_path: The REST path behind `history(source=REST)`.
         grouped_daily_path: The REST path that serves `history()` for `dm.ALL` daily bars, one
             request per day.
@@ -433,15 +450,27 @@ class DatasetSpec:
     def times(self) -> RowTimes:
         """Which of the library's time columns the rows carry: `row_times`, or derived from it.
 
-        `BAR` for a `bars` dataset, `TICK` for any other dataset in a kind (trades, quotes,
-        values, LULD, imbalances, FMV), and `NONE` for the rest, unless `row_times` says
-        otherwise.
+        `BAR` for a dataset of bars (`holds_bars`), `TICK` for any other dataset in a
+        kind (trades, quotes, values, LULD, imbalances, FMV), and `NONE` for the rest, unless
+        `row_times` says otherwise.
         """
         if self.row_times is not RowTimes.BY_KIND:
             return self.row_times
-        if self.is_bars:
+        if self.holds_bars:
             return RowTimes.BAR
         return RowTimes.NONE if self.kind is None else RowTimes.TICK
+
+    @property
+    def holds_bars(self) -> bool:
+        """True when the rows are price bars of the request's timespan.
+
+        Every `bars()` dataset (`is_bars`) holds them, and so does every other dataset of the
+        `bars` kind, such as `stocks.previous_day_bar`; their bars are stamped by the day rules
+        (`history_source.stamp_rule`) and, where the request sends `adjusted`, checked against
+        Massive's echo of it. The indicators carry bar times too (`RowTimes.BAR`) but hold
+        indicator values, not bars.
+        """
+        return self.is_bars or self.kind == "bars"
 
     @property
     def group(self) -> str | None:
@@ -637,29 +666,26 @@ class DatasetSpec:
     def _check_verbs(self) -> None:
         """Check that the dataset's transports match one query class.
 
+        A fetch path is a dataset of its own: `fetch()` always returns every row its endpoint
+        returns, so an endpoint that answers one row per symbol (the last trade, the previous
+        day's bar) is a one-row dataset beside the stream and history one, never a verb of it.
+
         Raises:
-            ValueError: If the dataset has no verb; if it has channels and a fetch path but no
-                history source (no query class streams and fetches without history); if,
-                outside `bars`, it has a history source and a fetch path but no channels (that
-                class is kept for daily bars); or if a `bars` dataset has no history source.
-                The message names the dataset.
+            ValueError: If the dataset has no verb; if a `bars` dataset has no history source;
+                or if a fetch path is combined with channels or a history source. The message
+                names the dataset.
         """
         stream, history, fetch = self.has_channels, self.has_history, self.has_fetch
-        if self.is_bars:
-            if not history:
-                raise ValueError(f"{self.name}: a bars dataset needs a history source")
-            return
+        if self.is_bars and not history:
+            raise ValueError(f"{self.name}: a bars dataset needs a history source")
         if not (stream or history or fetch):
             raise ValueError(
                 f"{self.name}: a dataset needs channels, a history source, or a fetch path"
             )
-        if stream and fetch and not history:
+        if fetch and (stream or history):
             raise ValueError(
-                f"{self.name}: a dataset with channels and a fetch path needs a history source"
-            )
-        if history and fetch and not stream:
-            raise ValueError(
-                f"{self.name}: only bars combine a history source and a fetch path without channels"
+                f"{self.name}: a fetch path is a dataset of its own, never combined with "
+                "channels or a history source"
             )
 
 
@@ -1197,8 +1223,10 @@ class Catalog:
         - **unique columns:** after the rename, no source has a repeated column.
         - **member types:** across the members of a kind, one column gets one wire type, up to
           the lattice joins.
-        - **kind membership:** a kind dataset's sources equal the sources holding a membership
-          of its `(kind, group)`.
+        - **kind membership:** a kind dataset reads only sources holding a membership of its
+          `(kind, group)`, and the datasets of one `(kind, group)` together read each of those
+          sources exactly once: a group may be split over a stream and history dataset and the
+          one-row dataset of the same class (`stocks.trades` and `stocks.last_trade`).
         - **wire parameters:** every wire name the dataset declares is a parameter of its
           REST path: the `start`/`end` pair and the symbol parameter of the history path (or
           of the fetch path when there is none), each key filled from the request, which
@@ -1347,7 +1375,14 @@ class Catalog:
         return []
 
     def _kind_problems(self, spec: DatasetSpec) -> list[str]:
-        """Check that a kind dataset reads exactly the sources of its kind's group.
+        """Check that a kind's group is read, source by source, by exactly one of its datasets.
+
+        A kind's group (`(kind, group)`, such as trades of stocks) may be split over several
+        datasets of its class: the stream and history dataset and the one-row dataset of the
+        same rows (`stocks.trades` and `stocks.last_trade`). Each dataset may read only the
+        group's sources; the group's first dataset in declaration order also reports the
+        sources no dataset of the group reads and those several read, so a group's failure is
+        listed once.
 
         Args:
             spec: The dataset; every source is generated.
@@ -1357,21 +1392,34 @@ class Catalog:
         """
         if spec.kind is None:
             return []
+        group = f"{spec.kind}/{spec.group}"
         expected = {
             (transport, key)
             for transport in Transport
             for key, source in self._sources(transport).items()
             if any(m.kind == spec.kind and m.group == spec.group for m in source.memberships)
         }
-        actual = set(spec.sources)
         found = []
-        for what, names in (("lacks", expected - actual), ("reads outside it", actual - expected)):
+        if outside := set(spec.sources) - expected:
+            listed = sorted(f"{t.value} {k}" for t, k in outside)
+            found.append(
+                f"kind membership: {spec.name}: reads outside it the {group} sources {listed}"
+            )
+        members = [
+            m for m in self._by_name.values() if m.kind == spec.kind and m.group == spec.group
+        ]
+        if members[0] is not spec:
+            return found
+        read = [source for m in members for source in m.sources if source in expected]
+        unread = expected - set(read)
+        repeated = {source for source in read if read.count(source) > 1}
+        for what, names in (
+            (f"no {group} dataset reads", unread),
+            (f"several {group} datasets read", repeated),
+        ):
             if names:
                 listed = sorted(f"{t.value} {k}" for t, k in names)
-                found.append(
-                    f"kind membership: {spec.name}: {what} the {spec.kind}/{spec.group} "
-                    f"sources {listed}"
-                )
+                found.append(f"kind membership: {spec.name}: {what} the sources {listed}")
         return found
 
     def _parameter_problems(self, spec: DatasetSpec) -> list[str]:
