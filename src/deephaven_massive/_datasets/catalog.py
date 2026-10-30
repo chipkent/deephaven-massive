@@ -428,7 +428,7 @@ class DatasetSpec:
         if self.kind is not None and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
         if self.flat_file_prefixes and self.asset_class is ClassFromPrefix.ANY:
-            # A file filter looks for the spellings of one class (`symbols.wire_spellings`).
+            # A file filter looks for the spellings of one class (`wire_symbols.wire_spellings`).
             raise ValueError(f"{self.name}: a flat-file dataset needs a class")
         if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
             # A stream subscribes and a flat file filters by the class's spellings.

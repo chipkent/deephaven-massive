@@ -94,6 +94,10 @@ A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of t
 next block, and reads not yet started are cancelled. After a close, no request starts once a
 reader has seen it; a request already in flight is discarded, and the call raises
 `MassiveError("MassiveSession #1 is closed")`.
+
+The module is one subject although it runs past 1,000 lines: it is one transport, from the
+read plan of a call to its table, and every step shares the plan's columns and its failure
+rules.
 """
 
 from __future__ import annotations
@@ -132,16 +136,16 @@ from deephaven_massive._datasets.row_times import (
     within,
 )
 from deephaven_massive._datasets.source_columns import rename, required_fields, widen
-from deephaven_massive._datasets.symbols import (
-    WireSymbols,
-    option_roots,
-    unknown_symbol_message,
-    wire_spellings,
-)
+from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
+)
+from deephaven_massive._datasets.wire_symbols import (
+    WireSymbols,
+    unknown_symbol_message,
+    wire_spellings,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
@@ -357,7 +361,7 @@ class _Transform:
             request: The normalized arguments: the canonical symbols to keep, as a tuple
                 (anything else, `dm.ALL` or None for a dataset without instruments, keeps every
                 row), and the bars' timespan and multiplier. The files are filtered on every
-                spelling `symbols.canonical_from_wire` reads as one of the symbols
+                spelling `wire_symbols.canonical_from_wire` reads as one of the symbols
                 (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
@@ -470,7 +474,7 @@ class _Transform:
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
-                session's `unknown_symbols` is `FAIL` (`symbols.unknown_symbol_message`);
+                session's `unknown_symbols` is `FAIL` (`wire_symbols.unknown_symbol_message`);
                 under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
         """
         arrays: dict[str, pa.Array] = {}

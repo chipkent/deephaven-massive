@@ -1,8 +1,5 @@
-"""Tests for the canonical symbol grammar, the converters, and the wire spellings."""
+"""Tests for the canonical symbol grammar, its checks, and the converters."""
 
-import csv
-import io
-import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -14,11 +11,8 @@ from deephaven.dherror import DHError
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
-    WireSymbols,
-    canonical_from_wire,
     check_symbol,
     forex_codes,
     is_canonical,
@@ -26,12 +20,9 @@ from deephaven_massive._datasets.symbols import (
     normalize,
     option_roots,
     symbol_class,
-    unknown_symbol_message,
-    wire_spellings,
-    ws_symbol,
 )
+from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
-from deephaven_massive._log_limits import BoundedWarnings
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -482,117 +473,9 @@ def test_forex_currencies_are_three_letters() -> None:
         assert not is_forex_currency(code)
 
 
-@pytest.mark.parametrize(
-    ("asset_class", "symbol", "expected"),
-    [
-        (FX, "C:EURUSD", "EUR-USD"),
-        (CRY, "X:BTCUSD", "BTC-USD"),
-        (CRY, "X:SHIBUSDT", "SHIB-USDT"),
-        (CRY, "X:ETHBTC", "ETH-BTC"),
-        (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
-        (IDX, "I:SPX", "I:SPX"),
-        (STK, "AAPL", "AAPL"),
-        (FUT, "ESZ5", "ESZ5"),
-    ],
-)
-def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
-    # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
-    split = cast("tuple[str, str]", tuple(expected.split("-")))
-    pairs = {symbol: split} if asset_class is CRY else {}
-    assert ws_symbol(asset_class, symbol, pairs) == expected
-
-
-@pytest.mark.parametrize(
-    ("asset_class", "raw", "expected"),
-    [
-        (FX, "EUR/USD", "C:EURUSD"),  # WebSocket quote and aggregate frames
-        (FX, "EUR-USD", "C:EURUSD"),  # the topic form
-        (FX, "C:EURUSD", "C:EURUSD"),
-        (FX, "C:EUR-USD", "C:EURUSD"),
-        (FX, "X:EUR-USD", "C:EURUSD"),  # the forex quotes flat-file sample
-        (FX, "EURUSD", "C:EURUSD"),
-        (FX, "eur/usd", None),  # case is never folded on the wire
-        (FX, "EUR/US", None),
-        (CRY, "BTC-USD", "X:BTCUSD"),  # WebSocket frames
-        (CRY, "X:BTC-USD", "X:BTCUSD"),  # FMV frames
-        (CRY, "X:BTCUSD", "X:BTCUSD"),
-        (CRY, "BTC/USD", "X:BTCUSD"),
-        (CRY, "BTC-XYZ", "X:BTCXYZ"),  # any quote currency
-        (CRY, "X:BTC-DAI", "X:BTCDAI"),
-        (CRY, "X:BTCDAI", "X:BTCDAI"),
-        (CRY, "ABCUS-DT", "X:ABCUSDT"),
-        (CRY, "BTC--USD", None),
-        (IDX, "I:SPX", "I:SPX"),
-        (IDX, "SPX", "I:SPX"),  # the endpoint's class adds the prefix
-        (IDX, "spx", "I:spx"),  # never re-cased
-        (IDX, "S P X", None),
-        (FUT, "BOB 02-01 U6", "BOB 02-01 U6"),
-        (FUT, "ZZ:NEW COMBO Z6", "ZZ:NEW COMBO Z6"),  # a row keeps a form not seen yet
-        (FUT, " ESZ5", None),
-        (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
-        (OPT, "AAPL250117C00150000", None),
-        (STK, "KIMpL", "KIMpL"),
-        (STK, "BRK/B", None),
-        (FUT, "ESZ5", "ESZ5"),
-        (ClassFromPrefix.ANY, "X:BTC-USD", "X:BTCUSD"),
-        (ClassFromPrefix.ANY, "C:EURUSD", "C:EURUSD"),
-        (ClassFromPrefix.ANY, "X:EUR-USD", "X:EURUSD"),  # without the forex class, X: is crypto
-        (ClassFromPrefix.ANY, "I:SPX", "I:SPX"),
-        (ClassFromPrefix.ANY, "AAPL", "AAPL"),
-        (ClassFromPrefix.ANY, "aapl", None),
-    ],
-)
-def test_canonical_from_wire(
-    asset_class: AssetClass | ClassFromPrefix, raw: str, expected: str | None
-) -> None:
-    assert canonical_from_wire(asset_class, raw) == expected
-
-
-@pytest.mark.parametrize(
-    ("asset_class", "symbol"),
-    [
-        (FX, "C:EURUSD"),
-        (CRY, "X:BTCUSDT"),
-        (IDX, "I:SPX"),
-        (STK, "BRK.B"),
-        (OPT, "O:AAPL250117C00150000"),
-    ],
-)
-def test_wire_spellings_are_the_inverse_of_canonical_from_wire(
-    asset_class: AssetClass, symbol: str
-) -> None:
-    spellings = wire_spellings(asset_class, symbol)
-    assert spellings[0] == symbol
-    assert len(set(spellings)) == len(spellings)
-    assert all(canonical_from_wire(asset_class, s) == symbol for s in spellings)
-
-
 def test_forex_codes_split_a_forex_ticker_by_position() -> None:
     assert forex_codes("C:EURUSD") == ("EUR", "USD")
     assert forex_codes("C:USDJPY") == ("USD", "JPY")
-
-
-def test_wire_spellings_cover_the_flat_file_and_websocket_forms() -> None:
-    assert {"X:EUR-USD", "EUR/USD", "EUR-USD"} <= set(wire_spellings(FX, "C:EURUSD"))
-    assert {"BTC-USD", "X:BTC-USD"} <= set(wire_spellings(CRY, "X:BTCUSD"))
-    assert "C:EUR-USD" in wire_spellings(FX, "C:EURUSD")  # the knowledge base's file spelling
-    assert wire_spellings(IDX, "I:SPX") == ("I:SPX", "SPX")
-
-
-def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
-    load_fixture: Callable[[str, str], bytes],
-) -> None:
-    # The fixture pairs well-known tickers with Massive's WebSocket form of each; the split
-    # comes from Massive's crypto ticker list at run time, never from the ticker text.
-    text = load_fixture("datasets/symbols", "crypto_tickers.csv").decode()
-    rows = list(csv.DictReader(io.StringIO(text)))
-    assert len(rows) > 20
-    for row in rows:
-        ticker, websocket = row["ticker"], row["websocket"]
-        assert is_canonical(CRY, ticker)
-        split = cast("tuple[str, str]", tuple(websocket.split("-")))
-        assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
-        assert canonical_from_wire(CRY, websocket) == ticker
 
 
 def test_option_roots() -> None:
@@ -677,86 +560,6 @@ def test_symbol_tables_compare_by_wrapper(dh_exec_ctx: object) -> None:
 )
 def test_symbol_class(symbol: str, asset_class: AssetClass) -> None:
     assert symbol_class(symbol) is asset_class
-
-
-def test_the_unknown_symbol_message_names_the_spellings_and_the_switch() -> None:
-    message = unknown_symbol_message("forex.quotes", ["b", "a"])
-    assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
-    one = unknown_symbol_message("forex.quotes", ["a"])
-    assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
-    assert "MASSIVE_UNKNOWN_SYMBOLS=warn" in message
-    assert "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN)" in message
-
-
-@pytest.fixture
-def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=2)
-    )
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.WARN)
-    raw = pa.array(["EUR/USD", None, "??", "X:EUR-USD", "??", "!!", "##"])
-    cache: dict[str, str | None] = {}
-    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
-        read = reader.read(raw, cache)
-        reader.read(raw, {})  # a fresh read warns no spelling twice
-    assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
-    assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
-    assert read.unknown == ("!!", "##", "??")
-    assert cache == {
-        "EUR/USD": "C:EURUSD",
-        "??": None,
-        "X:EUR-USD": "C:EURUSD",
-        "!!": None,
-        "##": None,
-    }
-    # Two spellings are reported, then one record says the rest are not.
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages == [
-        (
-            "forex.quotes: Massive sent the symbol '!!', a spelling the library cannot read; its "
-            "rows have a null Symbol and keep the text in RawSymbol"
-        ),
-        (
-            "forex.quotes: Massive sent the symbol '##', a spelling the library cannot read; its "
-            "rows have a null Symbol and keep the text in RawSymbol"
-        ),
-        "2 values were reported; further ones are not logged",
-    ]
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -> None:
-    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.FAIL)
-    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
-        read = reader.read(pa.array(["??", "C:EURUSD"]), {})
-    assert read.unknown == ("??",)
-    assert read.symbols.to_pylist() == [None, "C:EURUSD"]
-    assert caplog.records == []
-
-
-def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:
-    # The ticker text never decides the split: X:ETHWBTC ends in BTC but quotes in WBTC, and
-    # X:DOTUSD could be DOT-USD or DO-TUSD.
-    pairs = {"X:ETHWBTC": ("ETH", "WBTC"), "X:DOTUSD": ("DOT", "USD"), "X:BTCUSD": ("BTC", "USD")}
-    assert ws_symbol(CRY, "X:ETHWBTC", pairs) == "ETH-WBTC"
-    assert ws_symbol(CRY, "X:DOTUSD", pairs) == "DOT-USD"
-    assert ws_symbol(CRY, "X:BTCUSD", pairs) == "BTC-USD"
-    with pytest.raises(KeyError, match="X:BTCUSD"):
-        ws_symbol(CRY, "X:BTCUSD", {})  # no split given: none is guessed
-    assert ws_symbol(FX, "C:EURUSD", {}) == "EUR-USD"
-    assert ws_symbol(STK, "AAPL", {}) == "AAPL"
-    # A file may split a pair anywhere: every cut is looked for, and each reads back.
-    for symbol in ("X:BTCXYZ", "X:BTCPYUSD", "X:BTCUSD"):
-        spellings = wire_spellings(CRY, symbol)
-        assert spellings[:2] == (symbol, symbol[2:])
-        assert all(canonical_from_wire(CRY, s) == symbol for s in spellings)
-    assert {"X:BTC-PYUSD", "BTC/PYUSD", "X:BTCPY-USD"} <= set(wire_spellings(CRY, "X:BTCPYUSD"))
 
 
 def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:

@@ -26,7 +26,7 @@ from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._datasets import history_source, symbols
+from deephaven_massive._datasets import history_source, wire_symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
@@ -1651,14 +1651,16 @@ def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=5)
+        wire_symbols,
+        "_unknown_spellings",
+        BoundedWarnings(logging.getLogger(wire_symbols.__name__), limit=5),
     )
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
     config = dm.MassiveConfig(
         api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
     )
-    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
+    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
         (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]

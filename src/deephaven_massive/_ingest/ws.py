@@ -18,7 +18,7 @@ everything else the library decides belongs here:
   host, and they keep running.
 - **Rows, rejects, and drift.** Rows go to the connection's flush thread (`Flusher`), which
   publishes them. A rejected row fails the streams that would have received it, its raw wire
-  symbol mapped to the canonical one (`_datasets/symbols.py`); a row with no symbol fails only
+  symbol mapped to the canonical one (`_datasets/wire_symbols.py`); a row with no symbol fails only
   the channel's `dm.ALL` streams and is logged at ERROR. Drift is recorded on the connection's
   `SchemaDrift` here and handed to the flush thread for the streams' rows.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
@@ -71,7 +71,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
-from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
+from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
