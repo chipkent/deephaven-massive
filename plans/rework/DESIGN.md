@@ -3359,7 +3359,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   13-F `OtherManagers`), the `last_by` keys on a hidden text column in its place, the JSON text
   of the row's list keys, which the poller writes beside every row and tombstone and the result
   drops (a DEBUG line names the keys the table uses); the poller's identities hold a list as
-  a tuple. A cycle is one `add`,
+  a tuple. A list key compares item by item and in order, as Deephaven compares arrays: the
+  same items in another order are another key, since the library never reorders what Massive
+  sends. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
   every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
   churning key set (an options chain, the day's movers) grows with the keys it has held. The

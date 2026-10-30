@@ -29,7 +29,9 @@ A poll key may be a list column (`long[]` or `String[]`, such as a 13F line's `O
 which Deephaven cannot key an aggregation on. A keyed table whose poll keys hold one keys its
 `last_by` on a hidden text column instead (`LIST_KEY_COLUMN`): the JSON text of the row's list
 keys, which the poller writes beside every row and tombstone, and which the result drops. Two
-rows have the same text exactly when their lists are equal, so the table keys the same rows.
+rows have the same text exactly when their lists are equal, item by item and in order, as
+Deephaven compares two arrays and as `APPEND` compares identities: the same items in another
+order, as Massive sent them, are another key. The library never sorts a list Massive sends.
 
 Every row's `TimestampInsert` is when its page of the cycle arrived, so in a keyed table it is
 the time of the latest poll that returned the row; it is never part of a row's identity.

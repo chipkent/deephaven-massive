@@ -1635,3 +1635,21 @@ def test_append_identities_hold_a_list_poll_key(
     script.holdings(("C1", ["A"], 2.0), ("C1", ["B"], 3.0))
     next_cycle(clock)
     until(lambda: holdings(table, dh_to_pylist) == [("C1", ("A",), 1.0), ("C1", ("B",), 3.0)])
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_list_poll_key_is_order_sensitive(
+    *,
+    massive_session: dm.MassiveSession,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # The same managers in another order are another key in every mode, as Deephaven compares
+    # arrays: the library never reorders a list Massive sends.
+    script = ListScript(massive_session)
+    script.holdings(("C1", ["A", "B"], 1.0), ("C1", ["B", "A"], 2.0))
+    table = start_holdings(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
+    expected = [("C1", ("A", "B"), 1.0), ("C1", ("B", "A"), 2.0)]
+    until(lambda: holdings(table, dh_to_pylist) == expected)
