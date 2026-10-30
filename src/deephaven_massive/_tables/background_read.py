@@ -443,18 +443,18 @@ def open_read(
     stop = core.read_stop()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, call=call, stop=stop, note=note)
-    read = BackgroundRead(
-        core,
-        name=spec.name,
-        call=call,
-        columns=core.dataset_schema(spec).column_names,
-        publisher=publisher,
-        stop=stop,
-        run=run,
-    )
     count, text = (None, "") if symbols is None else describe_symbols(symbols)
     registered = False
     try:
+        read = BackgroundRead(
+            core,
+            name=spec.name,
+            call=call,
+            columns=core.dataset_schema(spec).column_names,
+            publisher=publisher,
+            stop=stop,
+            run=run,
+        )
         core.register_worker(
             StreamRow(
                 stream_id=call,
