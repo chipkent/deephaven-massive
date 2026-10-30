@@ -90,7 +90,8 @@ from deephaven.update_graph import shared_lock
 
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import UnknownSymbols
-from deephaven_massive._errors import BoundedWarnings, MassiveError
+from deephaven_massive._errors import MassiveError
+from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,

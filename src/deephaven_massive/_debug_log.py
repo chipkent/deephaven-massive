@@ -150,6 +150,8 @@ class _Switch:
     Attributes:
         handler: The handler on the `deephaven_massive` logger, or None before the first.
         environment_read: True once the environment variables were read, or need not be.
+        overridden: True once `enable_debug_logging` or `disable_debug_logging` has run: an
+            environment read still in flight then installs nothing, so the function wins.
     """
 
     def __init__(self) -> None:
@@ -157,6 +159,7 @@ class _Switch:
         self.lock = threading.Lock()
         self.handler: logging.Handler | None = None
         self.environment_read = False
+        self.overridden = False
 
 
 _switch = _Switch()
@@ -210,7 +213,8 @@ def disable_debug_logging() -> None:
     then as it was at import: WARNING and ERROR records reach `sys.stderr` through Python's
     last-resort handler, and lower levels are dropped. A handler a user added to the logger
     themselves stays. The environment variables count as read afterwards, so a later first
-    session does not turn the log back on; `enable_debug_logging()` does. With the log already
+    session does not turn the log back on, and a read of them already under way on another
+    thread installs nothing; `enable_debug_logging()` does turn it on again. With the log already
     off it changes nothing.
 
     Example:
@@ -224,6 +228,7 @@ def disable_debug_logging() -> None:
     """
     with _switch.lock:
         _switch.environment_read = True
+        _switch.overridden = True  # an environment read in flight installs nothing now
         handler = _switch.handler
         if handler is None:
             return
@@ -295,10 +300,11 @@ def _install(level: int, output: LogOutput | str | os.PathLike[str], *, environm
     with _switch.lock:
         previous = _switch.handler
         # The function wins over the variables, even when it ran while they were being read.
-        superseded = environment and previous is not None
+        superseded = environment and _switch.overridden
         if not superseded:
             _switch.handler = handler
             _switch.environment_read = True
+            _switch.overridden = _switch.overridden or not environment
             _library_logger.addHandler(handler)
             if previous is not None:
                 _library_logger.removeHandler(previous)

@@ -356,3 +356,13 @@ def test_disable_debug_logging_loses_a_race_with_enable(
     [handler] = [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
     assert _debug_log._switch.handler is handler
     assert LIBRARY.level == logging.DEBUG
+
+
+def test_disable_debug_logging_wins_over_an_environment_read_in_flight(tmp_path: Path) -> None:
+    # The first session read the variables, then disable ran before their handler went in:
+    # the handler the variables built is closed instead of installed.
+    dm.disable_debug_logging()
+    path = tmp_path / "massive.log"
+    _debug_log._install(logging.DEBUG, path, environment=True)
+    assert (LIBRARY.level, _debug_log._switch.handler) == (logging.NOTSET, None)
+    assert path.read_text(encoding="utf-8") == ""

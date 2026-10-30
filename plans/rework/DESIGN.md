@@ -3666,7 +3666,8 @@ the old one:
 one INFO line saying so, removes and closes the library's handler, and sets the logger's level
 back to `NOTSET`, so the library is as it was at import (WARNING and ERROR through the
 last-resort handler). The variables then count as read, so a later first session does not turn
-the log back on; `enable_debug_logging` does. With nothing turned on it changes nothing. It
+the log back on, and a read of them already under way on another thread installs nothing, as
+after `enable_debug_logging`; only `enable_debug_logging` turns it on again. With nothing turned on it changes nothing. It
 never touches a handler or level the user set on the logger themselves. It takes no argument:
 the switch exists to undo the other two, and a level is what `DEEPHAVEN_MASSIVE_LOG` is for.
 
