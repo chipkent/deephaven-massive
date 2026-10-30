@@ -2674,8 +2674,17 @@ def test_a_long_grouped_daily_download_is_announced(
     ) in caplog.text
 
 
+def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The range's 00:00 UTC stays and the day's last millisecond moves to 00:00 UTC.
     march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
@@ -2713,16 +2722,11 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         adjusted=True,
     )
     assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
-    # A stamp at midnight New York time is another day cut: it fails loudly. The flat files
-    # hold only as-traded bars, so the way out for adjusted bars says to pass adjusted=False.
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^forex\.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/\{date\} "
-        r"is stamped 2025-03-03T05:00:00\+00:00, which .*; read the 1-day flat files with "
-        r"source=dm\.HistorySource\.FLAT_FILES and adjusted=False \(as-traded prices; the files "
-        r"hold no adjusted bars\) if S3 credentials are configured, and report",
-    ):
-        history(
+    assert not unexpected_stamps(caplog)
+    # A stamp at midnight New York time may be another day cut: the bar is still served,
+    # labelled by the UTC day it falls on, and one WARNING names the stamp.
+    with caplog.at_level(logging.WARNING):
+        odd = history(
             session,
             FOREX_BARS,
             start="2025-03-03",
@@ -2731,6 +2735,15 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
             timespan=Timespan.DAY,
             adjusted=True,
         )
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in odd] == [
+        ("2025-03-03", march_3 * 10**6, march_4 * 10**6, 3.0)
+    ]
+    [warning] = unexpected_stamps(caplog)
+    assert warning.startswith(
+        "forex.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/{date} is stamped "
+        "2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for such a bar "
+        "(00:00:00.000, 23:59:59.999 in UTC). The bar is served"
+    )
 
 
 def test_a_history_by_instants_is_not_announced_however_many_symbols(
@@ -2760,22 +2773,27 @@ def crypto_bars(
     )
 
 
-def test_longer_crypto_bars_must_start_at_utc_midnight(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_longer_crypto_bars_are_expected_at_utc_midnight(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Two-day bars stamped at midnight New York time would hold hours of the next day.
+    caplog.set_level(logging.WARNING)
+    # A two-day bar stamped at midnight New York time may hold hours of the next day: it is
+    # served, labelled by the UTC day it falls on, with one WARNING.
     start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
-        r"2025-03-03T05:00:00\+00:00, which is not a stamp Massive is known to use for such a "
-        r"bar \(00:00:00\.000 in UTC\).*; request 1-day bars; no other source serves these, "
-        r"and report",
-    ):
-        crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
+    out = crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (start * 10**6, utc_ms(date(2025, 3, 5)) * 10**6, 1.0)
+    ]
+    [warning] = unexpected_stamps(caplog)
+    assert warning.startswith(
+        "crypto.bars: a bar from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/"
+        "{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known "
+        "to use for such a bar (00:00:00.000 in UTC). The bar is served"
+    )
+    caplog.clear()
     # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
     # and the week runs to the next Sunday: it is kept as stamped.
     sunday, after = utc_ms(date(2026, 10, 11)), utc_ms(date(2026, 10, 18))
@@ -2790,13 +2808,19 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
         (sunday * 10**6, after * 10**6, 2.0)
     ]
-    # A week bar stamped on another day may cover another week: it fails.
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"is stamped 2026-10-12T00:00:00\+00:00, which is not a stamp Massive is known to "
-        r"use for such a bar \(00:00:00\.000 in UTC, on a Sunday\)",
-    ):
-        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
+    assert not unexpected_stamps(caplog)
+    # A week bar stamped on another day may cover another week: it is served in the week its
+    # stamp falls in, with one WARNING.
+    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (sunday * 10**6, after * 10**6, 2.0)
+    ]
+    [warning] = unexpected_stamps(caplog)
+    assert (
+        "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
+        "such a bar (00:00:00.000 in UTC, on a Sunday)"
+    ) in warning
+    caplog.clear()
 
     # A month bar must be stamped on its 1st.
     first, april = utc_ms(date(2025, 3, 1)), utc_ms(date(2025, 4, 1))
@@ -2812,8 +2836,14 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
         (first * 10**6, april * 10**6, 3.0)
     ]
-    with pytest.raises(dm.MassiveError, match=r"is stamped 2025-03-02T00:00:00.*on the 1st of"):
-        crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
+    assert not unexpected_stamps(caplog)
+    out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (first * 10**6, april * 10**6, 3.0)
+    ]
+    [warning] = unexpected_stamps(caplog)
+    assert "is stamped 2025-03-02T00:00:00+00:00" in warning
+    assert "on the 1st of a month)" in warning
 
 
 def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(

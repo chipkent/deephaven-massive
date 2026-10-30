@@ -91,6 +91,13 @@ other would have filled those columns. Pass the `source=` the WARNING names.
 **`history()` refuses `dm.ALL`.** REST takes explicit symbols, except for daily bars. Use
 flat-file keys, or name the symbols.
 
+**A WARNING says a bar "is not a stamp Massive is known to use".** Massive stamped a bar at
+a time or on a day the library does not expect. The bar is in your table, labelled by the day
+its stamp falls on, but its `Date`, `TimestampStart`, and `TimestampEnd` may cover other days
+than the bar does. Check those bars before you rely on their dates, and report the WARNING on
+the [issues page](https://github.com/chipkent/deephaven-massive/issues). The library logs it
+once per dataset and timespan in a session.
+
 **Prices jump at a split.** Historical stock and option bars are split-adjusted by default;
 live bars are as traded. A table that joins the two shows a step on a split's date. Build it
 again after a split. Pass `adjusted=False` to `bars()` for as-traded history.
