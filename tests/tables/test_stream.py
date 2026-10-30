@@ -774,6 +774,47 @@ def test_routes_forget_a_stream_once(flusher: Flusher, massive_session: dm.Massi
     assert flusher.routes.sinks() == ()
 
 
+def test_a_flush_forgets_the_symbols_of_streams_no_longer_routed(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    sink, _ = make_sink(massive_session._core, ALL)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL"), trade("MSFT")])
+    flusher.flush()
+    assert flusher._symbols == {sink.plan: {"AAPL": "AAPL", "MSFT": "MSFT"}}
+    flusher.routes.remove(1)
+    flusher.flush()
+    assert flusher._symbols == {}
+
+
+def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caplog: pytest.LogCaptureFixture,
+    rows_when: RowsWhen,
+) -> None:
+    # A `dm.ALL` stream meets new contracts every day: the cache never outgrows its limit.
+    monkeypatch.setattr(stream, "SYMBOL_CACHE_LIMIT", 2)
+    sink, blink = make_sink(massive_session._core, ALL)
+    shown = blink_to_append_only(blink)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL"), trade("MSFT")])
+    flusher.flush()
+    assert flusher._symbols[sink.plan] == {"AAPL": "AAPL", "MSFT": "MSFT"}
+    with caplog.at_level(logging.DEBUG, logger=stream.__name__):
+        flusher.rows("T", [trade("IBM")])
+        flusher.flush()
+    assert flusher._symbols[sink.plan] == {}
+    assert "test.trades: the T symbol cache passed 2 spellings and starts over" in caplog.text
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert flusher._symbols[sink.plan] == {"AAPL": "AAPL"}
+    rows = rows_when(shown, lambda rows: len(rows) == 4)
+    assert [row["Symbol"] for row in rows] == ["AAPL", "MSFT", "IBM", "AAPL"]
+
+
 def test_a_sink_whose_session_is_gone_reports_nothing(
     *,
     massive_session: dm.MassiveSession,
