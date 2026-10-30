@@ -31,7 +31,9 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
+    accepted_values,
     adjustment_notes,
     bar_query_class,
     build_query,
@@ -299,6 +301,24 @@ def test_naive_datetime_filters_and_params_are_rejected(
         build(massive_session, INDICATOR, params={"timestamp_gte": naive})
     aware = naive.replace(tzinfo=UTC)
     assert build(massive_session, INDICATOR, filters={"timestamp_gte": aware})._request.filters
+
+
+def test_accepted_values_read_the_generated_enum(massive_session: dm.MassiveSession) -> None:
+    sma = CATALOG.by_name["indicators.sma"]
+    spans = accepted_values(massive_session._core, sma, "timespan")
+    assert "minute" in spans
+    assert "second" not in spans
+    conversion = CATALOG.by_name["forex.conversion"]
+    assert accepted_values(massive_session._core, conversion, "precision") == tuple(
+        str(digits) for digits in range(5)
+    )
+
+
+def test_every_snapshot_splits_its_tickers_alike() -> None:
+    # The per-class and unified snapshots name one shared count of tickers per request.
+    lists = [spec for spec in CATALOG.by_name.values() if spec.symbols_per_request is not None]
+    assert {spec.name for spec in lists} >= {"snapshots", "stocks.snapshots", "crypto.snapshots"}
+    assert {spec.symbols_per_request for spec in lists} == {SNAPSHOT_SYMBOLS_PER_REQUEST}
 
 
 def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:

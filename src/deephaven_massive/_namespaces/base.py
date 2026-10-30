@@ -70,7 +70,9 @@ if TYPE_CHECKING:
 __all__ = [
     "ADJUSTED_PRICE",
     "ADJUSTED_VOLUME",
+    "SNAPSHOT_SYMBOLS_PER_REQUEST",
     "Namespace",
+    "accepted_values",
     "adjustment_notes",
     "bar_query_class",
     "build_query",
@@ -98,6 +100,14 @@ ADJUSTED_VOLUME: Final = (
     "ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded."
 )
 """The note on every volume column of a dataset with a split-adjustment choice."""
+
+
+SNAPSHOT_SYMBOLS_PER_REQUEST: Final = 250
+"""The most tickers one snapshot request names in its comma-separated ticker list.
+
+Massive's unified snapshot documents 250 as the limit of its `ticker.any_of`; the per-class
+snapshots take the same size, so every long watchlist is split into requests whose URLs stay
+well under the lengths servers refuse (`DatasetSpec.symbols_per_request`)."""
 
 
 def adjustment_notes(prices: Iterable[str], volumes: Iterable[str]) -> Mapping[str, str]:
@@ -250,6 +260,24 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
     return params
+
+
+def accepted_values(core: SessionCore, spec: DatasetSpec, name: str) -> tuple[str, ...]:
+    """Return the values the enum parameter of a dataset's fetch path accepts, as generated.
+
+    Reading them from the generated path, not a copy, makes a dataset method accept exactly
+    what Massive's specification lists, through every refresh.
+
+    Args:
+        core: The session core, whose catalog holds the generated paths.
+        spec: The dataset; its fetch path has an enum parameter `name`.
+        name: The parameter's wire name, such as `"timespan"`.
+
+    Returns:
+        The accepted wire values, in the specification's order.
+    """
+    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
+    return next(param.values for param in path.params if param.name == name)
 
 
 def require_bool(name: str, value: object) -> bool:
