@@ -7,7 +7,6 @@ without a network, so they observe exactly when Deephaven runs a stream's `on_sh
 import gc
 import logging
 import threading
-import types
 import weakref
 from collections.abc import Callable
 from typing import Any, Protocol, cast
@@ -15,10 +14,10 @@ from typing import Any, Protocol, cast
 import pytest
 from deephaven import empty_table, time_table
 from deephaven.dherror import DHError
-from deephaven.execution_context import ExecutionContext, get_exec_ctx
+from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
-from deephaven.update_graph import exclusive_lock, shared_lock
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -26,16 +25,16 @@ from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
+from deephaven_massive._tables.execution_context import (
+    entered,
+)
 from deephaven_massive._tables.liveness import (
     QueueWorker,
     Reaper,
     ResultRecord,
     ResultRegistry,
-    entered,
-    holds_update_graph_lock,
     make_result,
     new_scope,
-    refuse_update_graph_thread,
 )
 from deephaven_massive._types import override
 
@@ -423,60 +422,6 @@ def test_concurrent_verbs_share_one_stream(
     assert fake_streams.shutdown[winner].wait(TIMEOUT)
     drain()
     assert fake_streams.shutdown_calls == dict.fromkeys(fake_streams.shutdown, 1)
-
-
-def test_the_update_graph_check_refuses_only_update_graph_threads(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # The check itself, run on this thread with an update graph that says this is one of its
-    # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
-    graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
-    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
-    with pytest.raises(ValueError, match="must not run on a Deephaven update-graph thread"):
-        refuse_update_graph_thread(cast("ExecutionContext", update_thread))
-    with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
-        refuse_update_graph_thread(dh_exec_ctx)
-    refuse_update_graph_thread(dh_exec_ctx)
-
-
-def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:
-    update_graph = dh_exec_ctx.update_graph
-    assert not holds_update_graph_lock(dh_exec_ctx)
-    with shared_lock(update_graph):
-        assert holds_update_graph_lock(dh_exec_ctx)
-    with exclusive_lock(update_graph):
-        assert holds_update_graph_lock(dh_exec_ctx)
-    assert not holds_update_graph_lock(dh_exec_ctx)
-
-
-def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionContext) -> None:
-    # Regression: one shared ExecutionContext wrapper entered on two threads at once made the
-    # first thread to exit install the other thread's previous (empty) context on itself.
-    poisoned = "PoisonedUpdateGraph"
-    worker_in = threading.Event()
-    main_out = threading.Event()
-    seen: list[str] = []
-
-    def worker() -> None:
-        with entered(dh_exec_ctx):
-            worker_in.set()
-            main_out.wait(TIMEOUT)
-            seen.append(_update_graph_class())
-
-    thread = threading.Thread(target=worker)
-    with entered(dh_exec_ctx):
-        thread.start()
-        assert worker_in.wait(TIMEOUT)
-    main_out.set()
-    thread.join(TIMEOUT)
-    assert _update_graph_class() != poisoned
-    assert seen != [poisoned]
-    assert len(seen) == 1
-
-
-def _update_graph_class() -> str:
-    j_update_graph = get_exec_ctx().update_graph.j_update_graph
-    return str(j_update_graph.getClass().getSimpleName())
 
 
 def test_collection_takes_no_lock(dh_exec_ctx: ExecutionContext) -> None:

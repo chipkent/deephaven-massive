@@ -3,12 +3,11 @@
 A dataset method normalizes its arguments once, when the query is created, into a `Request`:
 an immutable, hashable record, so equal calls give equal queries and share streams. The verbs
 pass it, with the dataset's `DatasetSpec`, to the transports. The module also names the types a
-request is built from (`ParamValue`), the identity of a live stream (`StreamKey`), and the
-REST transport's answer to which WebSocket host serves a channel family (`HostDecision`).
+request is built from (`ParamValue`) and the identity of a live stream (`StreamKey`).
 
 Everything here is a plain value: no I/O, no threads, and no Deephaven call. The query classes
 that build requests live in `_query.py`; the transport interfaces that receive them live in
-`_tables/core.py`.
+`_tables/transports.py`.
 """
 
 from __future__ import annotations
@@ -25,9 +24,9 @@ if TYPE_CHECKING:
     from enum import StrEnum
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._enums import FuturesVenue, Recency, Timespan
+    from deephaven_massive._enums import FuturesVenue, Timespan
 
-__all__ = ["HostDecision", "ParamValue", "Request", "StreamKey"]
+__all__ = ["ParamValue", "Request", "StreamKey"]
 
 ParamValue: TypeAlias = (
     "str | int | float | bool | date | datetime | StrEnum | tuple[str | date, ...]"
@@ -131,22 +130,3 @@ def _render(value: object) -> str:
     if isinstance(value, tuple) and value and isinstance(value[0], tuple):
         return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
     return repr(value)
-
-
-@dataclass(frozen=True, slots=True)
-class HostDecision:
-    """Which WebSocket host serves a (asset class, channel family), and why.
-
-    Returned by `RestTransport.resolve_host`; immutable, so it can be cached and shared between
-    threads.
-
-    Attributes:
-        host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data, or `UNKNOWN` when the
-            evidence did not say (only then may a server verdict re-route the connection).
-        evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
-    """
-
-    host: str
-    recency: Recency
-    evidence: str

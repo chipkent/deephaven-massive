@@ -29,10 +29,10 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._log_limits import log_once
+from deephaven_massive._tables.transports import HostDecision
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

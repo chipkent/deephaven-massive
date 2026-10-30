@@ -36,12 +36,12 @@ from deephaven_massive._ingest.ws import CONNECTION_SETTINGS, WsConnections, WsT
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._datasets.request import HostDecision
     from deephaven_massive._enums import AssetClass, ChannelFamily
     from deephaven_massive._massive import Cancel, FlatFileClient
-    from deephaven_massive._tables.core import (
+    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import (
         FlatFileTransport,
-        SessionCore,
+        HostDecision,
         StreamTransport,
     )
 
@@ -55,7 +55,7 @@ class SessionClients:
 
     Created once per session by `MassiveSession.__init__`, right after the session's core, and
     attached to that core, whose transport hooks call `rest()`, `streams()`, and
-    `flat_files()` (the `IngestPorts` protocol of `_tables/core.py`). The core holds this
+    `flat_files()` (the `IngestPorts` protocol of `_tables/transports.py`). The core holds this
     object, so this object holds the core only through a weak reference: a strong reference
     back would make a cycle, and a session dropped without `close()` would then wait for the
     cyclic garbage collector before its connections are closed. Each method takes a strong

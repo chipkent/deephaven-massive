@@ -1,9 +1,13 @@
 """The Deephaven side of a session: its tables, their liveness, and the library threads.
 
-- `core`: `SessionCore`, the per-session state behind every query (the registries under
-  `registry_lock`, the stream registry, the closers) and the transport ports a verb calls
-  through, served by the ingest side attached to it;
-- `liveness`: liveness scopes, `entered()`, result records, `QueueWorker`, and the reaper;
+- `session_core`: `SessionCore`, the per-session state behind every query (the registries
+  under `registry_lock`, the stream registry, the live set, the closers, and `close()`);
+- `transports`: the transport ports a verb calls through, served by the ingest side attached
+  to the core, and the values that cross them (`StreamHandle`, `HostDecision`);
+- `execution_context`: `entered()` and the checks of where a call runs (a real execution
+  context, the script session's query scope, not an update-graph thread, the update graph's
+  lock);
+- `liveness`: liveness scopes, result records, `QueueWorker`, and the reaper;
 - `diagnostics`: the `connections()` and `streams()` tables and their writer thread;
 - `columns`: the Deephaven type of each column type and the column definitions of a schema;
 - `watchlist`: the check of a symbol table's rows and the watch that follows a reactive one;

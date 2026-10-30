@@ -23,10 +23,10 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Source, WsClient
+from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
 

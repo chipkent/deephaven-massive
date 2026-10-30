@@ -1,9 +1,7 @@
 """Tests for the unit of each epoch field and the timestamp routine."""
 
 import logging
-from datetime import UTC, date, datetime, time, tzinfo
-from typing import Any, cast
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime
 
 import pyarrow as pa
 import pytest
@@ -11,12 +9,10 @@ import pytest
 from deephaven_massive import _log_limits
 from deephaven_massive._datasets.timestamps import (
     FMV_NS_THRESHOLD,
-    ISSUES_URL,
     MAX_INSTANT_NS,
     MIN_INSTANT_NS,
     TimeUnit,
     UnitMismatchError,
-    day_starts,
     instants,
     masked_instants,
     mismatch_message,
@@ -245,197 +241,3 @@ def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
         "timestamp unit mismatch for t.T: 4611686018427387904 ms|ns is outside 1990 to 2100"
     )
     assert mismatch_message("t.T", TimeUnit.SECONDS, 2**40).endswith("overflows 64-bit nanoseconds")
-
-
-DAY_NS = 86_400 * 10**9
-HOUR_NS = 3600 * 10**9
-MS_NS = 10**6
-MARCH_3 = 1_740_960_000 * 10**9  # 2025-03-03T00:00Z
-NEW_YORK = ZoneInfo("America/New_York")
-CLOSE = time(16)
-LAST_MS = time(23, 59, 59, 999_000)
-
-
-def stamps(*values: int | None) -> pa.Array:
-    return pa.array(values, pa.timestamp("ns", "UTC"))
-
-
-def ns(moment: datetime) -> int:
-    return int(moment.timestamp()) * 10**9 + moment.microsecond * 1000
-
-
-def starts(values: pa.Array, zone: tzinfo, *known: time, what: str = "1-day bar") -> list[Any]:
-    moved = day_starts(
-        "x.bars", values, zone=zone, known=known, source="src", what=what, remedy="r"
-    )
-    assert moved.type == values.type
-    return cast("list[Any]", moved.cast(pa.int64()).to_pylist())
-
-
-def test_utc_day_stamps_move_each_known_stamp_to_its_days_start() -> None:
-    # The aggregates' 00:00 UTC stays; day_aggs_v1's 23:59:59.999 UTC moves to its day's start.
-    last_ms = MARCH_3 + DAY_NS - MS_NS
-    assert starts(stamps(MARCH_3, last_ms, None), UTC, LAST_MS) == [MARCH_3, MARCH_3, None]
-    # A stamp anywhere in the first or last millisecond counts as that boundary.
-    edge = stamps(MARCH_3 + MS_NS - 1, MARCH_3 + DAY_NS - 1)
-    assert starts(edge, UTC, LAST_MS) == [MARCH_3, MARCH_3]
-
-
-def test_new_york_stamps_move_by_wall_clock_across_daylight_saving_time() -> None:
-    # 16:00 New York is 21:00 UTC in winter and 20:00 UTC in summer; both are the close.
-    winter, summer = date(2025, 3, 7), date(2025, 3, 10)  # the clocks change on 03-09
-    days = [datetime.combine(d, time(), NEW_YORK) for d in (winter, summer)]
-    closes = [datetime.combine(d, CLOSE, NEW_YORK) for d in (winter, summer)]
-    values = stamps(*(ns(moment) for moment in [*days, *closes]))
-    assert starts(values, NEW_YORK, CLOSE) == [ns(day) for day in days * 2]
-    # Midnight in Chicago is 01:00 New York time all year.
-    chicago = datetime(2025, 7, 1, tzinfo=ZoneInfo("America/Chicago"))
-    expected = ns(datetime(2025, 7, 1, tzinfo=NEW_YORK))
-    assert starts(stamps(ns(chicago)), NEW_YORK, time(1)) == [expected]
-
-
-@pytest.mark.parametrize(
-    ("zone", "known", "offset"),
-    [
-        (UTC, (LAST_MS,), MS_NS),
-        (UTC, (LAST_MS,), 5 * HOUR_NS),  # midnight New York time: another day cut
-        (UTC, (LAST_MS,), DAY_NS - MS_NS - 1),
-        (UTC, (), DAY_NS - MS_NS),  # a longer bar must start at 00:00
-        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 14 * HOUR_NS),  # 14:00, no known stamp
-        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 16 * HOUR_NS + MS_NS),  # a millisecond after 16:00
-        (NEW_YORK, (CLOSE,), 0),  # 19:00 New York time, the day before
-        (NEW_YORK, (), 5 * HOUR_NS + 16 * HOUR_NS),  # a longer bar at the close
-    ],
-)
-def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], offset: int) -> None:
-    with pytest.raises(
-        MassiveError, match=r"^crypto\.bars: a bar from /v2/aggs/x is stamped 2025-03-0"
-    ) as caught:
-        day_starts(
-            "crypto.bars",
-            stamps(MARCH_3 + 5 * HOUR_NS, MARCH_3 + offset),
-            zone=zone,
-            known=known,
-            source="/v2/aggs/x",
-            what="bar",
-            remedy="read the flat files",
-        )
-    message = str(caught.value)
-    assert ", which is not a stamp Massive is known to use for such a bar (00:00:00.000" in message
-    assert message.endswith(
-        f"; read the flat files, and report the stamp at {ISSUES_URL} so the day cut can be settled"
-    )
-
-
-def test_the_refusal_names_the_stamp_in_both_zones_and_the_accepted_times() -> None:
-    close = datetime(2024, 11, 29, 14, 30, tzinfo=NEW_YORK)
-    with pytest.raises(MassiveError) as caught:
-        day_starts(
-            "stocks.bars",
-            stamps(ns(close)),
-            zone=NEW_YORK,
-            known=(CLOSE,),
-            source="the flat files us_stocks_sip/day_aggs_v1",
-            what="1-day bar",
-            remedy="read REST",
-        )
-    assert str(caught.value) == (
-        "stocks.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is stamped "
-        "2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), which is "
-        "not a stamp Massive is known to use for such a bar (00:00:00.000, 16:00:00.000 in "
-        "America/New_York), so it may cover other days than the one it would be labelled with; "
-        "read REST, and report the stamp at https://github.com/chipkent/deephaven-massive/issues "
-        "so the day cut can be settled"
-    )
-
-
-def test_a_utc_refusal_names_the_stamp_once() -> None:
-    with pytest.raises(MassiveError) as caught:
-        day_starts(
-            "forex.bars",
-            stamps(MARCH_3 + 5 * HOUR_NS),
-            zone=UTC,
-            known=(LAST_MS,),
-            source="s",
-            what="1-day bar",
-            remedy="r",
-        )
-    assert "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp" in str(caught.value)
-    assert "(00:00:00.000, 23:59:59.999 in UTC)" in str(caught.value)
-
-
-def week_starts(values: pa.Array, zone: tzinfo, weekdays: tuple[int, ...]) -> list[Any]:
-    moved = day_starts(
-        "x.bars",
-        values,
-        zone=zone,
-        known=(),
-        weekdays=weekdays,
-        source="src",
-        what="bar",
-        remedy="r",
-    )
-    return cast("list[Any]", moved.cast(pa.int64()).to_pylist())
-
-
-def test_a_week_bar_must_be_stamped_on_a_day_its_week_starts() -> None:
-    # 2025-03-01 is a Saturday, 03-02 a Sunday, 03-03 a Monday.
-    saturday, sunday = MARCH_3 - 2 * DAY_NS, MARCH_3 - DAY_NS
-    assert week_starts(stamps(MARCH_3, None), UTC, (0,)) == [MARCH_3, None]
-    new_york = [ns(datetime.combine(date(2025, 3, d), time(), NEW_YORK)) for d in (1, 2, 3)]
-    assert week_starts(stamps(*new_york), NEW_YORK, (5, 6, 0)) == new_york
-    with pytest.raises(
-        MassiveError,
-        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
-        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
-    ):
-        week_starts(stamps(MARCH_3, sunday), UTC, (0,))
-    with pytest.raises(MassiveError, match=r"on a Monday or Saturday or Sunday\)"):
-        week_starts(stamps(saturday + DAY_NS * 4 + 5 * HOUR_NS), NEW_YORK, (5, 6, 0))
-
-
-@pytest.mark.parametrize(
-    ("months", "named"),
-    [
-        (tuple(range(1, 13)), "a month"),
-        ((1, 4, 7, 10), "January or April or July or October"),
-        ((1,), "January"),
-    ],
-)
-def test_a_longer_bar_must_be_stamped_on_the_1st_of_its_period(
-    months: tuple[int, ...], named: str
-) -> None:
-    first = ns(datetime(2025, 1, 1, tzinfo=NEW_YORK))
-    moved = day_starts(
-        "x.bars",
-        stamps(first),
-        zone=NEW_YORK,
-        known=(),
-        months=months,
-        source="s",
-        what="bar",
-        remedy="r",
-    )
-    assert moved.cast(pa.int64()).to_pylist() == [first]
-    # The 2nd is never a period's start; the 1st of February starts only a month.
-    wrong = [first + DAY_NS] if 2 in months else [first + DAY_NS, first + 31 * DAY_NS]
-    for stamp in wrong:
-        with pytest.raises(MassiveError, match=f"on the 1st of {named}\\)"):
-            day_starts(
-                "x.bars",
-                stamps(stamp),
-                zone=NEW_YORK,
-                known=(),
-                months=months,
-                source="s",
-                what="bar",
-                remedy="r",
-            )
-
-
-def test_repeated_stamps_are_converted_once_and_kept_in_order() -> None:
-    # A batch of grouped-daily bars holds one stamp per day, repeated on every row.
-    close = MARCH_3 + 21 * HOUR_NS  # 16:00 New York time, in winter
-    start = MARCH_3 + 5 * HOUR_NS
-    values = stamps(close, None, close + DAY_NS, close, None)
-    assert starts(values, NEW_YORK, CLOSE) == [start, None, start + DAY_NS, start, None]

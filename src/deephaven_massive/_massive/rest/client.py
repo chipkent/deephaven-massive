@@ -64,7 +64,12 @@ from deephaven_massive._massive.net.retry import (
 )
 from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
-from deephaven_massive._massive.rest.response import Request, body_excerpt, decode_page, http_error
+from deephaven_massive._massive.rest.response import (
+    RequestTarget,
+    body_excerpt,
+    decode_page,
+    http_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -524,7 +529,7 @@ class RestClient:
             The decoded page. When no retry is left, the last attempt's error is raised; see
             `get`.
         """
-        request = Request(self._host, target)
+        request = RequestTarget(self._host, target)
         parents = (self._closed,) if job.cancel is None else (self._closed, job.cancel)
         with Cancel(*parents) as stop:
             retry = 0
@@ -544,7 +549,9 @@ class RestClient:
                 self._clock.wait(stop, wait)
                 retry += 1
 
-    def _attempt(self, job: _Job, request: Request, stop: Cancel) -> Page | _Retryable | object:
+    def _attempt(
+        self, job: _Job, request: RequestTarget, stop: Cancel
+    ) -> Page | _Retryable | object:
         """Send one attempt of a request, once the governor admits it.
 
         Args:
@@ -573,7 +580,9 @@ class RestClient:
                 raise self._stopped(request)
             return self._send(job, request, permit)
 
-    def _send(self, job: _Job, request: Request, permit: Permit) -> Page | _Retryable | object:
+    def _send(
+        self, job: _Job, request: RequestTarget, permit: Permit
+    ) -> Page | _Retryable | object:
         """Send an admitted attempt and report its end to the governor.
 
         Args:
@@ -637,7 +646,7 @@ class RestClient:
     def _answered(
         self,
         job: _Job,
-        request: Request,
+        request: RequestTarget,
         *,
         permit: Permit,
         response: BaseHTTPResponse,
@@ -743,7 +752,9 @@ class RestClient:
             response.release_conn()
         return body if whole else None
 
-    def _unreadable(self, request: Request, response: BaseHTTPResponse, reason: str) -> WireError:
+    def _unreadable(
+        self, request: RequestTarget, response: BaseHTTPResponse, reason: str
+    ) -> WireError:
         """Return the error of a response whose body arrived but cannot be read.
 
         A body unreadable for its content, one that does not decompress or decompresses past
@@ -770,7 +781,7 @@ class RestClient:
             path=request.target,
         )
 
-    def _permit(self, request: Request, admission: Admission, stop: Cancel) -> Permit:
+    def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
         """Wait for the governor to admit an attempt, in the call's lane.
 
         The lane is the caller's cancellation token, which a read shares among its calls, or
@@ -806,7 +817,7 @@ class RestClient:
                 request_id=error.request_id,
             ) from None
 
-    def _stopped(self, request: Request) -> WireError:
+    def _stopped(self, request: RequestTarget) -> WireError:
         """Return the error of a request whose client closed or whose caller cancelled.
 
         Args:
@@ -818,7 +829,9 @@ class RestClient:
         reason = "the REST client is closed" if self._closed.is_set() else "cancelled"
         return WireError(f"GET {request.target}: {reason}", host=self._host, path=request.target)
 
-    def _unanswered(self, request: Request, error: urllib3.exceptions.HTTPError) -> _Retryable:
+    def _unanswered(
+        self, request: RequestTarget, error: urllib3.exceptions.HTTPError
+    ) -> _Retryable:
         """Classify an attempt that got no response.
 
         Args:

@@ -446,3 +446,24 @@ def test_values_are_frozen_and_hash_by_value(
     assert value is not twin
     assert value == twin
     assert hash(value) == hash(twin)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "joined"),
+    [
+        (WireType.LONG, WireType.DOUBLE, WireType.DOUBLE),
+        (WireType.DOUBLE, WireType.LONG, WireType.DOUBLE),
+        (WireType.LONG, WireType.INT_ARRAY, WireType.INT_ARRAY),
+        (WireType.STRING, WireType.LONG, None),
+        (WireType.DOUBLE, WireType.INT_ARRAY, None),
+        (WireType.EPOCH, WireType.LONG, None),
+        (WireType.ISO_INSTANT, WireType.EPOCH, None),
+        (WireType.STRING, WireType.JSON_TEXT, None),
+        *((same, same, same) for same in WireType),
+    ],
+)
+def test_common_type_is_the_narrowest_type_that_holds_both(
+    first: WireType, second: WireType, joined: WireType | None
+) -> None:
+    assert first.common_type(second) is joined
+    assert second.common_type(first) is joined
