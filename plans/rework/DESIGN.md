@@ -2654,20 +2654,20 @@ windows:
   tightest being six sessions over eight weekdays from 2024-12-24. Datetime bounds therefore
   keep only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
   returns Tuesday to Thursday, so daily bars are asked for with dates.
-- For stocks, options, and indices, which do not trade at weekends, a week runs Monday to
-  Friday, and a bar Massive stamps on the Saturday or Sunday before a week names that week;
-  months, quarters, and years are calendar periods less their leading and trailing weekend days,
-  so March 2024 runs from Friday the 1st to Friday the 29th. An index's period is named the same
-  way, but since an index can update around the clock (`I:AAVE100`), its window is the whole
-  calendar period, at its start and its end: an index week runs Monday to Sunday and ends an
-  hour after the next Monday begins, so a range must reach that Sunday to keep it, and an index
-  month of June 2024 starts on Saturday the 1st, so a range from Monday the 3rd leaves it out.
-  An index week stamped on the Saturday or Sunday before its Monday starts on that day, the
-  earlier reading, since it may hold it. Forex (which trades from Sunday evening UTC) and crypto
-  (every day) keep their weekends: Monday-to-Sunday weeks and whole calendar months, quarters,
-  and years. A forex week is the calendar week until the live check of Massive's forex week
-  bucket ([section 23](#23-open-verification-items)) settles where it starts. A bar of
-  `multiplier` periods spans that many.
+- Massive starts a week on Sunday, at 00:00 in the class day zone, and stamps the week's bar
+  there: the live check of [section 23](#23-open-verification-items) item 33 found every crypto
+  and forex week bar at Sunday 00:00 UTC (2026-10-11T00:00Z) and every stock week bar at Sunday
+  00:00 New York time (04:00Z), each holding exactly the volume from that Sunday on. So every
+  class's week is named by its Sunday. For stocks and options, which do not trade at weekends,
+  a week's window is its Monday to Friday, and months, quarters, and years are calendar periods
+  less their leading and trailing weekend days, so March 2024 runs from Friday the 1st to
+  Friday the 29th. Since an index can update around the clock (`I:AAVE100`), its window is the
+  whole calendar period, at its start and its end: an index week runs Sunday to Saturday and
+  ends an hour after the next Sunday begins, so a range must reach that Saturday to keep it,
+  and an index month of June 2024 starts on Saturday the 1st, so a range from Monday the 3rd
+  leaves it out. Forex (which trades from Sunday evening UTC) and crypto (every day) keep their
+  weekends too: Sunday-to-Saturday weeks and whole calendar months, quarters, and years. A bar
+  of `multiplier` periods spans that many.
 - A futures bar named by session dates is kept by its session label, Massive's
   `session_end_date` (the row's `Date` before a bar of several units has it set to null): an
   intraday bar when its session lies in the range; a session, week, month, quarter, or year bar
@@ -2692,8 +2692,8 @@ for futures named by date, only finished sessions count (the sessions before the
 instant belongs to). There is no holiday calendar: a holiday is a weekday like any other, so a
 week whose Friday is a holiday still runs Monday to Friday, and monthly stock bars for March
 2024 need a range through Good Friday, 03-29. The REST aggregates' `{from}` is the first instant
-that belongs to the first bar that fits (the Saturday before a Monday-to-Friday week, the 1st of
-a month even when that is a weekend), the start of the kept range: whether Massive selects bars
+that belongs to the first bar that fits (a week's Sunday, the 1st of a month even when that is
+a weekend), the start of the kept range: whether Massive selects bars
 by their stamp or builds them from `{from}`, the first whole period's bar is returned, and a
 partial bucket begun before it is dropped. `{to}` is the last whole millisecond before the
 range's end. Rows outside the window are then dropped.
@@ -2718,11 +2718,11 @@ places a bar by its stamp's day:
 
 | Class | 1-day bars (`multiplier` 1) | Longer bars: time (REST range only) | Week bars: day | Month, quarter, year bars: day |
 |---|---|---|---|---|
-| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`); 13:00, a short day's close | 00:00 | Saturday, Sunday, or Monday | the 1st |
-| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00; 16:15 and 13:15, the closes of index options such as SPXW | 00:00 | Saturday, Sunday, or Monday | the 1st |
-| Indices | 00:00; 01:00, which is midnight in Chicago (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00 | 00:00; 01:00 | Saturday, Sunday, or Monday | the 1st |
-| Forex | 00:00 (range); 23:59:59.999, the day's last millisecond (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 | Monday | the 1st |
-| Crypto | 00:00; 23:59:59.999 (`day_aggs_v1`) | 00:00 | Monday | the 1st |
+| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`); 13:00, a short day's close | 00:00 | Sunday | the 1st |
+| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00; 16:15 and 13:15, the closes of index options such as SPXW | 00:00 | Sunday | the 1st |
+| Indices | 00:00; 01:00, which is midnight in Chicago (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00 | 00:00; 01:00 | Sunday | the 1st |
+| Forex | 00:00 (range); 23:59:59.999, the day's last millisecond (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 | Sunday | the 1st |
+| Crypto | 00:00; 23:59:59.999 (`day_aggs_v1`) | 00:00 | Sunday | the 1st |
 
 The 1st is of a month for month bars, of January, April, July, or October for quarter bars,
 and of January for year bars. A bar of several days may start on any day. A time known for one
@@ -2736,10 +2736,10 @@ of [section 23](#23-open-verification-items) items 50 to 52 confirm them:
   a day there, so the check accepts it rather than fail real data on every short day.
 - 16:15 and 13:15 for options are the closes of index options on full and short days, where
   `/prev` may stamp such a contract.
-- The week days follow the whole-window rule: a stock, option, or index week's Saturday and
-  Sunday belong to it, while a forex or crypto week is a calendar week from its Monday, so a
-  forex or crypto week bar stamped on a Sunday raises until the live check of items 33 to 35
-  settles where Massive starts those weeks.
+- The week day is the Sunday Massive starts every week on, as the live check of item 33
+  found for stocks, forex, and crypto; options and indices are presumed to follow the same
+  aggregates. A week bar stamped on any other day raises, since the whole-window rule would
+  place it in another week.
 
 Every accepted time lies inside its own day in the zone, so none of them, on any date, changes
 which day a bar is labelled with, and the whole-window rule keeps or drops a bar stamped at its
@@ -2796,7 +2796,7 @@ first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `Timestam
 | Tick | (none: `Timestamp`) | (none) | the day zone's date of `Timestamp`; futures: `session_end_date` from REST and flat files, the WebSocket rule below on streams |
 | Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: the later of that and Massive's `e` | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
 | 1-day bar | 00:00 of the day | 00:00 of the next day; indices 01:00 New York time (`dates.day_end`) | the day |
-| n-day, week, month, quarter, year bar | 00:00 of the window's first day: a week's Monday; for stocks and options a month's, quarter's, or year's first weekday; for indices its first calendar day | the end of the window's last day: n days count as trading days with the holiday allowance (`bar_periods.last_trading_day`) for stocks, options, and indices; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
+| n-day, week, month, quarter, year bar | 00:00 of the window's first day: for stocks and options a week's Monday and a month's, quarter's, or year's first weekday; for indices, forex, and crypto its first calendar day (a week's Sunday) | the end of the window's last day: n days count as trading days with the holiday allowance (`bar_periods.last_trading_day`) for stocks, options, and indices; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
 | Futures session bar | Massive's `window_start` | 17:00 Chicago time on its session date | `session_end_date` |
 | Futures bar of several sessions | `window_start` | 17:00 Chicago time on the latest day its sessions can end on, counted from its start's session date plus one session (a folded first session opens before its holiday), with the holiday allowance (`bar_periods.last_trading_day`), or on its label if that is later | null |
 | Futures week, month, quarter, year bar | `window_start` | 17:00 Chicago time on the last weekday of the latest period its label allows | null |
@@ -3564,8 +3564,8 @@ How a request is built from a `DatasetSpec` and a `Request`:
   from; the rows' symbol is made canonical as usual.
 - **Bars ranges.** A bars spec whose range path has `{from}` and `{to}` segments declares no
   `time_axis`, and `history()` fills those segments as epoch milliseconds: `{from}` is the first
-  instant that belongs to the first bar whose whole window fits the range (the Saturday before
-  a Monday-to-Friday week, the 1st of a month) and `{to}` the last whole millisecond before the
+  instant that belongs to the first bar whose whole window fits the range (a week's Sunday, the
+  1st of a month) and `{to}` the last whole millisecond before the
   range's end ([section 12](#12-timestamp-units-and-day-boundaries)); the bars that do not fit
   wholly, or have not ended, are dropped afterwards.
   `futures.bars`, whose path `/futures/v1/aggs/{ticker}` has no such segments, declares the
@@ -6315,8 +6315,8 @@ document already reflects them.
     moved (the table of [section 12](#12-timestamp-units-and-day-boundaries)): each lies
     inside its own New York day, so no calendar check is needed and a known close never fails
     real data. A week, month, quarter, or year bar must also be stamped on the day its period
-    starts (a stock, option, or index week on its Saturday, Sunday, or Monday, a forex or
-    crypto week on its Monday, a longer period on its 1st), so the whole-window rule never
+    starts (a week on its Sunday, where the live check found Massive starts the weeks of every
+    class it read, a longer period on its 1st), so the whole-window rule never
     places it in another period. Any other stamp, forex included, raises `MassiveError` as
     decision 52's crypto check does, instead of being relabelled, and ends with the way out of
     the verb that read it: the flat files for 1-day `history()` (with `adjusted=False` for an
@@ -6719,8 +6719,8 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
 | 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
 | 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |
-| 33 | The day a week bar starts on, for stocks, options, indices, forex, and crypto: Monday, or the Sunday before (forex trades from Sunday evening UTC) | Stock, option, and index weeks run Monday to Friday, and a bar stamped on the Saturday, Sunday, or Monday of a week names that week; the REST `{from}` is that Saturday. Forex and crypto weeks are calendar weeks, Monday to Sunday, and a forex or crypto week bar stamped on any other day than its Monday raises `MassiveError`; were the bucket to start on Sunday, the owner decides whether its week becomes the Sunday-to-Saturday week | `tests/datasets/test_bar_periods.py`, `tests/datasets/test_row_times.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_indices.py`: Sunday- and Monday-stamped index week bars are kept for their week; a Sunday-stamped crypto week raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: two weeks of week bars each; record each `TimestampStart` and the first and last trade each bar holds |
-| 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside, and on which day a month bar is stamped | `{from}` is the first instant that belongs to the first bar that fits wholly (the Saturday before a stock week, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped; a month, quarter, or year bar stamped on another day than its 1st raises `MassiveError` | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins; a crypto month bar stamped on the 2nd raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
+| 33 | The day a week bar starts on, for stocks, options, indices, forex, and crypto: Monday, or the Sunday before (forex trades from Sunday evening UTC) | Settled by the live check of 2026-10-30: Massive stamps every week bar at Sunday 00:00 in the class day zone (UTC for crypto and forex, New York time for stocks), and the bar holds that Sunday-to-Saturday week. Every week is named by its Sunday and the REST `{from}` is that Sunday; a stock or option week's window is its Monday to Friday, and an index, forex, or crypto week's is its whole Sunday-to-Saturday week. A week bar stamped on any other day than its Sunday raises `MassiveError` | `tests/datasets/test_bar_periods.py`, `tests/datasets/test_row_times.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_indices.py`: Sunday-stamped week bars of every class are kept for their week; a Monday-stamped crypto week raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: two weeks of week bars each; record each `TimestampStart` and the first and last trade each bar holds |
+| 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside, and on which day a month bar is stamped | `{from}` is the first instant that belongs to the first bar that fits wholly (a week's Sunday, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped; a month, quarter, or year bar stamped on another day than its 1st raises `MassiveError` | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins; a crypto month bar stamped on the 2nd raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
 | 35 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start, and a multi-week or multi-month bar must still be stamped on a day its period starts | `tests/datasets/test_bar_periods.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
 | 36 | Whether a futures session can end on a Saturday or Sunday | Sessions are requested on weekdays only; Saturday and Sunday dates are skipped without a request | `tests/ingest/test_rest.py`: a range over a weekend requests only its weekday sessions | `tests/namespaces/test_futures_integration.py`: `schedules` over a month; record every `session_end_date`'s weekday |
 | 37 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | A stamp at 00:00 or 23:59:59.999 UTC is moved to 00:00 UTC of its day; any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_row_times.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_forex.py`: range, grouped, `/prev`, and flat-file stamps map to 00:00 UTC; a stamp at midnight New York time raises | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day, and two weeks of its week bars from the range; record each `TimestampStart`, the week bars' weekday, and whether the OHLCV agree |

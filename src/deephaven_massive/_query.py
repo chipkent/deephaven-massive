@@ -1044,19 +1044,19 @@ class HistoryQuery(QueryBase):
         last session's date for futures). Its window is an intraday or 1-day bar's own interval;
         for stocks, options, and futures, a week Monday to Friday and a month, quarter, or year
         its calendar period less its leading and trailing weekend days; for indices, which can
-        update around the clock, the same periods as whole calendar periods, weekends included
-        at both ends; for forex and crypto, which trade at weekends, whole calendar weeks
-        (Monday to Sunday), months, quarters, and years; a bar of several units all of them,
-        where several days or sessions end as late as holidays could push them (one weekday
-        more, and one more for every five further days); and a futures bar named by session
-        dates its sessions. So the current day's, week's, or month's bar is never returned, and
-        `history("2025-03-05", "2025-03-20")` of monthly bars is empty. Datetime bounds keep
-        only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
-        returns Tuesday to Thursday, so pass dates for daily bars. A futures bar of several
-        sessions, weeks, or months named by dates is kept only when it fits the range whether
-        Massive labels it with its first or its last session, which is not documented. There is
-        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
-        week. There is no `limit`: the library pages internally.
+        update around the clock, and for forex and crypto, which trade at weekends, whole
+        calendar weeks (Sunday to Saturday, as Massive starts its weeks on Sunday), months,
+        quarters, and years, weekends included at both ends; a bar of several units all of
+        them, where several days or sessions end as late as holidays could push them (one
+        weekday more, and one more for every five further days); and a futures bar named by
+        session dates its sessions. So the current day's, week's, or month's bar is never
+        returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty.
+        Datetime bounds keep only whole calendar days of 1-day bars: Monday 09:30 to Friday
+        16:00 New York time returns Tuesday to Thursday, so pass dates for daily bars. A futures
+        bar of several sessions, weeks, or months named by dates is kept only when it fits the
+        range whether Massive labels it with its first or its last session, which is not
+        documented. There is no holiday calendar: a stock week whose Friday is a holiday still
+        runs Monday to Friday. There is no `limit`: the library pages internally.
 
         Every row says when it happened, its trading day, and when it arrived: a tick its
         `Timestamp`; a bar its window, `TimestampStart` and the exclusive `TimestampEnd`
@@ -1157,8 +1157,8 @@ class HistoryQuery(QueryBase):
         session's file, which holds the holiday's hours, is not published yet or does not exist
         within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
         Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
-        or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
-        instead; or once the session is closed. `TypeError` if `wait` is not a `bool`. With
+        or a week bar on a Monday), naming the dataset, the source, and what to do instead; or
+        once the session is closed. `TypeError` if `wait` is not a `bool`. With
         `wait=False`, every error above that needs no request still raises at the call, and the
         others fail the table instead.
 

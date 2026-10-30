@@ -812,10 +812,11 @@ def _start_sentence(spec: DatasetSpec) -> str:
             "class (UTC for forex and crypto, New York otherwise)."
         )
     first = (
-        "a week's Monday"
-        if spec.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO)
-        else "a week's Monday, a month's, quarter's, or year's first weekday"
+        "a week's Monday, a month's, quarter's, or year's first weekday"
+        if spec.asset_class in (AssetClass.STOCKS, AssetClass.OPTIONS)
+        else "a week's Sunday, a month's, quarter's, or year's 1st"
     )
+
     return (
         "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
         f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "

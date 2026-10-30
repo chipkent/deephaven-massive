@@ -2905,11 +2905,11 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # Wednesday 03-05 to Friday 03-21 holds the weeks of 03-10 and 03-17 whole. The request
-    # starts on the Saturday before the first of them, so a bar stamped on its Sunday is
-    # returned whether Massive selects bars by stamp or builds them from `{from}`.
-    start, end = ny_ms(date(2025, 3, 8)), ny_ms(date(2025, 3, 22)) - 1
+    # starts on the Sunday Massive starts the first of them on, so its bar is returned
+    # whether Massive selects bars by stamp or builds them from `{from}`.
+    start, end = ny_ms(date(2025, 3, 9)), ny_ms(date(2025, 3, 22)) - 1
     path = f"/v2/aggs/ticker/AAPL/range/1/week/{start}/{end}"
-    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, as a week may be
+    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, where Massive stamps
     fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
     out = history(
         session,
@@ -2921,8 +2921,9 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
         adjusted=False,
     )
     assert [p for p, _ in sent(fake_rest)] == [path]
-    # Each week runs from its Monday's midnight to the Saturday's after its Friday, whatever
-    # day it was stamped on, and spans several dates, so it has no `Date`.
+    # Each week, stamped on its Sunday, runs from its Monday's midnight to the Saturday's
+    # after its Friday, and spans several dates, so it has no `Date`.
+
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Date"]) for r in out] == [
         (ny_ms(date(2025, 3, 10)) * 10**6, ny_ms(date(2025, 3, 15)) * 10**6, None),
         (ny_ms(date(2025, 3, 17)) * 10**6, ny_ms(date(2025, 3, 22)) * 10**6, None),
@@ -3098,26 +3099,28 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
         r"and report",
     ):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
-    # A week bar at 00:00 UTC Monday is kept as stamped.
-    monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
-    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
-    sunday = monday - 86_400_000
+    # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
+    # and the week runs to the next Sunday: it is kept as stamped.
+    sunday, after = utc_ms(date(2026, 10, 11)), utc_ms(date(2026, 10, 18))
+    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{sunday}/{after - 1}".replace(":", "%3A")
+    monday = sunday + 86_400_000
     fake_rest.reply(
         week,
-        Reply(envelope([{"t": monday, "c": 2.0}])),
         Reply(envelope([{"t": sunday, "c": 2.0}])),
+        Reply(envelope([{"t": monday, "c": 2.0}])),
     )
-    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (monday * 10**6, after * 10**6, 2.0)
+        (sunday * 10**6, after * 10**6, 2.0)
     ]
-    # A week bar stamped on the Sunday before would be placed in the week before: it fails.
+    # A week bar stamped on another day may cover another week: it fails.
     with pytest.raises(
         dm.MassiveError,
-        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
-        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
+        match=r"is stamped 2026-10-12T00:00:00\+00:00, which is not a stamp Massive is known to "
+        r"use for such a bar \(00:00:00\.000 in UTC, on a Sunday\)",
     ):
-        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
+
     # A month bar must be stamped on its 1st.
     first, april = utc_ms(date(2025, 3, 1)), utc_ms(date(2025, 4, 1))
     month = f"/v2/aggs/ticker/X:BTCUSD/range/1/month/{first}/{april - 1}".replace(":", "%3A")
