@@ -442,6 +442,21 @@ def test_the_flat_file_client_never_shows_the_s3_secret(
     _assert_no_secret(every_logger_at_debug, info.value)
 
 
+def test_an_s3_error_code_echoing_the_secret_is_cleaned(
+    fake_s3: FakeS3, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    # The code is the server's text too: the DEBUG line of the refused request cleans it.
+    fake_s3.refuse("us_", status=403, code=f"Denied{PLANTED_S3}", message="Rejected")
+    client = _flat_files()
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(_FILE)
+    finally:
+        client.close()
+    assert any(f"-> 403 Denied{REDACTED} " in m for m in every_logger_at_debug.messages)
+    _assert_no_secret(every_logger_at_debug, info.value)
+
+
 @pytest.mark.parametrize(("status", "code"), [(403, "AccessDenied"), (503, "SlowDown")])
 def test_an_s3_message_echoing_the_secret_is_cleaned(
     *, status: int, code: str, fake_s3: FakeS3, every_logger_at_debug: pytest.LogCaptureFixture

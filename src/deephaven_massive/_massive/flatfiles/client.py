@@ -406,11 +406,13 @@ class FlatFileClient:
                         "GET %s -> 404 NoSuchKey (request_id %s)", location, _request_id(error)
                     )
                     return None
+                # S3's code is the server's text, so it is cleaned like its message.
+                shown = redact(str(code), self._secret_access_key)
                 _log.debug(
                     "GET %s -> %s %s (request_id %s)",
                     location,
                     _status(error),
-                    code,
+                    shown,
                     _request_id(error),
                 )
                 raise

@@ -182,7 +182,9 @@ def body_excerpt(data: bytes | bytearray) -> str:
     Returns:
         The first 2,000 characters, with undecodable bytes replaced; empty for an empty body.
     """
-    return data.decode("utf-8", "replace")[:_BODY_EXCERPT]
+    # A UTF-8 character is at most 4 bytes, so this many bytes hold the excerpt: a large body
+    # is never decoded whole only to be cut.
+    return bytes(data[: _BODY_EXCERPT * 4]).decode("utf-8", "replace")[:_BODY_EXCERPT]
 
 
 def _excerpt(data: bytes | bytearray) -> str:
