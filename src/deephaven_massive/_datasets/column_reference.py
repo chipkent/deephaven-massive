@@ -422,8 +422,8 @@ def _columns_by_dataset(pages: Mapping[str, str]) -> dict[str, dict[str, str]]:
         Each section's columns, in order, with their types, by the call path its heading names.
     """
     found: dict[str, dict[str, str]] = {}
-    current: dict[str, str] = {}
     for text in pages.values():
+        current: dict[str, str] = {}  # a row before a page's first heading belongs to none
         for line in text.split("\n"):
             heading = _HEADING.match(line)
             if heading:

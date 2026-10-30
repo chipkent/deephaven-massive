@@ -23,7 +23,6 @@ from deephaven_massive._datasets.catalog import (
 )
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars, PollMode, Timespan
 from deephaven_massive._massive import RestPath, Source, Transport, sources
 from deephaven_massive._session import CATALOG
@@ -56,6 +55,7 @@ STOCK_TRADES = DatasetSpec(
     asset_class=AssetClass.STOCKS,
     kind="trades",
     history_path="/v3/trades/{stockTicker}",
+    page_size=1000,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
@@ -81,6 +81,7 @@ CRYPTO_TRADES = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     history_path="/v3/trades/{cryptoTicker}",
+    page_size=1000,
     channels={NotBars.ANY: "XT"},
     flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
@@ -104,6 +105,7 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     kind="trades",
     history_path="/futures/v1/trades/{ticker}",
+    page_size=1000,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
     keys={
@@ -147,6 +149,7 @@ CONTRACTS = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.OPTIONS,
     fetch_path="/v3/reference/options/contracts",
+    page_size=1000,
     extra_paths=("/v3/reference/options/contracts/{options_ticker}",),
     keys={
         (R, "/v3/reference/options/contracts"): keys("Ticker", fanout="UnderlyingTicker"),
@@ -169,6 +172,7 @@ DIVIDENDS = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     fetch_path="/stocks/v1/dividends",
+    page_size=1000,
     keys={(R, "/stocks/v1/dividends"): keys("Ticker")},
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
@@ -384,6 +388,41 @@ def test_a_daily_summary_needs_its_date_key_on_every_source() -> None:
     assert problems(summary) == ()
     with pytest.raises(ValueError, match=r"a daily summary needs a date key on \['REST "):
         change(summary, keys={(R, path): keys("Symbol")})
+    # Its window and descriptions name one calendar zone: futures sessions and data of no
+    # class have none.
+    for no_zone in (AssetClass.FUTURES, ClassFromPrefix.ANY):
+        with pytest.raises(ValueError, match=r"^stocks\.daily_open_close: a daily summary needs"):
+            change(summary, asset_class=no_zone)
+
+
+def test_a_dataset_sets_its_page_size_exactly_when_a_path_takes_limit() -> None:
+    contracts = "/v3/reference/options/contracts"
+    paged = DatasetSpec(
+        name="options.contracts",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.OPTIONS,
+        fetch_path=contracts,
+        keys={(R, contracts): keys("Ticker")},
+        page_size=1000,
+    )
+    assert problems(paged) == ()
+    assert problems(change(paged, page_size=None)) == (
+        f"page size: options.contracts: {contracts} takes limit, but page_size is unset",
+    )
+    open_close = "/v1/open-close/{stocksTicker}/{date}"
+    unpaged = DatasetSpec(
+        name="stocks.daily_open_close",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=open_close,
+        keys={(R, open_close): keys("Symbol", date="From")},
+        per_symbol=True,
+        row_times=RowTimes.DAY,
+        page_size=10,
+    )
+    assert problems(unpaged) == (
+        "page size: stocks.daily_open_close: page_size is set, but no REST path takes limit",
+    )
 
 
 def test_row_times_follow_the_kind_unless_declared() -> None:
@@ -538,6 +577,7 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
                 name="a.b",
                 summary="A dataset for the tests.",
                 history_path="/v3/trades/{stockTicker}",
+                page_size=1000,
             ),
             False,
         ),
@@ -546,6 +586,7 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
                 name="a.b",
                 summary="A dataset for the tests.",
                 history_path="/v3/trades/{stockTicker}",
+                page_size=1000,
                 keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"))},
             ),
             True,  # a symbol filled from the request
@@ -615,6 +656,7 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
         fetch_path=path,
         symbol_param="tickers.any_of",
         poll_keys=("Cik",),
+        page_size=100,
     )
     assert problems(sheets) == ()
     columns = Catalog((sheets,)).dataset_schema(sheets).column_names
@@ -699,6 +741,7 @@ def test_members_of_one_group_follow_their_positions() -> None:
         asset_class=AssetClass.STOCKS,
         kind="trades",
         history_path="/v3/trades/{stockTicker}",
+        page_size=1000,
         keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp")},
     )
     assert Catalog((last, history)).members("trades") == (history, last)
@@ -761,6 +804,7 @@ def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
         name="stocks.institutional_holdings",
         summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
+        page_size=1000,
         poll_keys=("AccessionNumber",),
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
     )
@@ -793,6 +837,7 @@ def test_a_classed_reference_dataset_declares_no_key() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         fetch_path="/futures/v1/exchanges",
+        page_size=1000,
         poll_keys=("Id",),
     )
     assert not Catalog((exchanges,)).takes_symbols(exchanges)
@@ -963,6 +1008,7 @@ def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
         name="economy.inflation",
         summary="A dataset for the tests.",
         fetch_path="/fed/v1/inflation",
+        page_size=1000,
         keys={(R, "/fed/v1/inflation"): keys(time="Date")},
         poll_keys=("Date",),
     )
@@ -983,6 +1029,7 @@ def test_fanout_keys_of_datasets_in_no_kind_need_not_agree() -> None:
         name="stocks.institutional_holdings",
         summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
+        page_size=1000,
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
         poll_keys=("AccessionNumber",),
     )
@@ -1061,6 +1108,7 @@ def test_kind_membership_gate() -> None:
     twice = change(
         STOCK_LAST_TRADE,
         extra_paths=("/v3/trades/{stockTicker}",),
+        page_size=1000,
         keys={
             **STOCK_LAST_TRADE.keys,
             (R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp"),
@@ -1421,34 +1469,15 @@ def test_sort_is_checked_against_the_sort_fields_of_each_path(
             catalog.check_sort(spec, sort, ordered=ordered)
 
 
-LIBRARY_NAME = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")
-"""`Timestamp` alone or with a qualifier: the names of the library's time columns."""
-
-
-def library_name_violations(spec: DatasetSpec) -> list[str]:
-    # Every column of the dataset's sources named like a library time column (`Timestamp`,
-    # `Timestamp<Qualifier>`, and on a dataset whose rows carry a trading day `Date`) that a
-    # vendor field keeps under its own name, outside a declared key.
-    found = []
-    dated = spec.times is not RowTimes.NONE
-    for transport, key in spec.sources:
-        claimed = {k.column for _, k in spec.keys_for(transport, key).declared()}
-        for column in rename(spec, CATALOG.source(transport, key)):
-            named = None if column.field is None else column.field.column
-            owned = LIBRARY_NAME.fullmatch(column.column) or (dated and column.column == "Date")
-            if owned and named == column.column and named not in claimed:
-                found.append(f"{spec.name}: {transport.value} {key}: {column.column}")
-    return found
-
-
 def test_no_vendor_field_keeps_a_library_time_column_s_name() -> None:
     # The library owns these names: each such column comes from a declared key (time, end, or
     # date) or is one the library fills, never a vendor field that merely carries the name.
-    assert [v for spec in CATALOG.by_name.values() for v in library_name_violations(spec)] == []
+    assert not [p for p in CATALOG.problems() if p.startswith("library names:")]
     for spec in CATALOG.by_name.values():
         names = CATALOG.dataset_schema(spec).column_names
         assert names[-1] == "TimestampInsert"
-        assert {n for n in names if LIBRARY_NAME.fullmatch(n)} <= LIBRARY_COLUMNS, spec.name
+        timestamps = {n for n in names if re.fullmatch(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?", n)}
+        assert timestamps <= LIBRARY_COLUMNS, spec.name
 
 
 def test_the_naming_gate_catches_a_vendor_timestamp_outside_a_key() -> None:
@@ -1457,6 +1486,7 @@ def test_the_naming_gate_catches_a_vendor_timestamp_outside_a_key() -> None:
     schedules = CATALOG.by_name["futures.schedules"]
     (path,) = schedules.rest_paths
     assert schedules.keys_for(R, path).time == KeySpec("Timestamp")
-    assert library_name_violations(change(schedules, keys={})) == [
-        f"futures.schedules: REST {path}: Timestamp"
-    ]
+    assert (
+        f"library names: futures.schedules: REST {path}: the vendor field 'Timestamp' has the "
+        "name of a library time column but is no declared key"
+    ) in Catalog((change(schedules, keys={}),)).problems()

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Field, Source
 
 __all__ = [
+    "INSTANT_WIRE_TYPES",
     "KEY_COLUMNS",
     "SourceColumn",
     "key_column",
@@ -50,6 +51,11 @@ __all__ = [
     "required_fields",
     "widen",
 ]
+
+INSTANT_WIRE_TYPES: Final = frozenset({WireType.EPOCH, WireType.ISO_INSTANT})
+"""The wire types of a field that holds an instant rather than a calendar date: the types a
+`time` or `end` key may have, so that their columns are always `Instant`s, and the row fields
+that make a date filter compare instants (`filters.takes_instants`)."""
 
 
 KEY_COLUMNS: Final[Mapping[str, str]] = {
@@ -118,10 +124,8 @@ def _projection(spec: DatasetSpec, source: Source) -> Mapping[str, str] | None:
         The kept wire keys and their columns, or None when the source joins the dataset with
         every field under its own column (no kind, no membership, or no projection).
     """
-    for membership in source.memberships:
-        if membership.kind == spec.kind and membership.group == spec.group:
-            return membership.projection
-    return None
+    membership = source.membership(spec.kind, spec.group)
+    return None if membership is None else membership.projection
 
 
 def kind_position(spec: DatasetSpec, source: Source) -> int | None:
@@ -135,10 +139,8 @@ def kind_position(spec: DatasetSpec, source: Source) -> int | None:
         The membership's position, or None for a source in no membership of the dataset's
         kind and group (and for every source of a dataset in no kind).
     """
-    for membership in source.memberships:
-        if membership.kind == spec.kind and membership.group == spec.group:
-            return membership.position
-    return None
+    membership = source.membership(spec.kind, spec.group)
+    return None if membership is None else membership.position
 
 
 def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
@@ -185,7 +187,7 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
                 f"declared keys: {where}: the {role} key {key.column!r} is not a column of the "
                 "source"
             )
-        elif role in ("time", "end") and by_column[key.column].wire_type not in _INSTANTS:
+        elif role in ("time", "end") and by_column[key.column].wire_type not in INSTANT_WIRE_TYPES:
             raise ValueError(
                 f"declared keys: {where}: the {role} key {key.column!r} is "
                 f"{by_column[key.column].wire_type}, not an instant (epoch or iso-instant)"
@@ -247,10 +249,6 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
         for role, key in spec.keys_for(source.transport, source.key).declared()
         if not key.from_request and key.required
     )
-
-
-_INSTANTS: Final = frozenset({WireType.EPOCH, WireType.ISO_INSTANT})
-"""The wire types a `time` or `end` key may have, so that their columns are always `Instant`s."""
 
 
 def widen(values: pa.Array, target: pa.DataType) -> pa.Array:

@@ -664,7 +664,7 @@ def dataset_schema(
         for name in types
         if name not in leading and name != INSERT and (name in own or name in described)
     ]
-    order = [*leading, *rest, *((INSERT,) if INSERT in types else ())]
+    order = [*leading, *rest, INSERT]  # the library fills TimestampInsert on every dataset
     transports = tuple(t for t in TRANSPORT_ORDER if any(d is t for d, _ in spec.sources))
     columns = [
         replace(

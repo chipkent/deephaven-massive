@@ -553,6 +553,25 @@ class Source:
                 return candidate
         raise KeyError(f"source {self.key!r} has no column {column!r}")
 
+    def membership(self, kind: str | None, group: str | None) -> Membership | None:
+        """Return the source's membership of one dataset kind and group, if it holds one.
+
+        The one lookup of a source's place in a kind: a dataset's merge reads its projection
+        and position, and the dataset catalog orders and checks a kind's members by it.
+
+        Args:
+            kind: The dataset kind, such as `"trades"`, or None for a dataset in no kind.
+            group: The asset-class group, such as `"stocks"`, or None for no group.
+
+        Returns:
+            The membership whose kind and group these are; None when the source holds none,
+            and always for a kind of None. A source holds at most one per kind and group.
+        """
+        return next(
+            (m for m in self.memberships if (m.kind, m.group) == (kind, group)),
+            None,
+        )
+
 
 @dataclass(frozen=True, kw_only=True)
 class RestPath(Source):

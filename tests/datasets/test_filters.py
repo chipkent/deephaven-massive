@@ -12,7 +12,7 @@ import pytest
 
 from deephaven_massive._datasets import filters
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.filters import check_filters
+from deephaven_massive._datasets.filters import check_filters, param_base
 from deephaven_massive._enums import AssetClass, ContractType
 from deephaven_massive._massive import (
     Field,
@@ -413,3 +413,9 @@ def test_the_valid_filters_named_are_only_those_the_caller_can_pass() -> None:
     assert "'distribution_type'" in named
     with pytest.raises(ValueError, match=r"has no filter 'frequency_gte'"):
         check_filters(catalog, DIVIDENDS, {"frequency_gte": 4}, typed=("frequency",))
+
+
+def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
+    assert param_base("timestamp.gte") == "timestamp"
+    assert param_base("ticker.any_of") == "ticker"
+    assert param_base("date") == "date"
