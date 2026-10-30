@@ -766,7 +766,7 @@ def test_a_poll_racing_close_after_registering_never_starts(
     assert poller.stopped
     assert poller.thread.ident is None  # never started
     drain()
-    until(lambda: not massive_session._core._polls)
+    until(lambda: not massive_session._core._workers)
 
 
 def test_a_poll_racing_close_never_starts(
@@ -776,12 +776,12 @@ def test_a_poll_racing_close_never_starts(
     pollers.close()
     with pytest.raises(dm.MassiveError, match="label is closed"):
         start(massive_session, script=script, pollers=pollers, clock=clock)
-    assert massive_session._core._polls == {}
+    assert massive_session._core._workers == {}
     # A session closed before the row is registered refuses it too.
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         start(massive_session, script=script, pollers=Pollers("open"), clock=clock)
-    assert massive_session._core._polls == {}
+    assert massive_session._core._workers == {}
 
 
 def test_a_failed_registration_releases_everything(
@@ -801,7 +801,7 @@ def test_a_failed_registration_releases_everything(
         start(massive_session, script=script, pollers=pollers, clock=clock)
     monkeypatch.undo()
     assert pollers._live == set()
-    assert massive_session._core._polls == {}
+    assert massive_session._core._workers == {}
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
 
@@ -879,7 +879,7 @@ def test_a_poll_keeps_polling_while_a_derived_table_remains(
     clock.advance(60)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
-    until(lambda: not massive_session._core._polls)
+    until(lambda: not massive_session._core._workers)
 
 
 def test_a_poll_fails_once_and_publishes_nothing_after(

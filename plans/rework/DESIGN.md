@@ -356,7 +356,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
   session_core.py        SessionCore, registry_lock, the registries, closers, stream ids, the
-                         live set, the poll() registry, diagnostics_view, attach, close()
+                         live set, the worker-table registry, diagnostics_view, attach, close()
                          (sections 4.3, 6)
   transports.py          the transport ports (RestTransport, StreamTransport,
                          FlatFileTransport), IngestPorts, StreamHandle, HostDecision
@@ -369,6 +369,8 @@ _tables/                 the Deephaven side: tables, liveness, library threads
                          column_table() (section 7.4)
   publisher.py           blink_publisher(), BlinkPublisher: the publisher of every blink
                          table, whose failure pins the table until it is delivered (section 6.1)
+  background_read.py     wait=False: BackgroundRead, open_read, the merged partitioned table a
+                         read's static result lands in as one constituent (section 6.1)
   stream.py              streams, flush thread, fan-out, bound-failure routing (section 14)
   poll.py                poll(): Poller, Pollers, open_poll; REPLACE/UPSERT/APPEND, fan-out, data
                          failures -> publish_failure; SymbolRowError
@@ -758,16 +760,17 @@ command, such as a `history()` of many requests on a rate-limited key, holds eve
 of the worker still for its duration, as any long console command does. The first verb of a
 session that runs 5 seconds or longer there logs one WARNING after it returns, "MassiveSession
 #1: stocks.bars history() ran for 12 s inside a Deephaven console command, which holds the
-update graph's lock: live tables do not update until the command ends; run long downloads from
-a thread of your own, outside a console command (logged once per session)", and a paced REST
+update graph's lock: live tables do not update until the command ends; pass wait=False to
+fetch() or history() to read in the background (logged once per session)", and a paced REST
 read warns before its first request how long it will pause them
-([section 13.4](#134-rest)). An application script runs under the lock too, so the remedy is a
-thread, not a script.
+([section 13.4](#134-rest)). An application script runs under the lock too, so the remedy is
+`wait=False`, a read on a library thread of its own ([section 7](#7-query-classes-and-verbs)),
+not a script.
 
 **How long a session lives.** The rule: a live table keeps alive everything it needs, and
 nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
-namespace), and while it has a running stream, a running `poll()` table, or a diagnostics table
-someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
+namespace), and while it has a running stream, a running `poll()` table, a background read
+(`wait=False`) whose result is held or still in use, or a diagnostics table someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
 the session strongly; nothing else in the library does, and the library forms no reference
 cycle through it, so an unused session is freed by reference counting, even with
 `gc.disable()`. (A caller can still form one: an exception raised out of a call keeps the
@@ -894,7 +897,8 @@ return result
   library code releases a scope without the lock; the suite runs every branch of the library.
 - **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
   only under `registry_lock`, never the other way round). A core is in it exactly while its
-  stream registry, its `poll()` registry, or its count of held diagnostics tables is non-empty;
+  stream registry, its worker-table registry (`poll()` tables and background reads), or its count
+  of held diagnostics tables is non-empty;
   every method that changes one of them updates the set in the same `registry_lock` section.
   The set is what keeps a session with a running stream or poll alive after the user dropped
   every reference to it: nothing else in the library holds a core strongly (connections,
@@ -1001,14 +1005,16 @@ return result
 - **`m.close()`** stops everything the session runs and fails every live table:
   1. On a UG thread it raises `ValueError`. On a thread that only holds the UG lock it works.
   2. Under `registry_lock` it only collects: it sets the closed flag, takes the closers, marks
-     every stream and `poll()` record `CLOSED` with the error text below (a released stream
-     that a derived table or panel still keeps alive included), gathers the streams and polls
-     whose tables have not shut down, and wakes the verbs waiting for an open.
+     every stream, `poll()`, and background-read record `CLOSED` with the error text below (a
+     released stream that a derived table or panel still keeps alive included; a `FAILED` or
+     `DONE` row keeps its state), gathers the streams, polls, and loading reads whose tables
+     have not shut down, and wakes the verbs waiting for an open.
   3. Outside every lock it fails each gathered table with
      `MassiveError("MassiveSession #1 was closed; this table no longer updates")`: a stream
      through its sink, under the stream's publish lock and once only, so a connection failure
-     queued meanwhile cannot replace `CLOSED`; a poll by stopping its poller first and then
-     failing its publisher. `SessionCore.fail_stream` never changes a `CLOSED` row's state.
+     queued meanwhile cannot replace `CLOSED`; a poll or a read by stopping its thread first
+     and then failing its publisher. `SessionCore.fail_stream` never changes a `CLOSED` row's
+     state.
   4. It runs the closers: the session's own streams leave their connections, and every
      connection no other session leases is closed and joined for a bounded time; the pollers
      stop. On a thread that holds the UG lock it joins nothing (neither the connections nor
@@ -1068,6 +1074,49 @@ poll keeps polling while its table is in use, by the result or anything derived 
 Releasing the result marks its row `RELEASED`; the poller stops when the poll's blink table
 shuts down, because nothing uses the table any more.
 
+Background reads (`fetch(wait=False)`, `history(..., wait=False)`) follow the same rule and the
+same registry as `poll()` tables; the session core calls both *worker tables*, a table one
+library thread of its own fills. The result is created on the caller thread inside its own
+result scope, from a blink table whose one column holds Deephaven tables
+(`_tables/background_read.py`):
+
+```python
+blink, publisher = blink_publisher(name, {"Constituent": <io.deephaven.engine.table.Table>}, ...)
+parts = PartitionedTable.from_partitioned_table(
+    blink_to_append_only(blink), key_cols=[], unique_keys=False,
+    constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
+    constituent_changes_permitted=True)
+result = describe(parts.merge(), spec, schema)     # refreshing, no rows
+```
+
+The read's thread enters the session's execution context and runs the same transport call as
+`wait=True`, so the complete static table is built off the UG lock (the static conversion may
+take the shared lock briefly, as any `to_table` does). It then publishes one row that holds the
+table. On the next cycle the append-only table gains that row and the merge adds the static table
+as a constituent, which redirects row keys and copies no rows: a result of a billion rows lands
+in one cycle as fast as one of ten. A test fills a billion-row result whose column is a lazy
+formula (copying it would take seconds and gigabytes) and checks that it lands within one
+second of the publish. The result shows every row in that one update and never changes again;
+it is never half loaded. Its row in `m.streams()` is `Kind=read`, `LOADING` until then and
+`DONE` after.
+
+- **Releasing cancels.** Releasing the result (`m.release`, garbage collection) marks the row
+  `RELEASED`; the blink table's shutdown, once nothing uses the result, sets the read's stop
+  token, which its REST requests and flat-file reads listen to (`IngestPorts.read_stop`), so a
+  request waiting for the rate governor stops at once and one on the wire is the last. A read
+  that stops publishes nothing. A table derived from the result keeps the read going, as it
+  keeps a poll polling, and gets the rows when they land.
+- **Failures.** A download that fails fails the table (the normal failed-table state carrying
+  the full message, through the publisher's failure, which reaches the merged result through
+  the append-only and partitioned tables) and marks the row `FAILED` with the message, after
+  logging it once at ERROR (`call 7 failed after 3.2 s: ...`). A defect that is not a
+  `MassiveError` is logged with its traceback and fails the table with a `MassiveError` naming
+  it. `m.close()` fails a read still `LOADING` like any live table and marks its row `CLOSED`;
+  a `DONE` read is never failed, and its row stays `DONE`, a final state like `FAILED`.
+- **The race of the last publish and a failure** is settled under the read's publish lock: the
+  publish and the failure check a flag set under it, so a table either gets its rows (and later
+  failures are skipped) or fails (and the publish is skipped), never both.
+
 There is no `stop()` on queries. Release is automatic (garbage collection) or explicit
 (`m.release`); `m.close()` stops anything, whatever still holds it.
 
@@ -1089,7 +1138,9 @@ class QueryBase:                           # the base of all four classes below
 
 ```python
 class Query:                               # REST list, snapshot, and one-row datasets
-    def fetch(self) -> Table: ...          # static; every row the endpoint returns, fully paginated
+    def fetch(self, *, wait: bool = True) -> Table: ...
+                                           # every row the endpoint returns, fully paginated;
+                                           # static, or with wait=False read in the background
     def poll(self, interval: float | timedelta, *, mode: PollMode = PollMode.AUTO) -> Table: ...
                                            # live; re-runs fetch() every interval
 
@@ -1101,7 +1152,8 @@ class StreamQuery:                         # WebSocket datasets
 
 class HistoryQuery:                        # datasets with a historical retrieval path
     def history(self, start: DateLike, end: DateLike | None = None, *,
-                source: HistorySource = HistorySource.AUTO) -> Table: ...   # static
+                source: HistorySource = HistorySource.AUTO,
+                wait: bool = True) -> Table: ...   # static, or read in the background
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
 ```
@@ -1309,6 +1361,43 @@ t = merge([q.history("2026-10-20", "2026-10-23"), q.append_only()])
 
 The history range is half-open and the live stream starts when `append_only()` is called, so
 rows between the two can be missing or duplicated. The user owns that boundary.
+
+**`wait`.** `fetch()` and `history()` take `wait: bool = True`, keyword-only, on every dataset
+that has them, the one-row datasets included; the live verbs already return at once. A bool,
+like `adjusted` and `expired`: a yes or no, not a choice among several. `wait=True` blocks until
+the whole result is read and returns a static table, as before. `wait=False` returns at once a
+`Table` with the same columns and no rows, refreshing. When the whole download has landed, the
+complete result appears in one update and never changes again; it is never half loaded, and
+the return type is the same as `wait=True`, with no `Future`, since a `Future` would need a
+later `result()` that cannot wait inside a console command. The read runs on a library thread
+of its own, so it holds no lock: inside a console command the command returns at once and
+every live table keeps updating while the read runs.
+
+- **Arguments raise at the call.** Everything `wait=True` checks before its first request is
+  checked on the caller thread before the table exists: types and ranges, `dm.ALL` where it is
+  not allowed, a symbol table's rows (read once, now), the source choice of `history()`, every
+  REST path's parameters (`RestTransport.check_fetch` and `check_history` plan the requests
+  with no request made; a crypto pair is split later, by the read), a closed session, and the
+  update-graph thread. A failure during the download fails the table instead
+  ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). A `history()` range no
+  row can lie in still returns a background read, whose empty result lands at once, so
+  `wait=False` always returns the same kind of table.
+- **Telling loading from done.** The result's `m.streams()` row has `Kind=read` and `State`
+  `LOADING`, then `DONE` (or `FAILED`, `RELEASED`, `CLOSED`), with `RowsPublished` set when the
+  rows land. The table's description, which Deephaven fixes when the table is created, says it
+  is read in the background: "no rows until the download completes, then the complete result
+  in one update, which never changes; m.streams() shows LOADING, then DONE or FAILED". The
+  first line of the `wait` argument's docstring warns that `to_pandas()` before the fill
+  returns no rows, and that `snapshot()` gives a static copy.
+- **Lifetime.** The result has its own liveness scope, like a live table. Releasing it (and
+  every table derived from it), garbage collection, or `m.close()` cancels the download, and
+  `m.release()` accepts it.
+- **Rate limits.** The read holds no lock, so it waits out the full 10 minutes of pauses
+  (`READ_PATIENCE`), not the 90 s of a console command; pacing never counts toward patience,
+  so a paced Basic download of hours completes ([section 13.4](#134-rest)).
+- **Logging.** The call logs `call 7 start: <query>.fetch(wait=False)` at DEBUG at once, and
+  `call 7 done: <rows> rows in <s> s` (DEBUG) or `call 7 failed after <s> s: <error>` (ERROR)
+  from the read's thread. The call id is the row's `StreamId`.
 
 ### 7.1 `bars()` overloads
 
@@ -3331,7 +3420,10 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   gives the patience and how much the read has spent; says the usual cause is another
   program or process using the same Massive account (the sessions of one process share one
   governor); and gives the remedies: retry after that time, stop the other program, and, for
-  a subscription, declare it Basic or upgrade it (none of these for `other`). Only that read
+  a subscription, declare it Basic or upgrade it (none of these for `other`). A read with the
+  console's patience adds one more, the patience's `advice`: "this read ran inside a Deephaven
+  console command, which waits out only 90 s of pauses; pass wait=False to fetch() or
+  history() to read in the background, which waits out 10 min". Only that read
   stops; the requests of other reads, a stream's host decision and other sessions included,
   keep their own patience. Every lookup the session shares between the callers that need it
   at once (the crypto ticker list and each WebSocket host decision) follows the same rule. A
@@ -3359,8 +3451,8 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   state). Made on a thread that holds the UG lock (a console command), which pauses every live
   table of the worker while the read runs, that line is a WARNING instead: "stocks.bars
   history: 250 requests; paced at 5 requests a minute (stocks); this command will pause every
-  live table in the worker for at least 49 min: run long downloads from a thread of your own,
-  outside a console command". And
+  live table in the worker for at least 49 min: pass wait=False to read in the background".
+  And
   a grouped-daily or per-session download of more than five requests of an unpaced
   subscription names what the Basic tier would cost ([section 12](#12-timestamp-units-and-day-boundaries)).
   A `poll()` whose cycle makes more paced requests than its interval allows (each request
@@ -3784,7 +3876,8 @@ table, so the queue stays bounded however fast rows arrive.
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 | `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
 
-**`m.streams()`**: one row per stream. A row is written when the stream has opened and on
+**`m.streams()`**: one row per stream, per `poll()` table, and per background read
+(`wait=False`), told apart by `Kind`. A row is written when the stream has opened and on
 every change until the stream leaves the registry (its holds released and its blink table shut
 down), so a released stream still kept alive by a derived table keeps reporting
 `RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
@@ -3794,16 +3887,17 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 
 | Column | Meaning |
 |---|---|
-| `StreamId` | key |
+| `StreamId` | key; a read's is its call id |
+| `Kind` | `stream` (a WebSocket stream), `poll` (a `poll()` table), or `read` (a background `fetch()` or `history()`) |
 | `Dataset` | `"stocks.trades"` |
 | `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
-| `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream and `REST` for a `poll()` |
-| `RowsPublished` | count |
+| `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream, `REST` for a `poll()`, and for a read the source it reads, `REST` or `flat files`; a read's `Host` and `Path` are null |
+| `RowsPublished` | count; a read's is set once, when its rows land |
 | `RequestsPerCycle` | `poll()` fan-out |
-| `State` | `RUNNING`, `FAILED`, `RELEASED`, `CLOSED` |
+| `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
 | `Error` | text; also a futures stream's schedule miss, a warning that leaves it `RUNNING` ([section 12](#12-timestamp-units-and-day-boundaries)) |
 | `CreatedAt` | `Instant` |
 | `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
@@ -3831,7 +3925,9 @@ again; a batch handled after that moment pulls them too, so a busy queue cannot 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
 or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released. `CLOSED`
-is final: no later failure replaces it.
+is final: no later failure replaces it. A read's `RELEASED` means its result was released
+while it was loading; it becomes `DONE` if a derived table kept it going until its rows landed.
+`DONE` is final like `FAILED`: neither a release nor `m.close()` changes it.
 
 `Error` also carries warnings that do not fail the stream: the options cap's deferral
 ([section 15](#15-options-contract-cap)) and the wait for a WebSocket slot
@@ -4060,13 +4156,14 @@ without the GIL.
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (the first TLS context of a certificate setting loads from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open, charged to the `futures` bucket, each lookup in a lane of its own that the calendar's close ends; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
+| background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
+| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
 Every thread and pool the library creates is named `massive #<session> <role>`, or
 `massive group #<group> <role>` for a connection group's, so each log line names its session or
@@ -4481,7 +4578,8 @@ RequestGovernor(buckets, *, learn_only=(), clock=SYSTEM_CLOCK, labels={})
     # refused, charge_pause, snapshot, next_change, estimate, idle, subscribe,
     # subscribe_bucket, unsubscribe
 Admission.acquire(cancel) -> Permit   # inside `with governor.admission(...)`; exit reports it
-Patience(seconds)                     # one read's budget of pause time, shared by its requests
+Patience(seconds, *, advice="")       # one read's budget of pause time, shared by its requests;
+                                      # advice ends its give-up message
 Cancel(*parents)                                  # a threading.Event set once, following parents
 Page(status: str, request_id: str | None, rows: list[dict], body: dict | list,
      drift: DriftReport)          # drift.statuses only; repr omits rows and body
@@ -4599,7 +4697,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   not a retry, and the attempt is made again once the governor allows it; the bucket never
   gives up, and a call whose read's `Patience` cannot cover a pause raises
   `WireError(status=429)` naming the bucket's requests, when the next one goes, the patience
-  and what it has spent, the usual cause, the remedies, and the latest refusal. A bucket named `learn_only` at construction
+  and what it has spent, the usual cause, the remedies (ending with the patience's `advice`, when it
+  has one), and the latest refusal. A bucket named `learn_only` at construction
   (`other`) cannot be declared and is paced once a refusal names the limit. A
   request that may start at once with nothing queued before it is granted without queuing,
   and a wait without a deadline is woken only by a change of its bucket, never by a timer;
@@ -6430,7 +6529,6 @@ document already reflects them.
     ([section 5](#5-massiveconfig), [section 7](#7-query-classes-and-verbs),
     [section 16](#16-historysourceauto), [section 17](#17-diagnostics),
     [section 17.1](#171-the-log)).
-
 66. **One setting enum for bad symbols, and both default to log and keep running** (2026-10-29;
     the owner's decisions, turned into a design by the coordinator after an adversarial review
     by a Deephaven quant user and a library maintainer). One enum, `dm.OnError {RAISE, LOG,
@@ -6478,6 +6576,21 @@ document already reflects them.
     dataset's `symbols` keep None, which there means "not sent"; `order` and `sort` are sent
     only together on most paths, so a default for one would force the other
     ([section 8](#8-namespace-tree), [section 9](#9-filters)).
+68. **Long downloads read in the background with `wait=False`** (2026-10-29; the owner chose a
+    parameter that says whether the call blocks, the coordinator the details). `fetch()` and
+    `history()` take `wait: bool = True`. `wait=False` returns at once a refreshing `Table` with
+    the dataset's columns and no rows; the complete result lands in one update, as one
+    constituent of a merged partitioned table built off the update-graph lock, so no rows are
+    copied inside a cycle, and never changes after. No `Future`: its `result()` could not wait
+    inside a console command. Argument errors raise at the call; a failed download fails the
+    table. `m.streams()` gains `Kind` (`stream`, `poll`, `read`) and the states `LOADING` and
+    `DONE`. The result has its own liveness scope; releasing it, garbage collection, or
+    `close()` cancels the download. The read holds no lock, so the console's 90 s patience does
+    not apply, and the console's give-up error and pause warning name `wait=False`. The table
+    description cannot change once Deephaven has published the table, so it states the
+    behaviour instead of moving from "loading" to "complete"; `m.streams()` shows the change
+    ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released),
+    [section 7](#7-query-classes-and-verbs), [section 17](#17-diagnostics)).
 
 ## 23. Open verification items
 

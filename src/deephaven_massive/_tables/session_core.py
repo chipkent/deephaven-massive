@@ -16,8 +16,10 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   one opening or held, unfailed, live stream that serves it;
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
-- the `poll()` registry: the `m.streams()` row of every `poll()` table from its creation until
-  its result is released and its blink table has shut down;
+- the worker-table registry: the `m.streams()` row of every *worker table*, a table one library
+  thread of its own fills (a `poll()` table's poller, or a background read's thread for
+  `fetch(wait=False)` and `history(..., wait=False)`), from its creation until its result is
+  released and its blink table has shut down;
 - the result registry and the reaper thread (`liveness.py`);
 - the diagnostics tables and their writer thread, the count of diagnostics views users hold, and
   the drift registry that every transport reports schema drift to (`diagnostics.py`);
@@ -35,13 +37,13 @@ So the core and everything else on the Deephaven side are tested without a fake 
 dependency never points from the tables up to the code that does the I/O.
 
 **The live set.** A session is kept alive by its user's references and by its own live tables,
-and by nothing else. The module's live set holds every core whose stream registry, `poll()`
-registry, or count of held diagnostics views is non-empty; every method that changes one of
-them updates the set in the same `registry_lock` section (`_sync_live`). Everything else in the
-library refers to a core weakly (connections, stream sinks, pollers, the clients, and the
-owner callbacks of result records), so an unused session is freed by reference counting, at
-once, and a session whose stream a derived table keeps running stays alive as long as that
-table.
+and by nothing else. The module's live set holds every core whose stream registry,
+worker-table registry, or count of held diagnostics views is non-empty; every method that
+changes one of them updates the set in the same `registry_lock` section (`_sync_live`).
+Everything else in the library refers to a core weakly (connections, stream sinks, pollers,
+the clients, and the owner callbacks of result records), so an unused session is freed by
+reference counting, at once, and a session whose stream a derived table keeps running stays
+alive as long as that table.
 A core that leaves the set is handed to the reaper as a job argument, so its last reference
 is not dropped under a lock; the thread that took it out may still drop it last, which is safe
 because the core's finalizer only queues work on the reaper. On a free-threaded build, a
@@ -73,10 +75,10 @@ the UG lock cannot wait (the open may need that lock, to start a watchlist's lis
 takes the key over: it registers and opens a stream of its own, which later verbs on the key
 reuse, while the first open finishes for its own caller alone.
 
-The module is one subject although it runs past 1,000 lines: the stream registry, the `poll()`
-registry, the count of diagnostics views, the closers, and `close()` all change the same state
-under the one `registry_lock` and keep the one live set in step with it, so each of those
-critical sections reads whole only here.
+The module is one subject although it runs past 1,000 lines: the stream registry, the
+worker-table registry, the count of diagnostics views, the closers, and `close()` all change
+the same state under the one `registry_lock` and keep the one live set in step with it, so
+each of those critical sections reads whole only here.
 """
 
 from __future__ import annotations
@@ -101,6 +103,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
     DriftRegistry,
+    StreamKind,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -148,12 +151,20 @@ _T = TypeVar("_T")
 _stream_id_lock = threading.Lock()
 _stream_numbers = itertools.count(1)
 
-# The live set: every core with a running stream or poll, or a held diagnostics view, by id. It
-# is what keeps such a session alive once its user has dropped it. Its lock is a leaf, taken
-# only under the core's `registry_lock`.
+# The live set: every core with a running stream or worker table, or a held diagnostics view, by
+# id. It is what keeps such a session alive once its user has dropped it. Its lock is a leaf,
+# taken only under the core's `registry_lock`.
 _live_lock = threading.Lock()
 _live: dict[int, SessionCore] = {}
 
+
+_ACTIVE: Final = frozenset({StreamState.RUNNING, StreamState.LOADING})
+"""The states of a table that is still publishing, or still loading: the ones a release marks
+`RELEASED`."""
+
+_FINAL: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
+"""The states no failure changes any more: a failed or closed table, and a read whose rows have
+landed. `close()` and a dying thread fail only the tables in none of them."""
 
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
@@ -182,8 +193,8 @@ def _call(core_ref: weakref.ref[SessionCore], release: Callable[..., None], *arg
     A result record lives as long as its result's Python wrapper, so a strong reference to the
     core there would let a forgotten wrapper keep the session alive, and would make a cycle
     (core, results, record, core). The core is always alive when the record is released: the
-    record's unreleased hold (a stream hold, a poll, or a diagnostics view) keeps the core in
-    the live set until this callback has run.
+    record's unreleased hold (a stream hold, a worker table, or a diagnostics view) keeps the
+    core in the live set until this callback has run.
 
     Args:
         core_ref: The session's core, weakly.
@@ -302,18 +313,20 @@ class _StreamEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class _PollState:
-    """One `poll()` table of the registry; replaced, never mutated, under `registry_lock`.
+class _WorkerState:
+    """One worker table of the registry; replaced, never mutated, under `registry_lock`.
 
-    Like a stream's record, it has two clocks: its one result's hold, and its blink table's
-    shutdown. Releasing the result marks the row `RELEASED` and leaves the poller running (a
-    derived table may still use the table); the shutdown stops the poller. The record leaves
-    the registry once both have happened.
+    A worker table is a `poll()` table or a background read: a table one library thread of its
+    own fills. Like a stream's record, it has two clocks: its one result's hold, and its blink
+    table's shutdown. Releasing the result marks the row `RELEASED` and leaves the thread
+    running (a derived table may still use the table); the shutdown stops the thread. The
+    record leaves the registry once both have happened.
 
     Attributes:
         row: The table's current diagnostics row.
-        fail: Stops the poller and fails the table with the error, once; returns False when
-            the table had already failed. A Deephaven call: never under `registry_lock`.
+        fail: Stops the thread and fails the table with the error, once; returns False when
+            the table had already failed or, for a read, already got its rows. A Deephaven
+            call: never under `registry_lock`.
         held: True until the result is released.
         shut_down: True once the blink table shut down while the result was held.
     """
@@ -396,8 +409,9 @@ class SessionCore:
         self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamEntry] = {}
-        # The live `poll()` tables, by stream id; they have no key and no handle.
-        self._polls: dict[int, _PollState] = {}
+        # The worker tables (`poll()` tables and background reads), by stream id; they have no
+        # key and no handle.
+        self._workers: dict[int, _WorkerState] = {}
         # How many diagnostics views (`diagnostics_view`) users hold.
         self._views = 0
         # Whether the core is in the live set; changed only by `_sync_live`.
@@ -452,12 +466,12 @@ class SessionCore:
         """Put the core in the live set, or take it out, after a registry change.
 
         Called with `registry_lock` held, by every method that changes the stream registry, the
-        `poll()` registry, or the count of diagnostics views. A core leaving the set is handed
+        worker-table registry, or the count of diagnostics views. A core leaving the set is handed
         to the reaper (`_let_go`), so its last reference is never dropped under a lock; the
         changing thread may still drop it last once it returns, which is safe because the
         core's finalizer only queues work.
         """
-        live = bool(self._streams or self._polls or self._views)
+        live = bool(self._streams or self._workers or self._views)
         if live is self._in_live:
             return
         self._in_live = live
@@ -516,9 +530,9 @@ class SessionCore:
         if first:
             logger.warning(
                 "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
-                "update graph's lock: live tables do not update until the command ends; run "
-                "long downloads from a thread of your own, outside a console command (logged "
-                "once per session)",
+                "update graph's lock: live tables do not update until the command ends; pass "
+                "wait=False to fetch() or history() to read in the background (logged once per "
+                "session)",
                 self.label,
                 call,
                 seconds,
@@ -593,6 +607,17 @@ class SessionCore:
             The transport.
         """
         return self._attached_ports().flat_files()
+
+    def read_stop(self) -> threading.Event:
+        """Return a new stop token for one background read (`IngestPorts.read_stop`).
+
+        The transports' `fetch` and `history` take it as `stop`; setting it cancels the read.
+        Without attached ports this raises the `RuntimeError` of `_attached_ports`.
+
+        Returns:
+            The unset token.
+        """
+        return self._attached_ports().read_stop()
 
     # --- Streams --------------------------------------------------------------------------
 
@@ -878,6 +903,7 @@ class SessionCore:
             count, text = describe_symbols(request.symbol_key())
             row = StreamRow(
                 stream_id=stream_id,
+                kind=StreamKind.STREAM,
                 dataset=spec.name,
                 query=shown_query(query),
                 symbol_count=count,
@@ -1027,8 +1053,9 @@ class SessionCore:
         so a verb that finds the table failed always finds the failure recorded. The stream's
         row becomes `FAILED` with `error`, and its key is unmapped, so the next
         verb with the same key opens a fresh stream instead of returning the dead table. A
-        registered `poll()` table's row becomes `FAILED` the same way. A `CLOSED` stream or poll
-        is left as it is, and no row is written: the close came first and is final. The failed
+        registered worker table's row (a `poll()` table's or a background read's) becomes
+        `FAILED` the same way. A `CLOSED` stream or worker table is left as it is, and no row is
+        written: the close came first and is final. The failed
         stream's record stays in the registry until its holds are released and its blink table
         has shut down.
 
@@ -1051,11 +1078,11 @@ class SessionCore:
         """
         with self.registry_lock:
             state = self._streams.get(stream_id)
-            poll = self._polls.get(stream_id)
-            current = state.row if state is not None else None if poll is None else poll.row
+            worker = self._workers.get(stream_id)
+            current = state.row if state is not None else None if worker is None else worker.row
             if current is not None and current.state is StreamState.CLOSED:
                 return current.error
-            polled = state is None and self._update_poll(
+            recorded = state is None and self._update_worker(
                 stream_id, functools.partial(replace, state=StreamState.FAILED, error=error)
             )
             if state is not None:
@@ -1065,7 +1092,7 @@ class SessionCore:
                     del self._stream_ids[state.key]
                 if state.handle is not None:  # an opening stream's row is written by _open
                     self.diagnostics.write(row)
-        if state is None and not polled:
+        if state is None and not recorded:
             logger.debug(
                 "%s: stream %d failed after it left the registry: %s", self.label, stream_id, error
             )
@@ -1077,7 +1104,8 @@ class SessionCore:
         The one allocator of stream ids: WebSocket streams get theirs when the session
         registers them, the REST transport calls this for each `poll()` table's row, and each
         static verb (`fetch()`, `history()`) takes one as its call id, which its log lines and
-        thread names carry (`call 7`), so no two of them ever collide.
+        thread names carry (`call 7`), and a background read's row as its `StreamId`, so no two
+        of them ever collide.
         Thread-safe; takes only a leaf lock of its own, so it may
         be called with or without `registry_lock` held.
 
@@ -1092,12 +1120,12 @@ class SessionCore:
         The WebSocket transport's flush thread calls this once per flush, after its
         `publisher.add` calls, never under any other lock; at the default `flush_interval` that
         is about 20 times a second per connection. A `poll()` table's poller calls it once per
-        cycle. One short critical section under `registry_lock`: every listed stream still in
-        the registry (opening, running, released, failed, or shut down but still held) and every
-        registered `poll()` table gets its row updated, and written once the stream has opened
-        (an opening stream's row is first written when its open returns, so an open that raises
-        leaves no row behind); an id that has left the registry is ignored. No Deephaven call,
-        no wait. It never changes `State`.
+        cycle; a background read never does (`finish_read`). One short critical section under
+        `registry_lock`: every listed stream still in the registry (opening, running, released,
+        failed, or shut down but still held) and every registered worker table gets its row
+        updated, and written once the stream has opened (an opening stream's row is first
+        written when its open returns, so an open that raises leaves no row behind); an id that
+        has left the registry is ignored. No Deephaven call, no wait. It never changes `State`.
 
         Args:
             changes: The update of each stream, by stream id.
@@ -1106,7 +1134,7 @@ class SessionCore:
             for stream_id, update in changes.items():
                 state = self._streams.get(stream_id)
                 if state is None:
-                    self._update_poll(stream_id, update.apply)
+                    self._update_worker(stream_id, update.apply)
                     continue
                 row = update.apply(state.row)
                 self._streams[stream_id] = replace(state, row=row)
@@ -1118,7 +1146,7 @@ class SessionCore:
 
         The REST poller and the WebSocket flush thread call this for each payload a stream receives,
         after reporting the drift's WARNINGs with `DriftRegistry.report` outside every lock; a
-        registered `poll()` table is recorded the same way. Recording the drift and writing the row
+        registered worker table is recorded the same way. Recording the drift and writing the row
         happen in one `registry_lock` section, so the row always shows the latest text however many
         threads report for the stream. An opening stream's row is first written when its open
         returns; an id that has left the registry is ignored, so no drift is kept for a stream that
@@ -1134,10 +1162,12 @@ class SessionCore:
         with self.registry_lock:
             state = self._streams.get(stream_id)
             if state is None:
-                if stream_id in self._polls:
+                if stream_id in self._workers:
                     text = self.drift.record(stream_id, prefix, drift)
                     if text is not None:
-                        self._update_poll(stream_id, functools.partial(replace, schema_drift=text))
+                        self._update_worker(
+                            stream_id, functools.partial(replace, schema_drift=text)
+                        )
                 return
             text = self.drift.record(stream_id, prefix, drift)
             if text is None:
@@ -1147,49 +1177,52 @@ class SessionCore:
             if state.handle is not None:  # an opening stream's row is written by _open
                 self.diagnostics.write(row)
 
-    def register_poll(self, row: StreamRow, *, fail: Callable[[MassiveError], bool]) -> None:
-        """Register a new `poll()` table in `m.streams()` and the live set, before it polls.
+    def register_worker(self, row: StreamRow, *, fail: Callable[[MassiveError], bool]) -> None:
+        """Register a new worker table in `m.streams()` and the live set, before its thread starts.
 
-        A `poll()` table is no shared stream: it has no key, is never reused, and its one
-        result is its only hold. Its record stays in the registry, keeping the session alive and
-        taking the poller's updates (`update_streams`, `fail_stream`, `record_stream_drift`),
-        until its result is released (`release_poll`) and its blink table has shut down
-        (`poll_shut_down`), in either order. One short critical section under `registry_lock`;
-        the row is queued for the diagnostics writer.
+        A worker table, a `poll()` table or a background read, is no shared stream: it has no
+        key, is never reused, and its one result is its only hold. Its record stays in the
+        registry, keeping the session alive and taking its thread's updates (`update_streams`,
+        `fail_stream`, `record_stream_drift`, `finish_read`), until its result is released
+        (`release_worker`) and its blink table has shut down (`worker_shut_down`), in either
+        order. One short critical section under `registry_lock`; the row is queued for the
+        diagnostics writer.
 
         Args:
-            row: The table's first row: its `StreamId` (from `next_stream_id`), its dataset and
-                symbols, one held result, `Transport=REST`, and its host and path.
-            fail: Stops the poller and fails the table, once (`_PollState.fail`); `close()` and a
-                dying library thread call it.
+            row: The table's first row: its `StreamId` (from `next_stream_id`), its `Kind`
+                (`POLL` or `READ`), its dataset and symbols, one held result, its transport,
+                and a poll's host and path; `RUNNING` for a poll, `LOADING` for a read.
+            fail: Stops the thread and fails the table, once (`_WorkerState.fail`); `close()`
+                and a dying library thread call it.
 
         Raises:
             MassiveError: If the session is closed (`"MassiveSession #1 is closed"`): the table
-                must not start a poller then.
+                must not start its thread then.
         """
         with self.registry_lock:
             if self._closed:
                 raise MassiveError(f"{self.label} is closed")
-            self._polls[row.stream_id] = _PollState(row, fail)
+            self._workers[row.stream_id] = _WorkerState(row, fail)
             self.diagnostics.write(row)
             self._sync_live()
 
-    def release_poll(self, stream_id: int) -> None:
-        """Record that a `poll()` table's result was released; the poller keeps running.
+    def release_worker(self, stream_id: int) -> None:
+        """Record that a worker table's result was released; its thread keeps running.
 
-        The row is written with no held result and `State=RELEASED`, unless it failed or the
-        session closed, which keep their state. A derived table may still use the poll, so the
-        poller runs on until the poll's blink table shuts down (`poll_shut_down`); if it already
-        has, the record leaves the registry now and the drift registry forgets it. Runs on the
-        reaper thread when the result is released, or on the caller thread when `poll()` fails
-        after registering the row; each table is released once. No Deephaven call, no wait.
+        The row is written with no held result and `State=RELEASED` when it was `RUNNING` or
+        `LOADING`; a failed, closed, or done row keeps its state. A derived table may still use
+        the table, so the thread runs on until the table's blink table shuts down
+        (`worker_shut_down`); if it already has, the record leaves the registry now and the
+        drift registry forgets it. Runs on the reaper thread when the result is released, or on
+        the caller thread when the verb fails after registering the row; each table is released
+        once. No Deephaven call, no wait.
 
         Args:
             stream_id: The table's `StreamId`.
         """
         with self.registry_lock:
-            state = self._polls[stream_id]
-            released = state.row.state is StreamState.RUNNING
+            state = self._workers[stream_id]
+            released = state.row.state in _ACTIVE
             row = replace(
                 state.row,
                 held_results=0,
@@ -1197,51 +1230,73 @@ class SessionCore:
             )
             self.diagnostics.write(row)
             if state.shut_down:
-                del self._polls[stream_id]
+                del self._workers[stream_id]
                 self.drift.forget(stream_id)
             else:
-                self._polls[stream_id] = replace(state, row=row, held=False)
+                self._workers[stream_id] = replace(state, row=row, held=False)
             self._sync_live()
 
-    def poll_shut_down(self, stream_id: int) -> None:
-        """Record that a `poll()` table's blink table has shut down: nothing uses the poll.
+    def worker_shut_down(self, stream_id: int) -> None:
+        """Record that a worker table's blink table has shut down: nothing uses the table.
 
-        Called from the blink table's `on_shutdown_callback`, after the poller was told to
-        stop, on whichever thread dropped the table's last reference. With the result released
-        the record leaves the registry (its last row stays in `m.streams()`); while the result
-        is still held (a failure shut the table down) it is marked, and the release deletes it.
-        It takes only `registry_lock`, makes no Deephaven call, and writes no row. An unknown
-        id (a poll whose registration failed) is ignored.
+        Called from the blink table's `on_shutdown_callback`, after the table's thread was told
+        to stop, on whichever thread dropped the table's last reference. With the result
+        released the record leaves the registry (its last row stays in `m.streams()`); while the
+        result is still held (a failure shut the table down) it is marked, and the release
+        deletes it. It takes only `registry_lock`, makes no Deephaven call, and writes no row.
+        An unknown id (a table whose registration failed) is ignored.
 
         Args:
             stream_id: The table's `StreamId`.
         """
         with self.registry_lock:
-            state = self._polls.get(stream_id)
+            state = self._workers.get(stream_id)
             if state is None:
                 return
             if state.held:
-                self._polls[stream_id] = replace(state, shut_down=True)
+                self._workers[stream_id] = replace(state, shut_down=True)
             else:
-                del self._polls[stream_id]
+                del self._workers[stream_id]
                 self.drift.forget(stream_id)
             self._sync_live()
 
-    def _update_poll(self, stream_id: int, change: Callable[[StreamRow], StreamRow]) -> bool:
-        """Change a registered `poll()` table's row and write it; `registry_lock` is held.
+    def finish_read(self, stream_id: int, rows: int) -> None:
+        """Record that a background read's rows have landed: its row becomes `DONE`.
+
+        The read's thread calls it right after it published the one row that holds the
+        complete result, outside every lock. `DONE` replaces `LOADING`, `RELEASED` (a derived
+        table kept the read going after its result was released), and `CLOSED` (a close that
+        raced the publish, which then failed nothing: the table has its rows). The read's
+        publish lock fails a read only before its rows land, so no row is `FAILED` here. `DONE`
+        is final. `RowsPublished` is set and `Error` cleared. One short critical section under
+        `registry_lock`; an id that has left the registry is ignored. No Deephaven call, no
+        wait.
+
+        Args:
+            stream_id: The read's `StreamId`.
+            rows: How many rows the result holds, for `RowsPublished`.
+        """
+        with self.registry_lock:
+            done = functools.partial(
+                replace, state=StreamState.DONE, rows_published=rows, error=None
+            )
+            self._update_worker(stream_id, done)
+
+    def _update_worker(self, stream_id: int, change: Callable[[StreamRow], StreamRow]) -> bool:
+        """Change a registered worker table's row and write it; `registry_lock` is held.
 
         Args:
             stream_id: The table's `StreamId`.
             change: Returns the new row from the current one.
 
         Returns:
-            True if the id is a registered `poll()` table.
+            True if the id is a registered worker table.
         """
-        state = self._polls.get(stream_id)
+        state = self._workers.get(stream_id)
         if state is None:
             return False
         row = change(state.row)
-        self._polls[stream_id] = replace(state, row=row)
+        self._workers[stream_id] = replace(state, row=row)
         self.diagnostics.write(row)
         return True
 
@@ -1352,11 +1407,11 @@ class SessionCore:
             SessionCore._fail_live(core, MassiveError(text))
 
     def _fail_live(self, error: MassiveError) -> int:
-        """Fail every stream and `poll()` table of the session that has not failed or shut down.
+        """Fail every stream and worker table of the session that is still live.
 
         For a library thread that is dying (`_thread_died`): without it, the tables it served
         would stop without an error. The tables to fail are collected under `registry_lock`
-        and failed outside it, each once (`StreamHandle.fail`, `_PollState.fail`). A failure
+        and failed outside it, each once (`StreamHandle.fail`, `_WorkerState.fail`). A failure
         that raises is logged at ERROR and the others still fail.
 
         Args:
@@ -1373,19 +1428,18 @@ class SessionCore:
         """Return the fail hooks of every running table; `registry_lock` is held.
 
         Returns:
-            The hook of each opened stream and each poll whose table has not shut down and has
-            not failed or closed.
+            The hook of each opened stream and each worker table whose table has not shut down
+            and has not failed, closed, or, for a read, got its rows.
         """
-        done = {StreamState.FAILED, StreamState.CLOSED}
         fails = [
             state.handle.fail
             for state in self._streams.values()
-            if state.handle is not None and not state.shut_down and state.row.state not in done
+            if state.handle is not None and not state.shut_down and state.row.state not in _FINAL
         ]
         fails += [
-            poll.fail
-            for poll in self._polls.values()
-            if not poll.shut_down and poll.row.state not in done
+            worker.fail
+            for worker in self._workers.values()
+            if not worker.shut_down and worker.row.state not in _FINAL
         ]
         return fails
 
@@ -1416,15 +1470,18 @@ class SessionCore:
         """Close the session: fail every live table, run the closers, release the diagnostics.
 
         Idempotent. Under `registry_lock` it only collects: it marks the session closed, takes
-        the closers, marks every stream and `poll()` table not already failed `CLOSED` in
-        `m.streams()` with the error text below (a released stream that a derived table or an
-        open panel still keeps alive included), and gathers those whose tables still run. Then,
+        the closers, marks every stream and worker table `CLOSED` in `m.streams()` with the error
+        text below (a released stream that a derived table or an open panel still keeps alive
+        included; a `FAILED` row, or a read's `DONE` row, keeps its state), and gathers those
+        whose tables still run. Then,
         outside every lock, verbs waiting for a stream that is still opening wake and raise
         `MassiveError` (the opener releases the stream when its open returns); every gathered
         table fails with `MassiveError("MassiveSession #1 was closed; this table no longer
         updates")`, and with it every table derived from it (a failed table keeps its rows for
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
-        their connections, connections no other session uses close, and the pollers stop); the
+        their connections, connections no other session uses close, and the pollers stop; a
+        background read's thread stops with its table's failure, and its requests with the
+        session's REST client); the
         final rows are written and the diagnostics scope released, and `close()` returns once
         the update cycle that applied them has ended, so a held view shows them. On a thread
         that holds the update graph's lock, such as a console command's, no cycle can run until
@@ -1456,8 +1513,8 @@ class SessionCore:
                 self._streams[stream_id] = replace(state, row=closed)
                 if state.handle is not None:  # an opening stream has no row yet
                     self.diagnostics.write(closed)
-            for stream_id in tuple(self._polls):
-                self._update_poll(stream_id, functools.partial(_closed_row, error=text))
+            for stream_id in tuple(self._workers):
+                self._update_worker(stream_id, functools.partial(_closed_row, error=text))
         for ready in opening:  # waiting verbs wake and raise MassiveError
             ready.set()
         failed = self._fail_all(fails, MassiveError(text))
@@ -1481,15 +1538,16 @@ class SessionCore:
 
 
 def _closed_row(row: StreamRow, error: str) -> StreamRow:
-    """Return a row marked `CLOSED` with the close's text, unless it has already failed.
+    """Return a row marked `CLOSED` with the close's text, unless it has already ended.
 
     Args:
         row: The current row.
         error: The close's text.
 
     Returns:
-        The new row; a `FAILED` row keeps its state and its own error.
+        The new row; a `FAILED` row keeps its state and its own error, and a background read's
+        `DONE` row keeps its state, since its table has every row and is not failed.
     """
-    if row.state is StreamState.FAILED:
+    if row.state in (StreamState.FAILED, StreamState.DONE):
         return row
     return replace(row, state=StreamState.CLOSED, error=error)

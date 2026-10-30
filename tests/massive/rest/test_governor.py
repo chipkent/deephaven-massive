@@ -1367,13 +1367,13 @@ def test_a_patience_counts_each_stretch_of_pause_once() -> None:
     assert UNLIMITED.spent == 0.0  # shared by every governor and thread, so never changed
 
 
-@pytest.mark.parametrize("name", ["seconds", "spent"])
+@pytest.mark.parametrize("name", ["seconds", "advice", "spent"])
 def test_a_patience_is_read_only_so_the_shared_unlimited_one_never_changes(name: str) -> None:
     with pytest.raises(AttributeError, match="has no setter"):
         setattr(UNLIMITED, name, 1.0)
     with pytest.raises(AttributeError, match="has no deleter"):
         delattr(UNLIMITED, name)
-    assert (UNLIMITED.seconds, UNLIMITED.spent) == (math.inf, 0.0)
+    assert (UNLIMITED.seconds, UNLIMITED.advice, UNLIMITED.spent) == (math.inf, "", 0.0)
 
 
 def test_a_long_paced_read_still_waits_out_a_short_pause() -> None:
@@ -1401,6 +1401,20 @@ def test_a_spent_patience_still_starts_a_request_when_nothing_is_paused() -> Non
     with governor.admission("stocks", lane=object(), patience=patience) as admission:
         governor.done(admission.acquire(Cancel()), answered=True)
     assert patience.spent == 0.0
+
+
+def test_the_give_up_message_ends_with_the_patience_s_advice() -> None:
+    # The caller knows one more remedy (a console read can read in the background): it comes
+    # last, after the governor's own.
+    governor = RequestGovernor(BUCKETS, learn_only={"other"}, clock=FakeClock())
+    with governor.admission("other", lane=object()) as claim:
+        _refuse(governor, claim.acquire(Cancel()), retry_after=60.0)
+    patience = Patience(0.0, advice="read in the background")
+    with pytest.raises(WireError) as caught:
+        governor.admission("other", lane=object(), patience=patience).acquire(Cancel())
+    assert str(caught.value).endswith(
+        "To go on: retry after that time, or stop the other program; read in the background"
+    )
 
 
 def test_the_give_up_message_offers_no_declaration_for_a_learn_only_bucket() -> None:

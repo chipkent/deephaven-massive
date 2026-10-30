@@ -34,6 +34,9 @@ Each static verb (`fetch()`, `history()`) is one *call*: it takes a process-uniq
 session's stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows>
 rows in <s> s` or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their
 worker threads after it (`massive #1 call-7 rest_0`), so every line of one call can be found.
+With `wait=False` a static verb checks its arguments on the calling thread, then returns at once
+a refreshing table that a library thread of its own fills in one update when the download
+completes (`open_read` in `_tables/background_read.py`); that thread logs the call's outcome.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -75,17 +78,20 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import ErrorCause, MassiveError, failure_text
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable, Sequence
 
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike
@@ -170,6 +176,23 @@ def _interval(value: object) -> timedelta:
     if period <= timedelta(0):  # also an interval that rounds to zero microseconds
         raise ValueError(f"interval must be a positive, finite time, got {value!r}")
     return period
+
+
+def _wait(value: object) -> bool:
+    """Validate the `wait` argument of `fetch()` and `history()`.
+
+    Args:
+        value: The argument as passed.
+
+    Returns:
+        The value.
+
+    Raises:
+        TypeError: If `value` is not a `bool`.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"wait must be a bool, not {type(value).__name__}")
+    return value
 
 
 def _serves(spec: DatasetSpec, verb: str) -> bool:
@@ -437,13 +460,18 @@ class QueryBase:
         with entered(self._core.exec_ctx):
             return describe(table, spec, schema, note=note)
 
-    def _logged_call(self, verb: str, run: Callable[[int], Table]) -> Table:
+    def _logged_call(
+        self, verb: str, run: Callable[[int], Table], *, background: bool = False
+    ) -> Table:
         """Run a static verb as one call: a new call id, and its start and outcome at DEBUG.
 
         Args:
             verb: The verb and its arguments, for the start line, such as `"fetch()"`.
             run: Runs the verb's work, given the call id; the id names the transport's worker
                 threads.
+            background: True for `wait=False`: `run` returns the table a background read
+                fills, and the read's thread logs the call's outcome, so no `done` line is
+                logged here.
 
         Returns:
             What `run` returns.
@@ -460,7 +488,7 @@ class QueryBase:
         except BaseException as error:
             _log_failure(call, time.monotonic() - started, error)
             raise
-        if logger.isEnabledFor(logging.DEBUG):
+        if not background and logger.isEnabledFor(logging.DEBUG):
             elapsed = time.monotonic() - started
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
@@ -476,6 +504,44 @@ class QueryBase:
             symbols = _read_symbol_table(self._core, self._spec, request.symbols)
             return replace(request, symbols=symbols)
         return request
+
+    def _result(
+        self,
+        call: int,
+        request: Request,
+        *,
+        wait: bool,
+        transport: Transport,
+        note: str | None,
+        run: Callable[[threading.Event | None], Table],
+    ) -> Table:
+        """Run a static verb's transport call now, or start it as a background read.
+
+        Args:
+            call: The call id.
+            request: The request with static symbols, for the read's `m.streams()` row.
+            wait: True to run `run` on this thread and return its described static table;
+                False to return at once the refreshing table a background read fills
+                (`open_read`).
+            transport: The source `run` reads, for the read's row.
+            note: The sentence the table description adds after the summary, or None.
+            run: Runs the transport call, given a background read's stop token or None.
+
+        Returns:
+            The static result, or the refreshing one a background read fills.
+        """
+        if wait:
+            return self._described(run(None), note=note)
+        return open_read(
+            self._core,
+            spec=self._spec,
+            call=call,
+            query=repr(self),
+            symbols=request.symbols,
+            transport=transport,
+            note=note,
+            run=run,
+        )
 
 
 class Query(QueryBase):
@@ -494,8 +560,8 @@ class Query(QueryBase):
     __slots__ = ()
 
     @_verb
-    def fetch(self) -> Table:
-        """Return every row the dataset's endpoint returns, fully paginated, as a static table.
+    def fetch(self, *, wait: bool = True) -> Table:
+        """Return every row the dataset's endpoint returns, fully paginated.
 
         The requests run on the calling thread, or for an endpoint that takes one symbol per
         request on up to `max_concurrency` threads. `limit`, when the dataset was built with
@@ -514,25 +580,65 @@ class Query(QueryBase):
         for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
         any other failure.
 
+        With `wait=False` every check above that needs no request still raises at the call,
+        and a failed request fails the table instead.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
+        `MassiveError` once the session is closed. A `wait` that is not a `bool` raises
+        `TypeError`.
+
+        Args:
+            wait: With False, `to_pandas()` before the fill returns no rows: take
+                `snapshot()` once the table is filled for a static copy. True (the default)
+                blocks until the whole result is read and returns a static table. False
+                returns at once a refreshing table with the same columns and no rows, which a
+                library thread of its own fills: when the whole download has landed, the
+                complete result appears in one update and never changes again. Its row in
+                `m.streams()` (`Kind=read`) is `LOADING`, then `DONE`, or `FAILED` with the
+                error, which also fails the table. The read holds no lock, so inside a console
+                command the command returns at once and live tables keep updating, and it
+                waits out the full 10 minutes of rate-limit pauses. Releasing the table
+                (`m.release`, garbage collection) stops the download once nothing derived
+                from it is left, and `m.close()` stops it at once.
 
         Returns:
-            A static table.
-        """
-        return self._logged_call("fetch()", self._fetch)
+            A static table; with `wait=False`, a refreshing table filled once in the
+            background.
 
-    def _fetch(self, call: int) -> Table:
+        Example:
+            ::
+
+                divs = m.stocks.dividends(["AAPL", "MSFT"]).fetch(wait=False)
+        """
+        background = not _wait(wait)
+        return self._logged_call(
+            "fetch(wait=False)" if background else "fetch()",
+            functools.partial(self._fetch, wait=wait),
+            background=background,
+        )
+
+    def _fetch(self, call: int, *, wait: bool) -> Table:
         """Run `fetch()` as call `call`.
 
         Args:
             call: The call id.
+            wait: As `fetch` takes it.
 
         Returns:
-            The static table.
+            The static table, or the refreshing one a background read fills.
         """
-        return self._described(
-            self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
+        spec = self._spec
+        request = self._static_request()
+        rest = self._core.rest_transport()
+        if not wait:  # a parameter error raises now, as it would before the first request
+            rest.check_fetch(spec, request)
+        return self._result(
+            call,
+            request,
+            wait=wait,
+            transport=Transport.REST,
+            note=None,
+            run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
         )
 
     @_verb
@@ -892,6 +998,7 @@ class HistoryQuery(QueryBase):
         end: DateLike | None = None,
         *,
         source: HistorySource = HistorySource.AUTO,
+        wait: bool = True,
     ) -> Table:
         """Return the dataset's rows over a range of whole days or of exact instants.
 
@@ -972,7 +1079,8 @@ class HistoryQuery(QueryBase):
 
         Side effects: network requests on the calling thread, and for flat files a pool of up
         to `max_concurrency` reader threads that end before the call returns. It blocks until
-        the whole range is read.
+        the whole range is read, unless `wait=False`: then the requests and readers run on a
+        library thread of the read's own, and the call returns at once.
 
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
@@ -983,11 +1091,24 @@ class HistoryQuery(QueryBase):
                 for a date `start`.
             source: Where to read: `AUTO` (the default) picks flat files or REST, `REST` or
                 `FLAT_FILES` forces one.
+            wait: With False, `to_pandas()` before the fill returns no rows: take
+                `snapshot()` once the table is filled for a static copy. True (the default)
+                blocks until the whole result is read and returns a static table. False
+                returns at once a refreshing table with the same columns and no rows, which a
+                library thread of its own fills: when the whole download has landed, the
+                complete result appears in one update and never changes again. Its row in
+                `m.streams()` (`Kind=read`) is `LOADING`, then `DONE`, or `FAILED` with the
+                error, which also fails the table. The read holds no lock, so inside a console
+                command the command returns at once and live tables keep updating, and it
+                waits out the full 10 minutes of rate-limit pauses. Releasing the table
+                (`m.release`, garbage collection) stops the download once nothing derived
+                from it is left, and `m.close()` stops it at once.
 
         Returns:
             A static table in the dataset's schema (see `columns()`), oldest first within each
             symbol over REST, in file order over flat files; empty, with every column, when
-            no row lies in the range.
+            no row lies in the range. With `wait=False`, a refreshing table that a background
+            read fills once with that result.
 
         Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
         `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
@@ -1012,7 +1133,9 @@ class HistoryQuery(QueryBase):
         within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
         Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
         or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
-        instead; or once the session is closed.
+        instead; or once the session is closed. `TypeError` if `wait` is not a `bool`. With
+        `wait=False`, every error above that needs no request still raises at the call, and the
+        others fail the table instead.
 
         Example:
             ::
@@ -1023,25 +1146,38 @@ class HistoryQuery(QueryBase):
                     datetime(2026, 1, 2, 14, tzinfo=UTC), datetime(2026, 1, 2, 15, tzinfo=UTC)
                 )
                 since = q.history("2026-01-02")  # through now
+                year = q.history("2025-01-01", "2025-12-31", wait=False)  # fills when read
         """
+        background = not _wait(wait)
         return self._logged_call(
-            f"history({start!r}, {end!r}, source={source!r})",
-            lambda call: self._history(start, end, source=source, call=call),
+            f"history({start!r}, {end!r}, source={source!r}{', wait=False' if background else ''})",
+            lambda call: self._history(start, end, source=source, call=call, wait=wait),
+            background=background,
         )
 
     def _history(
-        self, start: DateLike, end: DateLike | None, *, source: HistorySource, call: int
+        self,
+        start: DateLike,
+        end: DateLike | None,
+        *,
+        source: HistorySource,
+        call: int,
+        wait: bool,
     ) -> Table:
         """Run `history()` as call `call`; see `history` for everything else.
+
+        Everything that needs no request is checked here, on the calling thread, before the
+        transport call runs or a background read starts.
 
         Args:
             start: As `history` takes it.
             end: As `history` takes it.
             source: As `history` takes it.
             call: The call id.
+            wait: As `history` takes it.
 
         Returns:
-            The static table.
+            The static table, or the refreshing one a background read fills.
         """
         chosen = _require_enum(source, HistorySource, "source")
         first = parse_date_like(start, "start")
@@ -1055,43 +1191,69 @@ class HistoryQuery(QueryBase):
         window = history_window(
             self._spec, request, start=first, end=last, classes=map(symbol_class, listed)
         )
+        spec = self._spec
         if chosen is HistorySource.REST:
             self._check_rest_history()
-            if window.empty:
-                return self._empty()
-            return self._described(
-                self._core.rest_transport().history(self._spec, request, window, call=call),
-                note="Read from REST: requested with source=dm.HistorySource.REST.",
-            )
-        dates = partition_dates(self._spec, window)
-        choice = choose_source(
-            self._spec, request, dates, requested=chosen, config=self._core.config
-        )
+            note = "Read from REST: requested with source=dm.HistorySource.REST."
+            return self._rest_history(call, request, window, wait=wait, note=note)
+        dates = partition_dates(spec, window)
+        choice = choose_source(spec, request, dates, requested=chosen, config=self._core.config)
         label = TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]]
         if chosen is HistorySource.AUTO:
             logger.info(
-                "%s history: AUTO chose %s (%s)",
-                self._spec.name,
-                choice.source.name,
-                choice.reason,
+                "%s history: AUTO chose %s (%s)", spec.name, choice.source.name, choice.reason
             )
             note = f"Read from {label}: AUTO chose it ({choice.reason})."
         else:
             note = f"Read from {label}: requested with source=dm.HistorySource.FLAT_FILES."
-        if window.empty:
-            return self._empty()
-        if chosen is HistorySource.AUTO:
+        if chosen is HistorySource.AUTO and not window.empty:
             self._warn_unfilled(choice)
         if choice.source is HistorySource.REST:
-            return self._described(
-                self._core.rest_transport().history(self._spec, request, window, call=call),
-                note=note,
-            )
-        return self._described(
-            self._core.flat_file_transport().history(
-                self._spec, request, window, dates=dates, call=call
-            ),
+            return self._rest_history(call, request, window, wait=wait, note=note)
+        files = self._core.flat_file_transport()
+        return self._result(
+            call,
+            request,
+            wait=wait,
+            transport=Transport.FLAT_FILES,
             note=note,
+            run=lambda stop: (
+                self._empty_rows()
+                if window.empty
+                else files.history(spec, request, window, dates=dates, call=call, stop=stop)
+            ),
+        )
+
+    def _rest_history(
+        self, call: int, request: Request, window: HistoryWindow, *, wait: bool, note: str
+    ) -> Table:
+        """Read `history()` from REST, now or in the background.
+
+        Args:
+            call: The call id.
+            request: The request with static symbols and the parsed bounds.
+            window: The call's window; an empty one reads nothing.
+            wait: As `history` takes it.
+            note: The sentence that names the source in the table description.
+
+        Returns:
+            The static table, or the refreshing one a background read fills.
+        """
+        spec = self._spec
+        rest = self._core.rest_transport()
+        if not wait and not window.empty:  # a parameter error raises now
+            rest.check_history(spec, request, window)
+        return self._result(
+            call,
+            request,
+            wait=wait,
+            transport=Transport.REST,
+            note=note,
+            run=lambda stop: (
+                self._empty_rows()
+                if window.empty
+                else rest.history(spec, request, window, call=call, stop=stop)
+            ),
         )
 
     def _warn_unfilled(self, choice: SourceChoice) -> None:
@@ -1143,17 +1305,15 @@ class HistoryQuery(QueryBase):
             remedy,
         )
 
-    def _empty(self) -> Table:
-        """Return the empty result of a range no row can lie in, without any request.
+    def _empty_rows(self) -> Table:
+        """Return the static rows of a range no row can lie in, without any request.
 
         Returns:
-            A static table with every column of the dataset and no row, described as a
-            result is (`_described`).
+            A static table with every column of the dataset and no row.
         """
         schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
-            table = dh_arrow.to_table(schema.arrow_schema().empty_table())
-        return self._described(table)
+            return dh_arrow.to_table(schema.arrow_schema().empty_table())
 
     def _check_rest_history(self) -> None:
         """Reject `history(source=REST)` where REST cannot serve the request.
