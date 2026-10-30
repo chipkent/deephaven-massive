@@ -88,7 +88,7 @@ def run_group(
                 )
             elif group == "throughput":
                 stream_capture.run_throughput(
-                    m, units=due, folder=folder, until=until, report=report
+                    m, units=due, tiers=tiers, folder=folder, until=until, report=report
                 )
             else:
                 reconcile.run_reconcile(

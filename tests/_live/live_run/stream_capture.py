@@ -85,6 +85,9 @@ MAX_GAP: Final = timedelta(minutes=30)
 """Gaps after which a stream day fails."""
 
 GAP_THRESHOLD: Final = timedelta(seconds=60)
+
+DAY_START: Final = time(3, 45)
+"""When a stream day starts, New York time (`timetable.STREAM_DAY`)."""
 """A pause between samples longer than this counts as a gap."""
 
 OPTION_CONTRACTS: Final = 10
@@ -165,13 +168,14 @@ def stream_day_streams(
         name = unit.split()[0]
         if name == "stocks":
             streams.append(Stream("stocks-minute-bars", unit, lambda m: m.stocks.bars(STOCKS)))
-            streams.append(
-                Stream(
-                    "stocks-second-bars",
-                    unit,
-                    lambda m: m.stocks.bars(STOCKS, dm.Timespan.SECOND),
+            if tiers["stocks"] != "business":  # the base Business plan has no per-second bars
+                streams.append(
+                    Stream(
+                        "stocks-second-bars",
+                        unit,
+                        lambda m: m.stocks.bars(STOCKS, dm.Timespan.SECOND),
+                    )
                 )
-            )
             if tiers["stocks"] not in {"basic", "starter", "business"}:
                 streams.append(
                     Stream(
@@ -203,18 +207,23 @@ def stream_day_streams(
     return streams
 
 
-def throughput_streams(units: Iterable[str]) -> list[Stream]:
+def throughput_streams(units: Iterable[str], *, tiers: dict[str, str]) -> list[Stream]:
     """Return the throughput group's streams of every symbol, for its due units.
 
     Args:
         units: The due units of the stocks and currencies classes.
+        tiers: Each class's tier: the base Stocks Business plan has no per-second bars, so it
+            streams every stock's minute bars instead.
 
     Returns:
-        The streams: every stock's second bars, every crypto trade, every forex quote.
+        The streams: every stock's second (or minute) bars, every crypto trade, every forex
+        quote.
     """
     streams: list[Stream] = []
     for unit in units:
-        if unit.startswith("stocks"):
+        if unit.startswith("stocks") and tiers.get("stocks") == "business":
+            streams.append(Stream("stocks-all-minute-bars", unit, lambda m: m.stocks.bars(dm.ALL)))
+        elif unit.startswith("stocks"):
             streams.append(
                 Stream(
                     "stocks-all-second-bars",
@@ -529,32 +538,29 @@ def _plain(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in row.items()}
 
 
-def record_gap(folder: Path, now: datetime) -> timedelta:
+def record_gap(folder: Path, now: datetime, *, day_start: datetime) -> timedelta:
     """Record the gap since a stream day's last sample, and return the day's gaps so far.
+
+    The first child of a day that starts late counts the time since the day's start as a gap
+    too, so a stream day begun in the evening cannot pass as a whole day.
 
     Args:
         folder: The attempt's folder, which may hold an earlier child's samples.
         now: When this child starts.
+        day_start: When the stream day starts (03:45 New York time).
 
     Returns:
         The total of every gap recorded in `gaps.csv`.
     """
     samples = folder / "samples-process.csv"
+    start, cause = day_start, "the day's first child started late"
     if samples.exists():
         with samples.open(encoding="utf-8") as file:
             last = list(csv.DictReader(file))[-1]["time"]
-        start = datetime.fromisoformat(last)
-        if now - start > GAP_THRESHOLD:
-            append_csv(
-                folder / "gaps.csv",
-                [
-                    {
-                        "start": start.isoformat(),
-                        "end": now.isoformat(),
-                        "cause": "the child restarted",
-                    }
-                ],
-            )
+        start, cause = datetime.fromisoformat(last), "the child restarted"
+    if now - start > GAP_THRESHOLD:
+        gap = {"start": start.isoformat(), "end": now.isoformat(), "cause": cause}
+        append_csv(folder / "gaps.csv", [gap])
     return total_gaps(folder)
 
 
@@ -602,6 +608,7 @@ def run_stream_day(
     until: datetime,
     report: Callable[[str, str, str], None],
     clock: Clock | None = None,
+    day_start: datetime | None = None,
 ) -> None:
     """Stream the due units until the day's end, recording rows, samples, and gaps.
 
@@ -613,10 +620,13 @@ def run_stream_day(
         until: When the day ends (20:30 New York time).
         report: Receives each unit's name, status, and reason at the end.
         clock: The time source and wait; the real clock by default.
+        day_start: When the day began, for a late first child's gap; 03:45 New York time of
+            the clock's day by default.
     """
     clock = clock or Clock()
-    gaps = record_gap(folder, clock.now())
     today = clock.now().astimezone(NEW_YORK).date()
+    day_start = day_start or datetime.combine(today, DAY_START, NEW_YORK)
+    record_gap(folder, clock.now(), day_start=day_start)
     options: list[str] = []
     if any(u.startswith("options") for u in units):
         chain = m.options.chain("SPY").fetch()
@@ -644,7 +654,9 @@ def run_stream_day(
     minutes = round(gaps.total_seconds() / 60)
     for unit in units:
         failure = failures.get(unit.split()[0], "")
-        if failure:
+        if unit.startswith("options") and not options:
+            report(unit, "failed", "the SPY chain gave no contract to stream")
+        elif failure:
             report(unit, "failed", f"a stream failed: {failure}")
         elif gaps > MAX_GAP:
             report(unit, "failed", f"gaps {minutes}")
@@ -728,6 +740,7 @@ def run_throughput(
     m: MassiveSession,
     *,
     units: list[str],
+    tiers: dict[str, str],
     folder: Path,
     until: datetime,
     report: Callable[[str, str, str], None],
@@ -739,6 +752,7 @@ def run_throughput(
     Args:
         m: The session.
         units: The due units (stocks and currencies).
+        tiers: Each class's tier (`throughput_streams`).
         folder: The attempt's folder.
         until: When to stop (11:00 New York time).
         report: Receives each unit's name, status, and reason at the end.
@@ -747,7 +761,7 @@ def run_throughput(
     """
     clock = clock or Clock()
     window = window or throughput_window(units, clock.now().astimezone(NEW_YORK).date())
-    streams = throughput_streams(units)
+    streams = throughput_streams(units, tiers=tiers)
     tables = [stream.query(m).last_by() for stream in streams]
     recorder = Recorder(folder)
     try:

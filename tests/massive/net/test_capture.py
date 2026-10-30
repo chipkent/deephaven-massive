@@ -10,6 +10,7 @@ raises never reaches the client and is logged once.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -175,8 +176,16 @@ def test_a_sink_that_raises_never_fails_the_client_and_is_logged_once(
 
 
 def test_frames_after_authentication_reach_the_sink_and_the_handshake_never_does(
-    fake_ws_server: FakeMassiveServer, replies: list[CapturedReply]
+    fake_ws_server: FakeMassiveServer,
 ) -> None:
+    replies: list[CapturedReply] = []
+    arrived = threading.Event()
+
+    def sink(reply: CapturedReply) -> None:
+        replies.append(reply)
+        arrived.set()
+
+    set_reply_capture(sink)
     client = WsClient(
         fake_ws_server.url("/stocks"),
         api_key=PLANTED_KEY,
@@ -195,12 +204,11 @@ def test_frames_after_authentication_reach_the_sink_and_the_handshake_never_does
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         frame = f'[{{"ev":"status","status":"success","message":"echo {PLANTED_KEY}"}}]'
         fake_ws_server.send(frame)
-        deadline = time.monotonic() + 10.0
-        while not replies and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert arrived.wait(10.0)  # the sink signals the frame, on the client's loop thread
     finally:
         client.close()
         assert client.join(10.0)
+        set_reply_capture(None)
     [reply] = replies  # the greeting and the reply to the key are not captured
     assert (reply.transport, reply.host, reply.path) == ("ws", "127.0.0.1", "/stocks")
     assert (reply.query, reply.status, reply.request_id) == ((), None, None)

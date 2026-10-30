@@ -163,6 +163,7 @@ def test_a_stream_day_records_rows_counts_delays_and_samples(
         folder=tmp_path,
         until=START + timedelta(seconds=25),
         report=report,
+        day_start=START,
         clock=day.clock(),
     )
     assert seen == [("stocks delayed", "passed", "")]
@@ -218,6 +219,7 @@ def test_a_batch_the_recorder_cannot_write_fails_the_day(
         folder=tmp_path,
         until=START + timedelta(seconds=5),
         report=report,
+        day_start=START,
         clock=day.clock(),
     )
     [(unit, status, reason)] = seen
@@ -242,6 +244,7 @@ def test_a_restarted_day_records_its_gap_and_fails_past_thirty_minutes(
             until=start + timedelta(seconds=1),
             report=report,
             clock=_Day(now_at=start).clock(),
+            day_start=START,
         )
         runs.append(seen)
     # The second start is 5 minutes after the first's last sample: a gap, but a short one.
@@ -282,6 +285,7 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
         folder=tmp_path,
         until=START + timedelta(hours=1),
         report=report,
+        day_start=START,
         clock=day.clock(),
     )
     assert seen == [("options delayed", "passed", "")]
@@ -389,7 +393,8 @@ def test_each_unit_streams_its_watchlist(massive_session: MassiveSession) -> Non
 def test_throughput_streams_every_symbol_of_stocks_and_currencies(
     massive_session: MassiveSession,
 ) -> None:
-    streams = stream_capture.throughput_streams(["stocks delayed", "currencies real-time"])
+    units = ["stocks delayed", "currencies real-time"]
+    streams = stream_capture.throughput_streams(units, tiers={"stocks": "starter"})
     assert [(s.name, s.event_column) for s in streams] == [
         ("stocks-all-second-bars", "TimestampEnd"),
         ("crypto-all-trades", "Timestamp"),
@@ -453,11 +458,28 @@ def test_a_recorder_with_nothing_writes_nothing(tmp_path: Path) -> None:
 
 
 def test_gaps_count_only_pauses_past_a_minute(tmp_path: Path) -> None:
-    assert stream_capture.record_gap(tmp_path, START) == timedelta()
+    assert stream_capture.record_gap(tmp_path, START, day_start=START) == timedelta()
     stream_capture.append_csv(tmp_path / "samples-process.csv", [{"time": START.isoformat()}])
-    assert stream_capture.record_gap(tmp_path, START + timedelta(seconds=60)) == timedelta()
-    three = stream_capture.record_gap(tmp_path, START + timedelta(minutes=3))
+    later = START + timedelta(seconds=60)
+    assert stream_capture.record_gap(tmp_path, later, day_start=START) == timedelta()
+    three = stream_capture.record_gap(tmp_path, START + timedelta(minutes=3), day_start=START)
     assert three == timedelta(minutes=3)
+
+
+def test_a_stream_day_begun_late_counts_the_lost_hours_as_a_gap(tmp_path: Path) -> None:
+    evening = START + timedelta(hours=15)
+    assert stream_capture.record_gap(tmp_path, evening, day_start=START) == timedelta(hours=15)
+    [gap] = _csv(tmp_path / "gaps.csv")
+    assert gap["cause"] == "the day's first child started late"
+
+
+def test_the_base_stocks_business_plan_streams_no_second_bars() -> None:
+    day = stream_capture.stream_day_streams(
+        ["stocks real-time"], tiers={"stocks": "business"}, today=START.date(), options=[]
+    )
+    assert [s.name for s in day] == ["stocks-minute-bars"]
+    measured = stream_capture.throughput_streams(["stocks real-time"], tiers={"stocks": "business"})
+    assert [s.name for s in measured] == ["stocks-all-minute-bars"]
 
 
 # --- throughput -----------------------------------------------------------------------------
@@ -481,6 +503,7 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
     stream_capture.run_throughput(
         ws_session.session,
         units=["stocks real-time", "currencies real-time"],
+        tiers={"stocks": "advanced", "currencies": "starter"},
         folder=tmp_path / "covered",
         until=START + timedelta(seconds=50),
         report=report,
@@ -495,6 +518,7 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
     stream_capture.run_throughput(
         ws_session.session,
         units=["stocks delayed"],
+        tiers={"stocks": "starter"},
         folder=tmp_path / "early",
         until=START + timedelta(seconds=10),
         report=report,
@@ -654,9 +678,30 @@ def test_a_stream_that_failed_fails_its_unit(
         folder=tmp_path,
         until=START + timedelta(hours=1),
         report=report,
+        day_start=START,
         clock=day.clock(),
     )
     [(unit, status, reason)] = seen
     assert (unit, status) == ("indices delayed", "failed")
     assert reason.startswith("a stream failed: ")
     assert "not authorized" in reason
+
+
+@pytest.mark.jvm_held
+def test_an_options_unit_without_contracts_fails(
+    make_ws_session: Callable[..., WsSession], fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([])))
+    harness = make_ws_session(rest_base_url=fake_rest.url)
+    seen, report = _reports()
+    stream_capture.run_stream_day(
+        harness.session,
+        units=["options delayed"],
+        tiers={"options": "starter"},
+        folder=tmp_path,
+        until=START + timedelta(hours=1),
+        report=report,
+        clock=_Day(stop_after=1).clock(),
+        day_start=START,
+    )
+    assert seen == [("options delayed", "failed", "the SPY chain gave no contract to stream")]
