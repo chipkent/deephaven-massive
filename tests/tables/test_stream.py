@@ -959,6 +959,7 @@ class _DyingFlusher(Flusher):
 class _Stubborn:
     # A routed stream whose failure raises.
     stream_id = 2
+    plan = None  # read by the flush that forgets the plans no longer routed
 
     def fail(self, error: MassiveError) -> bool:
         raise RuntimeError(f"cannot fail: {error}")
@@ -989,6 +990,7 @@ class _Recording:
     # A routed stream that records the errors it is failed with.
     def __init__(self, stream_id: int) -> None:
         self.stream_id = stream_id
+        self.plan = None  # read by the flush that forgets the plans no longer routed
         self.errors: list[MassiveError] = []
 
     def fail(self, error: MassiveError) -> bool:
