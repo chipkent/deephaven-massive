@@ -695,6 +695,20 @@ class Connection:
             )
             self.check_idle()
 
+    def stop_awaiting(self, stream_ids: Iterable[int]) -> None:
+        """Stop awaiting streams and stop counting them against the options cap; lock held.
+
+        Called with the group's lock held, for streams that will never be adopted here: their
+        lease was returned, or the old connection's loop ended before it could hand them over.
+        The caller posts `check_idle` (or a release follows) so the calls kept for them go too.
+
+        Args:
+            stream_ids: The streams.
+        """
+        for stream_id in stream_ids:
+            self.awaiting.discard(stream_id)
+            self.cap_pending.pop(stream_id, None)
+
     def check_idle(self) -> None:
         """Arm the idle close if the connection has no stream left.
 
@@ -747,10 +761,12 @@ class Connection:
 
         Only the streams that still hold a lease go there (the move pointed each lease at
         `successor`). A stream whose lease is gone (its blink table shut down, or its session
-        closed, after or before the move) stays behind: it stops being routed, `successor`
-        stops awaiting it, and its topics are never subscribed there, so a closed session's
-        stream cannot keep the successor open. The connection closes even if the hand-over
-        raises, since a connection out of the registry has no other close.
+        closed, after or before the move) stays behind: it stops being routed here, and its
+        topics are never subscribed on `successor`, which stopped awaiting it when the lease
+        was returned (`WsConnections._forget`), so a closed session's stream cannot keep the
+        successor open. A lease returned after this choice is caught by `adopt`. The
+        connection closes even if the hand-over raises, since a connection out of the registry
+        has no other close.
 
         Args:
             successor: The connection that takes over.
@@ -1797,9 +1813,7 @@ class ConnectionGroup:
         if not connection.post(connection.hand_over, successor):
             # The old loop ended first: its streams were failed there and never arrive.
             with self.lock:
-                successor.awaiting.difference_update(moved)
-                for stream_id in moved:
-                    successor.cap_pending.pop(stream_id, None)
+                successor.stop_awaiting(moved)
             successor.post(successor.check_idle)
 
     @staticmethod
@@ -2279,8 +2293,7 @@ class WsConnections:
         del group.streams[stream_id]
         del group.owners[stream_id]
         self._mine.discard(stream_id)
-        current.awaiting.discard(stream_id)
-        current.cap_pending.pop(stream_id, None)
+        current.stop_awaiting((stream_id,))
         current.give(self)
         return current
 
