@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import pytest
 
 from deephaven_massive._massive.net.errors import WireEntitlementError
-from deephaven_massive._massive.refresh import drift, fetch, snapshot, spec_diff
+from deephaven_massive._massive.refresh import drift, fetch, knowledge_base, snapshot, spec_diff
 from deephaven_massive._massive.refresh.drift import Committed, Drift, Report, Section
 from deephaven_massive._massive.refresh.exclusions import Exclusion
 from deephaven_massive._massive.refresh.gates import RefreshError
@@ -134,6 +134,22 @@ def dataset_page(columns: Mapping[str, str], header: tuple[str, ...] | None = No
 
 
 WIDGETS = {"stocks/widgets.md": rest_page("/v1/widgets")}
+SLUG = next(iter(knowledge_base.ARTICLES))
+ARTICLE = knowledge_base.article_url(SLUG)
+
+
+def article(text: str = "Five requests a minute.") -> str:
+    # An article as the snapshot stores it: its title, then one paragraph.
+    return f"# A question?\n\n{text}\n"
+
+
+def article_page(stored: str) -> bytes:
+    # The HTML page whose extracted Markdown is `stored`, an `article(...)`.
+    title, _, text = stored.partition("\n\n")
+    return (
+        f"<html><head><title>{title.removeprefix('# ')} | Massive</title></head>"
+        f"<body><article><p>{text.strip()}</p></article></body></html>"
+    ).encode()
 
 
 def make(
@@ -144,8 +160,10 @@ def make(
     ws_pages: Mapping[str, str] | None = None,
     flat_pages: Mapping[str, str] | None = None,
     components: Mapping[str, Any] | None = None,
+    articles: Mapping[str, str] | None = None,
 ) -> Snapshot:
-    # A snapshot of one REST path, one channel, and one flat-file dataset, or the given parts.
+    # A snapshot of one REST path, one channel, one flat-file dataset, and every article the
+    # library relies on, or the given parts.
     rest = {"/v1/widgets": item()} if rest is None else rest
     ws = {"/stocks/W": {"get": body(PRICE)}} if ws is None else ws
     ws_pages = {"stocks/widgets.md": ws_page("stocks", "W")} if ws_pages is None else ws_pages
@@ -154,6 +172,7 @@ def make(
             "stocks/overview.md": overview(("stocks/widgets.md", "us_stocks_sip/widgets_v1")),
             "stocks/widgets.md": dataset_page({"ticker": "string", "price": "number"}),
         }
+    articles = dict.fromkeys(knowledge_base.ARTICLES, article()) if articles is None else articles
     return Snapshot(
         openapi={"openapi": "3.0.3", "paths": dict(rest), "components": components or {}},
         llms="",
@@ -166,6 +185,8 @@ def make(
         websocket_page_urls={name: WS + name for name in ws_pages},
         flat_file_pages=dict(flat_pages),
         flat_file_page_urls={name: FLAT + name for name in flat_pages},
+        articles=dict(articles),
+        article_urls={slug: knowledge_base.article_url(slug) for slug in articles},
     )
 
 
@@ -536,6 +557,28 @@ def test_pages_added_to_or_removed_from_the_index() -> None:
     ]
 
 
+# Knowledge-base articles.
+
+
+def test_an_article_whose_text_changed_names_what_the_library_takes_from_it() -> None:
+    after = make(articles={SLUG: article("Ten requests a minute.")})
+    assert compare(after) == [
+        (
+            f"CHANGES - knowledge base `{ARTICLE}`: its text changed: check that it still says "
+            f"what the library relies on: {knowledge_base.ARTICLES[SLUG]}"
+        )
+    ]
+
+
+def test_an_article_added_to_or_removed_from_the_list() -> None:
+    assert compare(make(), make(articles={})) == [
+        f"CHANGES - knowledge base `{ARTICLE}`: not in the vendored snapshot"
+    ]
+    assert compare(make(articles={})) == [
+        f"CHANGES - knowledge base `{ARTICLE}`: vendored, but the library no longer relies on it"
+    ]
+
+
 def test_a_page_that_documents_another_endpoint_or_feed() -> None:
     after = make(
         rest={"/v1/widgets": item(), "/v2/widgets": item()},
@@ -834,6 +877,10 @@ def vendor_files(snap: Snapshot) -> dict[str, tuple[str, bytes]]:
         ("flat-files", snap.flat_file_pages, snap.flat_file_page_urls),
     ):
         files |= {f"{directory}/{name}": (urls[name], pages[name].encode()) for name in pages}
+    files |= {
+        snapshot.article_file(slug): (snap.article_urls[slug], text.encode())
+        for slug, text in snap.articles.items()
+    }
     return files
 
 
@@ -850,7 +897,9 @@ def store(snap: Snapshot, directory: Path) -> Path:
 
 
 def served(snap: Snapshot) -> dict[str, bytes]:
-    return dict(vendor_files(snap).values())
+    # What the live sources answer: each file as stored, but each article as its HTML page.
+    pages = {snap.article_urls[slug]: article_page(text) for slug, text in snap.articles.items()}
+    return dict(vendor_files(snap).values()) | pages
 
 
 class FakeS3(Protocol):
@@ -943,6 +992,19 @@ def test_check_reports_drift_gate_stops_and_unnamed_bucket_prefixes(
     assert "AKIDDRIFT" not in text
     assert "drift-secret" not in text
     assert fake_s3.listings == [None]
+
+
+def test_check_reports_an_article_whose_text_changed(tmp_path: Path) -> None:
+    before = store(make(), tmp_path / "vendor")
+    live = make(articles={SLUG: article("Ten requests a minute.")})
+    report = drift.check(
+        snapshot_directory=before,
+        get=served(live).__getitem__,
+        environ={},
+        committed=COMMITTED,
+        hand=NO_HAND,
+    )
+    assert [(d.area, d.item) for d in report.items] == [("knowledge base", ARTICLE)]
 
 
 def test_check_adds_the_gate_stops_of_the_live_sources(tmp_path: Path) -> None:

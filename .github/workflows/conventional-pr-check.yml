@@ -4,6 +4,11 @@ on:
   # The check reads only the title. A push cannot change it, so pushes do not run the check; an
   # edit that leaves the title alone, such as a rewritten description, skips the job below. The
   # check is not a required one, so a new commit without its status blocks nothing.
+  #
+  # pull_request_target runs this file, and the checkout below fetches the script, as they are
+  # on the base branch, never the pull request's own copies: a pull request cannot change the
+  # check that judges it, and the job's write access never meets the pull request's code. A
+  # change to the check therefore takes effect only once it is merged.
   pull_request_target:
     types:
       - opened
@@ -18,28 +23,41 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/check_pr_title.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check the title against the title standard
         id: lint_pr_title
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The title reaches the script through the environment, never pasted into the
+          # command, so no title can run as shell code.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        # The runner's own Python suffices: the script uses only the standard library.
+        run: |
+          args=()
+          # Dependabot's titles name the package and both versions, so they cannot be held to
+          # the length limit; every other rule still applies to them.
+          if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+            args+=(--skip-length)
+          fi
+          python3 -I scripts/check_pr_title.py "${args[@]}" -- "$PR_TITLE"
 
       - uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        # When the previous steps fails, the workflow would stop. By adding this
-        # condition you can continue the execution with the populated error message.
+        # A failed step stops the job unless a later step asks to run anyway; this one posts
+        # the problems the check found.
         if: always() && (steps.lint_pr_title.outputs.error_message != null)
         with:
           header: pr-title-lint-error
           message: |
-            Pull Request titles must follow the [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/).
-            Breaking changes that are expected to impact users must include "BREAKING CHANGE: <description>" at the end of the PR description.
+            The pull request title breaks the project's [title standard](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/pull-requests.md#title). Retitle the pull request with `gh pr edit <number> --title "<new title>"`, and the check runs again.
 
-            Details:
-
-            ```
             ${{ steps.lint_pr_title.outputs.error_message }}
-            ```
 
-      # Delete a previous comment when the issue has been resolved
+      # Delete a previous comment once the title meets the standard.
       - if: ${{ steps.lint_pr_title.outputs.error_message == null }}
         uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:

@@ -20,8 +20,9 @@ sections, each with the action a person takes:
   channel its path names; documentation pages added to or removed from
   `llms.txt`; a REST page that documents another endpoint, or a WebSocket page another feed;
   a flat-file page's "Columns" table, its "Example Data" header, or an overview's dataset
-  rows; and every problem a refresh gate would stop on if the live sources were fetched and
-  regenerated (`gate_stops`).
+  rows; a knowledge-base article the library relies on whose text changed, or that the
+  vendored snapshot lacks or no longer needs; and every problem a refresh gate would stop on
+  if the live sources were fetched and regenerated (`gate_stops`).
 - **Deprecations** (`Section.DEPRECATIONS`): a path or channel the vendor newly deprecates; a
   deprecated or removed one the committed `rest.json` or `ws.json` still holds (also when
   the snapshot was refetched without regenerating, so neither specification has it); and a
@@ -54,7 +55,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
-from deephaven_massive._massive.refresh import docs, fetch, generate, ws
+from deephaven_massive._massive.refresh import docs, fetch, generate, knowledge_base, ws
 from deephaven_massive._massive.refresh.flatfiles import venue_template
 from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
@@ -155,9 +156,9 @@ class Drift:
     Attributes:
         section: Which kind of drift it is, and so what to do about it.
         area: Where it is: `"REST"`, `"WebSocket"`, `"flat files"`, `"documentation"`,
-            `"bucket"`, or `"refresh"` (a gate stop).
-        item: The vendor item concerned (a path template, specification path, page URL,
-            prefix, or source key), as the vendor spells it.
+            `"knowledge base"`, `"bucket"`, or `"refresh"` (a gate stop).
+        item: The vendor item concerned (a path template, specification path, page or article
+            URL, prefix, or source key), as the vendor spells it.
         detail: What changed, as Markdown with every vendor value already quoted as code.
     """
 
@@ -449,6 +450,38 @@ def _page_changes(before: Snapshot, after: Snapshot) -> Iterator[Drift]:
             )
 
 
+def _article_changes(before: Snapshot, after: Snapshot) -> Iterator[Drift]:
+    """Compare the knowledge-base articles the library relies on.
+
+    The text is compared whole: an article is vendored for what it states, so any change of
+    wording is worth a person's reading.
+
+    Args:
+        before: The vendored snapshot.
+        after: The live sources.
+
+    Yields:
+        A change per article whose text differs, naming what the library takes from it; per
+        article the live sources have but the vendored snapshot lacks (one newly added to
+        `knowledge_base.ARTICLES`); and per article the vendored snapshot has but the live
+        sources do not (one removed from it).
+    """
+    for slug in sorted(before.articles.keys() | after.articles.keys()):
+        url = after.article_urls.get(slug) or before.article_urls[slug]
+        if slug not in before.articles:
+            detail = "not in the vendored snapshot"
+        elif slug not in after.articles:
+            detail = "vendored, but the library no longer relies on it"
+        elif before.articles[slug] != after.articles[slug]:
+            detail = (
+                "its text changed: check that it still says what the library relies on: "
+                f"{knowledge_base.ARTICLES[slug]}"
+            )
+        else:
+            continue
+        yield Drift(section=Section.CHANGES, area="knowledge base", item=url, detail=detail)
+
+
 def _documented_endpoints(snapshot: Snapshot) -> set[str]:
     """Return every endpoint a REST page of the snapshot documents.
 
@@ -681,6 +714,7 @@ def compare(
             file="ws.json",
         ),
         *_page_changes(before, after),
+        *_article_changes(before, after),
     ]
     channels = operations(after.websocket)
     found += _event_mismatches(channels)
