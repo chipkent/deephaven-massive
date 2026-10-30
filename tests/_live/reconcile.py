@@ -68,12 +68,18 @@ def _history(m: MassiveSession, stream: str, *, symbols: list[str], day: date) -
     return table
 
 
-def streamed_bars(folder: Path, stream: str) -> dict[tuple[str, int], tuple[Any, ...]]:
+def streamed_bars(
+    folder: Path, stream: str, *, unreadable: list[str]
+) -> dict[tuple[str, int], tuple[Any, ...]]:
     """Read a stream's bars from its hourly Parquet files, the last of each minute winning.
+
+    A file a killed child left unfinished has no footer and cannot be read: it is skipped and
+    named in `unreadable`, so the rest of the day still compares.
 
     Args:
         folder: The stream day's attempt folder.
         stream: The stream.
+        unreadable: Receives the name of each file that could not be read.
 
     Returns:
         Each bar's fields by `(Symbol, TimestampStart in epoch ns)`.
@@ -81,7 +87,11 @@ def streamed_bars(folder: Path, stream: str) -> dict[tuple[str, int], tuple[Any,
     parquet = importlib.import_module("pyarrow.parquet")
     bars: dict[tuple[str, int], tuple[Any, ...]] = {}
     for path in sorted((folder / "rows").glob(f"{stream}-*.parquet")):
-        table = parquet.read_table(path)
+        try:
+            table = parquet.read_table(path)
+        except (OSError, ValueError):  # pyarrow's ArrowInvalid is a ValueError
+            unreadable.append(path.name)
+            continue
         starts = table.column("TimestampStart").cast("int64").to_pylist()
         symbols = table.column("Symbol").to_pylist()
         values = list(zip(*(table.column(f).to_pylist() for f in FIELDS), strict=True))
@@ -141,12 +151,15 @@ def run_reconcile(
         stream_folder: The stream day's attempt folder.
         day: The stream day.
         folder: This attempt's folder.
-        report: Receives each unit's name, status, and reason.
+        report: Receives each unit's name, status, and reason: passed when its bars were
+            compared, failed when the stream day left none.
     """
-    summary: dict[str, Any] = {"day": day.isoformat(), "streams": {}}
+    unreadable: list[str] = []
+    summary: dict[str, Any] = {"day": day.isoformat(), "streams": {}, "unreadable": unreadable}
     for unit in units:
+        compared = 0
         for stream in UNIT_STREAMS[unit.split()[0]]:
-            streamed = streamed_bars(stream_folder, stream)
+            streamed = streamed_bars(stream_folder, stream, unreadable=unreadable)
             symbols = sorted({symbol for symbol, _ in streamed})
             fetched: dict[tuple[str, int], tuple[Any, ...]] = {}
             if symbols:
@@ -154,6 +167,7 @@ def run_reconcile(
                     start = int(row["TimestampStart"].timestamp() * 1e9)
                     fetched[row["Symbol"], start] = tuple(row[f] for f in FIELDS)
             rows = compare(streamed, fetched)
+            compared += len(symbols)
             append_csv(folder / "reconciliation.csv", [{"stream": stream} | r for r in rows])
             both = sum(r["both"] for r in rows)
             matched = sum(round((r["match_share"] or 0) * r["both"]) for r in rows)
@@ -162,5 +176,8 @@ def run_reconcile(
                 "bars_on_both_sides": both,
                 "match_share": round(matched / both, 4) if both else None,
             }
-        report(unit, "passed", "")
+        if compared:
+            report(unit, "passed", "")
+        else:
+            report(unit, "failed", "no streamed bars to compare")
     (folder / "summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")

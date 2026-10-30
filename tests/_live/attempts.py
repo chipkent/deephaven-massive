@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 from tests._live import children, run_state
 from tests._live.calendar import NEW_YORK
+from tests._live.machine_checks import REQUIRED_DISK
 from tests._live.outcomes import (
     COLLECTION_VARIABLE,
     OUTCOMES_VARIABLE,
@@ -34,7 +35,7 @@ from tests._live.outcomes import (
     read_outcomes,
 )
 from tests._live.run_probe import plans_variable
-from tests._live.run_schedule import PYTEST_GROUPS, due_names, half_day_suffix
+from tests._live.run_schedule import PYTEST_GROUPS, PYTEST_PATHS, due_names, half_day_suffix
 from tests._live.run_state import Attempt, RunState, check_of, is_due, record
 
 if TYPE_CHECKING:
@@ -84,23 +85,6 @@ def new_attempt(ctx: RunContext, state: RunState, group: str) -> Attempt:
     return attempt
 
 
-def mark_stale_attempts(state: RunState) -> list[Attempt]:
-    """Mark the attempts recorded as running whose child is gone as interrupted.
-
-    Args:
-        state: The run's state, read on resume.
-
-    Returns:
-        The attempts marked.
-    """
-    stale = [
-        a for a in state.attempts if a.status == "running" and not children.is_alive(a.pid, a.token)
-    ]
-    for attempt in stale:
-        attempt.status = "interrupted"
-    return stale
-
-
 def run_child(
     ctx: RunContext,
     state: RunState,
@@ -123,8 +107,8 @@ def run_child(
     Returns:
         Whether the program stopped the child at `until`.
 
-    Raises:
-        KeyboardInterrupt: When Control-C stopped the child; the attempt is interrupted.
+    Whatever interrupts the wait (Control-C, a hang-up, an error) stops the child, marks the
+    attempt interrupted, and goes on.
     """
     child = children.start(
         argv,
@@ -132,17 +116,42 @@ def run_child(
         env=env,
         log=ctx.out / attempt.folder / "group.log",
         secrets_filter=ctx.secrets,
-        echo=lambda line: ctx.echo(f"  | {line[:96]}"),
+        echo=lambda line: None if is_startup_noise(line) else ctx.echo(f"  | {line[:96]}"),
     )
     attempt.pid = child.process.pid
     run_state.save(ctx.out, state)
     try:
         code, stopped = children.wait(child, deadline=until, now=ctx.now, grace=ctx.stop_grace)
-    except KeyboardInterrupt:
+    except BaseException:
         attempt.status, attempt.ended = "interrupted", ctx.now().isoformat()
         raise
     attempt.exit_code, attempt.ended, attempt.status = code, ctx.now().isoformat(), "finished"
     return stopped
+
+
+STARTUP_NOISE: Final = (
+    "# Starting io.deephaven",
+    "# io.deephaven.",
+    "deephaven.cacheDir=",
+    "deephaven.configDir=",
+    "deephaven.dataDir=",
+    "Server started on port",
+)
+"""The starts of the lines an embedded Deephaven server prints as it starts. They still go to
+`group.log`, but the terminal shows only what the tester may act on."""
+
+
+def is_startup_noise(line: str) -> bool:
+    """Tell whether a child's line is the embedded server's start-up chatter.
+
+    Args:
+        line: The line.
+
+    Returns:
+        True for a line starting with one of `STARTUP_NOISE`, or a JVM's count of compiler
+        directives.
+    """
+    return line.startswith(STARTUP_NOISE) or line.endswith("compiler directives added")
 
 
 def environment(
@@ -210,7 +219,9 @@ def collect(
     """
     folder = ctx.out / attempt.folder
     target = folder / "collection.json"
-    argv = _pytest_argv(ctx, attempt, group=group, rest=["--collect-only", "-q"])
+    argv = _pytest_argv(
+        ctx, attempt, group=group, rest=["--collect-only", "-q", *PYTEST_PATHS.get(group, ())]
+    )
     env = environment(ctx, state, folder=folder, extra={COLLECTION_VARIABLE: str(target)})
     run_child(ctx, state, attempt, argv=argv, env=env, until=until)
     attempt.status = "running"
@@ -276,7 +287,7 @@ def run_pytest_group(
     ctx.say(f"{group}: {len(due)} checks; on Basic, up to {minutes} minutes of requests")
     move_evidence(ctx.root / "live-evidence.log", ctx.out / "orphans")
     outcomes = folder / "outcomes.jsonl"
-    argv = _pytest_argv(ctx, attempt, group=group, rest=due)
+    argv = _pytest_argv(ctx, attempt, group=group, rest=["--tb=short", *due])
     env = environment(ctx, state, folder=folder, extra={OUTCOMES_VARIABLE: str(outcomes)})
     stopped = True
     try:
@@ -318,6 +329,34 @@ def _pytest_results(outcomes: Path, due: list[str]) -> dict[str, tuple[str, str]
     return {n: check_outcome(by_test[n]) if n in by_test else None for n in due}
 
 
+def record_results(
+    state: RunState,
+    *,
+    group: str,
+    found: dict[str, tuple[str, str] | None],
+    stopped: bool,
+    day: str,
+) -> None:
+    """Record each check's result.
+
+    A check that left no record never started: it is `interrupted`, still due and not counted
+    as a failure. One that started and never finished is an `error` when the child ended by
+    itself, and `interrupted` when the program stopped it.
+
+    Args:
+        state: The run's state.
+        group: The group.
+        found: Each check's `(status, reason)`, or None when it left no record.
+        stopped: Whether the program stopped the child.
+        day: The attempt's New York date, ISO.
+    """
+    for name, result in found.items():
+        status, reason = result if result is not None else ("interrupted", "")
+        if status == "error" and stopped:
+            status, reason = "interrupted", ""
+        record(state, check_of(state, group, name), status=status, reason=reason, day=day)
+
+
 def _record_all(
     ctx: RunContext,
     state: RunState,
@@ -327,10 +366,7 @@ def _record_all(
     found: dict[str, tuple[str, str] | None],
     stopped: bool,
 ) -> None:
-    """Record each check's result, and save the state.
-
-    A check with no result, or one that did not finish, is `interrupted` (still due) when the
-    program stopped the child, and `error` when the child ended by itself.
+    """Record each check's result (`record_results`), and save the state.
 
     Args:
         ctx: The command's context.
@@ -341,13 +377,49 @@ def _record_all(
         stopped: Whether the program stopped the child.
     """
     day = ctx.now().astimezone(NEW_YORK).date().isoformat()
-    for name, result in found.items():
-        status, reason = result if result is not None else ("error", "the child ended first")
-        if status == "error" and stopped:
-            status, reason = "interrupted", ""
-        record(state, check_of(state, group, name), status=status, reason=reason, day=day)
+    record_results(state, group=group, found=found, stopped=stopped, day=day)
     memory.finished_since_pack = True
     run_state.save(ctx.out, state)
+
+
+def recover_stale_attempts(ctx: RunContext, state: RunState) -> list[Attempt]:
+    """On resume, end what an earlier run left behind and keep what its children recorded.
+
+    An attempt recorded as running belongs to a run that ended without stopping its child (a
+    closed terminal, a crash). A child still alive, its token on its command line, is killed
+    with its whole process group, so two children never share the key or the folder. Then the
+    results its child wrote are recorded: each test's outcomes, or each built-in check's
+    result. Checks without a result stay due.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+
+    Returns:
+        The attempts recovered, now `interrupted`.
+    """
+    stale = [a for a in state.attempts if a.status == "running"]
+    for attempt in stale:
+        if children.is_alive(attempt.pid, attempt.token):
+            children.kill_group(attempt.pid)
+            ctx.say(f"stopped a child the last run left running ({attempt.group})")
+        folder = ctx.out / attempt.folder
+        found: dict[str, tuple[str, str] | None] = {}
+        if attempt.group in PYTEST_GROUPS:
+            by_test: dict[str, list[dict[str, Any]]] = {}
+            for line in read_outcomes(folder / "outcomes.jsonl"):
+                by_test.setdefault(line["nodeid"], []).append(line)
+            day = date.fromisoformat(attempt.day)
+            suffix = half_day_suffix(day) if attempt.group == "half-day" else ""
+            found = {n + suffix: check_outcome(lines) for n, lines in by_test.items()}
+        else:
+            found = {
+                r["name"]: (r["status"], r["reason"])
+                for r in read_outcomes(folder / "results.jsonl")
+            }
+        record_results(state, group=attempt.group, found=found, stopped=True, day=attempt.day)
+        attempt.status = "interrupted"
+    return stale
 
 
 def run_built_in_group(
@@ -363,12 +435,22 @@ def run_built_in_group(
         until: When the group ends; a streaming child ends itself two minutes before, and is
             stopped `STREAM_GRACE` after.
 
-    Control-C stops the child; what finished is recorded, and the `KeyboardInterrupt` goes on.
+    A stream day does not start with less free disk than `machine_checks.REQUIRED_DISK`; its
+    units stay due. Control-C stops the child; what finished is recorded, and the
+    `KeyboardInterrupt` goes on.
     """
     today = ctx.now().astimezone(NEW_YORK).date()
-    due = due_names(state, group, today, any_time=group in memory.any_time) or []
+    due = due_names(state, group, today, any_time=group in state.any_time) or []
     attempt = new_attempt(ctx, state, group)
     folder = ctx.out / attempt.folder
+    if group == "stream-day" and (free := ctx.free_disk(ctx.out)) < REQUIRED_DISK:
+        ctx.say(
+            f"stream-day: only {free >> 30} GB free under {ctx.out}; it needs "
+            f"{REQUIRED_DISK >> 30} GB: free some space, and it starts again"
+        )
+        attempt.status, attempt.ended = "finished", ctx.now().isoformat()
+        run_state.save(ctx.out, state)
+        return
     streams = [a.folder for a in state.attempts if a.group == "stream-day"]
     request = {
         "group": group,

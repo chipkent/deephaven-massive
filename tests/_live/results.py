@@ -280,7 +280,8 @@ def pack(
 
     Returns:
         The zip's path and no finds; or None and every find, when a secret was found and
-        nothing was zipped.
+        nothing was zipped. Parquet files, already compressed, are stored as they are. Once
+        the new zip is written, the older ones are deleted, since each zip holds everything.
     """
     write_checks_csv(folder, state)
     write_report(folder, state)
@@ -294,6 +295,10 @@ def pack(
         for path in sorted(p for p in folder.rglob("*") if p.is_file()):
             if path in skip or path == partial or path.name.startswith(".state-"):
                 continue
-            archive.write(path, path.relative_to(folder).as_posix())
+            stored = zipfile.ZIP_STORED if path.suffix == ".parquet" else zipfile.ZIP_DEFLATED
+            archive.write(path, path.relative_to(folder).as_posix(), compress_type=stored)
     partial.replace(target)
+    for older in folder.glob("live-results-*.zip"):
+        if older != target:
+            older.unlink()
     return target, []

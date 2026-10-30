@@ -250,11 +250,18 @@ over every REST body and WebSocket frame already cleaned of the key. A check tha
 run again until a subscription's tier rises; a check that failed runs once more; a check
 skipped for a missing subscription waits for the subscriptions to change.
 
+Control-C, a closed terminal, and a `kill` all stop the program the same way: the running
+child is stopped, the state saved, and the same `run` command resumes. A resume first stops any
+child an earlier run left behind and keeps every result that child recorded. `--any-time`
+takes effect once per results folder; a resume finishes its groups without it.
+
 The program reads the secrets only from the environment and never writes them: every line it
 prints or writes passes through a filter that replaces each secret's value (plain or
-URL-encoded) and any `apiKey=`, `Authorization`, or `X-Amz-` value with `***`, and `pack`
-scans every file of the results folder for each secret, plain, URL-encoded, and base64, and
-refuses to zip a folder in which it finds one. The program's logic lives in `tests/_live/`
+URL-encoded), a proxy URL's password, and any `apiKey=`, `Authorization`, or `X-Amz-` value
+with `***`. `pack` scans every file of the results folder for each secret, plain,
+URL-encoded, and base64, and refuses to zip a folder in which it finds one. It also refuses
+unless the terminal holds exactly the secrets the run used: `run` records a salted fingerprint
+of each one, never its value, so a scan for other values cannot pass by mistake. The program's logic lives in `tests/_live/`
 (`cli.py` and the modules it names), unit-tested against the fakes; the script is its entry
 point.
 

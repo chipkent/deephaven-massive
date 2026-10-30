@@ -156,3 +156,17 @@ def test_pack_refuses_when_a_secret_is_anywhere(tmp_path: Path) -> None:
     assert target is None
     assert finds == ["debug.log: line 2"]
     assert not list(tmp_path.glob("*.zip"))
+
+
+def test_pack_stores_parquet_as_it_is_and_keeps_only_the_newest_zip(tmp_path: Path) -> None:
+    (tmp_path / "rows").mkdir()
+    (tmp_path / "rows" / "bars.parquet").write_bytes(b"PAR1" * 100)
+    (tmp_path / "group.log").write_text("line\n" * 100)
+    (tmp_path / "live-results-2026-11-03.zip").write_bytes(b"older")
+    target, _ = results.pack(tmp_path, _state(), SecretFilter((PLANTED_KEY,)), day="2026-11-04")
+    assert target is not None
+    with zipfile.ZipFile(target) as archive:
+        kinds = {info.filename: info.compress_type for info in archive.infolist()}
+    assert kinds["rows/bars.parquet"] == zipfile.ZIP_STORED
+    assert kinds["group.log"] == zipfile.ZIP_DEFLATED
+    assert sorted(p.name for p in tmp_path.glob("*.zip")) == ["live-results-2026-11-04.zip"]

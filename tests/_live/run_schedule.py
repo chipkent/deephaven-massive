@@ -6,7 +6,7 @@ from the state, the run's memory, and the time:
 1. Probe when the day's probe time (`timetable.probe_time`) has passed since the last probe, or
    when a probe that could not tell the tiers is due to be tried again.
 2. Sleep through the pause after a probe, so the first group starts on an unspent minute.
-3. Run the `--any-time` groups that still have due checks, at once.
+3. Run the `--any-time` groups that still have due checks, at once, except on a stream day.
 4. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today,
    and whose latest start has not passed; sleep until its earliest start if it is not open yet.
 5. Otherwise sleep until the next trading day's probe.
@@ -35,8 +35,8 @@ PYTEST_GROUPS: Final = {
     "evidence": ("-m", "integration", "-k", "not luld"),
     "luld": ("-m", "integration", "-k", "luld"),
     "smoke": ("-m", "integration_smoke"),
-    "limits-ws": ("-m", "integration_limits", "tests/massive/ws/test_client_integration.py"),
-    "limits-second-connection": ("-m", "integration_limits", "tests/ingest/test_ws_integration.py"),
+    "limits-ws": ("-m", "integration_limits"),
+    "limits-second-connection": ("-m", "integration_limits"),
     "half-day": (
         "-m",
         "integration",
@@ -44,7 +44,15 @@ PYTEST_GROUPS: Final = {
         "day_and_week_bar_stamps_from_rest or day_and_longer_bar_stamps_from_rest",
     ),
 }
-"""Each pytest group's selection, as pytest arguments."""
+"""Each pytest group's selection, as pytest options."""
+
+PYTEST_PATHS: Final = {
+    "limits-ws": ("tests/massive/ws/test_client_integration.py",),
+    "limits-second-connection": ("tests/ingest/test_ws_integration.py",),
+}
+"""The test files a group collects from, when not every test file: only its collection names
+them, since the run itself names only the due tests, and a path beside them would run the
+path's every test."""
 
 PROBE_RETRIES: Final = 3
 PROBE_RETRY_AFTER: Final = timedelta(minutes=5)
@@ -103,13 +111,26 @@ def known_names(state: RunState, group: str, today: date) -> list[str] | None:
         "responses": [e.name for e in EXAMPLES],
         "stream-day": stream_units(tiers),
         "throughput": throughput_units(tiers),
-        "stream-day-reconcile": [
-            c.name
-            for c in state.checks.values()
-            if c.group == "stream-day" and c.status == "passed"
-        ],
+        "stream-day-reconcile": _reconcile_units(state, today),
     }
     return names.get(group, [])
+
+
+def _reconcile_units(state: RunState, today: date) -> list[str]:
+    """Return the units to compare with history: those that streamed a whole earlier day.
+
+    Args:
+        state: The run's state.
+        today: The New York date.
+
+    Returns:
+        The stream day's passed units, once its day is over; none before.
+    """
+    if not state.stream_days or state.stream_days[-1] >= today.isoformat():
+        return []
+    return [
+        c.name for c in state.checks.values() if c.group == "stream-day" and c.status == "passed"
+    ]
 
 
 def due_names(
@@ -194,8 +215,8 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
     """Decide the run's next step.
 
     Args:
-        state: The run's state.
-        memory: The run's memory; finished `--any-time` groups are removed from it.
+        state: The run's state; `--any-time` groups with nothing due leave its list.
+        memory: The run's memory.
         now: The current time, aware.
 
     Returns:
@@ -208,11 +229,10 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
         return Step("probe")
     if memory.not_before is not None and now < memory.not_before:
         return Step("sleep", "the pause after the probe", memory.not_before)
-    for group in list(memory.any_time):
+    for group in list(state.any_time) if kind is not timetable.DayKind.STREAM else []:
         if has_due(state, group, today, any_time=True):
-            stop = timetable.at(today + timedelta(days=1), timetable.HARD_STOP)
-            return Step("run", group, stop)
-        memory.any_time.remove(group)
+            return Step("run", group, any_time_stop(state, today))
+        state.any_time.remove(group)
     for slot in timetable.slots(today, kind):
         if ran_today(state, slot.group, today) or not has_due(state, slot.group, today):
             continue
@@ -221,6 +241,23 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
         if now <= timetable.at(today, slot.latest):
             return Step("run", slot.group, timetable.stop_of(today, slot))
     return Step("sleep", "the next probe", next_probe(state, today))
+
+
+def any_time_stop(state: RunState, today: date) -> datetime:
+    """Return when an `--any-time` attempt started today is stopped.
+
+    Args:
+        state: The run's state, for its planned stream day.
+        today: The New York date.
+
+    Returns:
+        03:00 of the next day, or the planned stream day's probe if that comes first.
+    """
+    stop = timetable.at(today + timedelta(days=1), timetable.HARD_STOP)
+    if state.stream_day > today.isoformat():
+        planned = date.fromisoformat(state.stream_day)
+        stop = min(stop, timetable.at(planned, timetable.STREAM_PROBE))
+    return stop
 
 
 def next_probe(state: RunState, today: date) -> datetime:

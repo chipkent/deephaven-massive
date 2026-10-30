@@ -21,6 +21,7 @@ The parent's main thread calls every function; each child's output thread only w
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import signal
@@ -173,6 +174,11 @@ def _copy_output(
             echo(line)
 
 
+WAIT_SLICE: Final = 30.0
+"""The longest single wait on a child, in seconds: the wall clock is checked after each, so a
+deadline is kept even when the machine slept, which a single long timeout would not count."""
+
+
 def stop(child: Child, *, grace: float = STOP_GRACE) -> None:
     """Stop a child: SIGINT to its process group, then SIGKILL after the grace period.
 
@@ -180,11 +186,11 @@ def stop(child: Child, *, grace: float = STOP_GRACE) -> None:
         child: The child.
         grace: Seconds to wait after SIGINT.
     """
-    _signal_group(child.process.pid, signal.SIGINT)
+    _signal_group(child.process, signal.SIGINT)
     try:
         child.process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
-        _signal_group(child.process.pid, signal.SIGKILL)
+        _signal_group(child.process, signal.SIGKILL)
         child.process.wait()
     _finish(child)
 
@@ -200,23 +206,46 @@ def _finish(child: Child) -> None:
         child.process.stdin.close()
 
 
-def _signal_group(pid: int, signal_number: signal.Signals) -> None:
+def _signal_group(process: subprocess.Popen[bytes], signal_number: signal.Signals) -> None:
     """Send a signal to a child's process group, which may be gone already.
 
+    On macOS, `killpg` of a group whose leader has exited but not yet been reaped raises
+    `PermissionError` rather than `ProcessLookupError`; either means there is nothing left to
+    signal once `poll()` reaps the leader.
+
     Args:
-        pid: The child's pid, which is its group's id.
+        process: The child, whose pid is its group's id.
         signal_number: The signal.
+
+    Raises:
+        PermissionError: When the group is still running but may not be signalled.
     """
     try:
-        os.killpg(pid, signal_number)
+        os.killpg(process.pid, signal_number)
     except ProcessLookupError:
         return
+    except PermissionError:
+        if process.poll() is None:
+            raise
+
+
+def kill_group(pid: int) -> None:
+    """Kill a process group left behind by an earlier run of the program.
+
+    Args:
+        pid: The recorded child's pid, its group's id.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
 
 
 def wait(
     child: Child, *, deadline: datetime, now: Callable[[], datetime], grace: float = STOP_GRACE
 ) -> tuple[int, bool]:
-    """Wait for a child to end, stopping it at its deadline or on Control-C.
+    """Wait for a child to end, stopping it at its deadline or when the parent is interrupted.
+
+    It waits in slices of at most `WAIT_SLICE` seconds and checks the wall clock after each,
+    so a deadline passed while the machine slept stops the child at once on waking.
 
     Args:
         child: The child.
@@ -225,22 +254,24 @@ def wait(
         grace: Seconds a stopped child gets after SIGINT (`stop`).
 
     Returns:
-        The exit status (negative for a signal) and whether the child was stopped.
-
-    Raises:
-        KeyboardInterrupt: After stopping the child, when Control-C reached the parent.
+        The exit status (negative for a signal) and whether the child was stopped. Whatever
+        interrupts the wait (Control-C, a hang-up, an error) stops the child, then goes on.
     """
     try:
-        remaining = (deadline - now()).total_seconds()
-        code = child.process.wait(timeout=max(remaining, 0.0))
-    except subprocess.TimeoutExpired:
-        stop(child, grace=grace)
-        return child.process.returncode, True
-    except KeyboardInterrupt:
+        while True:
+            remaining = (deadline - now()).total_seconds()
+            if remaining <= 0:
+                stop(child, grace=grace)
+                return child.process.returncode, True
+            try:
+                code = child.process.wait(timeout=min(remaining, WAIT_SLICE))
+            except subprocess.TimeoutExpired:
+                continue
+            _finish(child)
+            return code, False
+    except BaseException:
         stop(child, grace=grace)
         raise
-    _finish(child)
-    return code, False
 
 
 def is_alive(pid: int, token: str) -> bool:

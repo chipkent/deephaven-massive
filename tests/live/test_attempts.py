@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import _thread
 import json
+import signal
+import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +60,7 @@ class Harness:
         self.root = tmp_path / "root"
         self.root.mkdir()
         self.lines: list[str] = []
+        self.started = time.monotonic()
         self.environ: dict[str, str] = {"MASSIVE_API_KEY": PLANTED_KEY, "FAKE_LIVE_CHILD": "{}"}
         self.ctx = RunContext(
             out=tmp_path / "out",
@@ -66,7 +70,7 @@ class Harness:
             commit="c",
             probe=_no_probe,
             machine=_no_machine,
-            now=lambda: NOW,
+            now=self.now,
             python=str(wrapper),
             script=Path("live_run.py"),
             echo=self.lines.append,
@@ -76,6 +80,14 @@ class Harness:
         self.state = RunState(commit="c")
         self.state.current = entitlement_id(self.state, BASIC, [])
         self.memory = RunMemory()
+
+    def now(self) -> datetime:
+        """Return the test's day and time, moving on with the real clock as a child's wait needs.
+
+        Returns:
+            The time, aware.
+        """
+        return NOW + timedelta(seconds=time.monotonic() - self.started)
 
     def script(self, **behavior: object) -> None:
         self.environ["FAKE_LIVE_CHILD"] = json.dumps(behavior)
@@ -120,7 +132,7 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
         harness.state, harness.check("evidence", C), status="passed", reason="", day="2026-11-03"
     )
     harness.script(
-        print=[f"collecting with {PLANTED_KEY}"],
+        print=[f"collecting with {PLANTED_KEY}", "Server started on port 1"],
         evidence="evidence line\n",
         collection={
             A: {"items": ["21"], "requests": 12},
@@ -138,7 +150,7 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
     argv = json.loads((folder / "argv.json").read_text())
     assert argv[:4] == ["-m", "pytest", "-p", "tests._live.outcomes"]
     assert argv[-2:] == [A, B]  # the passed test is not due
-    assert argv[-6:-2] == ["-m", "integration", "-k", "not luld"]
+    assert argv[-7:-2] == ["-m", "integration", "-k", "not luld", "--tb=short"]
     assert harness.check("evidence", A).status == "passed"
     assert harness.check("evidence", A).items == ["21"]
     assert (harness.check("evidence", B).status, harness.check("evidence", B).reason) == (
@@ -154,6 +166,8 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
     assert "collecting with ***" in log
     assert PLANTED_KEY not in log
     assert all(PLANTED_KEY not in line for line in harness.lines)
+    assert "Server started on port 1" in log  # the server's chatter is logged, not shown
+    assert not any("Server started" in line for line in harness.lines)
     assert any(
         "evidence: 2 checks; on Basic, up to 4 minutes of requests" in line
         for line in harness.lines
@@ -163,13 +177,19 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
     assert run_state.load(harness.ctx.out) == harness.state
 
 
-def test_a_test_that_left_no_record_is_an_error_when_the_child_ends_by_itself(
-    harness: Harness,
-) -> None:
+def test_a_test_that_left_no_record_stays_due_without_a_failure(harness: Harness) -> None:
     harness.script(collection={A: {"items": [], "requests": 10}}, exit=1)
     _run(harness)
     check = harness.check("evidence", A)
-    assert (check.status, check.reason, check.failures) == ("error", "the child ended first", 1)
+    assert (check.status, check.failures) == ("not run", 0)
+
+
+def test_a_test_that_started_and_never_finished_is_an_error(harness: Harness) -> None:
+    started = [_phase("setup", "passed")]
+    harness.script(collection={A: {"items": [], "requests": 10}}, outcomes={A: started}, exit=1)
+    _run(harness)
+    check = harness.check("evidence", A)
+    assert (check.status, check.reason, check.failures) == ("error", "did not finish", 1)
 
 
 def test_a_group_with_nothing_due_runs_no_tests(harness: Harness) -> None:
@@ -260,7 +280,7 @@ def test_a_built_in_group_reports_through_its_results_file(harness: Harness) -> 
         S3_PAIR
     )
     harness.script(results=[{"name": "market-status", "status": "passed", "reason": ""}])
-    harness.memory.any_time = ["responses"]
+    harness.state.any_time = ["responses"]
     attempts.run_built_in_group(
         harness.ctx,
         harness.state,
@@ -277,7 +297,7 @@ def test_a_built_in_group_reports_through_its_results_file(harness: Harness) -> 
         "--token", harness.state.attempts[-1].token,
     ]  # fmt: skip
     assert harness.check("responses", "market-status").status == "passed"
-    assert harness.check("responses", "ticker-details").status == "error"
+    assert harness.check("responses", "ticker-details").status == "not run"  # no result: due
 
 
 def test_the_responses_child_gets_no_s3_pair(harness: Harness) -> None:
@@ -318,13 +338,73 @@ def test_attempts_are_numbered_per_group_and_day(harness: Harness) -> None:
     assert (harness.ctx.out / second.folder).is_dir()
 
 
-def test_attempts_whose_child_is_gone_are_marked_interrupted() -> None:
-    state = RunState(commit="c")
-    gone = Attempt("evidence", "e", "2026-11-04", "", pid=0)
-    done = Attempt("evidence", "e", "2026-11-04", "", status="finished")
-    state.attempts = [gone, done]
-    assert attempts.mark_stale_attempts(state) == [gone]
-    assert (gone.status, done.status) == ("interrupted", "finished")
+def test_a_resume_keeps_what_a_stale_attempts_children_recorded(harness: Harness) -> None:
+    pytest_folder = harness.ctx.out / "evidence" / "2026-11-03-1"
+    built_in_folder = harness.ctx.out / "responses" / "2026-11-03-1"
+    for folder in (pytest_folder, built_in_folder):
+        folder.mkdir(parents=True)
+    lines = [{"nodeid": A, **phase} for phase in PASS] + [
+        {"nodeid": B, **_phase("setup", "passed")}
+    ]
+    (pytest_folder / "outcomes.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+    result = {"name": "market-status", "status": "passed", "reason": ""}
+    (built_in_folder / "results.jsonl").write_text(json.dumps(result) + "\n")
+    gone = Attempt("evidence", "evidence/2026-11-03-1", "2026-11-03", "", pid=0)
+    stale = Attempt("responses", "responses/2026-11-03-1", "2026-11-03", "", pid=0)
+    done = Attempt("smoke", "smoke/x", "2026-11-03", "", status="finished")
+    harness.state.attempts = [gone, stale, done]
+    assert attempts.recover_stale_attempts(harness.ctx, harness.state) == [gone, stale]
+    assert [a.status for a in (gone, stale, done)] == ["interrupted", "interrupted", "finished"]
+    assert harness.check("evidence", A).status == "passed"
+    check = harness.check("evidence", B)  # started, never finished, and the run was stopped
+    assert (check.status, check.failures) == ("not run", 0)
+    assert harness.check("responses", "market-status").status == "passed"
+
+
+def test_a_resume_kills_a_child_the_last_run_left_running(harness: Harness) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", "orphan-mark-5d"],
+        start_new_session=True,
+    )
+    try:
+        folder = "stream-day/2026-11-03-1"
+        (harness.ctx.out / folder).mkdir(parents=True)
+        mark = str(process.args[-1])  # type: ignore[index]  # Popen.args is the list above
+        orphan = Attempt("stream-day", folder, "2026-11-03", "", pid=process.pid, token=mark)
+        harness.state.attempts = [orphan]
+        attempts.recover_stale_attempts(harness.ctx, harness.state)
+        assert process.wait(timeout=10) == -signal.SIGKILL
+        assert any("stopped a child the last run left running" in x for x in harness.lines)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_a_stream_day_waits_for_free_disk(harness: Harness) -> None:
+    harness.state.current = entitlement_id(harness.state, BASIC | {"stocks": "starter"}, [])
+    harness.ctx.free_disk = lambda _folder: 3 << 30
+    attempts.run_built_in_group(
+        harness.ctx, harness.state, harness.memory, group="stream-day", until=NOW
+    )
+    assert not (harness.ctx.out / "stream-day" / "2026-11-04-1" / "request.json").exists()
+    assert harness.state.attempts[-1].status == "finished"
+    assert any("only 3 GB free" in line for line in harness.lines)
+    assert harness.check("stream-day", "stocks delayed").status == "not run"
+
+
+def test_a_limits_group_names_its_file_only_to_collect(harness: Harness) -> None:
+    harness.script(collection={A: {"items": [], "requests": 1}}, outcomes={A: PASS})
+    _run(harness, "limits-ws")
+    argv = json.loads((harness.ctx.out / "limits-ws" / "2026-11-04-1" / "argv.json").read_text())
+    assert "tests/massive/ws/test_client_integration.py" not in argv
+    assert argv[-1] == A
+
+
+def test_the_servers_start_up_lines_are_noise() -> None:
+    assert attempts.is_startup_noise("# Starting io.deephaven.python.server.EmbeddedServer")
+    assert attempts.is_startup_noise("1 compiler directives added")
+    assert not attempts.is_startup_noise("tests/x.py::test_a PASSED")
 
 
 def test_evidence_never_overwrites_evidence(tmp_path: Path) -> None:

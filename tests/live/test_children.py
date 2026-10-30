@@ -185,3 +185,61 @@ def test_sleep_until_returns_once_the_moment_passed() -> None:
     moment = _now()
     times = iter([moment - timedelta(milliseconds=1), moment])
     children.sleep_until(moment, now=lambda: next(times), step=0.01)
+
+
+def test_a_deadline_passed_during_a_wait_slice_stops_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, _, ready = _start(tmp_path, SLEEPER)
+    assert ready.wait(30)
+    monkeypatch.setattr(children, "WAIT_SLICE", 0.05)
+    start = _now()
+    times = iter([start, start + timedelta(hours=9)])  # the machine slept through the deadline
+
+    def clock() -> datetime:
+        return next(times, start + timedelta(hours=9))
+
+    code, stopped = children.wait(child, deadline=start + timedelta(hours=1), now=clock, grace=30)
+    assert stopped
+    assert code != 0
+
+
+def test_signalling_a_group_whose_leader_exited_unreaped_is_harmless(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, _, _ = _start(tmp_path, "pass")
+    child.process.wait()
+
+    def refuse(_pid: int, _number: int) -> None:
+        raise PermissionError(1, "Operation not permitted")  # macOS, before the reap
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    children.stop(child, grace=0.2)
+    assert child.process.returncode == 0
+
+
+def test_signalling_a_running_group_that_refuses_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, _, ready = _start(tmp_path, SLEEPER)
+    assert ready.wait(30)
+    real_killpg = os.killpg
+
+    def refuse(_pid: int, _number: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    with pytest.raises(PermissionError):
+        children.stop(child, grace=0.2)
+    real_killpg(child.process.pid, 9)
+    child.process.wait()
+    child.output.join()
+
+
+def test_a_left_behind_group_is_killed_and_a_missing_one_ignored(tmp_path: Path) -> None:
+    child, _, ready = _start(tmp_path, STUBBORN)
+    assert ready.wait(30)
+    children.kill_group(child.process.pid)
+    assert child.process.wait(timeout=10) == -9
+    child.output.join()
+    children.kill_group(child.process.pid)  # gone now: nothing to do

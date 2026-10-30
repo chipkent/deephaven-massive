@@ -445,14 +445,39 @@ def _listen(table: Table, stream: Stream, recorder: Recorder) -> TableListenerHa
         ends.
     """
     listener = importlib.import_module("deephaven.table_listener")
+    handle: TableListenerHandle = listener.listen(table, RowCopier(stream, recorder).on_update)
+    return handle
 
-    def on_update(update: TableUpdate, is_replay: bool) -> None:
+
+class RowCopier:
+    """The listener of one stream's blink table: it hands each update's added rows on.
+
+    Created by `_listen` for each stream. Deephaven calls `on_update` on an update-graph thread
+    holding its lock, one update at a time, so it only copies the added rows and queues them on
+    the recorder, whose own thread writes them.
+    """
+
+    def __init__(self, stream: Stream, recorder: Recorder) -> None:
+        """Remember where the rows go.
+
+        Args:
+            stream: The stream.
+            recorder: The recorder.
+        """
+        self._stream = stream
+        self._recorder = recorder
+
+    def on_update(self, update: TableUpdate, is_replay: bool) -> None:
+        """Queue one update's added rows, when it has any.
+
+        Args:
+            update: The update; only its added rows are read (a blink table has no others).
+            is_replay: Whether it replays the table's first rows; listeners here never ask for
+                a replay, so it is ignored.
+        """
         added = update.added()
         if added and len(next(iter(added.values()))):
-            recorder.put(stream, added)
-
-    handle: TableListenerHandle = listener.listen(table, on_update)
-    return handle
+            self._recorder.put(self._stream, added)
 
 
 def process_sample(now: datetime) -> dict[str, Any]:

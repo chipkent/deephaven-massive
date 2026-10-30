@@ -19,6 +19,8 @@ which reads files.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import os
 import re
 import urllib.parse
@@ -36,6 +38,9 @@ SECRET_VARIABLES: Final = (
     "MASSIVE_S3_SECRET_ACCESS_KEY",
 )
 """The environment variables whose values are secrets."""
+
+PROXY_VARIABLES: Final = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+"""The proxy variables, whose URL may carry a password."""
 
 REDACTED: Final = "***"
 """What a secret becomes in cleaned text."""
@@ -76,6 +81,10 @@ class SecretFilter:
     def from_environment(cls, environ: Mapping[str, str] = os.environ) -> SecretFilter:
         """Read the secrets from the environment, ignoring unset and blank variables.
 
+        Besides the four secret variables, the password of a proxy URL (`HTTPS_PROXY`,
+        `HTTP_PROXY`, either case, as `http://user:password@host`) is a secret too, as written
+        and percent-decoded.
+
         Args:
             environ: The environment; the process's own by default.
 
@@ -83,6 +92,10 @@ class SecretFilter:
             The filter.
         """
         found = {environ.get(name, "").strip() for name in SECRET_VARIABLES}
+        for name in PROXY_VARIABLES:
+            password = urllib.parse.urlsplit(environ.get(name, "").strip()).password or ""
+            found.add(urllib.parse.unquote(password))
+            found.add(password)
         return cls(tuple(sorted(found - {""}, key=lambda value: (-len(value), value))))
 
     def clean(self, text: str) -> str:
@@ -177,3 +190,24 @@ def scan(root: Path, secrets: SecretFilter, *, skip: Iterable[Path] = ()) -> lis
             lines = [data.count(b"\n", 0, offset) + 1 for offset in offsets]
             finds.extend(f"{name}: line {line}" for line in lines)
     return finds
+
+
+def fingerprints(environ: Mapping[str, str], salt: str) -> dict[str, str]:
+    """Return a salted HMAC of each secret variable that is set, never the value itself.
+
+    `run` stores these with its salt, so `pack` can prove the terminal it runs in holds the
+    same secrets the run used: a scan for different secrets, or none, would prove nothing.
+
+    Args:
+        environ: The environment.
+        salt: A random salt, kept in the run's state.
+
+    Returns:
+        Each set secret variable's SHA-256 HMAC under the salt, in hex, by name.
+    """
+    found = {}
+    for name in SECRET_VARIABLES:
+        value = environ.get(name, "").strip()
+        if value:
+            found[name] = hmac.new(salt.encode(), value.encode(), hashlib.sha256).hexdigest()
+    return found

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import _thread
 import json
+import signal
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,7 +25,7 @@ from tests._live.machine_checks import FAIL, OK, Item
 from tests._live.run_context import RunContext, RunMemory, RunRefusedError
 from tests._live.run_probe import ProbeResult
 from tests._live.run_state import RunState, check_of, entitlement_id, record
-from tests._live.secret_scrub import SecretFilter
+from tests._live.secret_scrub import SecretFilter, fingerprints
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -269,7 +270,17 @@ def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Ha
     assert harness.awake == ["on", "off"]
     assert (harness.ctx.out / "preflight" / "environment.json").exists()
     assert list(harness.ctx.out.glob("live-results-2026-11-04.zip"))
-    assert harness.lines[-1].endswith("interrupted; run the same command to resume")
+    command = f"uv run python scripts/live_run.py run --out {harness.ctx.out}"
+    resume = f"interrupted; to resume, run: {command}"
+    assert harness.lines[-1].endswith(resume)  # without --any-time, which ran once
+    state = harness.state()
+    assert state.any_time_used
+    assert set(state.fingerprints) == {
+        "MASSIVE_API_KEY",
+        "MASSIVE_DELAYED_API_KEY",
+        "MASSIVE_S3_ACCESS_KEY_ID",
+        "MASSIVE_S3_SECRET_ACCESS_KEY",
+    }
     assert any(
         "idle: nothing more to run until Wed 16:15 EST (limits-ws)" in line
         for line in harness.lines
@@ -288,7 +299,9 @@ def test_a_run_resumes_and_refuses_another_commit(harness: Harness) -> None:
     assert live_run.command_run(harness.ctx) == live_run.INTERRUPTED
     assert any(line.endswith("resuming") for line in harness.lines)
     harness.ctx.commit = "c2"
-    with pytest.raises(RunRefusedError, match="started on commit c1"):
+    with pytest.raises(
+        RunRefusedError, match=r"started on commit c1: to resume, run `git -C .* checkout c1`"
+    ):
         live_run.command_run(harness.ctx)
 
 
@@ -325,10 +338,7 @@ def test_an_idle_pack_that_finds_a_secret_says_so(
 
     monkeypatch.setattr(results, "pack", refuse)
     live_run.command_run(harness.ctx, any_time=True)
-    assert any(
-        "pack refused: a secret was found in 1 places, such as run.log: line 1" in line
-        for line in harness.lines
-    )
+    assert any(line.endswith(f"{live_run.PACK_REFUSED} run.log: line 1") for line in harness.lines)
 
 
 # --- status and pack --------------------------------------------------------------------------
@@ -363,22 +373,164 @@ def test_pack_refuses_while_a_run_holds_the_folder(harness: Harness) -> None:
     assert "stop it with Control-C first" in harness.lines[0]
 
 
-def test_pack_refuses_without_the_api_key_and_without_a_run(harness: Harness) -> None:
-    harness.environ["MASSIVE_API_KEY"] = " "
-    assert live_run.command_pack(harness.ctx) == 1
-    harness.environ["MASSIVE_API_KEY"] = KEY
+def test_pack_refuses_without_a_run(harness: Harness) -> None:
     assert live_run.command_pack(harness.ctx) == 1
     assert harness.lines[-1] == f"no run in {harness.ctx.out}"
 
 
-def test_pack_writes_the_zip_or_names_every_secret_found(harness: Harness) -> None:
+def _saved_run(harness: Harness) -> RunState:
     harness.ctx.out.mkdir()
-    run_state.save(harness.ctx.out, RunState(commit="c1"))
+    state = RunState(commit="c1", salt="0f" * 16)
+    state.fingerprints = fingerprints(harness.environ, state.salt)
+    run_state.save(harness.ctx.out, state)
+    return state
+
+
+def test_pack_writes_the_zip_or_names_every_secret_found(harness: Harness) -> None:
+    _saved_run(harness)
     assert live_run.command_pack(harness.ctx) == 0
     assert harness.lines[-1] == f"wrote {harness.ctx.out / 'live-results-2026-11-04.zip'}"
     (harness.ctx.out / "leak.txt").write_text(f"{KEY}\n")
     assert live_run.command_pack(harness.ctx) == 1
-    assert harness.lines[-2:] == ["pack refused: a secret was found in:", "  leak.txt: line 1"]
+    assert harness.lines[-2:] == [live_run.PACK_REFUSED, "  leak.txt: line 1"]
+
+
+@pytest.mark.parametrize(
+    ("change", "detail"),
+    [
+        ({"MASSIVE_API_KEY": ""}, "not set: MASSIVE_API_KEY"),
+        (
+            {"MASSIVE_DELAYED_API_KEY": "PLANTED-another-delayed"},
+            "a different value: MASSIVE_DELAYED_API_KEY",
+        ),
+    ],
+)
+def test_pack_needs_exactly_the_secrets_the_run_used(
+    *, harness: Harness, change: dict[str, str], detail: str
+) -> None:
+    _saved_run(harness)
+    harness.environ.update(change)
+    assert live_run.command_pack(harness.ctx) == 1
+    assert harness.lines[-1].startswith("pack: set exactly the secrets the run used")
+    assert detail in harness.lines[-1]
+    assert not list(harness.ctx.out.glob("*.zip"))
+
+
+def test_pack_refuses_a_secret_the_run_did_not_have(harness: Harness) -> None:
+    state = _saved_run(harness)
+    del state.fingerprints["MASSIVE_DELAYED_API_KEY"]
+    run_state.save(harness.ctx.out, state)
+    assert live_run.command_pack(harness.ctx) == 1
+    assert "not used by the run: MASSIVE_DELAYED_API_KEY" in harness.lines[-1]
+
+
+def test_pack_refuses_a_folder_whose_run_recorded_no_secrets(harness: Harness) -> None:
+    harness.ctx.out.mkdir()
+    run_state.save(harness.ctx.out, RunState(commit="c1"))
+    assert live_run.command_pack(harness.ctx) == 1
+    assert harness.lines[-1].endswith("no run recorded them")
+
+
+def test_pack_waits_for_disk_space(harness: Harness) -> None:
+    _saved_run(harness)
+    harness.ctx.free_disk = lambda _folder: 0
+    assert live_run.command_pack(harness.ctx) == 1
+    assert harness.lines[-1].startswith("pack: the zip needs about 0 MB, and 0 MB is free")
+
+
+def test_an_idle_pack_waits_for_disk_space(harness: Harness) -> None:
+    harness.script(collection={NODE: {"items": [], "requests": 1}}, outcomes={NODE: PASS})
+    harness.clock = Clock(2)
+    harness.ctx.free_disk = lambda _folder: 0
+    live_run.command_run(harness.ctx, any_time=True)
+    assert any("pack: the zip needs about" in line for line in harness.lines)
+    assert not list(harness.ctx.out.glob("*.zip"))
+
+
+# --- robustness -------------------------------------------------------------------------------
+
+
+def test_every_command_that_probes_needs_the_api_key_first(harness: Harness) -> None:
+    harness.environ["MASSIVE_API_KEY"] = " "
+    commands = (
+        live_run.command_check,
+        live_run.command_run,
+        lambda ctx: live_run.command_upgrade_check(ctx, "stocks"),
+    )
+    for command in commands:
+        with pytest.raises(RunRefusedError, match="MASSIVE_API_KEY is not set in this terminal"):
+            command(harness.ctx)
+    assert not harness.ctx.out.exists()
+
+
+def test_a_probe_that_raises_is_an_unknown_answer(harness: Harness) -> None:
+    def broken() -> ProbeResult:
+        raise RuntimeError("the network is down")
+
+    harness.ctx.probe = broken
+    result = live_run.safe_probe(harness.ctx)
+    assert (result.tiers, result.error) == (
+        None,
+        "the probe failed: RuntimeError: the network is down",
+    )
+
+
+def test_a_step_that_raises_is_logged_and_retried(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failures = [OSError(28, f"No space left on device near {KEY}")]
+    real_step = live_run._step
+
+    def step(ctx: RunContext, state: RunState, memory: RunMemory) -> None:
+        if failures:
+            raise failures.pop()
+        real_step(ctx, state, memory)
+
+    monkeypatch.setattr(live_run, "_step", step)
+    harness.clock = Clock(2)
+    assert live_run.command_run(harness.ctx) == live_run.INTERRUPTED
+    assert harness.clock.sleeps[0] == NOW + live_run.ERROR_BACKOFF
+    log = (harness.ctx.out / "run.log").read_text()
+    assert "a step failed; trying again in 5 minutes" in log
+    assert "No space left on device near ***" in log
+    assert KEY not in log
+
+
+def test_a_state_that_cannot_be_saved_is_reported_not_raised(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(*_args: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(run_state, "save", full)
+    live_run._save_quietly(harness.ctx, RunState(commit="c1"))
+    assert harness.lines == ["could not save the state: [Errno 28] No space left on device"]
+
+
+@pytest.mark.parametrize("number", [signal.SIGHUP, signal.SIGTERM])
+def test_a_hang_up_or_termination_stops_the_run_like_control_c(
+    harness: Harness, number: signal.Signals
+) -> None:
+    def hang_up(_moment: datetime) -> None:
+        signal.raise_signal(number)
+
+    before = signal.getsignal(number)
+    harness.ctx.sleep_until = hang_up
+    assert live_run.command_run(harness.ctx) == live_run.INTERRUPTED
+    assert signal.getsignal(number) is before  # restored once the run ends
+
+
+def test_any_time_is_used_once_per_folder(harness: Harness) -> None:
+    harness.script(collection={})
+    harness.clock = Clock(1)
+    live_run.command_run(harness.ctx, any_time=True)
+    state = harness.state()
+    state.any_time = []
+    run_state.save(harness.ctx.out, state)
+    harness.clock = Clock(1)
+    live_run.command_run(harness.ctx, any_time=True)
+    assert harness.state().any_time == []
+    assert any("--any-time was used before for this folder" in line for line in harness.lines)
 
 
 # --- the upgrade check ------------------------------------------------------------------------

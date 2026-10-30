@@ -122,7 +122,12 @@ class RunState:
         attempts: Every attempt, oldest first.
         checks: Every check, by `key(group, name)`.
         known: Each pytest group's node ids at its latest collection.
-        last_pack: When `run` last packed, ISO UTC, or `""`.
+        any_time: The `--any-time` groups not yet run. `--any-time` takes effect once per
+            results folder: a resume finishes this list and ignores the flag.
+        any_time_used: Whether `--any-time` was ever given for this folder.
+        salt: The random salt of the secrets' fingerprints.
+        fingerprints: A salted HMAC of each secret variable the latest run had set, by name
+            (`secret_scrub.fingerprints`), never a value: `pack` requires the same ones.
     """
 
     commit: str
@@ -133,7 +138,10 @@ class RunState:
     attempts: list[Attempt] = field(default_factory=list)
     checks: dict[str, Check] = field(default_factory=dict)
     known: dict[str, list[str]] = field(default_factory=dict)
-    last_pack: str = ""
+    any_time: list[str] = field(default_factory=list)
+    any_time_used: bool = False
+    salt: str = ""
+    fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 def key(group: str, name: str) -> str:

@@ -105,6 +105,8 @@ def test_the_reconciliation_compares_the_latest_stream_day(
         stream_day="2026-11-03",
     )
     group_child.run_group(tmp_path, attempt, open_session=open_session, tier_of=_no_tier)
-    assert _results(tmp_path, attempt) == [("indices delayed", "passed", "")]
+    assert _results(tmp_path, attempt) == [
+        ("indices delayed", "failed", "no streamed bars to compare")
+    ]
     summary = json.loads((tmp_path / attempt / "summary.json").read_text())
     assert summary["day"] == "2026-11-03"

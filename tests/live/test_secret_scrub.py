@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._live import secret_scrub
 from tests._live.secret_scrub import REDACTED, SecretFilter, scan
 
 if TYPE_CHECKING:
@@ -86,3 +87,21 @@ def test_scan_reports_lines_offsets_and_skips_files(tmp_path: Path) -> None:
     (tmp_path / "old.zip").write_bytes(KEY.encode())
     finds = scan(tmp_path, secrets, skip=[tmp_path / "old.zip"])
     assert finds == ["logs/debug.log: line 3", "rows.parquet: byte offset 2"]
+
+
+def test_a_proxy_password_is_a_secret_as_written_and_decoded() -> None:
+    environ = {"HTTPS_PROXY": "http://alice:PLANTED%2Fproxy%40pw@proxy.local:3128"}
+    secrets = SecretFilter.from_environment(environ)
+    assert set(secrets.values) == {"PLANTED%2Fproxy%40pw", "PLANTED/proxy@pw"}
+    assert secrets.clean("via PLANTED/proxy@pw and PLANTED%2Fproxy%40pw") == "via *** and ***"
+    assert SecretFilter.from_environment({"https_proxy": "http://proxy.local:3128"}).values == ()
+
+
+def test_fingerprints_name_the_set_secrets_and_never_hold_a_value() -> None:
+    environ = {"MASSIVE_API_KEY": " PLANTED-fp-key ", "MASSIVE_DELAYED_API_KEY": ""}
+    found = secret_scrub.fingerprints(environ, "salt")
+    assert list(found) == ["MASSIVE_API_KEY"]
+    assert "PLANTED" not in found["MASSIVE_API_KEY"]
+    assert found == secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-key"}, "salt")
+    assert found != secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-key"}, "other")
+    assert found != secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-kez"}, "salt")

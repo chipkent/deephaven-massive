@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -32,6 +32,8 @@ from tests._live.stream_capture import Clock, Recorder, Stream
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from deephaven.table_listener import TableUpdate
 
     from deephaven_massive import MassiveSession
     from tests._fakes.rest import FakeRestServer
@@ -265,7 +267,12 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
     ]
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope(rows)))
     harness = make_ws_session(rest_base_url=fake_rest.url)
-    day = _Day(stop_after=1)
+
+    def diagnostics_caught_up() -> None:
+        # The first sample may run before the session's diagnostics show the new stream.
+        assert harness.session._core.diagnostics.barrier().wait(15.0)
+
+    day = _Day(stop_after=2, action=diagnostics_caught_up)
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
@@ -277,8 +284,9 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
         clock=day.clock(),
     )
     assert seen == [("options delayed", "passed", "")]
-    assert day.waits == [10.0]  # the wait that says stop ends the day early
-    [symbols] = {r["Symbols"] for r in _csv(tmp_path / "samples-streams.csv")}
+    assert day.waits == [10.0, 10.0]  # the wait that says stop ends the day early
+    last = (START + timedelta(seconds=10)).isoformat()
+    [symbols] = {r["Symbols"] for r in _csv(tmp_path / "samples-streams.csv") if r["time"] == last}
     assert {s.strip() for s in symbols.split(",")} == {ticker for ticker, _ in contracts}
 
 
@@ -548,3 +556,34 @@ def test_a_gap_inside_the_measured_hour_leaves_it_uncovered(tmp_path: Path) -> N
     )
     window = (START, START + timedelta(seconds=210))
     assert stream_capture.summarize_throughput(tmp_path, window)["covered"] is False
+
+
+class _Update:
+    """A stand-in for Deephaven's table update: only its added rows."""
+
+    def __init__(self, added: dict[str, np.ndarray[Any, Any]]) -> None:
+        self._added = added
+
+    def added(self) -> dict[str, np.ndarray[Any, Any]]:
+        return self._added
+
+
+def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> None:
+    queued: list[tuple[str, int]] = []
+
+    class Queue:
+        def put(
+            self, stream: stream_capture.Stream, columns: dict[str, np.ndarray[Any, Any]]
+        ) -> None:
+            queued.append((stream.name, len(columns["Symbol"])))
+
+    stream = stream_capture.Stream("stocks-minute-bars", "stocks delayed", lambda _m: None)
+    copier = stream_capture.RowCopier(stream, cast("stream_capture.Recorder", Queue()))
+    copier.on_update(
+        cast("TableUpdate", _Update({"Symbol": np.array(["AAPL", "NVDA"])})), is_replay=False
+    )
+    copier.on_update(
+        cast("TableUpdate", _Update({"Symbol": np.array([], dtype=object)})), is_replay=False
+    )
+    copier.on_update(cast("TableUpdate", _Update({})), is_replay=False)
+    assert queued == [("stocks-minute-bars", 2)]

@@ -84,7 +84,10 @@ def test_streamed_bars_are_compared_with_history_per_symbol_and_minute(
             folder=folder,
             report=lambda *result: seen.append(result),
         )
-    assert seen == [("stocks delayed", "passed", ""), ("indices delayed", "passed", "")]
+    assert seen == [
+        ("stocks delayed", "passed", ""),
+        ("indices delayed", "failed", "no streamed bars to compare"),  # nothing was compared
+    ]
     assert "adjusted=false" in fake_rest.requests[-1].target
     with (folder / "reconciliation.csv").open(encoding="utf-8") as file:
         [row] = list(csv.DictReader(file))
@@ -105,7 +108,19 @@ def test_streamed_bars_are_compared_with_history_per_symbol_and_minute(
             "stocks-minute-bars": {"symbols": 1, "bars_on_both_sides": 1, "match_share": 1.0},
             "indices-minute-bars": {"symbols": 0, "bars_on_both_sides": 0, "match_share": None},
         },
+        "unreadable": [],
     }
+
+
+def test_an_unreadable_hour_is_skipped_and_named(tmp_path: Path) -> None:
+    start = _ns(OPEN)
+    streamed = tmp_path / "stream-day"
+    _write_streamed(streamed, "stocks-minute-bars", [("AAPL", start, 1.5)])
+    (streamed / "rows" / "stocks-minute-bars-2026-10-28T15.parquet").write_bytes(b"PAR1 cut")
+    unreadable: list[str] = []
+    bars = reconcile.streamed_bars(streamed, "stocks-minute-bars", unreadable=unreadable)
+    assert list(bars) == [("AAPL", start)]
+    assert unreadable == ["stocks-minute-bars-2026-10-28T15.parquet"]
 
 
 def test_a_symbol_on_one_side_only_has_no_match_share() -> None:

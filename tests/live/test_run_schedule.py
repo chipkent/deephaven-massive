@@ -7,10 +7,11 @@ time: probe, run a group, or sleep, by the fixed timetable.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from datetime import time as timetable_time
 
 import pytest
 
-from tests._live import run_schedule
+from tests._live import run_schedule, timetable
 from tests._live.calendar import NEW_YORK
 from tests._live.run_context import RunMemory
 from tests._live.run_schedule import Step, next_step
@@ -77,10 +78,38 @@ def test_any_time_groups_run_at_once_and_leave_when_done() -> None:
     _collected(state)
     now = _at(date(2026, 11, 7), 6)  # a Saturday, before any slot
     memory = _probed(now)
-    memory.any_time = ["stream-day-reconcile", "evidence"]
+    state.any_time = ["stream-day-reconcile", "evidence"]
     step = next_step(state, memory, now)
     assert step == Step("run", "evidence", _at(date(2026, 11, 8), 3))
-    assert memory.any_time == ["evidence"]  # the reconciliation had nothing due
+    assert state.any_time == ["evidence"]  # the reconciliation had nothing due
+
+
+def test_any_time_groups_wait_through_a_stream_day() -> None:
+    state = _state(stocks="starter")
+    _collected(state)
+    state.stream_day = WEDNESDAY.isoformat()
+    state.any_time = ["evidence"]
+    now = _at(WEDNESDAY, 4)
+    assert next_step(state, _probed(now), now) == Step("run", "stream-day", _at(WEDNESDAY, 20, 30))
+    assert state.any_time == ["evidence"]
+
+
+def test_an_any_time_group_stops_before_a_planned_stream_days_probe() -> None:
+    state = _state()
+    assert run_schedule.any_time_stop(state, WEDNESDAY) == _at(date(2026, 11, 5), 3)
+    state.stream_day = "2026-11-05"
+    assert run_schedule.any_time_stop(state, WEDNESDAY) == _at(date(2026, 11, 5), 3)
+    state.stream_day = WEDNESDAY.isoformat()  # today's is no later stop
+    assert run_schedule.any_time_stop(state, WEDNESDAY) == _at(date(2026, 11, 5), 3)
+
+
+def test_an_any_time_stop_never_passes_a_stream_probe_before_three(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state()
+    state.stream_day = "2026-11-05"
+    monkeypatch.setattr(timetable, "HARD_STOP", timetable_time(4, 0))
+    assert run_schedule.any_time_stop(state, WEDNESDAY) == _at(date(2026, 11, 5), 3, 15)
 
 
 def test_an_ordinary_day_waits_for_the_luld_check_then_runs_the_sequence() -> None:
@@ -210,6 +239,10 @@ def test_a_reconciliation_is_due_for_each_unit_that_streamed_a_whole_day() -> No
     check = check_of(state, "stream-day", "stocks delayed")
     record(state, check, status="passed", reason="", day="2026-11-03")
     check_of(state, "stream-day", "options delayed")
+    assert run_schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == []  # no day yet
+    state.stream_days = ["2026-11-04"]
+    assert run_schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == []  # not over
+    state.stream_days = ["2026-11-03"]
     assert run_schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == ["stocks delayed"]
 
 

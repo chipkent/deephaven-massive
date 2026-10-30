@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final
@@ -185,21 +186,29 @@ def parser() -> argparse.ArgumentParser:
 
 
 def run_group_child(
-    out: Path, attempt: str, *, environ: Mapping[str, str], start_server: Callable[[int], None]
+    out: Path,
+    attempt: str,
+    *,
+    environ: Mapping[str, str],
+    start_server: Callable[[int, Path], None],
+    watch: Callable[[], None],
 ) -> None:
-    """Be a built-in group's child: start the server, then run the group.
+    """Be a built-in group's child: watch the parent, start the server, then run the group.
 
     Args:
         out: The results folder.
         attempt: The attempt's folder, relative to `out`.
         environ: The environment, for the probe of the upgrade check.
-        start_server: Starts an embedded Deephaven server with a heap of so many bytes.
+        start_server: Starts an embedded Deephaven server with a heap of so many bytes,
+            writing a JVM crash's log into the given folder.
+        watch: Starts watching the parent (`start_parent_watch`).
     """
+    watch()
     request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
     group = request["group"]
     memory = machine_checks.memory_total() or SMALL_HEAP * 2
     streams = group in {"stream-day", "throughput"}
-    start_server(min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP)
+    start_server(min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP, out / attempt)
     basic = frozenset(dm.Subscription(n) for n, t in request["tiers"].items() if t == "basic")
 
     def open_session() -> MassiveSession:
@@ -212,6 +221,41 @@ def run_group_child(
     group_child.run_group(out, attempt, open_session=open_session, tier_of=tier_of)
 
 
+PARENT_CHECK: Final = 5.0
+"""Seconds between a built-in child's checks that its parent still runs."""
+
+
+def start_parent_watch() -> None:
+    """Start a thread that ends this child at once if its parent goes away.
+
+    The child runs in a session of its own, so a closed terminal never reaches it; without
+    the watch it would outlive the program that would stop it, holding the key's connection
+    and writing into a folder a resumed run uses again.
+    """
+    threading.Thread(
+        target=watch_parent,
+        args=(os.getppid(),),
+        kwargs={"orphaned": lambda: os._exit(3), "wait": threading.Event().wait},
+        name="live run parent watch",
+        daemon=True,
+    ).start()
+
+
+def watch_parent(
+    parent: int, *, orphaned: Callable[[], None], wait: Callable[[float], bool]
+) -> None:
+    """Call `orphaned` once the process's parent is no longer `parent`.
+
+    Args:
+        parent: The parent's pid when the child started.
+        orphaned: Called once, when the parent is gone.
+        wait: Waits a number of seconds between checks.
+    """
+    while os.getppid() == parent:
+        wait(PARENT_CHECK)
+    orphaned()
+
+
 def main(
     argv: list[str],
     *,
@@ -219,8 +263,9 @@ def main(
     script: Path,
     environ: Mapping[str, str] = os.environ,
     stdout: IO[str] = sys.stdout,
-    start_server: Callable[[int], None],
+    start_server: Callable[[int, Path], None],
     make_context: Callable[..., RunContext] = real_context,
+    watch: Callable[[], None] = start_parent_watch,
 ) -> int:
     """Parse the command line and run the command.
 
@@ -230,9 +275,10 @@ def main(
         script: `scripts/live_run.py`.
         environ: The environment.
         stdout: Where the program prints.
-        start_server: Starts an embedded Deephaven server with a heap of so many bytes; only
-            `_group` calls it.
+        start_server: Starts an embedded Deephaven server with a heap of so many bytes, its
+            crash log in the given folder; only `_group` calls it.
         make_context: Builds the context (`real_context`); tests pass fakes.
+        watch: Starts a `_group` child's watch of its parent (`start_parent_watch`).
 
     Returns:
         The exit status: 0, 1 when a check, a pack, or an upgrade check failed, 2 when the
@@ -241,7 +287,9 @@ def main(
     arguments = parser().parse_args(argv)
     out = arguments.out.expanduser().resolve()
     if arguments.command == "_group":
-        run_group_child(out, arguments.attempt, environ=environ, start_server=start_server)
+        run_group_child(
+            out, arguments.attempt, environ=environ, start_server=start_server, watch=watch
+        )
         return 0
     ctx = make_context(out, root=root, script=script, environ=environ, stdout=stdout)
     commands: dict[str, Callable[[], int]] = {

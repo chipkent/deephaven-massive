@@ -27,8 +27,12 @@ import csv
 import dataclasses
 import fcntl
 import json
+import logging
+import secrets
+import signal
 import threading
-from datetime import timedelta
+import traceback
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Final, NoReturn
 
 from tests._live import attempts, children, results, run_state, timetable
@@ -36,21 +40,27 @@ from tests._live.calendar import NEW_YORK
 from tests._live.machine_checks import ready
 from tests._live.outcomes import read_outcomes
 from tests._live.run_context import RunMemory, RunRefusedError
+from tests._live.run_probe import ProbeResult
 from tests._live.run_schedule import PYTEST_GROUPS, next_start_text, next_step
 from tests._live.run_state import RunState, check_of, is_due, record
+from tests._live.secret_scrub import fingerprints
 from tests._live.stream_units import stream_units
 from tests._live.upgrade_check import PROMPT, SUBSCRIPTIONS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from tests._live.run_context import RunContext
-    from tests._live.run_probe import ProbeResult
+
+logger = logging.getLogger(__name__)
 
 BASIC_PAUSE: Final = timedelta(seconds=65)
 """The pause after a probe before any group starts, while some subscription is on Basic: the
 next group then starts on an unspent minute."""
+
+ERROR_BACKOFF: Final = timedelta(minutes=5)
+"""How long the run waits after a step that raised before it tries the next step."""
 
 INTERRUPTED: Final = 130
 """The exit status after Control-C."""
@@ -219,7 +229,8 @@ def command_check(ctx: RunContext) -> int:
     Returns:
         0 when the machine is ready and the key accepted, else 1.
     """
-    result = ctx.probe()
+    require_key(ctx)
+    result = safe_probe(ctx)
     items, _ = ctx.machine(ctx.out, result.clock_offset)
     for item in items:
         ctx.echo(f"{item.verdict:4} {item.name}: {item.detail}")
@@ -240,11 +251,14 @@ def command_check(ctx: RunContext) -> int:
 def _open_state(ctx: RunContext) -> RunState:
     """Load the folder's state, or start one; refuse another commit.
 
+    On resume, whatever the last run left running is stopped and its results kept
+    (`attempts.recover_stale_attempts`).
+
     Args:
         ctx: The command's context.
 
     Returns:
-        The state, its stale attempts marked interrupted.
+        The state.
 
     Raises:
         RunRefusedError: When the state was started on another commit.
@@ -254,29 +268,90 @@ def _open_state(ctx: RunContext) -> RunState:
         state = RunState(commit=ctx.commit)
         ctx.say(f"results folder: {ctx.out}")
     elif state.commit != ctx.commit:
-        msg = f"{ctx.out} was started on commit {state.commit}; check that commit out to resume"
+        msg = (
+            f"{ctx.out} was started on commit {state.commit}: to resume, run "
+            f"`git -C {ctx.root} checkout {state.commit}`; or give a new --out folder"
+        )
         raise RunRefusedError(msg)
     else:
-        attempts.mark_stale_attempts(state)
+        attempts.recover_stale_attempts(ctx, state)
         ctx.say("resuming")
     return state
+
+
+def require_key(ctx: RunContext) -> None:
+    """Refuse to start without the API key, before anything is probed or written.
+
+    Args:
+        ctx: The command's context.
+
+    Raises:
+        RunRefusedError: When `MASSIVE_API_KEY` is unset or blank, saying how to set it.
+    """
+    if not ctx.environ.get("MASSIVE_API_KEY", "").strip():
+        msg = (
+            "MASSIVE_API_KEY is not set in this terminal. Set it, then run the command again: "
+            "printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY"
+        )
+        raise RunRefusedError(msg)
+
+
+def safe_probe(ctx: RunContext) -> ProbeResult:
+    """Probe the key, turning any failure of the probe itself into an unknown result.
+
+    Args:
+        ctx: The command's context.
+
+    Returns:
+        The probe's result; on an exception, a result with no tiers and the exception as its
+        error, which keeps the previous tiers (`apply_probe`).
+    """
+    try:
+        return ctx.probe()
+    except Exception as error:
+        # Never printed: the run's own record of it is the probe file the error goes to.
+        logger.debug("the probe failed", exc_info=True)
+        when = ctx.now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return ProbeResult(when=when, error=f"the probe failed: {type(error).__name__}: {error}")
+
+
+@contextlib.contextmanager
+def hang_ups_interrupt() -> Iterator[None]:
+    """Treat a hang-up (a closed terminal) and a termination like Control-C while running.
+
+    Yields:
+        Control while SIGHUP and SIGTERM raise `KeyboardInterrupt` in the main thread.
+    """
+
+    def interrupt(_signal: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    saved = {number: signal.signal(number, interrupt) for number in (signal.SIGHUP, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
 
 
 def command_run(ctx: RunContext, *, any_time: bool = False, redo: tuple[str, ...] = ()) -> int:
     """Run every check the key allows, by the timetable, until stopped.
 
-    It refuses (`RunRefusedError`) when the folder is in use, was started on another commit,
-    or the key was rejected.
+    It refuses (`RunRefusedError`) without the API key, when the folder is in use, was started
+    on another commit, or the key was rejected. Control-C, a closed terminal (SIGHUP), and
+    SIGTERM all stop it the same way: the running child is stopped and the state saved.
 
     Args:
         ctx: The command's context.
-        any_time: Run the groups that need no market hours at once.
+        any_time: Run the groups that need no market hours at once. It takes effect the first
+            time it is given for a folder; a resume finishes those groups and ignores it.
         redo: Groups whose every check is made due again.
 
     Returns:
         `INTERRUPTED` after Control-C, the only way it ends but a refusal.
     """
-    with held_lock(ctx.out):
+    require_key(ctx)
+    with held_lock(ctx.out), hang_ups_interrupt():
         return _run_locked(ctx, any_time=any_time, redo=redo)
 
 
@@ -285,7 +360,7 @@ def _run_locked(ctx: RunContext, *, any_time: bool, redo: tuple[str, ...]) -> in
 
     Args:
         ctx: The command's context.
-        any_time: Run the groups that need no market hours at once.
+        any_time: Run the groups that need no market hours at once, once per folder.
         redo: Groups whose every check is made due again.
 
     Returns:
@@ -294,10 +369,17 @@ def _run_locked(ctx: RunContext, *, any_time: bool, redo: tuple[str, ...]) -> in
     state = _open_state(ctx)
     for group in redo:
         run_state.redo(state, group)
-    memory = RunMemory(any_time=list(timetable.ANY_TIME_GROUPS) if any_time else [])
+    if any_time and state.any_time_used:
+        ctx.say("--any-time was used before for this folder; following the timetable")
+    elif any_time:
+        state.any_time, state.any_time_used = list(timetable.ANY_TIME_GROUPS), True
+    state.salt = state.salt or secrets.token_hex(16)
+    state.fingerprints = fingerprints(ctx.environ, state.salt)
+    run_state.save(ctx.out, state)
+    memory = RunMemory()
     stop_keep_awake = ctx.keep_awake()
     try:
-        first = ctx.probe()
+        first = safe_probe(ctx)
         _, environment = ctx.machine(ctx.out, first.clock_offset)
         (ctx.out / "preflight").mkdir(exist_ok=True)
         text = ctx.secrets.clean(json.dumps(environment, indent=1, default=str))
@@ -305,15 +387,55 @@ def _run_locked(ctx: RunContext, *, any_time: bool, redo: tuple[str, ...]) -> in
         apply_probe(ctx, state, memory, result=first)
         _loop(ctx, state, memory)
     except KeyboardInterrupt:
-        run_state.save(ctx.out, state)
-        ctx.say("interrupted; run the same command to resume")
+        _save_quietly(ctx, state)
+        ctx.say(
+            f"interrupted; to resume, run: uv run python scripts/live_run.py run --out {ctx.out}"
+        )
         return INTERRUPTED
     finally:
         stop_keep_awake()
 
 
+def _save_quietly(ctx: RunContext, state: RunState) -> None:
+    """Save the state, saying so instead of raising when the disk refuses.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+    """
+    try:
+        run_state.save(ctx.out, state)
+    except OSError as error:
+        ctx.echo(f"could not save the state: {error}")
+
+
 def _loop(ctx: RunContext, state: RunState, memory: RunMemory) -> NoReturn:
     """Probe, run, and sleep, step by step, until Control-C.
+
+    A step that raises (a full disk, a bug) does not end the run: its traceback, cleaned of
+    the secrets, goes to `run.log`, the state is saved if the disk allows, and the loop waits
+    `ERROR_BACKOFF` before its next step.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+        memory: The run's memory.
+    """
+    while True:
+        try:
+            _step(ctx, state, memory)
+        except Exception:
+            logger.debug("a step failed", exc_info=True)  # run.log gets the cleaned traceback
+            text = ctx.secrets.clean(traceback.format_exc())
+            ctx.echo(text.rstrip().splitlines()[-1])
+            with contextlib.suppress(OSError):
+                ctx.say("a step failed; trying again in 5 minutes:\n" + text)
+            _save_quietly(ctx, state)
+            ctx.sleep_until(ctx.now() + ERROR_BACKOFF)
+
+
+def _step(ctx: RunContext, state: RunState, memory: RunMemory) -> None:
+    """Take the run's next step: probe, run one group, or sleep.
 
     Args:
         ctx: The command's context.
@@ -322,32 +444,38 @@ def _loop(ctx: RunContext, state: RunState, memory: RunMemory) -> NoReturn:
     """
 
     def reprobe() -> None:
-        apply_probe(ctx, state, memory, result=ctx.probe())
+        apply_probe(ctx, state, memory, result=safe_probe(ctx))
 
-    while True:
-        step = next_step(state, memory, ctx.now())
-        if step.action == "probe":
-            reprobe()
-            continue
-        assert step.until is not None  # a run has a stop and a sleep an end
-        if step.action == "run":
-            ctx.say(f"start {step.group}")
-            if step.group in PYTEST_GROUPS:
-                attempts.run_pytest_group(
-                    ctx, state, memory, group=step.group, until=step.until, reprobe=reprobe
-                )
-            else:
-                attempts.run_built_in_group(ctx, state, memory, group=step.group, until=step.until)
-            if step.group in memory.any_time:
-                memory.any_time.remove(step.group)
-            ctx.say(f"end {step.group}")
-            continue
-        if memory.finished_since_pack:
-            _pack_quietly(ctx, state)
-            memory.finished_since_pack = False
-        until = step.until.astimezone(NEW_YORK)
-        ctx.say(f"idle: nothing more to run until {until:%a %H:%M %Z} ({step.group})")
-        ctx.sleep_until(step.until)
+    step = next_step(state, memory, ctx.now())
+    if step.action == "probe":
+        reprobe()
+        return
+    assert step.until is not None  # a run has a stop and a sleep an end
+    if step.action == "run":
+        ctx.say(f"start {step.group}")
+        if step.group in PYTEST_GROUPS:
+            attempts.run_pytest_group(
+                ctx, state, memory, group=step.group, until=step.until, reprobe=reprobe
+            )
+        else:
+            attempts.run_built_in_group(ctx, state, memory, group=step.group, until=step.until)
+        if step.group in state.any_time:
+            state.any_time.remove(step.group)
+            run_state.save(ctx.out, state)
+        ctx.say(f"end {step.group}")
+        return
+    if memory.finished_since_pack:
+        memory.finished_since_pack = False
+        _pack_quietly(ctx, state)
+    until = step.until.astimezone(NEW_YORK)
+    ctx.say(f"idle: nothing more to run until {until:%a %H:%M %Z} ({step.group})")
+    ctx.sleep_until(step.until)
+
+
+PACK_REFUSED: Final = (
+    "pack refused: a secret was found in the files below, so no zip was written. Do not send "
+    "the folder; send the owner this list, and the owner will say how to clean those files:"
+)
 
 
 def _pack_quietly(ctx: RunContext, state: RunState) -> None:
@@ -357,12 +485,34 @@ def _pack_quietly(ctx: RunContext, state: RunState) -> None:
         ctx: The command's context.
         state: The run's state.
     """
+    shortage = _disk_shortage(ctx)
+    if shortage:
+        ctx.say(shortage)
+        return
     day = ctx.now().astimezone(NEW_YORK).date().isoformat()
     target, finds = results.pack(ctx.out, state, ctx.secrets, day=day)
     if target is None:
-        ctx.say(f"pack refused: a secret was found in {len(finds)} places, such as {finds[0]}")
+        ctx.say(f"{PACK_REFUSED} {', '.join(finds)}")
     else:
         ctx.say(f"packed {target.name}")
+
+
+def _disk_shortage(ctx: RunContext) -> str:
+    """Tell whether the disk lacks room for a zip of the results folder.
+
+    Args:
+        ctx: The command's context.
+
+    Returns:
+        Why a pack cannot run, or `""` when the free disk exceeds the folder's size.
+    """
+    size = sum(p.stat().st_size for p in ctx.out.rglob("*") if p.is_file())
+    free = ctx.free_disk(ctx.out)
+    if free > size:
+        return ""
+    return (
+        f"pack: the zip needs about {size >> 20} MB, and {free >> 20} MB is free: free some space"
+    )
 
 
 def command_status(ctx: RunContext) -> int:
@@ -403,27 +553,66 @@ def command_pack(ctx: RunContext) -> int:
         ctx: The command's context.
 
     Returns:
-        0 when the zip was written, else 1.
+        0 when the zip was written, else 1. It refuses while a run holds the folder, when the
+        terminal does not hold exactly the secrets the run used (by their fingerprints), since
+        a scan for other values would prove nothing, and when the disk lacks room for the zip.
     """
     if is_locked(ctx.out):
         ctx.echo("pack: a run is using this folder; stop it with Control-C first")
-        return 1
-    if not ctx.environ.get("MASSIVE_API_KEY", "").strip():
-        ctx.echo("pack: set MASSIVE_API_KEY first, so the scan can prove it is not in the results")
         return 1
     state = run_state.load(ctx.out)
     if state is None:
         ctx.echo(f"no run in {ctx.out}")
         return 1
+    mismatch = secrets_mismatch(state, ctx.environ)
+    shortage = _disk_shortage(ctx)
+    if mismatch or shortage:
+        ctx.echo(mismatch or shortage)
+        return 1
     day = ctx.now().astimezone(NEW_YORK).date().isoformat()
     target, finds = results.pack(ctx.out, state, ctx.secrets, day=day)
     if target is None:
-        ctx.echo("pack refused: a secret was found in:")
+        ctx.echo(PACK_REFUSED)
         for find in finds:
             ctx.echo(f"  {find}")
         return 1
     ctx.echo(f"wrote {target}")
     return 0
+
+
+def secrets_mismatch(state: RunState, environ: Mapping[str, str]) -> str:
+    """Tell whether this terminal holds the secrets the run used, by their fingerprints.
+
+    Args:
+        state: The run's state, with the latest run's fingerprints.
+        environ: This terminal's environment.
+
+    Returns:
+        `""` when the same secret variables are set to the same values; otherwise what to set,
+        naming every variable that is missing, extra, or different.
+    """
+    held = fingerprints(environ, state.salt) if state.salt else {}
+    if state.salt and held == state.fingerprints:
+        return ""
+    needed = ", ".join(sorted(state.fingerprints)) or "MASSIVE_API_KEY"
+    missing = sorted(set(state.fingerprints) - set(held))
+    extra = sorted(set(held) - set(state.fingerprints))
+    different = sorted(
+        n for n in held if n in state.fingerprints and held[n] != state.fingerprints[n]
+    )
+    details = [
+        f"{what}: {', '.join(names)}"
+        for what, names in (
+            ("not set", missing),
+            ("not used by the run", extra),
+            ("a different value", different),
+        )
+        if names
+    ]
+    return (
+        f"pack: set exactly the secrets the run used, with the same values ({needed}), in "
+        f"this terminal, then pack again; {'; '.join(details) or 'no run recorded them'}"
+    )
 
 
 def command_upgrade_check(ctx: RunContext, subscription: str) -> int:
@@ -441,10 +630,11 @@ def command_upgrade_check(ctx: RunContext, subscription: str) -> int:
         RunRefusedError: When the folder is in use, the commit differs, the key was rejected,
             or the subscription is not on Basic.
     """
-    with held_lock(ctx.out):
+    require_key(ctx)
+    with held_lock(ctx.out), hang_ups_interrupt():
         state = _open_state(ctx)
         memory = RunMemory()
-        apply_probe(ctx, state, memory, result=ctx.probe())
+        apply_probe(ctx, state, memory, result=safe_probe(ctx))
         tier = state.entitlements[state.current]["tiers"][subscription]
         if tier != "basic":
             msg = f"{subscription} is on {tier}, not Basic: the upgrade check starts from Basic"

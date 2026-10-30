@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -40,7 +42,7 @@ def _machine(_folder: Path, _offset: float | None) -> tuple[list[Item], dict[str
     return [], {}
 
 
-def _no_server(_heap: int) -> None:
+def _no_server(_heap: int, _folder: Path) -> None:
     pytest.fail("only _group starts a server")
 
 
@@ -224,15 +226,17 @@ def test_the_group_child_starts_a_server_sized_to_its_group(
     monkeypatch.setattr(
         group_child, "run_group", lambda _out, attempt, **_options: ran.append(attempt)
     )
-    heaps: list[int] = []
+    servers: list[tuple[int, Path]] = []
+    watched: list[str] = []
     code = cli.main(
         ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"],
         root=ROOT,
         script=Path("s.py"),
-        start_server=heaps.append,
+        start_server=lambda heap, folder: servers.append((heap, folder)),
+        watch=lambda: watched.append("watching"),
     )
     assert code == 0
-    assert (heaps, ran) == ([heap], ["a"])
+    assert (servers, ran, watched) == ([(heap, tmp_path / "a")], ["a"], ["watching"])
 
 
 def test_the_group_childs_sessions_declare_the_basic_subscriptions(
@@ -261,10 +265,42 @@ def test_the_group_childs_sessions_declare_the_basic_subscriptions(
     monkeypatch.setattr(group_child, "run_group", run_group)
     monkeypatch.setattr(cli, "probe_key", probe_key)
     cli.run_group_child(
-        tmp_path, "a", environ={"MASSIVE_API_KEY": KEY}, start_server=lambda _heap: None
+        tmp_path,
+        "a",
+        environ={"MASSIVE_API_KEY": KEY},
+        start_server=lambda _heap, _folder: None,
+        watch=lambda: None,
     )
     open_session = seen["open_session"]
     with open_session() as session:
         assert {str(s) for s in session._core.config.rest_basic_subscriptions} == {"stocks"}
     assert seen["tier_of"]("stocks") == "starter"
     assert seen["tier_of"]("stocks") is None
+
+
+def test_a_group_child_ends_once_its_parent_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    parents = [100, 100, 1]
+    monkeypatch.setattr(os, "getppid", lambda: parents.pop(0))
+    waits: list[float] = []
+    ended: list[str] = []
+
+    def wait(seconds: float) -> bool:
+        waits.append(seconds)
+        return False
+
+    cli.watch_parent(100, orphaned=lambda: ended.append("ended"), wait=wait)
+    assert (waits, ended) == ([cli.PARENT_CHECK, cli.PARENT_CHECK], ["ended"])
+
+
+def test_the_parent_watch_runs_on_a_thread_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[int] = []
+    done = threading.Event()
+
+    def watch_parent(parent: int, **_options: object) -> None:
+        seen.append(parent)
+        done.set()
+
+    monkeypatch.setattr(cli, "watch_parent", watch_parent)
+    cli.start_parent_watch()
+    assert done.wait(10.0)
+    assert seen == [os.getppid()]

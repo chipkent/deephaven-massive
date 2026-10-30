@@ -5,16 +5,16 @@ folder, the repository, the environment and its secret filter, the probe, the ma
 the clock, and the terminal. `scripts/live_run.py` builds it from the real machine; the unit
 tests build it with fakes, so the whole program runs against the fake servers and a fake
 clock. `RunMemory` holds what one `run` remembers between steps without writing it down: the
-latest probe and its retries, the pause before the next group, and the `--any-time` groups
-still to run.
+latest probe and its retries, and the pause before the next group.
 
 Only the program's main thread uses either.
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +72,7 @@ class RunContext:
         echo: Prints one line to the terminal.
         read_enter: Waits until the person presses Enter.
         stop_grace: Seconds a stopped child gets before it is killed.
+        free_disk: The free bytes on the disk that holds a folder.
     """
 
     out: Path
@@ -89,6 +90,7 @@ class RunContext:
     echo: Callable[[str], None] = _no_echo
     read_enter: Callable[[], str] = input
     stop_grace: float = STOP_GRACE
+    free_disk: Callable[[Path], int] = lambda folder: shutil.disk_usage(folder).free
 
     def say(self, line: str) -> None:
         """Print a line stamped with the New York time, and append it to `run.log`.
@@ -115,7 +117,6 @@ class RunMemory:
         probed_at: When the latest probe ran, whatever its answer.
         retries: Probes in a row that could not tell the tiers.
         not_before: No group starts before this (the pause after a probe).
-        any_time: The `--any-time` groups not yet run.
         reminded: The New York date the flat-files reminder was last printed, ISO.
         finished_since_pack: Whether an attempt finished since the last pack.
     """
@@ -124,6 +125,5 @@ class RunMemory:
     probed_at: datetime | None = None
     retries: int = 0
     not_before: datetime | None = None
-    any_time: list[str] = field(default_factory=list)
     reminded: str = ""
     finished_since_pack: bool = False

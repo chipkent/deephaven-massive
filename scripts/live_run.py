@@ -30,20 +30,24 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 """The repository root: every child runs there, and `tests._live` is imported from it."""
 
 
-def start_server(heap: int) -> None:
+def start_server(heap: int, crash_folder: Path) -> None:
     """Start an embedded Deephaven server on a free port.
 
     Args:
         heap: The JVM's maximum heap, in bytes.
+        crash_folder: Where a JVM crash writes its `hs_err_pid<pid>.log`: the attempt's folder,
+            so the crash travels with the results.
     """
     server = importlib.import_module("deephaven_server")
-    server.Server(port=0, jvm_args=[f"-Xmx{heap >> 20}m"]).start()
+    error_file = f"-XX:ErrorFile={crash_folder}/hs_err_pid%p.log"
+    server.Server(port=0, jvm_args=[f"-Xmx{heap >> 20}m", error_file]).start()
 
 
 def main() -> int:
@@ -61,8 +65,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    code = main()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    # A process that may have started a Deephaven server must skip the interpreter's shutdown.
-    os._exit(code)
+    # A process that may have started a Deephaven server must skip the interpreter's shutdown,
+    # whatever happens, so every way out ends in os._exit.
+    code = 1
+    try:
+        code = main()
+    except BaseException:
+        traceback.print_exc()  # the finally below exits before the interpreter could print it
+        raise
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
