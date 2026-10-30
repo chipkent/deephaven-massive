@@ -1804,7 +1804,7 @@ Notation:
 | `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{o}/prev` per contract | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
 | `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
-| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request, always with `type=options`, so `ALL` lists only options contracts; `type` is set by the library and rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
+| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request. `ALL` sends `type=options` in place of tickers, so it lists only options contracts; tickers are sent without `type`, which Massive refuses beside them (HTTP 400, "Cannot specify tickers and type."). `type` is rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
 | `contracts(symbols=None, *, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool = False, …F)` (`expired=False`, Massive's default, lists contracts still trading and is not sent, so the per-contract path accepts it; `True` lists expired ones and is sent); `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
 | `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
@@ -2151,7 +2151,7 @@ nanosecond timestamp, or ISO-8601 text, whose precision Massive does not documen
 base name and `.any_of` keep the date. An aware `datetime` is always sent as given. The
 reservation is one shared check in the filter validation, fed the dataset's typed parameters,
 never a guard in a namespace module. Parameters the library always sets itself (the
-`type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
+`expand_underlying=false` of the indicators) are reserved the same way. When Massive adds a filter,
 refreshing the snapshot adds it; no code changes.
 
 **`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
@@ -3529,7 +3529,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `<time axis field>.asc` on the futures paths, which default to newest first). The order of
   rows inside a flat file is Massive's and is not documented.
 - **Library-fixed parameters.** A parameter the library sets itself, with no argument of its
-  own (the options snapshot's `type=options`), is declared on the dataset as
+  own (the indicators' `expand_underlying=false`), is declared on the dataset as
   `DatasetSpec.fixed_params`. The catalog's `wire parameters` gate requires every REST path of
   the dataset to take it as a query parameter, so it is never blamed on the caller as a
   parameter a path lacks. `build_query` sends it like a typed parameter, and its whole
