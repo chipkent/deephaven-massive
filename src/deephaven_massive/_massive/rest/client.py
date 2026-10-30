@@ -574,14 +574,15 @@ class RestClient:
         # The claim is open before anything is granted, and its exit reports the permit if
         # nothing else did, so no interrupt can leave the permit unreported.
         with self._governor.admission(job.bucket, lane=lane, patience=job.patience) as admission:
+            queued = self._clock.monotonic()
             permit = self._permit(request, admission, stop)
             if stop.is_set():  # cancelled just as it was admitted: it is never sent
                 self._governor.release(permit)
                 raise self._stopped(request)
-            return self._send(job, request, permit)
+            return self._send(job, request, permit, waited=self._clock.monotonic() - queued)
 
     def _send(
-        self, job: _Job, request: RequestTarget, permit: Permit
+        self, job: _Job, request: RequestTarget, permit: Permit, *, waited: float
     ) -> Page | _Retryable | object:
         """Send an admitted attempt and report its end to the governor.
 
@@ -590,6 +591,8 @@ class RestClient:
             request: The request.
             permit: The attempt's permit: released when the request never left (the
                 connection could not be made), refused for a 429, and done otherwise.
+            waited: Seconds the attempt waited for its permit (a slot, a pause, a probe, or
+                its lane's turn), for the attempt's log line.
 
         Returns:
             What `_attempt` returns.
@@ -640,7 +643,13 @@ class RestClient:
             raise unreadable
         elapsed = self._clock.monotonic() - started
         return self._answered(
-            job, request, permit=permit, response=response, body=body, elapsed=elapsed
+            job,
+            request,
+            permit=permit,
+            response=response,
+            body=body,
+            elapsed=elapsed,
+            waited=waited,
         )
 
     def _answered(
@@ -652,6 +661,7 @@ class RestClient:
         response: BaseHTTPResponse,
         body: bytearray,
         elapsed: float,
+        waited: float,
     ) -> Page | _Retryable | object:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
@@ -668,6 +678,7 @@ class RestClient:
             response: The response, for its status and headers.
             body: Its whole body, as read.
             elapsed: Seconds from sending the request to reading its body.
+            waited: Seconds the attempt waited for its permit before it was sent.
 
         Returns:
             What `_attempt` returns.
@@ -689,9 +700,11 @@ class RestClient:
                 # from; the call that fails logs the error itself.
                 if _log.isEnabledFor(logging.DEBUG):
                     _log.debug(
-                        "GET %s -> 200 in %.3f s, but the page cannot be read (%s); body: %s",
+                        "GET %s -> 200 in %.3f s, waited %.1f s for a permit, but the page "
+                        "cannot be read (%s); body: %s",
                         self._base + request.target,
                         elapsed,
+                        waited,
                         unreadable,
                         body_excerpt(data),
                     )
@@ -704,11 +717,12 @@ class RestClient:
                 body=data,
             )
             _log.debug(
-                "GET %s -> 200 (request_id %s): %d rows in %.3f s",
+                "GET %s -> 200 (request_id %s): %d rows in %.3f s, waited %.1f s for a permit",
                 self._base + request.target,
                 page.request_id,
                 len(page.rows),
                 elapsed,
+                waited,
             )
             return page
         failure = http_error(response.status, data, request)
@@ -723,11 +737,12 @@ class RestClient:
             # The whole body (up to 2,000 characters, already cleaned of the key), so the line
             # shows every word Massive or a proxy said; the error quotes only its message.
             _log.debug(
-                "GET %s -> %d (request_id %s) in %.3f s; body: %s",
+                "GET %s -> %d (request_id %s) in %.3f s, waited %.1f s for a permit; body: %s",
                 self._base + request.target,
                 response.status,
                 failure.request_id,
                 elapsed,
+                waited,
                 body_excerpt(data),
             )
         if response.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -901,14 +916,13 @@ class RestClient:
             failure: The 429's error.
             response: The response, for its headers.
 
-        The governor hears of the refusal even when the hook or the log raises (an interrupt
-        while the record is written), so the bucket pauses and the permit is reported. The
+        The governor logs the refusal, once, with the pause it chose; it hears of the refusal
+        even when the hook raises, so the bucket pauses and the permit is reported. The
         attempt is then made again once the governor allows; the next permit fails instead,
         with status 429, if the call's patience cannot cover the pause.
         """
         basic = is_basic_refusal(failure.message)
         try:
-            _log.info("%s; pausing %s requests", failure, permit.bucket)
             if self._on_refused is not None:
                 self._on_refused(permit.bucket, failure, basic=basic)
         finally:

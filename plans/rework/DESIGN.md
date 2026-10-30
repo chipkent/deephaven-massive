@@ -4221,7 +4221,8 @@ reader must do, not how bad the event feels:
   table; data the user would misread (vendor drift, a bad symbol under the log setting); and
   configuration to fix.
 - **INFO: decisions and progress**: the host chosen, a long read's estimate, the first 429,
-  recoveries, session open and close, and a session garbage-collected without `close()`.
+  each rate-limit pause with its length and reason, recoveries, session open and close, and a
+  session garbage-collected without `close()`.
 - **DEBUG: everything else**, including every expected error that is also raised to the
   caller, each reconnect attempt, each retry and give-up, and per-request detail.
 
