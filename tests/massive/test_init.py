@@ -12,7 +12,7 @@ import pytest
 from deephaven_massive import _massive
 from deephaven_massive._massive import spec, ws
 from deephaven_massive._massive.flatfiles import client as flatfiles_client
-from deephaven_massive._massive.flatfiles import layout, reader
+from deephaven_massive._massive.flatfiles import object_keys, reader
 from deephaven_massive._massive.net import errors
 from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
@@ -84,7 +84,7 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.FlatFile is reader.FlatFile
     assert _massive.ReadPlan is reader.ReadPlan
     assert _massive.ReadColumn is reader.ReadColumn
-    assert _massive.object_key is layout.object_key
+    assert _massive.object_key is object_keys.object_key
     assert _massive.RestClient is client.RestClient
     assert _massive.Page is response.Page
     assert _massive.to_batch is batch.to_batch

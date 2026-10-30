@@ -4631,7 +4631,9 @@ verification, never a column list.
 `epoch` (with its `UNITS` entry). Two types meet for one column name within one kind by these
 joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
-**type conflict** (the `type-agreement` gate). `_datasets/schema.py` maps `long` to `long`, `double` to
+**type conflict** (the `type-agreement` gate). `WireType.common_type` is the one
+implementation of these joins: the refresh's `type-agreement` gate and the run-time merge
+both call it, so a kind the refresh accepts always merges. `_datasets/schema.py` maps `long` to `long`, `double` to
 `double`, `bool` to `boolean`, `string`, `json-text`, and `date` to `String` (a date as ISO
 `yyyy-MM-dd` text), `epoch` and
 `iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
@@ -4920,7 +4922,7 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
   schema = ordered union by column name of every cols(m, s):
            Symbol, then Timestamp, first where the dataset declares them; then first
            appearance in member, then source, then field order
-  each column's WireType = the lattice join over every contribution
+  each column's WireType = WireType.common_type over every contribution
 ```
 
 **Named conversions.** A `TYPE_FIXES` entry names one field of one source and one

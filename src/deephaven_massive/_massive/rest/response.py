@@ -49,7 +49,7 @@ from deephaven_massive._massive.spec.types import ENVELOPE_KEYS, DriftReport
 if TYPE_CHECKING:
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["GOOD_STATUSES", "Page", "Request", "body_excerpt", "decode_page", "http_error"]
+__all__ = ["GOOD_STATUSES", "Page", "RequestTarget", "body_excerpt", "decode_page", "http_error"]
 
 GOOD_STATUSES = frozenset({"OK", "DELAYED", "success"})
 """The documented envelope statuses of a good page; any other non-error status is drift."""
@@ -72,7 +72,7 @@ class ErrorContext(TypedDict):
 
 
 @dataclass(frozen=True)
-class Request:
+class RequestTarget:
     """Where one request went, for naming it in errors and logs.
 
     Attributes:
@@ -200,7 +200,7 @@ def _excerpt(data: bytes | bytearray) -> str:
     return data[: _EXCERPT * 4].decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
 
 
-def http_error(status: int, data: bytes | bytearray, request: Request) -> WireError:
+def http_error(status: int, data: bytes | bytearray, request: RequestTarget) -> WireError:
     """Return the error for a response whose HTTP status is not 200.
 
     Args:
@@ -228,7 +228,7 @@ def http_error(status: int, data: bytes | bytearray, request: Request) -> WireEr
     return kind(**request.context(f"HTTP {status}", detail, status=status, request_id=request_id))
 
 
-def _as_rows(value: object, request: Request) -> list[dict[str, object]]:
+def _as_rows(value: object, request: RequestTarget) -> list[dict[str, object]]:
     """Return the rows a result value holds.
 
     Args:
@@ -280,7 +280,7 @@ def _request_id(value: object) -> str | None:
     return None
 
 
-def _envelope(body: dict[str, object], request: Request) -> tuple[str, str | None]:
+def _envelope(body: dict[str, object], request: RequestTarget) -> tuple[str, str | None]:
     """Read and check an envelope's `status` and `request_id`.
 
     Args:
@@ -334,7 +334,7 @@ def _result(body: dict[str, object], result_key: str) -> object:
     return value
 
 
-def decode_page(data: bytes | bytearray, rest_path: RestPath, request: Request) -> Page:
+def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTarget) -> Page:
     """Decode the body of a 200 response into a `Page`.
 
     Besides the errors below, a body with an `ERROR` status raises `WireError` and one with a
