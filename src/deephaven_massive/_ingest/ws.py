@@ -780,11 +780,28 @@ class Connection:
     def adopt(self, streams: list[_Stream]) -> None:
         """Take over the streams of a connection the verdict moved, and the calls they missed.
 
+        Only the streams whose lease this connection still holds are taken. A stream whose
+        lease was returned after the hand-over chose it (its blink table shut down) is left
+        out and its route removed: its release may have reached this loop first and been
+        dropped, so registering it would keep its topics subscribed with nothing to release
+        them.
+
         Args:
             streams: The streams, with their topics.
         """
         with self._lock:
             self.awaiting.difference_update(s.stream_id for s in streams)
+            leased = self._group.streams
+            gone = [s.stream_id for s in streams if leased.get(s.stream_id) is not self]
+        if gone:
+            logger.debug(
+                "%s: streams %s shut down during their hand-over; they are not adopted",
+                self.url,
+                gone,
+            )
+            for stream_id in gone:
+                self.flusher.routes.remove(stream_id)
+            streams = [s for s in streams if s.stream_id not in gone]
         if self._ended:  # it failed or closed first; its failure already failed the routes
             return
         for stream in streams:

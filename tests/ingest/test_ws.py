@@ -1917,6 +1917,51 @@ def test_a_hand_over_leaves_a_stream_whose_lease_is_gone(
     del gone
 
 
+def test_a_stream_that_shuts_down_during_its_hand_over_is_not_adopted(
+    make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hand-over has chosen the stream, but its blink table shuts down before `adopt` is
+    # posted: the lease is returned and the release reaches the successor first, where the
+    # stream is no longer awaited, so the release is dropped. `adopt` must then leave the
+    # stream out, or its topic stays subscribed with nothing to release it.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    kept = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    gone = custom_session.query(FUTURES, ["NQZ5"]).blink()
+    custom_session.subscribed("T.ESZ5", "T.NQZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    group = custom_session.connections.group
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the hand-over waits behind it
+    try:
+        assert held.wait(TIMEOUT)
+        group._move(old, DELAYED)
+        successor = custom_session.connection("wss://delayed.test/futures")
+        real_post = successor.post
+
+        def shut_down_first(callback: Callable[..., None], *args: object) -> bool:
+            if getattr(callback, "__name__", "") == "adopt":
+                with group.lock:
+                    custom_session.connections._forget(2)  # what the shutdown callback does
+                real_post(successor.release_stream, 2)
+            return real_post(callback, *args)
+
+        monkeypatch.setattr(successor, "post", shut_down_first)
+    finally:  # a failed check must not leave the old loop held
+        release.set()
+    assert old.join(TIMEOUT)
+    wait_for(lambda: not successor.awaiting)
+    assert custom_session.on_loop(successor, lambda: sorted(successor._streams)) == [1]
+    assert [s.stream_id for s in successor.flusher.routes.sinks()] == [1]
+    custom_session.session.release(kept)
+    del gone
+
+
 def test_an_open_that_fails_during_a_move_returns_the_moved_lease(
     make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
