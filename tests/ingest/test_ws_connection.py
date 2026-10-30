@@ -1729,22 +1729,40 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
     assert rejected.startswith(f"{_URL} channel T: a rejected row fails streams [1]: ")
     assert rejected.endswith('"p":"bad","q":1,"t":1700000000000,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
+    # The failed stream 1 has left the connection; stream 2 has had no rows.
     assert summary.startswith(
-        f"{_URL}: last 60 s: 1 data batches, rows T=1, 1 rejected; 1 of 1 topics acknowledged "
-        "['T.MSFT'], 0 pending, 0 with no acknowledgement; last data T "
+        f"{_URL}: last 60 s: 1 data batches, rows T=1, 1 rejected; rows per stream 0 [], "
+        "streams with no rows 1 [2]; 1 of 1 topics acknowledged 1 [T.MSFT], added 1 [T.MSFT], "
+        "removed 0 [], 0 pending, 0 with no acknowledgement; last data T "
     )
     assert summary.endswith(" s ago; state CONNECTED, 0 reconnects")
-    # The next window starts empty; with DEBUG off the summary is counted but not logged.
+    # The next window starts empty and counts each stream's rows of the window only.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        ws_session.send(trade("MSFT"))
+        ws_session.flush()
+        ws_session.on_loop(connection, connection._summarize)
+    [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
+    assert "1 data batches, rows T=1, 0 rejected; rows per stream 1 [2=1], " in summary
+    assert "streams with no rows 0 []; " in summary
+    assert "acknowledged 1 [T.MSFT], added 0 [], removed 0 [], " in summary
     caplog.clear()
     with caplog.at_level(logging.DEBUG):
         ws_session.on_loop(connection, connection._summarize)
-    assert "1 data batches" not in caplog.text
-    assert "0 data batches, rows none, 0 rejected" in caplog.text
+    assert "0 data batches, rows none, 0 rejected; rows per stream 0 [], " in caplog.text
+    assert "streams with no rows 1 [2]; " in caplog.text
+    # A topic that left since the last summary is named.
+    caplog.clear()
+    ws_session.session.release(other)
+    ws_session.unsubscribed("T.MSFT")
+    with caplog.at_level(logging.DEBUG):
+        ws_session.on_loop(connection, connection._summarize)
+    assert "0 of 0 topics acknowledged 0 [], added 0 [], removed 1 [T.MSFT], " in caplog.text
     caplog.clear()
     with caplog.at_level(logging.INFO):
         ws_session.on_loop(connection, connection._summarize)
-    assert "last 60 s" not in caplog.text
-    del result, other
+    assert "last 60 s" not in caplog.text  # with DEBUG off the summary is not logged
+    del result
 
 
 def test_a_lost_connection_warns_once_per_outage_and_its_reconnect_is_info(

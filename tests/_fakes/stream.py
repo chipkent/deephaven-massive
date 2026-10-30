@@ -87,7 +87,7 @@ class FakeStreamTransport:
             self.opened.append((spec.name, channel))
             self.publishers[stream_id] = publisher
         fail = functools.partial(self._fail, stream_id)
-        return StreamHandle(stream_id, blink, scope, "socket.test", "/stocks", fail)
+        return StreamHandle(stream_id, blink, scope, "socket.test", "/stocks", "test host", fail)
 
 
 def transport_of(open_stream: Callable[..., StreamHandle]) -> Callable[[], Any]:

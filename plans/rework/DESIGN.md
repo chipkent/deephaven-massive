@@ -1054,9 +1054,10 @@ return result
      update cycle, which cannot run until the caller releases the lock, so `close()` asks the
      writer to apply the rows, release the scope, and end, and returns at once; the rows, and
      a held view, follow once the console command is over.
-  6. It logs "MassiveSession #1 closed; N live tables failed", at WARNING when N > 0 and at
-     INFO when N is 0. N counts the tables that are failed once the close is done, including
-     one a racing failure failed first; the tables are not logged one by one.
+  6. It logs "MassiveSession #1 closed; N live tables failed, streams N [...]", at WARNING
+     when N > 0 and at INFO when N is 0. N counts the tables that are failed once the close is
+     done, including one a racing failure failed first; the line names their stream ids (the
+     first 20) rather than logging the tables one by one.
 
   The failures shut the blink tables down on the next update cycle, whose callbacks then
   release the records; a session whose failed tables are still held stays in the live set
@@ -4179,16 +4180,25 @@ and pool named, no logging call under a leaf lock).
   the call itself, whatever its source: at DEBUG for an expected cause, which the caller
   receives as the exception, and at ERROR with the owner's text for a defect.
 - A stream's open, reuse, each released hold, and its shutdown (with its route and topics) log
-  at DEBUG with its stream id; so do a reactive symbol table's changes, each subscription step
-  (with the desired, acknowledged, and deferred counts), and each `poll()` cycle (requests,
-  rows read and published, and time). A `poll()` failure's record names its stream id.
+  at DEBUG with its stream id. The open names the session, the query and verb, the channel,
+  the host and path with the evidence for that host, and the symbols (their count and the
+  first 20). So do a reactive symbol table's changes, each subscription step (with the
+  desired, acknowledged, and deferred counts), a `poll()`'s start (query, interval, the mode
+  asked and the mode chosen, symbols) and end (why, and after how many cycles), and each
+  `poll()` cycle (requests, rows read and published, time, and the seconds of rate limit
+  pauses the cycle waits out). A `poll()` failure's record, and a skipped symbol-table row's,
+  names its stream id.
+- A REST request's rate governor bucket, and why, logs at DEBUG once per process for each
+  dataset, path, and bucket, not once per request.
 - A rejected WebSocket row logs at DEBUG with the streams it fails and its whole raw text; a
   row with no valid symbol logs at ERROR with the reason (no symbol, or the raw one and why it
   is not valid) and the library-bug text, once per spelling (at most 100).
 - Each WebSocket connection logs a DEBUG summary every 60 s from its loop: data batches and rows
-  per channel, rejected rows, the acknowledged topics, pending and unacknowledged counts, and
-  how long ago each channel last had data, so a stall is visible though nothing failed. The
-  timer always runs; the line is built only when DEBUG is on.
+  per channel, rejected rows, the rows each stream got and the streams that got none, the
+  acknowledged topics (their count, the first 20, and those added and removed since the last
+  summary), pending and unacknowledged counts, and how long ago each channel last had data, so
+  a stall is visible though nothing failed. Every list is bounded to 20 items. The timer
+  always runs; the line is built only when DEBUG is on.
 - A flat-file `history()` whose every trading day's file is missing (two or more) logs a
   WARNING that the bucket, prefix, or venue may be wrong, before the per-day holiday lines.
 - Nothing is logged while `registry_lock` or another leaf lock is held, and nothing in a blink

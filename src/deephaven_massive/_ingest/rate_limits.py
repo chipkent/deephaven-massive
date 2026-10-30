@@ -173,7 +173,8 @@ def read_patience(exec_ctx: ExecutionContext) -> Patience:
     does. The console's patience carries `CONSOLE_ADVICE`, so its give-up error names
     `wait=False`; a background read's thread holds no lock and gets the full patience. Call it
     on the read's own thread, before any fan-out and outside every library lock, since it asks
-    Deephaven (a Java call); pass the result to every request of the read.
+    Deephaven (a Java call); pass the result to every request of the read. It logs nothing: the
+    line that starts the read (a `fetch()` call's, or a `poll()` cycle's) names its seconds.
 
     Args:
         exec_ctx: The session's execution context, whose update graph is asked.
@@ -183,7 +184,6 @@ def read_patience(exec_ctx: ExecutionContext) -> Patience:
     """
     console = holds_update_graph_lock(exec_ctx)
     seconds = CONSOLE_PATIENCE if console else READ_PATIENCE
-    logger.debug("a read waits out %.0f s of pauses (update-graph lock held: %s)", seconds, console)
     return _massive.Patience(seconds, advice=CONSOLE_ADVICE if console else "")
 
 
