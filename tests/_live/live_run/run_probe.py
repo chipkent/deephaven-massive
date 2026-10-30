@@ -1,0 +1,247 @@
+"""The live run's probe: what the key can do right now, and every request it took to find out.
+
+The live-run program (`live_run`) probes at each start and at a fixed time each trading day
+(`timetable`). One probe asks, in this order:
+
+1. Massive's market status, whose `serverTime` gives the machine clock's offset; an HTTP 401
+   here means the key was rejected, and the program stops.
+2. Each subscription's tier, by the live suite's own probe (`probe.probe_tiers`): a snapshot
+   of one liquid ticker, its trades and quotes, and the `fmv` field. Using the suite's probe
+   keeps the tiers in the exact grammar the live tests read from `MASSIVE_LIVE_PLANS`.
+3. With both S3 credentials set, which flat-file prefixes they reach (`probe.reached_prefixes`).
+
+Every request is paced as Basic (5 a minute per subscription), since nothing is known yet; no
+subscription gets more than three. A probe that cannot tell the tiers (an answer that proves
+nothing, a 429, a 5xx, a timeout) comes back *unknown*, and the program keeps the previous
+tiers and tries again later. Each request's path, status, and request id are recorded through
+the wire package's reply-capture hook, never a body or a header; the history each subscription
+keeps comes from the documented windows (`plans.history_start`).
+
+The probe needs no Deephaven server: it uses the wire package's clients directly.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, Any, Final
+
+from deephaven_massive._massive import (
+    FlatFileClient,
+    RequestGovernor,
+    RestClient,
+    Transport,
+    WireAuthError,
+    WireError,
+    set_reply_capture,
+    source,
+)
+from tests._live.calendar import NEW_YORK, recent_monday
+from tests._live.plans import TIERS, LivePlans, history_start
+from tests._live.probe import PlanProbeError, probe_tiers, reached_prefixes
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from deephaven_massive._massive import CapturedReply
+
+REST_BASE_URL: Final = "https://api.massive.com"
+"""Massive's REST API."""
+
+S3_ENDPOINT_URL: Final = "https://files.massive.com"
+"""Massive's flat-file endpoint."""
+
+S3_BUCKET: Final = "flatfiles"
+"""Massive's flat-file bucket."""
+
+
+@dataclass(frozen=True)
+class Credentials:
+    """The secrets and endpoints a probe uses. Never written anywhere.
+
+    Attributes:
+        api_key: The API key.
+        s3_pair: The S3 access key id and secret access key, or None when unset.
+        rest_base_url: The REST API's base URL.
+        s3_endpoint_url: The flat-file endpoint.
+        s3_bucket: The flat-file bucket.
+    """
+
+    api_key: str
+    s3_pair: tuple[str, str] | None
+    rest_base_url: str = REST_BASE_URL
+    s3_endpoint_url: str = S3_ENDPOINT_URL
+    s3_bucket: str = S3_BUCKET
+
+
+@dataclass
+class ProbeResult:
+    """What one probe found.
+
+    Attributes:
+        when: When it ran, ISO UTC.
+        tiers: Each subscription's tier, or None when the probe could not tell (*unknown*).
+        flat_files: The flat-file prefixes the S3 pair reached, sorted.
+        history_start: Each subscription's earliest readable date, ISO, or `"all"` for a tier
+            that keeps all history; empty when the tiers are unknown.
+        clock_offset: The machine clock minus Massive's `serverTime`, in seconds, or None.
+        key_rejected: Whether Massive rejected the API key.
+        error: Why the tiers are unknown, `""` otherwise.
+        requests: Each request made: its path, query, status, and request id.
+    """
+
+    when: str
+    tiers: dict[str, str] | None = None
+    flat_files: list[str] = field(default_factory=list)
+    history_start: dict[str, str] = field(default_factory=dict)
+    clock_offset: float | None = None
+    key_rejected: bool = False
+    error: str = ""
+    requests: list[dict[str, Any]] = field(default_factory=list)
+
+
+def plans_variable(tiers: dict[str, str], flat_files: list[str]) -> str:
+    """Spell tiers in the `MASSIVE_LIVE_PLANS` grammar the live tests read.
+
+    Args:
+        tiers: Each subscription's tier.
+        flat_files: The prefixes the S3 pair reached.
+
+    Returns:
+        Every class with its tier, then each reached flat-file prefix as `s3=<prefix>`, such as
+        `"stocks=starter,options=basic,...,s3=us_stocks_sip/day_aggs_v1"`, so the live tests
+        skip a prefix the credentials do not reach. Basic classes are named too, so the value
+        is never empty: an empty one would make the live tests probe the key again themselves.
+    """
+    entries = [f"{name}={tier}" for name, tier in tiers.items()]
+    return ",".join([*entries, *(f"s3={prefix}" for prefix in sorted(flat_files))])
+
+
+def probe_key(credentials: Credentials, *, now: datetime) -> ProbeResult:
+    """Ask Massive what the key can do now.
+
+    Args:
+        credentials: The secrets and endpoints.
+        now: The current time, aware; its New York date picks the flat-file day and the
+            history windows, and its time of day is checked against Massive's snapshot reset.
+
+    Returns:
+        The result; its `tiers` are None when the probe could not tell them.
+    """
+    result = ProbeResult(when=now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    governor = RequestGovernor((*TIERS, "other"), learn_only=("other",))
+    governor.declare(TIERS)
+    client = RestClient(
+        credentials.api_key,
+        base_url=credentials.rest_base_url,
+        max_concurrency=1,
+        governor=governor,
+    )
+    try:
+        with _recording(result):
+            _probe_rest(client, result, now)
+            if result.tiers is not None and credentials.s3_pair is not None:
+                result.flat_files = _reached(credentials, now)
+    finally:
+        client.close()
+    if result.tiers is not None:
+        today = now.astimezone(NEW_YORK).date()
+        result.history_start = _history(result.tiers, today)
+    return result
+
+
+def _probe_rest(client: RestClient, result: ProbeResult, now: datetime) -> None:
+    """Read the clock offset and the tiers into a result.
+
+    Args:
+        client: The probe's REST client.
+        result: Filled in place.
+        now: The current time, aware.
+    """
+    try:
+        page = client.get(source(Transport.REST, "/v1/marketstatus/now"), {}, {}, bucket="other")
+        server_time = page.body.get("serverTime") if isinstance(page.body, dict) else None
+        if isinstance(server_time, str):
+            stamp = datetime.fromisoformat(server_time)
+            result.clock_offset = round((datetime.now(UTC) - stamp).total_seconds(), 3)
+        result.tiers = probe_tiers(client, now=now.astimezone(NEW_YORK).time())
+    except WireAuthError:
+        result.key_rejected = True
+        result.error = "the API key was rejected"
+    except (PlanProbeError, WireError) as error:
+        result.error = f"{type(error).__name__}: {error}"
+
+
+def _reached(credentials: Credentials, now: datetime) -> list[str]:
+    """Find the flat-file prefixes the S3 pair reaches.
+
+    Args:
+        credentials: The secrets, with the S3 pair set.
+        now: The current time, aware.
+
+    Returns:
+        The reached prefixes; empty when the endpoint fails.
+    """
+    assert credentials.s3_pair is not None  # checked by the caller
+    access_key_id, secret_access_key = credentials.s3_pair
+    client = FlatFileClient(
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        endpoint_url=credentials.s3_endpoint_url,
+        bucket=credentials.s3_bucket,
+        max_pool=1,
+    )
+    try:
+        day = recent_monday(now.astimezone(NEW_YORK).date())
+        return list(reached_prefixes(client, day))
+    except WireError:
+        return []
+    finally:
+        client.close()
+
+
+def _history(tiers: dict[str, str], today: date) -> dict[str, str]:
+    """Return each subscription's earliest readable date by the documented windows.
+
+    Args:
+        tiers: Each subscription's tier.
+        today: The New York date.
+
+    Returns:
+        Each class's first readable date, ISO, or `"all"`.
+    """
+    plans = LivePlans(tiers=tiers, s3=False, flat_files=(), source="probed")
+    found = {}
+    for name in tiers:
+        first = history_start(plans, name, today)
+        found[name] = "all" if first is None else first.isoformat()
+    return found
+
+
+@contextlib.contextmanager
+def _recording(result: ProbeResult) -> Iterator[None]:
+    """Record every reply's request while the probe runs, never its body.
+
+    Args:
+        result: Its `requests` receives one entry per reply.
+
+    Yields:
+        Control to the probe.
+    """
+
+    def sink(reply: CapturedReply) -> None:
+        result.requests.append(
+            {
+                "path": reply.path,
+                "query": dict(reply.query),
+                "status": reply.status,
+                "request_id": reply.request_id,
+            }
+        )
+
+    set_reply_capture(sink)
+    try:
+        yield
+    finally:
+        set_reply_capture(None)

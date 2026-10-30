@@ -40,6 +40,7 @@ import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.cancel import Cancel
+from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
     is_proxy_auth_failure,
@@ -655,9 +656,10 @@ class RestClient:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
         The body is cleaned of the key once, here, before anything reads it, so no row, error,
-        or log line can quote it. A 200 is decoded into a page; any other status is logged at
-        DEBUG with its body, then a 429 goes to the governor as a refusal, and every other status
-        is reported answered.
+        or log line can quote it; the cleaned body, whatever its status, also goes to the
+        reply-capture sink when one is installed (`net.capture`). A 200 is decoded into a page;
+        any other status is logged at DEBUG with its body, then a 429 goes to the governor as a
+        refusal, and every other status is reported answered.
 
         Args:
             job: The call's path, bucket, and cancellation.
@@ -680,6 +682,9 @@ class RestClient:
             try:
                 page = decode_page(data, job.rest_path, request)
             except WireError as unreadable:
+                capture_response(
+                    host=self._host, target=request.target, status=200, request_id=None, body=data
+                )
                 # The attempt's line still names it, with the body the page could not be read
                 # from; the call that fails logs the error itself.
                 if _log.isEnabledFor(logging.DEBUG):
@@ -691,6 +696,13 @@ class RestClient:
                         body_excerpt(data),
                     )
                 raise
+            capture_response(
+                host=self._host,
+                target=request.target,
+                status=200,
+                request_id=page.request_id,
+                body=data,
+            )
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 self._base + request.target,
@@ -700,6 +712,13 @@ class RestClient:
             )
             return page
         failure = http_error(response.status, data, request)
+        capture_response(
+            host=self._host,
+            target=request.target,
+            status=response.status,
+            request_id=failure.request_id,
+            body=data,
+        )
         if _log.isEnabledFor(logging.DEBUG):
             # The whole body (up to 2,000 characters, already cleaned of the key), so the line
             # shows every word Massive or a proxy said; the error quotes only its message.
