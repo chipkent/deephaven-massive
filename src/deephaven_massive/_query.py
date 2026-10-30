@@ -869,83 +869,21 @@ class HistoryQuery(QueryBase):
     ) -> Table:
         """Return the dataset's rows over a range of whole days or of exact instants.
 
-        The two bounds are of one kind, never mixed:
+        Dates (`"2025-03-03"` or a `date`) are whole days in the asset class's time zone, both
+        ends included; aware datetimes are exact instants, the end excluded. Leave out `end`
+        to read through now. A bar is returned only when its whole window lies in the range
+        and has ended, so the current day's, week's, or month's bar never is. Each row carries
+        `Timestamp` (a bar `TimestampStart` and `TimestampEnd`), its trading day `Date`, and
+        `TimestampInsert`, when it was downloaded. The rows come from REST or from Massive's
+        flat files, never both in one call: `source=dm.HistorySource.AUTO` picks flat files
+        for many symbols, or when only they can serve the request, and REST otherwise; the
+        table's description names the source and why. Split-adjusted bars (`adjusted=True`,
+        the default of stock and option bars) come only from REST. It blocks until the whole
+        range is read: requests run on the calling thread, flat files on up to
+        `max_concurrency` reader threads that end before it returns.
 
-        - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
-          `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
-          the asset class's day zone: New York for stocks, options, and indices, UTC for forex
-          and crypto. For futures a date names the trading session whose `Date`
-          (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
-          (earlier after a holiday).
-        - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
-          end` (for bars, `TimestampStart`). Equal instants give an empty table.
-
-        `end=None`, the default, reads through now. A bar is returned only when its whole window
-        lies inside the range and has ended: its `TimestampStart` lies in the range, and its
-        `TimestampEnd` is no later than now or than the range's end (for dates, the end of the
-        last day: the next midnight, 01:00 New York time for indices, 17:00 Chicago time on the
-        last session's date for futures). Its window is an intraday or 1-day bar's own interval;
-        for stocks, options, and futures, a week Monday to Friday and a month, quarter, or year
-        its calendar period less its leading and trailing weekend days; for indices, which can
-        update around the clock, the same periods as whole calendar periods, weekends included
-        at both ends; for forex and crypto, which trade at weekends, whole calendar weeks
-        (Monday to Sunday), months, quarters, and years; a bar of several units all of them,
-        where several days or sessions end as late as holidays could push them (one weekday
-        more, and one more for every five further days); and a futures bar named by session
-        dates its sessions. So the current day's, week's, or month's bar is never returned, and
-        `history("2025-03-05", "2025-03-20")` of monthly bars is empty. Datetime bounds keep
-        only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
-        returns Tuesday to Thursday, so pass dates for daily bars. A futures bar of several
-        sessions, weeks, or months named by dates is kept only when it fits the range whether
-        Massive labels it with its first or its last session, which is not documented. There is
-        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
-        week. There is no `limit`: the library pages internally.
-
-        Every row says when it happened, its trading day, and when it arrived: a tick its
-        `Timestamp`; a bar its window, `TimestampStart` and the exclusive `TimestampEnd`
-        (join on the end, `aj(..., on=["Symbol", "Timestamp>=TimestampEnd"])`, so no bar is
-        attached before it closed); its `Date`, ISO `yyyy-MM-dd` text, null for a bar that
-        spans more than one date; and `TimestampInsert`, when its page or file block arrived
-        (the download time). A bar of a day or longer starts at 00:00 of its window's first
-        day in the class day zone (New York for stocks, options, and indices; UTC for forex
-        and crypto), whatever the source, and ends at 00:00 after its last day (an hour later
-        for indices, whose day is not verified); a futures bar keeps Massive's window start and
-        ends at 17:00 Chicago time on its session date, or for a bar of several sessions, a week,
-        or longer at the latest end its label allows, since Massive does not document whether
-        it labels such a bar with its first or its last session.
-
-        One call never mixes split bases: with `adjusted=True`, the default of the stock and
-        option bars, it reads REST only and checks every page's `adjusted` echo; flat files
-        are as traded, so they serve only `adjusted=False`. Massive adjusts for splits only,
-        never for cash dividends. A table that joins adjusted history to live bars, which are
-        as traded, jumps at the next split's execution date: build it again after a split.
-
-        Flat files (S3) can serve a request when S3 credentials are configured, the dataset
-        has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
-        unadjusted where the dataset has `adjusted`), and every day's file is published (from
-        `flat_file_publish_cutoff`, New York time, after the day ends). REST can serve it when
-        the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
-        daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
-        or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. The two sources do not always carry the same
-        columns (REST trades have `DecimalSize`, flat-file trades do not): when both could
-        serve a request and `AUTO`'s choice leaves columns null that the other fills, one
-        WARNING per session, dataset, and set of columns names them and the `source=` that
-        fills them. Every table's description (its `TableDescription` attribute) names the
-        source it was read from and why. A bar of a day or longer stamped at a time of day,
-        or on a day, Massive is not known to use for its class fails loudly, whichever source
-        serves it, so the source never changes which day a bar is labelled with; `source=`
-        picks a source explicitly. A reactive symbol table is read once, when the verb is
-        called, and every source receives the same sorted canonical symbols; a row that is not
-        Massive's exact ticker raises `ValueError`. Flat-file reads skip a missing
-        weekend file silently and a missing weekday file (a holiday) with a WARNING. Futures
-        trades and quotes named by session dates are read over REST one request series per
-        weekday session and symbol; a long one-request-per-day download logs its request count
-        first, at INFO.
-
-        Side effects: network requests on the calling thread, and for flat files a pool of up
-        to `max_concurrency` reader threads that end before the call returns. It blocks until
-        the whole range is read.
+        Bar windows by class, how rows are stamped, the source rules, and what each source
+        fills: https://github.com/chipkent/deephaven-massive/blob/main/docs/guides/history.md.
 
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
