@@ -1258,11 +1258,9 @@ class Flusher:
                         self._shown[sink.stream_id] = message
                         found = updates.get(sink, StreamUpdate())
                         updates[sink] = replace(found, error=message)
-        for failure in converted.failures:
-            error = MassiveError(failure.message)
-            for sink in readers:
-                if failure.every_stream or sink.receives(failure.symbol):
-                    sink.fail(error)
+        for failure in converted.failures:  # one refused failure never fails another stream
+            failing = [s for s in readers if failure.every_stream or s.receives(failure.symbol)]
+            self._fail_each(failing, MassiveError(failure.message))
         if not converted.batch.num_rows:
             return
         shared = SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)

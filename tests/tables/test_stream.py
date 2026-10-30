@@ -809,6 +809,48 @@ def test_a_batch_whose_every_row_failed_publishes_nothing(
     assert not msft.failed
 
 
+def test_a_row_failure_that_is_refused_spares_the_other_streams(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Deephaven refuses one stream's failure for a bad row: a stream that never received the
+    # row keeps its own rows and is not failed with the batch.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+
+    def sink(stream_id: int, symbol: str) -> StreamSink:
+        # The two streams share the dataset's plan, as the streams of one connection do.
+        return open_stream_tables(
+            plan,
+            core.catalog.dataset_schema(TRADES, raw_symbol=False),
+            (symbol,),
+            core=core,
+            stream_id=stream_id,
+            host="socket.test",
+            path="/stocks",
+            on_shutdown=lambda: None,
+            on_symbols=lambda *_: None,
+        ).sink
+
+    aapl, msft = sink(1, "AAPL"), sink(2, "MSFT")
+
+    def refused(_: Exception) -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(aapl, "publisher", types.SimpleNamespace(publish_failure=refused))
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    flusher.rows("T", [trade("AAPL", SipTimestamp=5), trade("MSFT")])
+    flusher.flush()
+    assert aapl.failed
+    assert not msft.failed
+    assert msft.rows_published == 1
+    assert "test-flush: could not fail stream 1" in caplog.text
+
+
 def test_a_failure_is_recorded_before_the_table_fails(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
