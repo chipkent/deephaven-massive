@@ -9,7 +9,8 @@ gate, and what to do when a refresh adds something new.
 ## The pieces
 
 - **The snapshot**, `vendor/massive/`: Massive's published specifications, vendored as the
-  generator's input. They are Massive's content, not covered by this repository's license, and
+  generator's input, and the knowledge-base articles the library relies on, vendored so the
+  drift check sees them change. They are Massive's content, not covered by this repository's license, and
   shipped in neither the wheel nor the sdist (CI's build job checks both).
 - **The refresh**, `deephaven_massive._massive.refresh`: reads the snapshot and writes
   `spec/*.json`. It never touches the network unless asked to.
@@ -62,6 +63,22 @@ be read by a dataset. When a refresh adds one, the same pull request adds a data
 source for good, or defers it with an issue. The module docstring of `refresh/exclusions.py`
 explains the three choices, and the coverage test in `tests/datasets/test_catalog.py` says what
 it expects when it fails. An exclusion never means "not yet".
+
+## Knowledge-base articles
+
+Some rules the library depends on are stated only in Massive's knowledge base, not in its API
+documentation: the wording of the HTTP 429 that marks a Basic subscription, and that reference
+and cross-asset endpoints are counted in a rate-limit bucket of their own, both from "What is
+the request limit for Massive's RESTful APIs?". `ARTICLES` in `refresh/knowledge_base.py`
+lists each such article by its slug, with what the library takes from it. Articles are HTML
+pages only, so `--fetch` extracts each one's title and article text as Markdown and stores it
+as `vendor/massive/knowledge-base/<slug>.md`, with its URL and hashes in the manifest.
+
+- **To depend on another article**, add its slug and the reason to `ARTICLES`, run `--fetch`,
+  and cite the vendored file from the code that relies on it.
+- **When `--check` reports an article's text changed**, read the new text and check that the
+  rule named in the report still holds. If it does, `--fetch` takes the new text; if not, fix
+  the code first, in the same pull request.
 
 ## Drift
 

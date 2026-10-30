@@ -9,9 +9,10 @@ reads (`vendor/massive/`) is in a distribution.
   problem (the gate, the source, the key, and the vendor's description) and exits with status
   1, having written nothing.
 - With `--fetch`, it replaces the snapshot with the live vendor sources (the OpenAPI and
-  WebSocket specifications, the documentation index, and the REST, WebSocket, and flat-file
-  pages the index links) and stops; run it again without the option to regenerate from the
-  new snapshot. A failed download leaves the old snapshot in place and exits with status 1.
+  WebSocket specifications, the documentation index, the REST, WebSocket, and flat-file
+  pages the index links, and the knowledge-base articles the library relies on) and stops;
+  run it again without the option to regenerate from the new snapshot. A failed download
+  leaves the old snapshot in place and exits with status 1.
 - With `--check`, it downloads the same live sources into a scratch directory, compares them
   with the vendored snapshot and the committed schemas (`drift`), prints the drift report as
   Markdown to standard output, and changes nothing. It exits with status 0 when there is no

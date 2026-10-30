@@ -17,6 +17,11 @@ vendored snapshot (`vendor/massive/` in the source checkout, whose layout and ma
 - `flat-files/<class>/.../<page>.md`: every flat-file documentation page the index links: the
   overviews, whose tables name each dataset's bucket prefix, and the dataset pages, whose
   "Columns" tables are the flat-file schemas;
+- `knowledge-base/<slug>.md`: every knowledge-base article the library relies on
+  (`knowledge_base.ARTICLES`), downloaded as its HTML page from
+  `https://massive.com/knowledge-base/article/<slug>` and stored as the Markdown
+  `knowledge_base.article_markdown` extracts from it, since articles are published as HTML
+  only;
 - `manifest.json`: the fetch date and, for each file above, its URL, the SHA-256 of the bytes
   as fetched, and the SHA-256 of the file as stored.
 
@@ -25,7 +30,8 @@ reads line by line and the repository's whitespace hooks never need an exception
 re-serialized with an indent of one space and a final newline, keeping the vendor's key order
 (the order of an object's properties is the documented column order, so it is never sorted);
 text has the trailing whitespace of every line removed, trailing blank lines dropped, and one
-final newline. The stored hash covers that canonical form, the fetched hash the raw bytes.
+final newline. The stored hash covers that canonical form, the fetched hash the raw bytes
+(for an article, the HTML page).
 
 **Untrusted input.** The downloads are data, never code: JSON is parsed with the standard
 library, text is decoded as UTF-8, nothing is evaluated, and a page URL is accepted only below
@@ -54,7 +60,7 @@ from typing import TYPE_CHECKING
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT, http
-from deephaven_massive._massive.refresh import docs, snapshot
+from deephaven_massive._massive.refresh import docs, knowledge_base, snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -274,12 +280,13 @@ def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
     A `FetchError` from `get` or from canonicalizing a document propagates.
 
     Returns:
-        The two specifications, the index, then the pages of each documentation area (REST,
-        WebSocket, flat files), each area in index order.
+        The two specifications, the index, the pages of each documentation area (REST,
+        WebSocket, flat files), each area in index order, then the knowledge-base articles in
+        `knowledge_base.ARTICLES` order.
 
     Raises:
         FetchError: If the index links no page of an area, or a page outside its area's
-            documentation.
+            documentation, or an article's page has no title or no article text.
     """
     files = []
     for name, url in ((snapshot.OPENAPI, OPENAPI_URL), (snapshot.WEBSOCKET, WEBSOCKET_URL)):
@@ -301,6 +308,21 @@ def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
             files.append(
                 snapshot.VendorFile(name=name, url=url, raw=page, stored=canonical_text(page, url))
             )
+    for slug in knowledge_base.ARTICLES:
+        url = knowledge_base.article_url(slug)
+        page = get(url)
+        try:
+            text = knowledge_base.article_markdown(_decode(page, url), url)
+        except knowledge_base.KnowledgeBaseError as error:
+            raise FetchError(str(error)) from None
+        files.append(
+            snapshot.VendorFile(
+                name=snapshot.article_file(slug),
+                url=url,
+                raw=page,
+                stored=canonical_text(text.encode(), url),
+            )
+        )
     return files
 
 
@@ -324,8 +346,8 @@ def fetch(
         today: The fetch date written to the manifest; today's UTC date when omitted.
 
     A `FetchError` (a download failed, a specification is not JSON, a document is not UTF-8,
-    or the index links no page of an area or a page outside its area) propagates and leaves
-    the snapshot unchanged.
+    the index links no page of an area or a page outside its area, or an article's page has
+    no title or no article text) propagates and leaves the snapshot unchanged.
 
     Returns:
         The names of the stored files, relative to `directory`, manifest last.
