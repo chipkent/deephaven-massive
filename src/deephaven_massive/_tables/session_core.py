@@ -56,13 +56,16 @@ threads enter the session's context (`entered`) live in `execution_context.py`.
 graph's exclusive lock, so no update cycle runs until the command returns; a user thread may
 hold the shared lock to the same effect. Every call works there, and a call on a thread that
 holds the lock never waits for an update cycle or on a thread that may need the lock (the
-diagnostics writer, a poller, another caller's stream open): `close()` waits neither for the
+diagnostics writer, a poller, another caller's stream open, the reaper, whose releases take
+the lock): `close()` waits neither for the
 diagnostics writer nor for the cycle that applies its final rows, and a verb never waits for
 another thread's open of the same stream (see below). Only update-graph threads themselves
 (table listeners) are refused. A verb that runs long there pauses every live table of the
 worker, which the session reports once (`SessionCore.run_verb`).
 
-Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock. A
+Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock.
+Every liveness scope is released holding the UG shared lock and outside `registry_lock`
+(`release_scope`); a shutdown callback that the release runs takes `registry_lock` under it. A
 stream is registered under `registry_lock` before it opens (with a session-minted id), then
 opened with no lock held; a second verb on the same key waits for that open on its own thread,
 outside every lock, instead of opening a second stream. A second verb on a thread that holds
@@ -109,7 +112,7 @@ from deephaven_massive._tables.execution_context import (
     holds_update_graph_lock,
     refuse_update_graph_thread,
 )
-from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result
+from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -188,6 +191,17 @@ def _call(core_ref: weakref.ref[SessionCore], release: Callable[..., None], *arg
         *args: Its arguments after the core.
     """
     release(cast("SessionCore", core_ref()), *args)
+
+
+def _release_on(reaper: Reaper, exec_ctx: ExecutionContext, scope: LivenessScope) -> None:
+    """Queue a scope's release (`release_scope`) on the reaper; `SessionCore.release_later`.
+
+    Args:
+        reaper: The session's reaper, which runs the release.
+        exec_ctx: The session's execution context, whose update graph's lock the release takes.
+        scope: The scope to release.
+    """
+    reaper.submit(functools.partial(release_scope, exec_ctx, scope))
 
 
 def _let_go(core: SessionCore) -> None:
@@ -361,12 +375,21 @@ class SessionCore:
         except BaseException:  # the writer is running: stop it, or it holds the tables forever
             self.diagnostics.stop()
             raise
-        self.results: Final = ResultRegistry(self.registry_lock, self._reaper)
+        self.results: Final = ResultRegistry(self.registry_lock, self._reaper, exec_ctx)
         # Queues work on the reaper, after everything queued before it, for callers that must
         # not do it themselves: a listener on an update-graph thread, or a shutdown callback,
         # which must make no Deephaven call. Never blocks, takes no lock, safe from any thread;
         # a job that raises is logged at ERROR.
         self.defer: Final[Callable[[Callable[[], None]], None]] = self._reaper.submit
+        # Releases a scope on the reaper, under the update graph's shared lock
+        # (`release_scope`), for callers that may not take that lock themselves: a shutdown
+        # callback, or an owner holding a lock that a holder of the update graph's lock may
+        # wait for (a stream's publish lock). Never blocks, takes no lock, safe from any thread.
+        # Like `defer`, it refers to the reaper and the context but not to the core, so a
+        # shutdown callback that Java holds can keep it without keeping the session alive.
+        self.release_later: Final[Callable[[LivenessScope], None]] = functools.partial(
+            _release_on, self._reaper, exec_ctx
+        )
         self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamEntry] = {}
@@ -656,7 +679,7 @@ class SessionCore:
         try:
             self._require_unfailed(spec, handle.stream_id)
             with entered(self.exec_ctx):
-                result, scope = make_result(lambda: build(blink))
+                result, scope = make_result(self.exec_ctx, lambda: build(blink))
             self.results.track(
                 result,
                 scope,
@@ -672,8 +695,7 @@ class SessionCore:
             failure = self._failure(handle.stream_id) if deephaven else None
             try:
                 if scope is not None:
-                    with entered(self.exec_ctx):
-                        scope.release()
+                    release_scope(self.exec_ctx, scope)
             finally:
                 self._release_hold(handle.stream_id)
             if failure is not None:
@@ -933,8 +955,7 @@ class SessionCore:
                 closed = self._closed
         except BaseException:
             if opened is not None and not stored:  # the stream never reached the registry
-                with entered(self.exec_ctx):
-                    opened.scope.release()
+                release_scope(self.exec_ctx, opened.scope)
             raise
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self.label)
@@ -952,7 +973,9 @@ class SessionCore:
         and the drift registry forgets the stream. Releasing the stream scope drops the
         library's reference to the blink table; the table dies, and its shutdown callback
         releases the topics, when nothing else (a derived table, an open panel) refers to it.
-        Releasing the scope of a stream that has already shut down is a harmless decrement.
+        Releasing the scope of a stream that has already shut down is a harmless decrement. The
+        scope is released after `registry_lock` is let go, under the update graph's shared lock
+        (`release_scope`).
 
         Args:
             stream_id: The stream whose hold is dropped.
@@ -986,8 +1009,7 @@ class SessionCore:
             "; its stream scope is released" if not held and opened else "",
         )
         if not held and state.handle is not None:
-            with entered(self.exec_ctx):
-                state.handle.scope.release()
+            release_scope(self.exec_ctx, state.handle.scope)
 
     def fail_stream(self, stream_id: int, error: str) -> str | None:
         """Record that a stream failed and stop reusing it for new verbs.
@@ -1246,15 +1268,14 @@ class SessionCore:
         try:
             columns = [column.name for column in table.columns]
             with entered(self.exec_ctx):
-                result, scope = make_result(lambda: table.view(columns))
+                result, scope = make_result(self.exec_ctx, lambda: table.view(columns))
             self.results.track(
                 result, scope, functools.partial(_call, weakref.ref(self), SessionCore._drop_view)
             )
         except BaseException as error:  # nothing was tracked: the scope and the count are ours
             try:
                 if scope is not None:
-                    with entered(self.exec_ctx):
-                        scope.release()
+                    release_scope(self.exec_ctx, scope)
             finally:
                 self._drop_view()
             if isinstance(error, DHError) and self.closed:

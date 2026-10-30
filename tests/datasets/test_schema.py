@@ -7,11 +7,13 @@ from typing import cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import merge
 
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
+    JSON_TEXT_NOTE,
     KEY_COLUMNS,
     TRANSPORT_LABELS,
     Column,
@@ -36,7 +38,7 @@ from deephaven_massive._tables.columns import col_defs
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
 # The wire interface names `Source.memberships` but exports no constructor for an element.
-MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
+MEMBERSHIP = type(source(W, "stocks/T").memberships[0])
 
 
 # --- Column types and Schema -----------------------------------------------------------------
@@ -59,7 +61,8 @@ def test_pascal_case(path: str, expected: str) -> None:
 def test_column_types_map_to_arrow() -> None:
     assert ColumnType.INSTANT.arrow_type == pa.timestamp("ns", tz="UTC")
     assert ColumnType.INT.arrow_type == pa.int32()
-    assert ColumnType.INT_ARRAY.arrow_type == pa.list_(pa.int32())
+    assert ColumnType.LONG_ARRAY.arrow_type == pa.list_(pa.int64())
+    assert ColumnType.STRING_ARRAY.arrow_type == pa.list_(pa.string())
     assert {t.value for t in ColumnType} == {
         "Instant",
         "double",
@@ -67,7 +70,8 @@ def test_column_types_map_to_arrow() -> None:
         "int",
         "String",
         "boolean",
-        "int[]",
+        "long[]",
+        "String[]",
     }
 
 
@@ -78,7 +82,8 @@ def test_every_wire_type_has_a_column_type() -> None:
     assert COLUMN_TYPES[WireType.BOOL] is ColumnType.BOOLEAN
     # Every calendar date is ISO yyyy-MM-dd text.
     assert COLUMN_TYPES[WireType.DATE] is ColumnType.STRING
-    assert COLUMN_TYPES[WireType.INT_ARRAY] is ColumnType.INT_ARRAY
+    assert COLUMN_TYPES[WireType.LONG_ARRAY] is ColumnType.LONG_ARRAY
+    assert COLUMN_TYPES[WireType.STRING_ARRAY] is ColumnType.STRING_ARRAY
     # A dataset column is never a 32-bit int: exchange and tape ids are long.
     assert ColumnType.INT not in COLUMN_TYPES.values()
 
@@ -97,10 +102,11 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
             "Int": 3,
             "String": {"b": 1, "a": [2]},
             "Boolean": True,
-            "IntArray": 7,
+            "LongArray": 7,
+            "StringArray": ["AAPL", "BRK.B"],
             "Ignored": "extra keys are ignored",
         },
-        {"IntArray": [1, 2]},
+        {"LongArray": [1, 2**40], "StringArray": []},
     ]
     batch = ALL_TYPES.to_arrow(rows)
     assert batch.schema == ALL_TYPES.arrow_schema()
@@ -108,9 +114,11 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
     assert {c.name: c.data_type for c in table.columns} == col_defs(ALL_TYPES)
     values = dh_arrow.to_arrow(table).to_pylist()
     assert values[0]["String"] == '{"a": [2], "b": 1}'
-    assert values[0]["IntArray"] == [7]
+    assert values[0]["LongArray"] == [7]
+    assert values[0]["StringArray"] == ["AAPL", "BRK.B"]
     assert values[1]["Double"] is None
-    assert values[1]["IntArray"] == [1, 2]
+    assert values[1]["LongArray"] == [1, 2**40]
+    assert values[1]["StringArray"] == []
     assert ALL_TYPES.column_names[0] == "Instant"
 
 
@@ -138,9 +146,9 @@ def test_to_arrow_reports_integers_beyond_the_column_range() -> None:
 
 
 def test_to_arrow_never_truncates_floats_in_integer_lists() -> None:
-    with pytest.raises(MassiveError, match=r"schema mismatch in all\.IntArray.*7140\.08"):
-        ALL_TYPES.to_arrow([{"IntArray": [7140.08]}])
-    values = ALL_TYPES.to_arrow([{"IntArray": [1.0, None, 3]}]).column("IntArray")
+    with pytest.raises(MassiveError, match=r"schema mismatch in all\.LongArray.*7140\.08"):
+        ALL_TYPES.to_arrow([{"LongArray": [7140.08]}])
+    values = ALL_TYPES.to_arrow([{"LongArray": [1.0, None, 3]}]).column("LongArray")
     assert values.to_pylist() == [[1, None, 3]]
 
 
@@ -363,15 +371,37 @@ def test_a_projection_belongs_to_the_dataset_group() -> None:
 
 
 def test_required_keys_resolve_to_the_fields_behind_them() -> None:
-    snapshot = (R, "/v3/snapshot/indices")
+    # A source that joins the values kind with a few of its fields, `last_updated` as Timestamp.
+    snapshot = Source(
+        key="/snapshot",
+        transport=R,
+        fields=(
+            Field(wire_key="ticker", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="value", column="Value", wire_type=WireType.DOUBLE),
+            Field(
+                wire_key="last_updated",
+                column="LastUpdated",
+                wire_type=WireType.EPOCH,
+                unit=WireUnit.NS,
+            ),
+        ),
+        memberships=(
+            MEMBERSHIP(
+                kind="values",
+                group="indices",
+                position=0,
+                projection={"ticker": "Ticker", "last_updated": "Timestamp"},
+            ),
+        ),
+    )
     values = spec(
         "indices.values",
-        {snapshot: SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+        {(R, "/snapshot"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
         asset_class=AssetClass.INDICES,
         kind="values",
     )
-    # The kind's Timestamp is the snapshot's own LastUpdated, which the wire client decodes.
-    fields = required_fields(values, source(*snapshot))
+    # The kind's Timestamp is the source's own LastUpdated, which the wire client decodes.
+    fields = required_fields(values, snapshot)
     assert [(f.wire_key, f.column) for f in fields] == [
         ("ticker", "Ticker"),
         ("last_updated", "LastUpdated"),
@@ -594,8 +624,8 @@ def test_only_options_datasets_have_an_option_root() -> None:
 
 
 def test_the_merge_follows_the_membership_positions() -> None:
-    # Declared fetch, history, stream, files; the stocks trades group puts the history path
-    # (position 0) before the last-trade path (position 1).
+    # The stocks trades group puts the history path (position 0) before the last-trade path
+    # (position 1) and the stream (position 2), whichever dataset of the group reads each.
     sip = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
     history = (R, "/v3/trades/{stockTicker}")
     last = (R, "/v2/last/trade/{stocksTicker}")
@@ -604,14 +634,20 @@ def test_the_merge_follows_the_membership_positions() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
-        fetch_path=last[1],
         history_path=history[1],
         channels={NotBars.ANY: "T"},
         keys={
-            last: sip,
             history: SourceKeys(KeySpec("stockTicker", from_request=True), sip.time),
             (W, "stocks/T"): sip,
         },
+    )
+    last_trade = DatasetSpec(
+        name="stocks.last_trade",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        kind="trades",
+        fetch_path=last[1],
+        keys={last: sip},
     )
     made = Source(
         key=last[1],
@@ -627,11 +663,16 @@ def test_the_merge_follows_the_membership_positions() -> None:
     def tables(transport: Transport, key: str) -> Source:
         return made if key == last[1] else source(transport, key)
 
-    names = dataset_schema(trades, (trades,), tables).column_names
-    # The history path's columns come before the last-trade path's own Zeta.
-    assert names.index("Conditions") < names.index("Zeta")
+    names = dataset_schema(trades, (trades, last_trade), tables).column_names
+    # Only the last-trade path fills Zeta, so the trades dataset has none of it.
     assert names[:3] == ("Symbol", "Date", "Timestamp")
-    assert names[-2:] == ("Zeta", "TimestampInsert")
+    assert "Zeta" not in names
+    last_names = dataset_schema(last_trade, (trades, last_trade), tables).column_names
+    assert last_names == ("Symbol", "Date", "Timestamp", "Zeta", "TimestampInsert")
+    # The group's sources keep their positions whichever member comes first, so each dataset
+    # of the group has the same columns in the same order.
+    assert dataset_schema(trades, (last_trade, trades), tables).column_names == names
+    assert dataset_schema(last_trade, (last_trade, trades), tables).column_names == last_names
 
 
 def test_the_merge_joins_types_across_sources() -> None:
@@ -642,14 +683,14 @@ def test_the_merge_joins_types_across_sources() -> None:
         name="stocks.quotes",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        fetch_path=nbbo[1],
         history_path="/v3/quotes/{stockTicker}",
         channels={NotBars.ANY: "Q"},
-        keys={nbbo: both, stream: both},
+        keys={stream: both},
     )
-    schema = dataset_schema(quotes, (quotes,), lookup)
+    last = spec("stocks.last_quote", {nbbo: both}, asset_class=AssetClass.STOCKS)
+    schema = dataset_schema(quotes, (quotes, last), lookup)
     types = {c.name: c.type for c in schema.columns}
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["AskSize"] is ColumnType.DOUBLE  # long on the stream, double on /v3/quotes
     assert schema.column_names[:2] == ("Symbol", "Timestamp")
 
@@ -732,8 +773,8 @@ def test_rest_text_wins_and_source_order_breaks_ties() -> None:
         name="stocks.x",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        fetch_path="/first",
-        history_path="/second",
+        history_path="/first",
+        extra_paths=("/second",),
         channels={NotBars.ANY: "T"},
     )
     made = {
@@ -834,18 +875,24 @@ STOCK_TRADES = DatasetSpec(
     summary="Trades of US-listed stocks, tick by tick.",
     asset_class=AssetClass.STOCKS,
     kind="trades",
-    fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
-        (R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS,
         (R, "/v3/trades/{stockTicker}"): SourceKeys(
             KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
         ),
         (W, "stocks/T"): TRADES_KEYS,
         (F, "us_stocks_sip/trades_v1"): TRADES_KEYS,
     },
+)
+STOCK_LAST_TRADE = DatasetSpec(
+    name="stocks.last_trade",
+    summary="The latest trade of each US-listed stock.",
+    asset_class=AssetClass.STOCKS,
+    kind="trades",
+    fetch_path="/v2/last/trade/{stocksTicker}",
+    keys={(R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS},
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
@@ -861,25 +908,65 @@ CRYPTO_TRADES = DatasetSpec(
         (W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp")),
     },
 )
-TRADES = Catalog((STOCK_TRADES, CRYPTO_TRADES))
+TRADES = Catalog((STOCK_TRADES, STOCK_LAST_TRADE, CRYPTO_TRADES))
 
 
 def wire(transport: Transport, key: str, column: str) -> Field:
     return source(transport, key).field(column)
 
 
-def test_a_column_only_other_members_supply_names_them() -> None:
-    columns = {c.name: c for c in TRADES.dataset_schema(CRYPTO_TRADES).columns}
-    tape = columns["Tape"]
-    assert tape.description == "Always null for `crypto.trades`; supplied by `stocks.trades`."
-    assert (tape.supplied_by, dict(tape.wire_keys)) == ((), {})
-    # Crypto renames its own participant time to Timestamp, so the stocks column is union-only.
-    assert columns["ParticipantTimestamp"].description == (
-        "Always null for `crypto.trades`; supplied by `stocks.trades`."
-    )
+def test_a_dataset_keeps_only_the_columns_its_own_sources_fill() -> None:
+    crypto_columns = {c.name: c for c in TRADES.dataset_schema(CRYPTO_TRADES).columns}
+    stock_columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
+    # Only stocks fill `Tape`; crypto renames its own participant time to `Timestamp`.
+    assert "Tape" not in crypto_columns
+    assert "ParticipantTimestamp" not in crypto_columns
+    assert {"Tape", "ParticipantTimestamp"} <= set(stock_columns)
+    # The shared columns keep the kind's order and type, so the tables merge on them.
+    shared = [name for name in stock_columns if name in crypto_columns]
+    assert shared == [name for name in crypto_columns if name in stock_columns]
+    assert all(stock_columns[n].type is crypto_columns[n].type for n in shared)
     # Each dataset gets its own text, never the kind's: the stocks Tape is the vendor's.
-    stocks_tape = next(c for c in TRADES.dataset_schema(STOCK_TRADES).columns if c.name == "Tape")
-    assert stocks_tape.description == wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
+    assert stock_columns["Tape"].description == (
+        wire(R, "/v3/trades/{stockTicker}", "Tape").description
+    )
+
+
+@pytest.mark.parametrize("name", sorted(CATALOG.by_name))
+def test_every_dataset_column_is_supplied_by_some_transport(name: str) -> None:
+    # A dataset has only the columns some transport of its own fills, library columns included.
+    spec = CATALOG.by_name[name]
+    for raw_symbol in (False, True):
+        empty = [
+            c.name
+            for c in CATALOG.dataset_schema(spec, raw_symbol=raw_symbol).columns
+            if not c.supplied_by
+        ]
+        assert empty == [], name
+
+
+def test_tables_of_two_classes_merge_on_their_shared_columns(dh_exec_ctx: object) -> None:
+    # The recipe the column reference gives for a cross-class merge.
+    stock = CATALOG.dataset_schema(CATALOG.by_name["stocks.quotes"])
+    fx = CATALOG.dataset_schema(CATALOG.by_name["forex.quotes"])
+    assert stock.column_names != fx.column_names
+    a = dh_arrow.to_table(stock.to_arrow([{"Symbol": "SPY", "BidPrice": 1.0}]))
+    b = dh_arrow.to_table(fx.to_arrow([{"Symbol": "C:EURUSD", "BidPrice": 2.0}]))
+    common = [c for c in a.column_names if c in b.column_names]
+    both = merge([t.view(common) for t in (a, b)])
+    assert both.column_names == common
+    assert both.size == 2
+
+
+def test_a_json_text_column_says_so_and_a_list_column_is_an_array() -> None:
+    contracts_spec = CATALOG.by_name["options.contracts"]
+    contracts = {c.name: c for c in CATALOG.dataset_schema(contracts_spec).columns}
+    assert contracts["AdditionalUnderlyings"].type is ColumnType.STRING
+    assert contracts["AdditionalUnderlyings"].description.endswith(JSON_TEXT_NOTE)
+    news = {c.name: c for c in CATALOG.dataset_schema(CATALOG.by_name["reference.news"]).columns}
+    assert news["Tickers"].type is ColumnType.STRING_ARRAY
+    assert JSON_TEXT_NOTE not in news["Tickers"].description
+    assert news["Insights"].description.endswith(JSON_TEXT_NOTE)
 
 
 def test_every_transport_has_one_user_facing_spelling() -> None:
@@ -894,10 +981,9 @@ def test_every_transport_has_one_user_facing_spelling() -> None:
 
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
-    last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
+    history = "/v3/trades/{stockTicker}"
     files = "us_stocks_sip/trades_v1"
     symbol = [
-        f'REST `T`: "{wire(R, last, "Ticker").description}"',
         "REST: the request's `stockTicker` parameter",
         f'flat files `ticker`: "{wire(F, files, "Ticker").description}"',
         f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
@@ -905,10 +991,9 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     assert columns["Symbol"].description == (
         f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}"
     )
-    assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
+    assert dict(columns["Symbol"].wire_keys) == {R: (None,), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
     timestamp = [
-        f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
         f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
         f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',

@@ -481,7 +481,7 @@ def synthetic_catalog() -> Catalog:
         transport=R,
         fields=(
             Field(wire_key="size", column="Size", wire_type=WireType.DOUBLE),
-            Field(wire_key="conditions", column="Conditions", wire_type=WireType.INT_ARRAY),
+            Field(wire_key="conditions", column="Conditions", wire_type=WireType.LONG_ARRAY),
         ),
     )
     tables = {FF: {SYNTHETIC_FILES: files}, R: {rest.key: rest}}
@@ -2635,7 +2635,7 @@ def test_an_unconvertible_list_element_names_its_header(
     with pytest.raises(dm.MassiveError) as info:
         q.history("2025-03-03", "2025-03-03")
     assert str(info.value).startswith(
-        f"cannot read {LOCATION.format(TRADES_0303)}: conditions is not list<item: int32>: "
+        f"cannot read {LOCATION.format(TRADES_0303)}: conditions is not list<item: int64>: "
     )
 
 

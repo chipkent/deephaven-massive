@@ -194,7 +194,7 @@ def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.
 
             dm.enable_debug_logging()  # or dm.enable_debug_logging("/tmp/massive.log")
             m = dm.MassiveSession()
-            t = m.stocks.trades(["AAPL"]).fetch()  # its requests are now in the log
+            t = m.stocks.last_trade(["AAPL"]).fetch()  # its requests are now in the log
     """
     if not isinstance(output, LogOutput | str | os.PathLike):
         raise TypeError(

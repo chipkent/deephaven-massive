@@ -72,34 +72,48 @@ STOCK_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     kind="trades",
-    fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
-        (R, "/v2/last/trade/{stocksTicker}"): keys("Ticker", "SipTimestamp"),
         (R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp"),
         (W, "stocks/T"): keys("Ticker", "SipTimestamp"),
         (F, "us_stocks_sip/trades_v1"): keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
 )
+# The one-row dataset that reads the rest of the trades/stocks group.
+STOCK_LAST_TRADE = DatasetSpec(
+    name="stocks.last_trade",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.STOCKS,
+    kind="trades",
+    fetch_path="/v2/last/trade/{stocksTicker}",
+    keys={(R, "/v2/last/trade/{stocksTicker}"): keys("Ticker", "SipTimestamp")},
+    revision_keys=("Timestamp",),
+)
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.CRYPTO,
     kind="trades",
-    fetch_path="/v1/last/crypto/{from}/{to}",
     history_path="/v3/trades/{cryptoTicker}",
     channels={NotBars.ANY: "XT"},
     flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
-        (R, "/v1/last/crypto/{from}/{to}"): keys(request("from"), "Timestamp"),
         (R, "/v3/trades/{cryptoTicker}"): keys(request("cryptoTicker"), "ParticipantTimestamp"),
         (W, "crypto/XT"): keys("Pair", "ParticipantTimestamp"),
         (F, "global_crypto/trades_v1"): keys("Ticker", "ParticipantTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
+)
+CRYPTO_LAST_TRADE = DatasetSpec(
+    name="crypto.last_trade",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.CRYPTO,
+    kind="trades",
+    fetch_path="/v1/last/crypto/{from}/{to}",
+    keys={(R, "/v1/last/crypto/{from}/{to}"): keys(request("from"), "Timestamp")},
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
@@ -124,16 +138,20 @@ INDEX_VALUES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
     kind="values",
-    fetch_path="/v3/snapshot/indices",
     channels={NotBars.ANY: "V"},
     flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={
-        # `Timestamp` is a column of the snapshot only through its membership of the kind.
-        (R, "/v3/snapshot/indices"): keys("Ticker", "Timestamp"),
         (W, "indices/V"): keys("Ticker", "Timestamp"),
         (F, "us_indices/values_v1"): keys("Ticker", "Timestamp"),
     },
-    symbol_param="ticker.any_of",
+)
+FOREX_LAST_QUOTE = DatasetSpec(
+    name="forex.last_quote",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.FOREX,
+    kind="quotes",
+    fetch_path="/v1/last_quote/currencies/{from}/{to}",
+    keys={(R, "/v1/last_quote/currencies/{from}/{to}"): keys(request("from"), "Timestamp")},
 )
 EXCHANGES = DatasetSpec(
     name="reference.exchanges",
@@ -221,12 +239,13 @@ def test_a_spec_must_match_a_query_class() -> None:
         match=r"^test\.stream: a dataset needs channels, a history source, or a fetch path$",
     ):
         change(stream, channels={})
-    with pytest.raises(
-        ValueError, match=r"^test\.stream: a dataset with channels and a fetch path needs"
-    ):
+    own = r"^test\.stream: a fetch path is a dataset of its own, never combined with channels"
+    with pytest.raises(ValueError, match=own):
         change(stream, fetch_path="/v2/last/trade/{stocksTicker}")
-    with pytest.raises(ValueError, match=r"^test\.stream: only bars combine a history source"):
+    with pytest.raises(ValueError, match=own):
         change(stream, channels={}, fetch_path="/a", history_path="/b")
+    with pytest.raises(ValueError, match=own):  # bars too: the previous bar is a dataset
+        change(stream, is_bars=True, channels={}, fetch_path="/prev", history_path="/b")
     with pytest.raises(ValueError, match=r"^test\.stream: a bars dataset needs a history source$"):
         change(stream, is_bars=True, channels={Timespan.MINUTE: "AM"}, fetch_path="/prev")
     # Flat files are a history source too.
@@ -264,9 +283,11 @@ def test_a_summary_keeps_its_text() -> None:
 
 
 def test_spec_validation() -> None:
-    for name in ("trades", "trades.", ".trades"):  # no dot, or an empty half on either side
-        with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
+    for name in ("", "trades.", ".trades", "a..b"):  # an empty part anywhere
+        with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>', or one name"):
             change(EXCHANGES, name=name)
+    # One plain name is a dataset the session serves itself, such as `m.snapshots()`.
+    assert change(EXCHANGES, name="snapshots").name == "snapshots"
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
         DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={NotBars.ANY: "T"})
     with pytest.raises(ValueError, match=r"^test\.x: a flat-file dataset needs a class$"):
@@ -276,6 +297,9 @@ def test_spec_validation() -> None:
             summary="A dataset for the tests.",
             flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
         )
+    with pytest.raises(ValueError, match=r"^stocks\.trades: option_rows is for a dataset of every"):
+        change(STOCK_TRADES, option_rows=True)
+    assert change(EXCHANGES, option_rows=True).option_rows
     for transports in (
         {"channels": {NotBars.ANY: "T"}},
         {"flat_file_prefixes": {NotBars.ANY: "us/x"}},
@@ -335,14 +359,25 @@ def test_only_a_fanout_key_can_be_no_instrument(role: str) -> None:
     [
         ("time", KeySpec("Id", required=False)),
         ("end", KeySpec("Id", required=False)),
-        ("fanout", KeySpec("Id", required=False)),
         ("date", KeySpec("Id", required=False)),
         ("symbol", KeySpec("stocksTicker", from_request=True, required=False)),
+        ("fanout", KeySpec("stocksTicker", from_request=True, required=False)),
     ],
 )
-def test_only_a_symbol_from_rest_rows_can_be_optional(role: str, spec: KeySpec) -> None:
-    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+def test_only_a_symbol_or_fanout_key_from_rest_rows_can_be_optional(
+    role: str, spec: KeySpec
+) -> None:
+    with pytest.raises(
+        ValueError, match=r"only a symbol or fanout key read from a REST path's rows"
+    ):
         with_role(role, spec)
+
+
+def test_a_rest_fanout_key_can_be_optional() -> None:
+    # The unified snapshot's underlying: only its options rows carry one.
+    spec = with_role("fanout", KeySpec("Id", required=False))
+    found = spec.keys_for(R, "/v3/reference/exchanges").fanout
+    assert found == KeySpec("Id", required=False)
 
 
 def test_an_end_key_needs_bars_and_a_date_key_a_dated_dataset() -> None:
@@ -375,6 +410,13 @@ def test_row_times_follow_the_kind_unless_declared() -> None:
     assert bars.row_times is RowTimes.BY_KIND
     assert bars.times is RowTimes.BAR
     assert CATALOG.by_name["indicators.sma"].times is RowTimes.BAR
+    # A one-row dataset of the bars kind holds bars without being a bars() dataset; the
+    # indicators carry bar times but hold no bars.
+    previous = CATALOG.by_name["stocks.previous_day_bar"]
+    assert (previous.is_bars, previous.holds_bars, previous.times) == (False, True, RowTimes.BAR)
+    assert bars.holds_bars
+    assert not CATALOG.by_name["indicators.sma"].holds_bars
+    assert not STOCK_TRADES.holds_bars
     assert CATALOG.by_name["stocks.daily_open_close"].times is RowTimes.DAY
     assert change(EXCHANGES, row_times=RowTimes.TICK).times is RowTimes.TICK
     # No dataset of the catalog resolves to the declaration default.
@@ -383,7 +425,7 @@ def test_row_times_follow_the_kind_unless_declared() -> None:
 
 def test_a_stream_symbol_cannot_be_optional() -> None:
     optional = keys(KeySpec("Ticker", required=False), "SipTimestamp")
-    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+    with pytest.raises(ValueError, match=r"only a symbol or fanout key read from a REST path's"):
         change(STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): optional})
 
 
@@ -465,7 +507,7 @@ def test_a_request_finds_its_source_by_timespan_or_as_not_bars() -> None:
 
 
 def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
-    assert STOCK_TRADES.rest_paths == ("/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}")
+    assert STOCK_TRADES.rest_paths == ("/v3/trades/{stockTicker}",)
     by_class = DatasetSpec(
         name="indicators.sma",
         summary="A dataset for the tests.",
@@ -481,7 +523,6 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
         "/v1/indicators/sma/{cryptoTicker}",
     )
     assert STOCK_TRADES.sources == (
-        (R, "/v2/last/trade/{stocksTicker}"),
         (R, "/v3/trades/{stockTicker}"),
         (W, "stocks/T"),
         (F, "us_stocks_sip/trades_v1"),
@@ -590,7 +631,7 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
     assert problems(change(sheets, keys={(R, path): keys("Tickers")})) == (
         (
             "declared keys: stocks.balance_sheets: REST /stocks/financials/v1/balance-sheets: the "
-            "symbol key 'Tickers' is json-text, not a string"
+            "symbol key 'Tickers' is string-array, not a string"
         ),
     )
 
@@ -670,32 +711,38 @@ def test_members_of_one_group_follow_their_positions() -> None:
     assert Catalog((last, history)).members("trades") == (history, last)
 
 
-def test_the_trades_pair_has_identical_columns_with_one_timestamp() -> None:
-    catalog = Catalog((STOCK_TRADES, CRYPTO_TRADES))
+def test_the_trades_pair_shares_its_columns_in_one_order_with_one_timestamp() -> None:
+    catalog = Catalog((STOCK_TRADES, STOCK_LAST_TRADE, CRYPTO_TRADES, CRYPTO_LAST_TRADE))
     stocks, crypto = catalog.dataset_schema(STOCK_TRADES), catalog.dataset_schema(CRYPTO_TRADES)
-    # The same names and types; the descriptions are each dataset's own.
-    assert [(c.name, c.type) for c in stocks.columns] == [(c.name, c.type) for c in crypto.columns]
+    # The shared columns have the same names, types, and order; each keeps only its own.
+    shared = [(c.name, c.type) for c in stocks.columns if c.name in crypto.column_names]
+    assert shared == [(c.name, c.type) for c in crypto.columns if c.name in stocks.column_names]
     assert (stocks.name, crypto.name) == ("stocks.trades", "crypto.trades")
     names = stocks.column_names
-    assert names[:3] == ("Symbol", "Date", "Timestamp")
-    assert names[-1] == "TimestampInsert"
-    assert names.count("Timestamp") == 1
+    for each in (names, crypto.column_names):
+        assert each[:3] == ("Symbol", "Date", "Timestamp")
+        assert each[-1] == "TimestampInsert"
+        assert each.count("Timestamp") == 1
     # Crypto's participant time is its Timestamp; stocks keeps its own ParticipantTimestamp,
-    # which crypto rows hold null. Every source's own symbol key became Symbol.
+    # which crypto trades do not have. Every source's own symbol key became Symbol.
     assert "ParticipantTimestamp" in names
+    assert {"ParticipantTimestamp", "Tape"}.isdisjoint(crypto.column_names)
     assert {"SipTimestamp", "Ticker", "Pair"}.isdisjoint(names)
     types = {c.name: c.type for c in stocks.columns}
     assert types["Timestamp"] is ColumnType.INSTANT
     assert types["Size"] is ColumnType.DOUBLE  # the WebSocket's long joins REST's double
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert catalog.problems() == ()
 
 
 def test_a_projected_member_renames_through_its_projection() -> None:
     schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES)
-    # The snapshot joins the values kind with three of its fields; its other fields stay out.
     assert schema.column_names == ("Symbol", "Date", "Timestamp", "Value", "TimestampInsert")
     assert Catalog((INDEX_VALUES,)).problems() == ()
+    # The forex last quote joins the quotes kind with `ask` and `bid` under the kind's names.
+    columns = Catalog((FOREX_LAST_QUOTE,)).dataset_schema(FOREX_LAST_QUOTE).column_names
+    assert {"AskPrice", "BidPrice"} <= set(columns)
+    assert {"Ask", "Bid"}.isdisjoint(columns)
 
 
 def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
@@ -818,13 +865,13 @@ def test_generated_sources_gate() -> None:
     )
     # The other gates read the sources, so they wait for this one.
     no_tables = Catalog((EXCHANGES, CRYPTO_TRADES), source_tables=lambda _: {})
-    assert len(no_tables.problems()) == 5
+    assert len(no_tables.problems()) == 4
     assert all(p.startswith("generated sources: ") for p in no_tables.problems())
 
 
 def test_declared_keys_gate_needs_the_kind_keys() -> None:
     no_time = {**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker")}
-    assert problems(change(STOCK_TRADES, keys=no_time)) == (
+    assert problems(change(STOCK_TRADES, keys=no_time), STOCK_LAST_TRADE) == (
         "declared keys: stocks.trades: WS stocks/T declares no time key",
     )
 
@@ -849,19 +896,18 @@ def test_declared_keys_gate_needs_an_instrument_symbol() -> None:
 
 def test_declared_keys_gate_needs_a_column_of_the_source() -> None:
     lacking = {**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker", "Timestamp")}
-    assert problems(change(STOCK_TRADES, keys=lacking)) == (
+    assert problems(change(STOCK_TRADES, keys=lacking), STOCK_LAST_TRADE) == (
         (
             "declared keys: stocks.trades: WS stocks/T: the time key 'Timestamp' is not a column "
             "of the source"
         ),
     )
-    # A projection decides the names: the snapshot's own LastUpdated is Timestamp in the kind.
-    unprojected = {**INDEX_VALUES.keys, (R, "/v3/snapshot/indices"): keys("Ticker", "LastUpdated")}
-    assert problems(change(INDEX_VALUES, keys=unprojected)) == (
-        (
-            "declared keys: indices.values: REST /v3/snapshot/indices: the time key 'LastUpdated' "
-            "is not a column of the source"
-        ),
+    # A projection decides the names: the last quote's own `ask` is AskPrice in the kind.
+    path = "/v1/last_quote/currencies/{from}/{to}"
+    unprojected = change(FOREX_LAST_QUOTE, keys={(R, path): keys(request("from"), "Ask")})
+    assert problems(unprojected)[0] == (
+        f"declared keys: forex.last_quote: REST {path}: the time key 'Ask' is not a column of "
+        "the source"
     )
 
 
@@ -869,7 +915,7 @@ def test_a_per_ticker_path_and_a_futures_channel_pass_the_declared_keys_gate() -
     # The symbol of /v3/trades/{t} comes from the request; the futures stream has no session.
     assert STOCK_TRADES.keys_for(R, "/v3/trades/{stockTicker}").symbol == request("stockTicker")
     assert FUTURES_TRADES.keys_for(W, "futures/T").date is None
-    assert problems(STOCK_TRADES, FUTURES_TRADES) == ()
+    assert problems(STOCK_TRADES, STOCK_LAST_TRADE, FUTURES_TRADES) == ()
 
 
 def test_unique_columns_gate() -> None:
@@ -897,22 +943,23 @@ def test_member_types_gate() -> None:
         **CRYPTO_TRADES.keys,
         (W, "crypto/XT"): keys("Pair", "ParticipantTimestamp", fanout="Price"),
     }
-    found = problems(change(STOCK_TRADES, keys=text), change(CRYPTO_TRADES, keys=priced))
-    assert found == (
-        (
-            "member types: stocks.trades: column 'Underlying' is string elsewhere but double "
-            "in crypto.trades WS crypto/XT"
-        ),
-        (
-            "member types: crypto.trades: column 'Underlying' is string elsewhere but double "
-            "in crypto.trades WS crypto/XT"
-        ),
+    found = problems(
+        change(STOCK_TRADES, keys=text),
+        STOCK_LAST_TRADE,
+        change(CRYPTO_TRADES, keys=priced),
+        CRYPTO_LAST_TRADE,
+    )
+    # Every member of the kind merges the same sources, so each reports the conflict.
+    assert found == tuple(
+        f"member types: {name}: column 'Underlying' is string elsewhere but double in "
+        "crypto.trades WS crypto/XT"
+        for name in ("stocks.trades", "stocks.last_trade", "crypto.trades", "crypto.last_trade")
     )
 
 
 def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
     text_time = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Pair", "Id")}
-    assert problems(change(CRYPTO_TRADES, keys=text_time)) == (
+    assert problems(change(CRYPTO_TRADES, keys=text_time), CRYPTO_LAST_TRADE) == (
         (
             "declared keys: crypto.trades: WS crypto/XT: the time key 'Id' is string, not an "
             "instant (epoch or iso-instant)"
@@ -971,10 +1018,15 @@ def test_fanout_keys_agree_on_instrument() -> None:
         **CRYPTO_TRADES.keys,
         (W, "crypto/XT"): keys("Pair", "ParticipantTimestamp", fanout="Id"),
     }
-    found = problems(change(STOCK_TRADES, keys=as_cik), change(CRYPTO_TRADES, keys=as_instrument))
-    assert found[:2] == (
-        "declared keys: stocks.trades: the fanout keys of the trades kind disagree on instrument",
-        "declared keys: crypto.trades: the fanout keys of the trades kind disagree on instrument",
+    found = problems(
+        change(STOCK_TRADES, keys=as_cik),
+        STOCK_LAST_TRADE,
+        change(CRYPTO_TRADES, keys=as_instrument),
+        CRYPTO_LAST_TRADE,
+    )
+    assert found == tuple(
+        f"declared keys: {name}: the fanout keys of the trades kind disagree on instrument"
+        for name in ("stocks.trades", "stocks.last_trade", "crypto.trades", "crypto.last_trade")
     )
 
 
@@ -984,10 +1036,18 @@ def test_kind_membership_gate() -> None:
         flat_file_prefixes={},
         keys=without(STOCK_TRADES, (F, "us_stocks_sip/trades_v1")),
     )
-    assert problems(without_files) == (
+    assert problems(without_files, STOCK_LAST_TRADE) == (
         (
-            "kind membership: stocks.trades: lacks the trades/stocks sources "
+            "kind membership: stocks.trades: no trades/stocks dataset reads the sources "
             "['FLAT_FILES us_stocks_sip/trades_v1']"
+        ),
+    )
+    # The group's first dataset reports what the group lacks; the one-row dataset alone too.
+    assert problems(STOCK_LAST_TRADE) == (
+        (
+            "kind membership: stocks.last_trade: no trades/stocks dataset reads the sources "
+            "['FLAT_FILES us_stocks_sip/trades_v1', 'REST /v3/trades/{stockTicker}', "
+            "'WS stocks/T']"
         ),
     )
     outside = change(
@@ -998,16 +1058,32 @@ def test_kind_membership_gate() -> None:
             (R, "/v2/last/nbbo/{stocksTicker}"): keys("Ticker", "SipTimestamp"),
         },
     )
-    assert problems(outside) == (
+    assert problems(outside, STOCK_LAST_TRADE) == (
         (
             "kind membership: stocks.trades: reads outside it the trades/stocks sources "
             "['REST /v2/last/nbbo/{stocksTicker}']"
         ),
     )
+    # Two datasets of one group may not read the same source.
+    twice = change(
+        STOCK_LAST_TRADE,
+        extra_paths=("/v3/trades/{stockTicker}",),
+        keys={
+            **STOCK_LAST_TRADE.keys,
+            (R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp"),
+        },
+    )
+    assert problems(STOCK_TRADES, twice) == (
+        (
+            "kind membership: stocks.trades: several trades/stocks datasets read the sources "
+            "['REST /v3/trades/{stockTicker}']"
+        ),
+    )
 
 
 def test_wire_parameters_gate() -> None:
-    assert problems(change(STOCK_TRADES, time_axis=("timestamp.gte", "timestamp.before"))) == (
+    bad_axis = change(STOCK_TRADES, time_axis=("timestamp.gte", "timestamp.before"))
+    assert problems(bad_axis, STOCK_LAST_TRADE) == (
         (
             "wire parameters: stocks.trades: time axis 'timestamp.before' is not a parameter of "
             "/v3/trades/{stockTicker}"
@@ -1023,7 +1099,7 @@ def test_wire_parameters_gate() -> None:
         **STOCK_TRADES.keys,
         (R, "/v3/trades/{stockTicker}"): keys(request("ticker"), "SipTimestamp"),
     }
-    assert problems(change(STOCK_TRADES, keys=wrong)) == (
+    assert problems(change(STOCK_TRADES, keys=wrong), STOCK_LAST_TRADE) == (
         (
             "wire parameters: stocks.trades: symbol key 'ticker' is not a parameter of "
             "/v3/trades/{stockTicker}"
@@ -1048,7 +1124,8 @@ def test_wire_parameters_gate() -> None:
             "parameter of /stocks/v1/dividends"
         ),
     )
-    assert problems(change(STOCK_TRADES, fixed_params={"stockTicker": "AAPL"}))[-1] == (
+    fixed = change(STOCK_TRADES, fixed_params={"stockTicker": "AAPL"})
+    assert problems(fixed, STOCK_LAST_TRADE)[-1] == (
         "wire parameters: stocks.trades: fixed parameter 'stockTicker' is not a query "
         "parameter of /v3/trades/{stockTicker}"
     )
@@ -1120,7 +1197,9 @@ def test_append_keys_gate() -> None:
 
 def test_a_bad_member_is_reported_once() -> None:
     lacking = {**CRYPTO_TRADES.keys, (W, "crypto/XT"): keys("Nope", "ParticipantTimestamp")}
-    found = problems(STOCK_TRADES, change(CRYPTO_TRADES, keys=lacking))
+    found = problems(
+        STOCK_TRADES, STOCK_LAST_TRADE, change(CRYPTO_TRADES, keys=lacking), CRYPTO_LAST_TRADE
+    )
     # The stocks merge meets the crypto member's bad key too; the line is listed once.
     assert found == (
         (

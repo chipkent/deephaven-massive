@@ -12,7 +12,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import logging
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -32,10 +31,8 @@ from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import indices
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
 )
 from deephaven_massive._session import CATALOG
@@ -74,6 +71,7 @@ def test_every_dataset_is_declared_once_in_the_catalog() -> None:
     assert names == [
         "indices.values",
         "indices.bars",
+        "indices.previous_day_bar",
         "indices.snapshots",
         "indices.daily_open_close",
     ]
@@ -89,18 +87,17 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
 def test_the_datasets_read_the_documented_sources() -> None:
     rest, ws, files = Transport.REST, Transport.WS, Transport.FLAT_FILES
     assert indices.VALUES.sources == (
-        (rest, SNAPSHOT),
         (ws, "indices/V"),
         (files, "us_indices/values_v1"),
     )
     assert indices.BARS.sources == (
-        (rest, PREVIOUS),
         (rest, RANGE),
         (ws, "indices/A"),
         (ws, "indices/AM"),
         (files, "us_indices/minute_aggs_v1"),
         (files, "us_indices/day_aggs_v1"),
     )
+    assert indices.PREVIOUS_DAY_BAR.sources == ((rest, PREVIOUS),)
     assert indices.SNAPSHOTS.sources == ((rest, SNAPSHOT),)
     assert indices.DAILY_OPEN_CLOSE.sources == ((rest, OPEN_CLOSE),)
 
@@ -113,7 +110,8 @@ def test_every_dataset_is_an_instrument_dataset() -> None:
 
 
 def test_values_history_is_flat_files_only() -> None:
-    assert indices.VALUES.has_fetch
+    # The current level of an index is the snapshot's, a dataset of its own.
+    assert not indices.VALUES.has_fetch
     assert not indices.VALUES.has_rest_history
     assert indices.VALUES.flat_file_prefixes == {NotBars.ANY: "us_indices/values_v1"}
 
@@ -125,7 +123,6 @@ def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
 
 
 def test_values_schema() -> None:
-    # The snapshot joins the values kind with only its ticker, value, and update time.
     assert _schema(indices.VALUES) == [
         ("Symbol", "String"),
         ("Date", "String"),
@@ -135,11 +132,19 @@ def test_values_schema() -> None:
     ]
 
 
+def test_the_previous_day_bar_has_the_bars_columns_its_endpoint_fills() -> None:
+    mine = CATALOG.dataset_schema(indices.PREVIOUS_DAY_BAR).column_names
+    bars = CATALOG.dataset_schema(indices.BARS).column_names
+    # The bars columns in the bars order, less the official open only the streams and files fill.
+    assert tuple(name for name in bars if name in mine) == mine
+    assert set(bars) - set(mine) == {"OfficialOpen"}
+
+
 def test_bars_schema() -> None:
     # Index bars come from index values: no volume, no VWAP, no trade count.
     columns = {c.name: c for c in CATALOG.dataset_schema(indices.BARS).columns}
     for name in ("Volume", "Vwap", "Transactions"):
-        assert columns[name].supplied_by == ()
+        assert name not in columns
     # The stream's window end `e` is the declared end key, so it is `TimestampEnd`.
     assert _schema(indices.BARS) == [
         ("Symbol", "String"),
@@ -282,16 +287,23 @@ def test_flat_file_fixtures_have_the_generated_header(
 
 def test_values_query(m: dm.MassiveSession) -> None:
     q = m.indices.values(["I:SPX", "I:NDX", "I:SPX"])
-    assert type(q) is StreamHistoryLatestQuery
+    assert type(q) is StreamHistoryQuery
     assert q._spec is indices.VALUES
     assert q._request.symbols == ("I:NDX", "I:SPX")
-    assert repr(q) == "<StreamHistoryLatestQuery indices.values symbols=('I:NDX', 'I:SPX')>"
+    assert repr(q) == "<StreamHistoryQuery indices.values symbols=('I:NDX', 'I:SPX')>"
     assert m.indices.values(dm.ALL)._request.symbols is dm.ALL
 
 
-def test_values_fetch_needs_explicit_symbols(m: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"use m\.indices\.snapshots\(dm\.ALL\)\.fetch\(\)"):
-        m.indices.values(dm.ALL).fetch()
+def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
+    q = m.indices.values("I:SPX")
+    assert not hasattr(q, "fetch")
+    with pytest.raises(
+        AttributeError,
+        match=r"^indices\.values has no fetch\(\); its verbs are blink\(\), append_only\(\), "
+        r"ring\(\), last_by\(\), history\(\); for each symbol's current state use "
+        r"m\.indices\.snapshots\(\.\.\.\)\.fetch\(\)$",
+    ):
+        _ = q.fetch
 
 
 def test_values_history_has_no_rest_source(m: dm.MassiveSession) -> None:
@@ -316,7 +328,7 @@ def test_values_history_from_flat_files_needs_credentials(
     [
         (dm.Timespan.SECOND, 1, StreamHistoryQuery),
         (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryLatestQuery),
+        (dm.Timespan.DAY, 1, HistoryQuery),
         (dm.Timespan.MINUTE, 5, HistoryQuery),
         (dm.Timespan.HOUR, 1, HistoryQuery),
         (dm.Timespan.DAY, 2, HistoryQuery),
@@ -360,10 +372,17 @@ def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
 
 
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
-    q = m.indices.bars(dm.ALL, dm.Timespan.DAY)
-    assert type(q) is HistoryLatestQuery
-    with pytest.raises(ValueError, match=r"use m\.indices\.snapshots\(dm\.ALL\)\.fetch\(\)"):
-        q.fetch()
+    q = m.indices.previous_day_bar(["I:SPX", "I:NDX"])
+    assert type(q) is Query
+    assert repr(q) == (
+        "<Query indices.previous_day_bar symbols=('I:NDX', 'I:SPX') timespan=Timespan.DAY>"
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
+        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)$",
+    ):
+        m.indices.previous_day_bar(dm.ALL)
 
 
 def test_bars_history_over_rest_needs_explicit_symbols(m: dm.MassiveSession) -> None:
@@ -447,7 +466,9 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
         m.indices.daily_open_close("I:SPX", cast("str", 20250602))
 
 
-@pytest.mark.parametrize("name", ["values", "bars", "snapshots", "daily_open_close"])
+@pytest.mark.parametrize(
+    "name", ["values", "bars", "previous_day_bar", "snapshots", "daily_open_close"]
+)
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
     extra: tuple[object, ...] = ("2025-06-02",) if name == "daily_open_close" else ()
@@ -460,7 +481,8 @@ def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
 
 
 def test_factories_return_the_class_of_their_dataset() -> None:
-    assert query_class(indices.VALUES) is StreamHistoryLatestQuery
+    assert query_class(indices.VALUES) is StreamHistoryQuery
+    assert query_class(indices.PREVIOUS_DAY_BAR) is Query
     assert query_class(indices.SNAPSHOTS) is Query
     assert query_class(indices.DAILY_OPEN_CLOSE) is Query
     assert query_class(indices.BARS) is HistoryQuery
@@ -503,7 +525,7 @@ def rows(table: Table) -> list[dict[str, Any]]:
 
 
 def bar_rows(table: Table) -> list[dict[str, Any]]:
-    # The columns index bars fill; every column only other asset classes' bars fill is null.
+    # The columns index bars fill, less the arrival time; any other column is null.
     filled = {name for name, _ in _schema(indices.BARS)} - {"TimestampInsert"}
     out = rows(table)
     for row in out:
@@ -520,38 +542,12 @@ def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
     ]
 
 
-def test_values_fetch_reads_the_snapshot_and_drops_error_rows(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    fake_rest.reply(SNAPSHOT, Reply(load_fixture(OWNER, "snapshot.json")))
-    q = rest_session.indices.values(["I:SPX", "I:NDX", "I:NOPE"])
-    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
-        out = rows(q.fetch())
-        again = rows(q.fetch())
-    assert again == out
-    request = (SNAPSHOT, {"ticker.any_of": ["I:NDX,I:NOPE,I:SPX"], "limit": ["250"]})
-    assert sent(fake_rest) == [request, request]
-    assert out == [
-        {"Symbol": "I:SPX", "Date": "2025-06-02", "Timestamp": 1748894400 * NS, "Value": 5935.94},
-        {"Symbol": "I:NDX", "Date": "2025-06-02", "Timestamp": 1748894400 * NS, "Value": 21491.1},
-    ]
-    # Once per session and index, however often the row comes back.
-    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    dropped = "indices.values: Massive answered NOT_FOUND for I:NOPE: Ticker not found."
-    assert warned == [f"{dropped}; the row is dropped"]
-
-
-@pytest.mark.parametrize("dataset", ["values", "snapshots"])
 def test_the_snapshot_names_at_most_250_indices_a_request(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, dataset: str
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
     symbols = [f"I:X{n:03d}" for n in range(251)]
-    getattr(rest_session.indices, dataset)(symbols).fetch()
+    rest_session.indices.snapshots(symbols).fetch()
     batches = [query["ticker.any_of"][0].split(",") for _, query in sent(fake_rest)]
     # The batches are requested concurrently, so they arrive in either order.
     assert sorted(len(batch) for batch in batches) == [1, 250]
@@ -622,7 +618,7 @@ def test_previous_day_bars_fetch_one_index_a_request(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
-    out = bar_rows(rest_session.indices.bars("I:SPX", dm.Timespan.DAY).fetch())
+    out = bar_rows(rest_session.indices.previous_day_bar("I:SPX").fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
     # The New York day, ending an hour late at 01:00 New York time (midnight in Chicago),
     # since whether an index day bar covers the New York or the Chicago day is not verified.
@@ -636,9 +632,22 @@ def test_previous_day_bars_fetch_one_index_a_request(
             "Close": 5935.94,
             "High": 5940.35,
             "Low": 5876.0,
-            "OfficialOpen": None,
         }
     ]
+
+
+def test_a_previous_day_bar_poll_keeps_one_row_per_index(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
+    table = rest_session.indices.previous_day_bar("I:SPX").poll(60)
+    found = rows_when(table, lambda got: len(got) == 1)
+    assert [(r["Symbol"], r["Close"]) for r in found] == [("I:SPX", 5935.94)]
+    assert sent(fake_rest)[0] == ("/v2/aggs/ticker/I:SPX/prev", {})
 
 
 def test_bars_history_over_rest_fills_the_range_and_the_symbol(
@@ -681,7 +690,8 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
-    assert [r["TimestampStart"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
+    prev = rest_session.indices.previous_day_bar("I:SPX")
+    assert [r["TimestampStart"] for r in rows(prev.fetch())] == [MIDNIGHT_MS * MS]
     # A week bar stamped 01:00 on the Sunday before its week covers that week, and since an
     # index can update around the clock, it may hold that Sunday too: it starts at Sunday's
     # midnight and ends an hour after the next Monday's. A range must reach both Sundays.
@@ -984,8 +994,11 @@ def test_every_index_from_a_day_file_names_explicit_symbols_as_the_way_out(
         q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES)
 
 
-def test_only_the_snapshots_revise_on_their_update_time() -> None:
-    # An explicit APPEND poll of the snapshots appends each new state of an index.
+def test_the_current_state_datasets_revise_on_their_update_time() -> None:
+    # An explicit APPEND poll appends each new state of an index, or each new day's bar.
     revised = {spec.name: spec.revision_keys for spec in indices.DATASETS if spec.revision_keys}
-    assert revised == {"indices.snapshots": ("LastUpdated",)}
+    assert revised == {
+        "indices.previous_day_bar": ("TimestampStart",),
+        "indices.snapshots": ("LastUpdated",),
+    }
     assert "LastUpdated" in CATALOG.dataset_schema(indices.SNAPSHOTS).column_names

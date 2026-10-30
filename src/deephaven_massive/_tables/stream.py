@@ -93,7 +93,7 @@ from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -149,11 +149,12 @@ _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
     WireType.JSON_TEXT: pa.string(),
     WireType.DATE: pa.date32(),
     WireType.ISO_INSTANT: pa.int64(),
-    WireType.INT_ARRAY: pa.list_(pa.int32()),
+    WireType.LONG_ARRAY: pa.list_(pa.int64()),
+    WireType.STRING_ARRAY: pa.list_(pa.string()),
 }
 """The Arrow type of each wire type as the WebSocket client delivers its values: an epoch as its
 raw integer count (converted by its unit afterwards), an ISO-8601 instant as integer
-nanoseconds, a date as a `datetime.date`, and a list as a list of integers."""
+nanoseconds, a date as a `datetime.date`, and a list as a list of integers or of text."""
 
 
 class FuturesSessionDates(Protocol):
@@ -1290,7 +1291,7 @@ def open_stream_tables(
                 f"massive.{plan.dataset}#{stream_id}",
                 col_defs(schema),
                 on_shutdown=on_shutdown,
-                defer=core.defer,
+                release_later=core.release_later,
             )
             watch = None
             received: frozenset[str] | None
@@ -1311,7 +1312,7 @@ def open_stream_tables(
                 )
                 watch.keep_alive_with(blink)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
-        scope.release()
+        release_scope(core.exec_ctx, scope)
         raise
     handle = StreamHandle(
         stream_id,

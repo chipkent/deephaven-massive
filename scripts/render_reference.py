@@ -8,7 +8,9 @@ It starts an embedded Deephaven server first, because the library's session modu
 builds the dataset catalog, imports Deephaven, and the library itself never starts a server.
 Then it renders one page per namespace from that catalog and the provenance of the generated
 wire schemas, makes `docs/datasets/` hold exactly those pages (deleting any other file or
-directory there, so no orphaned page survives a rename), and prints what it wrote and deleted.
+directory there, so no orphaned page survives a rename), and prints which columns each dataset
+gained or lost, then what it wrote and deleted. Run after a refresh of Massive's
+specifications, the column report is how the refresh shows what it does to each table.
 All the logic is in `deephaven_massive._datasets.column_reference`, where the unit tests and
 the coverage gate reach it; this script only wires it up.
 
@@ -31,7 +33,7 @@ from deephaven_server import Server
 # Neither module imports Deephaven (the package's own __init__.py imports lazily), so both
 # import before the server starts.
 from deephaven_massive import _massive
-from deephaven_massive._datasets.column_reference import render, sync
+from deephaven_massive._datasets.column_reference import column_changes, render, sync
 
 if TYPE_CHECKING:
     from deephaven_massive import _session
@@ -43,8 +45,9 @@ _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 def main() -> None:
     """Start the server, render the pages, sync them into `docs/datasets/`, and report.
 
-    Side effects: starts an embedded Deephaven server in this process, deletes and writes
-    files under `docs/datasets/`, and writes one line per change to standard output.
+    Side effects: starts an embedded Deephaven server in this process, reads, deletes, and
+    writes files under `docs/datasets/`, and writes one line per dataset whose columns changed
+    and one per file changed to standard output.
     """
     # Registered first, so a server start that fails after the JVM loaded still exits safely.
     atexit.register(_exit)
@@ -57,7 +60,11 @@ def main() -> None:
         session = _session
     else:
         session = importlib.import_module("deephaven_massive._session")
-    result = sync(_DIRECTORY, render(session.CATALOG, _massive.provenance()))
+    pages = render(session.CATALOG, _massive.provenance())
+    committed = {p.name: p.read_text() for p in sorted(_DIRECTORY.glob("*.md")) if p.is_file()}
+    for line in column_changes(committed, pages):
+        sys.stdout.write(f"columns: {line}\n")
+    result = sync(_DIRECTORY, pages)
     shown = _DIRECTORY.relative_to(_DIRECTORY.parent.parent)
     for name in result.written:
         sys.stdout.write(f"wrote {shown / name}\n")

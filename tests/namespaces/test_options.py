@@ -36,11 +36,9 @@ from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -65,8 +63,10 @@ OWNER = "namespaces/options"
 CONTRACT = "O:AAPL250117C00150000"
 NAMES = (
     "trades",
+    "last_trade",
     "quotes",
     "bars",
+    "previous_day_bar",
     "fmv",
     "chain",
     "snapshots",
@@ -131,8 +131,10 @@ def test_contracts_carry_the_raw_deliverable_fields() -> None:
 def test_each_dataset_reads_its_sources() -> None:
     assert {spec.name: spec.kind for spec in options.DATASETS} == {
         "options.trades": "trades",
+        "options.last_trade": "trades",
         "options.quotes": "quotes",
         "options.bars": "bars",
+        "options.previous_day_bar": "bars",
         "options.fmv": "fmv",
         "options.chain": None,
         "options.snapshots": None,
@@ -142,8 +144,9 @@ def test_each_dataset_reads_its_sources() -> None:
     # Every dataset but the chain, which takes its underlying instead, takes contracts.
     takes = {spec.name for spec in options.DATASETS if CATALOG.takes_symbols(spec)}
     assert takes == {spec.name for spec in options.DATASETS} - {"options.chain"}
+    assert options.LAST_TRADE.sources == ((R, "/v2/last/trade/{optionsTicker}"),)
+    assert options.PREVIOUS_DAY_BAR.sources == ((R, "/v2/aggs/ticker/{optionsTicker}/prev"),)
     assert options.TRADES.sources == (
-        (R, "/v2/last/trade/{optionsTicker}"),
         (R, "/v3/trades/{optionsTicker}"),
         (Transport.WS, "options/T"),
         (Transport.FLAT_FILES, "us_options_opra/trades_v1"),
@@ -154,7 +157,6 @@ def test_each_dataset_reads_its_sources() -> None:
         (Transport.FLAT_FILES, "us_options_opra/quotes_v1"),
     )
     assert options.BARS.sources == (
-        (R, "/v2/aggs/ticker/{optionsTicker}/prev"),
         (R, "/v2/aggs/ticker/{optionsTicker}/range/{multiplier}/{timespan}/{from}/{to}"),
         (Transport.WS, "options/A"),
         (Transport.WS, "options/AM"),
@@ -175,9 +177,11 @@ def test_each_dataset_reads_its_sources() -> None:
 @pytest.mark.parametrize(
     ("spec", "expected"),
     [
-        (options.TRADES, StreamHistoryLatestQuery),
+        (options.TRADES, StreamHistoryQuery),
+        (options.LAST_TRADE, Query),
         (options.QUOTES, StreamHistoryQuery),
         (options.BARS, HistoryQuery),
+        (options.PREVIOUS_DAY_BAR, Query),
         (options.FMV, StreamQuery),
         (options.CHAIN, Query),
         (options.SNAPSHOTS, Query),
@@ -193,8 +197,10 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
     sizes = {spec.name: spec.page_size for spec in options.DATASETS}
     assert sizes == {
         "options.trades": 50_000,
+        "options.last_trade": None,
         "options.quotes": 50_000,
         "options.bars": 50_000,
+        "options.previous_day_bar": None,
         "options.fmv": None,
         "options.chain": 250,
         "options.snapshots": 250,
@@ -206,10 +212,20 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
 # --- Schemas ---------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("spec", [options.TRADES, options.QUOTES, options.BARS, options.FMV])
+@pytest.mark.parametrize(
+    "spec",
+    [
+        options.TRADES,
+        options.LAST_TRADE,
+        options.QUOTES,
+        options.BARS,
+        options.PREVIOUS_DAY_BAR,
+        options.FMV,
+    ],
+)
 def test_kind_datasets_lead_with_symbol_date_and_their_instants(spec: DatasetSpec) -> None:
     schema = CATALOG.dataset_schema(spec)
-    times = ("TimestampStart", "TimestampEnd") if spec.is_bars else ("Timestamp",)
+    times = ("TimestampStart", "TimestampEnd") if spec.holds_bars else ("Timestamp",)
     assert schema.column_names[: 2 + len(times)] == ("Symbol", "Date", *times)
     assert schema.column_names[-1] == "TimestampInsert"
     types = {c.name: c.type for c in schema.columns}
@@ -226,7 +242,7 @@ def test_trades_merge_the_rest_stream_and_flat_file_columns() -> None:
     assert "SipTimestamp" not in names
     assert {"Price", "Size", "Exchange", "Conditions", "ParticipantTimestamp"} <= set(names)
     types = {c.name: c.type for c in CATALOG.dataset_schema(options.TRADES).columns}
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["Size"] is ColumnType.DOUBLE  # the WebSocket's integer joins the REST number
 
 
@@ -354,7 +370,7 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
 ) -> None:
     m = massive_session
     for factory, cls in (
-        (m.options.trades, StreamHistoryLatestQuery),
+        (m.options.trades, StreamHistoryQuery),
         (m.options.quotes, StreamHistoryQuery),
         (m.options.fmv, StreamQuery),
     ):
@@ -386,7 +402,7 @@ def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSess
     bars = massive_session.options.bars
     assert type(bars(CONTRACT)) is StreamHistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.SECOND)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryLatestQuery
+    assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.MINUTE, multiplier=5)) is HistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.HOUR)) is HistoryQuery
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
@@ -640,14 +656,55 @@ def rows(table: Table) -> list[dict[str, Any]]:
     return out
 
 
-def test_trades_fetch_reads_the_last_trade(
+def test_the_one_row_datasets_share_the_columns_of_their_kind(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Each dataset has the kind's columns its own endpoints fill; the columns two of them share
+    # have one type and one order, so the tables merge on them.
+    for one, kind in (
+        (options.LAST_TRADE, options.TRADES),
+        (options.PREVIOUS_DAY_BAR, options.BARS),
+    ):
+        mine = [(c.name, c.type) for c in CATALOG.dataset_schema(one).columns]
+        theirs = [(c.name, c.type) for c in CATALOG.dataset_schema(kind).columns]
+        shared = [c for c in mine if c in theirs]
+        assert shared == [c for c in theirs if c in mine]
+        assert len(shared) > 5
+    assert not hasattr(massive_session.options.trades(CONTRACT), "fetch")
+    assert not hasattr(massive_session.options.bars(CONTRACT, dm.Timespan.DAY), "fetch")
+    assert type(massive_session.options.last_trade(CONTRACT)) is Query
+
+
+def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
+    massive_session: dm.MassiveSession,
+) -> None:
+    prev = massive_session.options.previous_day_bar
+    q = prev(CONTRACT)
+    assert type(q) is Query
+    assert (q._request.timespan, q._request.multiplier, q._request.adjusted) == (
+        dm.Timespan.DAY,
+        1,
+        True,
+    )
+    assert prev(CONTRACT, adjusted=False)._request.adjusted is False
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        prev(CONTRACT, adjusted=cast("bool", 1))
+    with pytest.raises(
+        ValueError,
+        match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
+        r"\.history\(day, day\)",
+    ):
+        prev(dm.ALL)
+
+
+def test_last_trade_fetch_reads_the_last_trade(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
-    out = rows(rest_session.options.trades("O:TSLA210903C00700000").fetch())
+    out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch())
     assert sent(fake_rest) == [(f"/v2/last/trade/{TSLA}", {})]
     assert len(out) == 1
     row = out[0]
@@ -655,8 +712,8 @@ def test_trades_fetch_reads_the_last_trade(
     assert row["OptionRoot"] == "TSLA"
     assert (row["Size"], row["Exchange"], row["Conditions"]) == (25.0, 312, [227])
     assert row["ParticipantTimestamp"] == 1617901342969834000
-    with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)\.fetch\(\)"):
-        rest_session.options.trades(dm.ALL).fetch()
+    with pytest.raises(ValueError, match=r"use m\.options\.chain\(underlying\)\.fetch\(\)"):
+        rest_session.options.last_trade(dm.ALL)
     assert len(sent(fake_rest)) == 1
 
 
@@ -706,14 +763,14 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     ]
 
 
-def test_bars_fetch_the_previous_session_and_read_a_range(
+def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
-    prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
     assert sent(fake_rest) == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it.
@@ -762,17 +819,18 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
         Reply({"status": "OK", "results": [{"T": TSLA, "t": early, "c": 1.0}]}),
         Reply({"status": "OK", "results": [{"T": TSLA, "t": afternoon, "c": 1.0}]}),
     )
-    prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
     assert [(r["Date"], r["TimestampStart"]) for r in prev] == [
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
     with pytest.raises(
         dm.MassiveError,
-        match=r"^options\.bars: a 1-day bar from /v2/aggs/ticker/\{optionsTicker\}/prev is "
+        match=r"^options\.previous_day_bar: a 1-day bar from "
+        r"/v2/aggs/ticker/\{optionsTicker\}/prev is "
         r"stamped 2024-11-29T19:30:00\+00:00 \(2024-11-29T14:30:00-05:00 in America/New_York\)"
-        r".*; use history\(\) for that day, and report",
+        r".*; use bars\(symbols, dm\.Timespan\.DAY\)\.history\(\) for that day, and report",
     ):
-        rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch()
+        rest_session.options.previous_day_bar(TSLA).fetch()
 
 
 def test_chain_reads_one_underlying(
@@ -1167,7 +1225,12 @@ def test_the_snapshots_revise_on_a_new_quote_or_trade() -> None:
     # An explicit APPEND poll of a snapshot appends each new state of a contract.
     revision = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
     revised = {spec.name: spec.revision_keys for spec in options.DATASETS if spec.revision_keys}
-    assert revised == {"options.chain": revision, "options.snapshots": revision}
+    assert revised == {
+        "options.last_trade": ("Timestamp",),
+        "options.previous_day_bar": ("TimestampStart",),
+        "options.chain": revision,
+        "options.snapshots": revision,
+    }
     for spec in (options.CHAIN, options.SNAPSHOTS):
         assert set(revision) <= set(CATALOG.dataset_schema(spec).column_names)
 

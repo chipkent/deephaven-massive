@@ -38,11 +38,9 @@ from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -92,11 +90,13 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
     assert isinstance(namespace, Namespace)
 
 
-def test_the_namespace_declares_its_six_datasets() -> None:
+def test_the_namespace_declares_its_eight_datasets() -> None:
     names = [spec.name for spec in forex.DATASETS]
     assert names == [
         "forex.quotes",
+        "forex.last_quote",
         "forex.bars",
+        "forex.previous_day_bar",
         "forex.fmv",
         "forex.snapshots",
         "forex.movers",
@@ -118,8 +118,10 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
 @pytest.mark.parametrize(
     ("spec", "expected"),
     [
-        (forex.QUOTES, StreamHistoryLatestQuery),
+        (forex.QUOTES, StreamHistoryQuery),
+        (forex.LAST_QUOTE, Query),
         (forex.BARS, HistoryQuery),
+        (forex.PREVIOUS_DAY_BAR, Query),
         (forex.FMV, StreamQuery),
         (forex.SNAPSHOTS, Query),
         (forex.MOVERS, Query),
@@ -141,6 +143,12 @@ def _schema(spec: DatasetSpec) -> dict[str, ColumnType]:
 
 def test_quotes_join_the_last_quote_through_its_projection() -> None:
     columns = _schema(forex.QUOTES)
+    # The last quote is a dataset of its own in the same kind: the kind's columns its endpoint
+    # fills, in the same order, which leaves out the stream's exchange ids.
+    last = _schema(forex.LAST_QUOTE)
+    assert {name: columns[name] for name in columns if name in last} == last
+    assert list(last) == [name for name in columns if name in last]
+    assert set(columns) - set(last) == {"AskExchange", "BidExchange"}
     assert list(columns) == [
         "Symbol",
         "Date",
@@ -161,6 +169,7 @@ def test_quotes_join_the_last_quote_through_its_projection() -> None:
 
 def test_bars_rename_the_pair_and_window_start() -> None:
     columns = _schema(forex.BARS)
+    assert _schema(forex.PREVIOUS_DAY_BAR) == columns
     assert list(columns)[:4] == ["Symbol", "Date", "TimestampStart", "TimestampEnd"]
     assert list(columns)[-1] == "TimestampInsert"
     assert {"Open", "High", "Low", "Close", "Volume", "Vwap", "Transactions"} <= set(columns)
@@ -219,9 +228,19 @@ def test_only_the_canonical_ticker_is_taken(
 
 def test_quotes(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.quotes(["C:GBPUSD", "C:EURUSD"])
-    assert type(query) is StreamHistoryLatestQuery
+    assert type(query) is StreamHistoryQuery
     assert request(query) == Request(symbols=("C:EURUSD", "C:GBPUSD"))
     assert request(massive_session.forex.quotes(dm.ALL)).symbols is dm.ALL
+
+
+def test_the_one_row_datasets(massive_session: dm.MassiveSession) -> None:
+    last = massive_session.forex.last_quote(["C:GBPUSD", "C:EURUSD"])
+    assert type(last) is Query
+    assert request(last) == Request(symbols=("C:EURUSD", "C:GBPUSD"))
+    prev = massive_session.forex.previous_day_bar("C:EURUSD")
+    assert type(prev) is Query
+    # The bar's request carries its timespan, so its rows get the 1-day day rules.
+    assert request(prev) == Request(symbols=("C:EURUSD",), timespan=dm.Timespan.DAY)
 
 
 def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> None:
@@ -236,7 +255,7 @@ def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> No
     [
         ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
         ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.DAY, 1), HistoryLatestQuery),
+        ((dm.Timespan.DAY, 1), HistoryQuery),
         ((dm.Timespan.MINUTE, 5), HistoryQuery),
         ((dm.Timespan.HOUR, 1), HistoryQuery),
         ((dm.Timespan.DAY, 2), HistoryQuery),
@@ -378,11 +397,21 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
         massive_session.forex.snapshots(table)
 
 
-def test_fetch_of_every_pair_names_the_snapshot(massive_session: dm.MassiveSession) -> None:
+def test_the_one_row_datasets_refuse_every_pair(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"use m\.forex\.snapshots\(dm\.ALL\)\.fetch\(\)"):
-        massive_session.forex.quotes(dm.ALL).fetch()
-    with pytest.raises(ValueError, match=r"use m\.forex\.snapshots\(dm\.ALL\)\.fetch\(\)"):
-        massive_session.forex.bars(dm.ALL, dm.Timespan.DAY).fetch()
+        massive_session.forex.last_quote(dm.ALL)
+    every_bar = r"use m\.forex\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)"
+    with pytest.raises(ValueError, match=every_bar):
+        massive_session.forex.previous_day_bar(dm.ALL)
+
+
+def test_a_missing_verb_names_the_dataset_that_has_it(massive_session: dm.MassiveSession) -> None:
+    quotes = massive_session.forex.quotes("C:EURUSD")
+    with pytest.raises(AttributeError, match=r"use m\.forex\.last_quote\(\.\.\.\)\.fetch\(\)"):
+        _ = quotes.fetch
+    day = massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY)
+    with pytest.raises(AttributeError, match=r"m\.forex\.previous_day_bar\(\.\.\.\)\.fetch"):
+        _ = day.fetch
 
 
 def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.MassiveSession) -> None:
@@ -398,7 +427,9 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
 def test_every_docstring_links_its_section_and_states_limit_and_all() -> None:
     methods = {
         "quotes": forex._Forex.quotes,
+        "last_quote": forex._Forex.last_quote,
         "bars": forex._Forex.bars,
+        "previous_day_bar": forex._Forex.previous_day_bar,
         "fmv": forex._Forex.fmv,
         "snapshots": forex._Forex.snapshots,
         "movers": forex._Forex.movers,
@@ -421,9 +452,9 @@ _ENVELOPE = ("status", "request_id", "next_url", "count")
 @pytest.mark.parametrize(
     ("name", "case"),
     [
-        ("last_quote.json", (forex.QUOTES, "/v1/last_quote/currencies/{from}/{to}")),
+        ("last_quote.json", (forex.LAST_QUOTE, "/v1/last_quote/currencies/{from}/{to}")),
         ("quotes.json", (forex.QUOTES, "/v3/quotes/{fxTicker}")),
-        ("prev.json", (forex.BARS, "/v2/aggs/ticker/{forexTicker}/prev")),
+        ("prev.json", (forex.PREVIOUS_DAY_BAR, "/v2/aggs/ticker/{forexTicker}/prev")),
         ("range.json", (forex.BARS, RANGE)),
         ("grouped_daily.json", (forex.BARS, "/v2/aggs/grouped/locale/global/market/fx/{date}")),
         ("snapshots.json", (forex.SNAPSHOTS, "/v2/snapshot/locale/global/markets/forex/tickers")),
@@ -490,7 +521,7 @@ def pick(table: Table, *names: str) -> list[tuple[Any, ...]]:
     return [tuple(row[name] for name in names) for row in rows(table)]
 
 
-def test_quotes_fetch_reads_the_last_quote_of_each_pair(
+def test_last_quote_reads_the_last_quote_of_each_pair(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -498,7 +529,7 @@ def test_quotes_fetch_reads_the_last_quote_of_each_pair(
 ) -> None:
     body = fixture_body(load_fixture, "last_quote.json")
     fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply(body))
-    table = rest_session.forex.quotes("C:AUDUSD").fetch()
+    table = rest_session.forex.last_quote("C:AUDUSD").fetch()
     # The pair goes out as two path segments, and the whole pair comes back as `Symbol`.
     assert sent(fake_rest) == [("/v1/last_quote/currencies/AUD/USD", {})]
     columns = ("Symbol", "Date", "Timestamp", "AskPrice", "BidPrice", "Exchange")
@@ -554,7 +585,7 @@ BAR_COLUMNS = (
 DAY_NS = 86_400 * NS
 
 
-def test_daily_bars_fetch_reads_the_previous_session(
+def test_previous_day_bar_reads_the_previous_session(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -563,7 +594,7 @@ def test_daily_bars_fetch_reads_the_previous_session(
     fake_rest.reply(
         "/v2/aggs/ticker/C%3AEURUSD/prev", Reply(fixture_body(load_fixture, "prev.json"))
     )
-    table = rest_session.forex.bars("C:EURUSD", dm.Timespan.DAY).fetch()
+    table = rest_session.forex.previous_day_bar("C:EURUSD").fetch()
     assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
     # Stamped 23:59:59.999 UTC by `/prev`, its window here is its whole UTC day.
     start = 1_651_622_400_000 * MS
@@ -1025,6 +1056,24 @@ def test_a_conversion_poll_keeps_one_row(
     rows_when(table, changes({("C:AUDUSD", 74.0)}, "Converted"))
 
 
+def test_a_last_quote_poll_keeps_one_row_per_pair(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    poll_clock: FakeClock,
+    rows_when: RowsWhen,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    body = fixture_body(load_fixture, "last_quote.json")
+    later = {**body, "last": {**body["last"], "bid": 0.7313, "timestamp": 1605557757000}}
+    fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply(body), Reply(later))
+    table = rest_session.forex.last_quote("C:AUDUSD").poll(60)
+    rows_when(table, changes({("C:AUDUSD", 0.73122)}, "BidPrice"))
+    # The next cycle replaces the pair's row with its newer quote.
+    next_cycle(poll_clock)
+    rows_when(table, changes({("C:AUDUSD", 0.7313)}, "BidPrice"))
+
+
 def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     # An explicit APPEND poll appends each new state of a pair, or each new conversion.
     revised = {spec.name: spec.revision_keys for spec in forex.DATASETS if spec.revision_keys}
@@ -1032,6 +1081,8 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
         "forex.snapshots": ("Updated",),
         "forex.movers": ("Updated",),
         "forex.conversion": ("LastTimestamp",),
+        "forex.last_quote": ("Timestamp",),
+        "forex.previous_day_bar": ("TimestampStart",),
     }
     for name, keys in revised.items():
         assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)

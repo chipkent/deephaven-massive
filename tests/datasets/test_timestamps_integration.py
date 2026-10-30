@@ -59,14 +59,15 @@ def test_forex_last_quote_timestamp_is_milliseconds(
     """Whether the library's milliseconds fit the timestamp of `/v1/last_quote/currencies/EUR/USD`.
 
     Records the raw value (13 digits for milliseconds) and the instant the library's
-    `forex.quotes(...).fetch()` makes of it. Passes when that instant is within four days of now (a
-    forex weekend and a holiday); a wrong unit lands decades away or fails the library's
-    bound.
+    `forex.last_quote(...).fetch()` makes of it. Passes when that instant is within four days of now
+    (a forex weekend and a holiday); a wrong unit lands decades away or fails the library's bound.
     """
     raw = rest_rows("/v1/last_quote/currencies/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/last_quote/currencies/EUR/USD: {raw}")
-    rows = table_rows(live_session.forex.quotes("C:EURUSD").fetch())
-    _check("forex.quotes fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence)
+    rows = table_rows(live_session.forex.last_quote("C:EURUSD").fetch())
+    _check(
+        "forex.last_quote fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence
+    )
 
 
 @pytest.mark.needs("currencies:starter")
@@ -82,14 +83,16 @@ def test_crypto_last_trade_timestamp_is_milliseconds(
     """Whether the library's milliseconds fit the timestamp of `/v1/last/crypto/BTC/USD`.
 
     Records the raw value (13 digits for milliseconds) and the instant the library's
-    `crypto.trades(...).fetch()` makes of it. Passes when that instant is within four days of now (a
-    forex weekend and a holiday); a wrong unit lands decades away or fails the library's
+    `crypto.last_trade(...).fetch()` makes of it. Passes when that instant is within four days of
+    now (a forex weekend and a holiday); a wrong unit lands decades away or fails the library's
     bound.
     """
     raw = rest_rows("/v1/last/crypto/{from}/{to}", {"from": "BTC", "to": "USD"}, {})
     evidence(f"raw /v1/last/crypto/BTC/USD: {raw}")
-    rows = table_rows(live_session.crypto.trades("X:BTCUSD").fetch())
-    _check("crypto.trades fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence)
+    rows = table_rows(live_session.crypto.last_trade("X:BTCUSD").fetch())
+    _check(
+        "crypto.last_trade fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence
+    )
 
 
 @pytest.mark.needs("currencies:starter")

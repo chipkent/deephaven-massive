@@ -210,7 +210,8 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    evidence(f"library fetch() (/prev): {_library_rows(bars.fetch, table_rows)}")
+    prev_bar = live_session.crypto.previous_day_bar(_PAIR)
+    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     evidence(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"

@@ -30,7 +30,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import reference
+from deephaven_massive._namespaces import snapshots
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -324,8 +324,8 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         filters={"type": "options"},
     )
     assert type(query) is Query
-    assert query._spec is reference.SNAPSHOTS
-    assert query._spec is _session.CATALOG.by_name["reference.snapshots"]
+    assert query._spec is snapshots.SNAPSHOTS
+    assert query._spec is _session.CATALOG.by_name["snapshots"]
     assert query._request == Request(
         symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
         params=(("order", dm.Order.DESC), ("sort", "ticker")),
@@ -621,7 +621,14 @@ def test_stream_verbs_work_in_a_console_command(
     ws_session.publish(TRADE)
     for shape in ("append_only", "ring", "last_by"):
         rows_when(made[shape], lambda rows: [r["Price"] for r in rows] == [114.125])
-    streams = rows_when(made["streams"], lambda rows: len(rows) == 2)
+    # The reaper releases `blink` only once the command lets go of the lock: 4 held at first.
+    streams = rows_when(
+        made["streams"],
+        lambda rows: (
+            sorted((r["Dataset"], r["HeldResults"]) for r in rows)
+            == [("stocks.quotes", 1), ("stocks.trades", 3)]
+        ),
+    )
     assert sorted((r["Dataset"], r["State"], r["HeldResults"]) for r in streams) == [
         ("stocks.quotes", "RUNNING", 1),
         ("stocks.trades", "RUNNING", 3),
@@ -670,7 +677,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def opening() -> None:
         m = dm.MassiveSession(config)
         sessions.append(m)
-        made["fetch"] = m.stocks.trades("AAPL").fetch()
+        made["fetch"] = m.stocks.last_trade("AAPL").fetch()
         bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
         made["rest"] = bars.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
         files = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
@@ -689,7 +696,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def closing() -> None:
         sessions[0].close()
         with dm.MassiveSession(config) as other:  # opened and closed within one command
-            made["other"] = other.stocks.trades("AAPL").fetch()
+            made["other"] = other.stocks.last_trade("AAPL").fetch()
 
     console_command(closing)
     assert [r["Price"] for r in dh_to_pylist(made["other"])] == [129.84]

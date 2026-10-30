@@ -21,6 +21,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
@@ -146,14 +147,15 @@ INDEX_SNAPSHOTS = DatasetSpec(
     symbol_param="ticker.any_of",
     keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
-INDEX_VALUES = DatasetSpec(
+# A tick dataset over the indices snapshot: each index's level, timed by its `last_updated`.
+INDEX_LEVELS = DatasetSpec(
     summary="A dataset for the tests.",
-    name="indices.values",
+    name="indices.levels",
     asset_class=AssetClass.INDICES,
-    kind="values",
+    row_times=RowTimes.TICK,
     fetch_path=INDEX_SNAPSHOT_PATH,
     symbol_param="ticker.any_of",
-    keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+    keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
 )
 TRADES_PATH = "/v3/trades/{stockTicker}"
 TRADES = DatasetSpec(
@@ -311,7 +313,7 @@ SPECS = (
     SMA,
     CONVERSION,
     INDEX_SNAPSHOTS,
-    INDEX_VALUES,
+    INDEX_LEVELS,
     TRADES,
     BARS,
     FUTURES_BARS,
@@ -611,6 +613,7 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
     patiences = _Patiences(monkeypatch)
     reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
     assert patiences.shared()
 
@@ -934,9 +937,10 @@ class _WatchedFuture(Future[rest.CryptoTickers]):
         self.waiting = threading.Event()
 
     @override
-    def result(self, timeout: float | None = None) -> rest.CryptoTickers:
+    def add_done_callback(self, fn: Callable[[Future[rest.CryptoTickers]], object]) -> None:
+        # A caller that joins the list asks to hear when it completes, then waits.
+        super().add_done_callback(fn)
         self.waiting.set()
-        return super().result(timeout)
 
 
 def _wait_for_pair(
@@ -966,8 +970,9 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
+    refused = dm.EntitlementError("refused", status=403)
     if outcome == "fails":
-        future.set_exception(dm.EntitlementError("refused", status=403))
+        future.set_exception(refused)
     else:
         future.set_result({"X:DOTUSD": ("DOT", "USD")})
     waiter.join(30)
@@ -975,8 +980,335 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     if outcome == "fails":
         assert isinstance(result, dm.EntitlementError)
         assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+        # Each waiter raises a copy, so no exception object is raised on two threads.
+        assert isinstance(result.__cause__, dm.EntitlementError)
+        assert result.__cause__ is not refused
+        assert result.__cause__.status == 403
     else:
         assert result == ("DOT", "USD")
+
+
+class _Caller:
+    # A thread that makes one call, holding the update graph's shared lock as a console
+    # command holds its lock when `console` is set, and keeps what the call returned or raised.
+    def __init__(self, m: dm.MassiveSession, call: Callable[[], object], *, console: bool) -> None:
+        self.result: object = None
+        self._m = m
+        self._call = call
+        self._console = console
+        self._thread = threading.Thread(target=self._run)
+        self._thread.start()
+
+    def _run(self) -> None:
+        if self._console:
+            # Deephaven's lock wraps an error raised inside it, so the call keeps its own.
+            with shared_lock(self._m._core.exec_ctx.update_graph):
+                self._make()
+        else:
+            self._make()
+
+    def _make(self) -> None:
+        try:
+            self.result = self._call()
+        except (dm.MassiveError, KeyboardInterrupt) as error:
+            self.result = error
+
+    def join(self) -> object:
+        self._thread.join(TIMEOUT)
+        assert not self._thread.is_alive()
+        return self.result
+
+
+class _Listeners:
+    """Record the listeners subscribed to one governor bucket that are still subscribed."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.buckets: list[str] = []
+        self.live: list[Callable[[], None]] = []
+        subscribe = _massive.RequestGovernor.subscribe_bucket
+        unsubscribe = _massive.RequestGovernor.unsubscribe
+
+        def subscribing(
+            governor: _massive.RequestGovernor, bucket: str, listener: Callable[[], None]
+        ) -> None:
+            self.buckets.append(bucket)
+            self.live.append(listener)
+            subscribe(governor, bucket, listener)
+
+        def unsubscribing(governor: _massive.RequestGovernor, listener: Callable[[], None]) -> None:
+            if listener in self.live:
+                self.live.remove(listener)
+            unsubscribe(governor, listener)
+
+        monkeypatch.setattr(_massive.RequestGovernor, "subscribe_bucket", subscribing)
+        monkeypatch.setattr(_massive.RequestGovernor, "unsubscribe", unsubscribing)
+
+
+def _manual_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dm.MassiveSession, FakeClock]:
+    # A session whose governor runs on a manual clock: each pause lasts until the test moves
+    # time past it.
+    clock = FakeClock(manual=True)
+    create = functools.partial(
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
+        labels=rate_limits.LABELS,
+    )
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    return m, clock
+
+
+PAUSE = Reply(
+    {"status": "ERROR", "message": "slow down"}, status=429, headers={"Retry-After": "60"}
+)
+"""Massive's refusal of a request, asking for a pause of 60 s."""
+LIST_TARGET = "/v3/reference/tickers?market=crypto&active=true&limit=1000"
+"""The first page of Massive's list of listed crypto tickers."""
+DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
+"""The first page of Massive's list of delisted crypto tickers."""
+
+
+def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
+    # A call that splits X:DOTUSD from the session's crypto ticker list.
+    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    return functools.partial(reader.crypto_pair, "X:DOTUSD")
+
+
+def _gave_up_after_two_pauses(result: object) -> None:
+    # The caller holding the update graph's lock waits out 90 s of pauses: the second 60 s
+    # pause takes it past that, after it spent 60 s.
+    assert isinstance(result, dm.MassiveError)
+    assert result.status == 429
+    assert re.search(
+        r"rate limited: Massive is refusing .*this read waits out at most 90 s of pauses and "
+        r"has spent 60 s",
+        str(result),
+    )
+
+
+@pytest.mark.parametrize("console", ["joiner", "maker", "neither"])
+def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    console: str,
+) -> None:
+    # Two callers need the list at once; `console` names the one inside a console command
+    # (90 s of pauses), the other waits out 600 s. Massive pauses the list twice for 60 s.
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    listeners = _Listeners(monkeypatch)
+    fake_rest.reply(LIST_TARGET, PAUSE, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
+    caplog.set_level(logging.DEBUG, LOGGER)
+    try:
+        maker = _Caller(m, _split_dot(m), console=console == "maker")
+        clock.wait_for_deadlines([60.0])  # the maker waits out Massive's first pause
+        joiner = _Caller(m, _split_dot(m), console=console == "joiner")
+        clock.wait_for_deadlines([60.0, math.inf])  # the joiner shares it, charged 60 s
+        clock.advance(60.0)  # the list's next request is refused: 60 s more, 120 s in all
+        if console == "neither":
+            clock.wait_for_deadlines([120.0, math.inf])
+        else:
+            _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+            # The other caller reads on: the maker its own lookup, or the joiner a new one
+            # of its own, since the maker's giving up says nothing about the list.
+            clock.wait_for_deadlines([120.0])
+        clock.advance(60.0)
+        if console != "maker":
+            assert maker.join() == ("DOT", "USD")
+        if console != "joiner":
+            assert joiner.join() == ("DOT", "USD")
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 4  # the list's three attempts, then the delisted page
+    assert (listeners.buckets, listeners.live) == (["other"], [])  # heard, then removed
+    patience = 90 if console == "joiner" else 600
+    assert (
+        f"{m._core.label}: waits for the crypto ticker list another caller is making, through "
+        f"at most {patience} s of its pauses"
+    ) in caplog.messages
+    stopped = [r for r in caplog.records if "stops waiting for the crypto" in r.getMessage()]
+    assert [r.levelno for r in stopped] == ([logging.ERROR] if console == "joiner" else [])
+    retried = [r for r in caplog.records if "this caller tries again" in r.getMessage()]
+    assert [r.levelno for r in retried] == ([logging.INFO] if console == "maker" else [])
+
+
+def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    fake_rest.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
+    client = cast("rest.RestEndpoints", m._core.rest_transport())._state.client
+    pages = client.pages
+    claimed = threading.Event()
+    interrupt = threading.Event()
+
+    def interrupted(*args: object, **kwargs: object) -> Iterator[_massive.Page]:
+        if not claimed.is_set():  # the maker, interrupted (as by Ctrl-C) once a caller joined
+            claimed.set()
+            assert interrupt.wait(TIMEOUT)
+            raise KeyboardInterrupt
+        return pages(*cast("Any", args), **cast("Any", kwargs))
+
+    monkeypatch.setattr(client, "pages", interrupted)
+    caplog.set_level(logging.INFO, LOGGER)
+    try:
+        maker = _Caller(m, _split_dot(m), console=False)
+        assert claimed.wait(TIMEOUT)
+        joiner = _Caller(m, _split_dot(m), console=True)
+        clock.wait_for_deadlines([math.inf])  # the joiner waits on the maker's lookup
+        interrupt.set()
+        assert isinstance(maker.join(), KeyboardInterrupt)
+        assert joiner.join() == ("DOT", "USD")  # it read the list itself
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 2
+    assert any(
+        "the caller making the crypto ticker list stopped (KeyboardInterrupt())" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.parametrize("console", ["joiner", "maker"])
+def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    load_fixture: Callable[[str, str], bytes],
+    console: str,
+) -> None:
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    listeners = _Listeners(monkeypatch)
+    snapshot = Reply(load_fixture("ingest/hosts", "stocks_delayed.json"))
+    fake_rest.reply("/v3/snapshot", PAUSE, PAUSE, snapshot)
+
+    def decide() -> object:
+        return m._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+
+    try:
+        maker = _Caller(m, decide, console=console == "maker")
+        clock.wait_for_deadlines([60.0])
+        joiner = _Caller(m, decide, console=console == "joiner")
+        clock.wait_for_deadlines([60.0, math.inf])
+        clock.advance(60.0)
+        _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+        clock.wait_for_deadlines([120.0])  # the other caller decides on
+        clock.advance(60.0)
+        decision = (maker if console == "joiner" else joiner).join()
+    finally:
+        m.close()
+    assert isinstance(decision, HostDecision)
+    assert decision.host == "delayed.massive.com"
+    assert len(sent(fake_rest)) == 3
+    assert (listeners.buckets, listeners.live) == (["stocks"], [])
+
+
+def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
+    # A call that needs one of the session's shared lookups: the crypto ticker list or the
+    # stocks WebSocket host decision.
+    if kind == "crypto":
+        return _split_dot(m)
+    transport = m._core.rest_transport()
+    return functools.partial(transport.resolve_host, AssetClass.STOCKS, ChannelFamily.TICK)
+
+
+def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
+    # Claim the shared lookup of `kind`, as a caller does before making or joining it.
+    state = cast("rest.RestEndpoints", m._core.rest_transport())._state
+    if kind == "crypto":
+        return state.crypto_future()
+    return state.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    def interrupted(_: object) -> NoReturn:  # Ctrl-C while asking Deephaven for the patience
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rest, "read_patience", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _lookup(session, kind)()
+    assert _claim(session, kind)[1]  # nobody holds a lookup that nobody would complete
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
+    *,
+    session: dm.MassiveSession,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    # The caller claims a lookup another caller is making, which that caller abandons before
+    # this one first looks at it: it must try again, not raise the abandonment.
+    snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
+    name = "crypto_future" if kind == "crypto" else "host_future"
+    claim = getattr(rest.RestState, name)
+    abandoned: Future[Any] = Future()
+    abandoned.set_exception(rest._AbandonedError("rate limited: the maker gave up"))
+    claims = iter([(abandoned, False)])
+
+    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+        return next(claims, None) or claim(state, *args)
+
+    monkeypatch.setattr(rest.RestState, name, claiming)
+    result = _lookup(session, kind)()
+    if kind == "crypto":
+        assert result == ("DOT", "USD")
+    else:
+        assert isinstance(result, HostDecision)
+        assert result.host == "delayed.massive.com"
+
+
+def test_an_interrupt_as_the_crypto_read_starts_leaves_nothing_claimed(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(*_: object) -> NoReturn:  # Ctrl-C as the claimed read begins
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rest.RestReader, "_read_crypto_tickers", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _split_dot(session)()
+    assert _claim(session, "crypto")[1]  # the claim was given up, so a new one is made
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    # A waiter that tries again must claim a fresh lookup, never find the failed one, so the
+    # claim is removed before its future completes.
+    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply(LIST_TARGET if kind == "crypto" else "/v3/snapshot", refused)
+    name = "crypto_future" if kind == "crypto" else "host_future"
+    claim = getattr(rest.RestState, name)
+    fresh_when_failed: list[bool] = []
+
+    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+        future, created = claim(state, *args)
+        if created and not fresh_when_failed:
+            # When the failure reaches the future, a new claim must already be fresh.
+            future.add_done_callback(lambda _: fresh_when_failed.append(claim(state, *args)[1]))
+        return future, created
+
+    monkeypatch.setattr(rest.RestState, name, claiming)
+    with pytest.raises(dm.MassiveError):
+        _lookup(session, kind)()
+    assert fresh_when_failed == [True]
 
 
 def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
@@ -1380,22 +1712,6 @@ def test_the_first_part_of_a_page_gives_a_drift_sample(
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
     [drift] = [m for m in caplog.messages if "'new' is not in the schema" in m]
     assert drift.endswith('; first value "good"')
-
-
-def test_error_rows_of_a_projected_path_are_dropped_with_a_warning(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
-    spx = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
-    with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, INDEX_VALUES, symbols=["I:SPX", "I:VIX"])
-    assert [(r["Symbol"], r["Timestamp"], r["Value"]) for r in out] == [
-        ("I:SPX", 1704310200000000000, 5900.0)
-    ]
-    assert (
-        "Massive answered NOT_ENTITLED for I:VIX: Not entitled; the row is dropped" in caplog.text
-    )
 
 
 def test_drift_is_reported_once_per_field_and_status(
@@ -2136,7 +2452,7 @@ def test_waiters_get_a_copy_of_the_deciders_error(session: dm.MassiveSession) ->
     error = dm.EntitlementError("no", status=403, request_id="r1")
     future.set_exception(error)
     with pytest.raises(dm.EntitlementError, match=r"^no$") as info:
-        rest._waited(future)
+        rest._outcome(future)
     assert info.value is not error
     assert (info.value.status, info.value.request_id) == (403, "r1")
 
@@ -2166,7 +2482,7 @@ def test_columns_a_path_does_not_carry_are_null(
     assert (row["Symbol"], row["CashAmount"], row["StrikePrice"]) == ("AAPL", 0.25, None)
 
 
-def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
+def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
@@ -2175,9 +2491,11 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
-            assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
+            (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
+            assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
     assert caplog.text.count("X:ETHUSD has no data") == 1
-    assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
+    kept = "the row is kept with its Error and Message columns"
+    assert caplog.text.count(f"for I:VIX: Not entitled; {kept}") == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -2222,6 +2540,41 @@ def test_a_404_without_a_symbol_fails_the_call(
     # Only a per-symbol request drops on 404; a list path that is missing is an error.
     with pytest.raises(dm.MassiveError, match="HTTP 404"):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
+
+
+def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    path = reader.rest_path(CRYPTO_LAST_PATH)
+    request = Request(symbols=("X:BTCUSD",))
+    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
+
+    def pages(*_: object, **__: object) -> NoReturn:
+        # The session closes while the symbol's request is on the wire, which then ends in 404.
+        reader.state.close()
+        raise _massive.WireError("HTTP 404 from GET /v1/last/crypto/BTC/USD", status=404)
+
+    monkeypatch.setattr(reader.state.client, "pages", pages)
+    with (
+        caplog.at_level(logging.DEBUG, LOGGER),
+        ThreadPoolExecutor(1) as pool,
+        pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"),
+    ):
+        reader.read(
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            patience=_massive.Patience(math.inf),
+        )
+    assert "has no data" not in caplog.text  # the symbol is not dropped as missing
+    assert (
+        f"crypto.last: HTTP 404 for X:BTCUSD from {CRYPTO_LAST_PATH} arrived after "
+        f"{session._core.label} closed; the call reports the close"
+    ) in caplog.messages
 
 
 def test_an_error_row_needs_only_its_symbol(
@@ -3102,7 +3455,7 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     snapshot = {"ticker": "I:SPX", "value": 1.0, "last_updated": late}
     other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
-    q = query(session, INDEX_VALUES, symbols=["I:NDX", "I:SPX"])
+    q = query(session, INDEX_LEVELS, symbols=["I:NDX", "I:SPX"])
     assert isinstance(q, Query)
     table = q.fetch()
     row = rows(table)[0]

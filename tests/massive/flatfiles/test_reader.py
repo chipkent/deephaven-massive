@@ -26,7 +26,7 @@ TRADE_COLUMNS = (
     ReadColumn("sip_timestamp", "Timestamp", pa.int64()),
     ReadColumn("price", "Price", pa.float64()),
     ReadColumn("id", "Id", pa.string()),
-    ReadColumn("conditions", "Conditions", pa.string(), pa.list_(pa.int32())),
+    ReadColumn("conditions", "Conditions", pa.string(), pa.list_(pa.int64())),
     ReadColumn("correction", "Correction", pa.int32()),
     ReadColumn("trf_timestamp", "TrfTimestamp", pa.int64()),
 )
@@ -110,7 +110,7 @@ def test_headers_are_renamed_typed_and_lists_parsed(trades: FlatFile) -> None:
             ("Timestamp", pa.int64()),
             ("Price", pa.float64()),
             ("Id", pa.string()),
-            ("Conditions", pa.list_(pa.int32())),
+            ("Conditions", pa.list_(pa.int64())),
             ("Correction", pa.int32()),
             ("TrfTimestamp", pa.int64()),
         ]
@@ -375,7 +375,7 @@ def test_a_missing_header_is_a_null_column_and_reported(
     result = table(opened(KEY, narrower), plan())
     assert result.schema.field("Price").type == pa.float64()
     assert result["Price"].to_pylist() == [None, None]
-    assert result.schema.field("Conditions").type == pa.list_(pa.int32())
+    assert result.schema.field("Conditions").type == pa.list_(pa.int64())
     assert result["Conditions"].to_pylist() == [None, None]
     assert result["Symbol"].to_pylist() == ["AAPL", "MSFT"]
     assert drift(opened(KEY, narrower), plan()).missing == {"price", "conditions"}
@@ -467,13 +467,13 @@ def test_a_byte_order_mark_before_the_header_is_dropped(
 def test_a_list_element_that_does_not_convert_names_its_header(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    for conditions in ("12,abc", "12,99999999999", "12,,3"):
+    for conditions in ("12,abc", "12,99999999999999999999", "12,,3"):
         row = f'"{conditions}",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         with pytest.raises(WireError) as info:
             table(opened(KEY, TRADE_HEADER + row), plan())
         assert info.value.message.startswith(
             f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: conditions is not "
-            "list<item: int32>: "
+            "list<item: int64>: "
         )
         assert isinstance(info.value.__cause__, pa.ArrowInvalid)
 

@@ -413,9 +413,9 @@ def _record_library_stock_stamps(
 ) -> None:
     """Record the library's windows of the bars the REST stamp check reads raw, call by call.
 
-    One evidence line per library call, each recorded as it returns: `history()` of the two
-    days, `fetch()`, the grouped-daily `dm.ALL` history of each day (AAPL's row), and the
-    week and month history.
+    One evidence line per library call, each recorded as it returns: `history()` of the two days,
+    `previous_day_bar().fetch()`, the grouped-daily `dm.ALL` history of each day (AAPL's row), and
+    the week and month history.
     """
     days = stamp_days["day"]
     rest = dm.HistorySource.REST
@@ -424,7 +424,8 @@ def _record_library_stock_stamps(
     evidence(
         "library history(REST): " + library_stamps(partial(day_bars.history, *days, source=rest))
     )
-    evidence(f"library fetch() (/prev): {library_stamps(day_bars.fetch)}")
+    previous = session.stocks.previous_day_bar(_SYMBOL)
+    evidence(f"library previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
     for day in days:
         outcome = library_stamps(partial(_symbol_rows, every, day))
         evidence(f"library dm.ALL history(REST) {day} (grouped daily): {outcome}")
