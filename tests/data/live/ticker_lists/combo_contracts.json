@@ -1,0 +1,17 @@
+{
+  "XNYM": [
+    {"ticker": "CL:BF Q6-U6-V6", "name": "CL Butterfly Q6-U6-V6", "product_code": "CL:BF", "trading_venue": "XNYM", "type": "combo"},
+    {"ticker": "CL:BF U6-V6-X6", "name": "CL Butterfly U6-V6-X6", "product_code": "CL:BF", "trading_venue": "XNYM", "type": "combo"},
+    {"ticker": "CL:BZ U6-V6", "name": "CL Calendar U6-V6", "product_code": "CL:BZ", "trading_venue": "XNYM", "type": "combo"},
+    {"ticker": "CLQ6-CLU6", "name": "CL Calendar Spread Q6-U6", "product_code": "CL", "trading_venue": "XNYM", "type": "combo"},
+    {"ticker": "ES Z6/H7 SPR", "name": "An undocumented spread", "product_code": "ES", "trading_venue": "XNYM", "type": "combo"},
+    {"name": "A row without a ticker", "product_code": "CL", "trading_venue": "XNYM", "type": "combo"}
+  ],
+  "XCBT": [
+    {"ticker": "BOB 02-01 U6", "name": "Board Crush U6", "product_code": "BOB", "trading_venue": "XCBT", "type": "combo"}
+  ],
+  "XCME": [
+    {"ticker": "6A:XF:AUDUSD:Q6", "name": "AUD/USD Cross Q6", "product_code": "6A:XF", "trading_venue": "XCME", "type": "combo"}
+  ],
+  "XCEC": []
+}

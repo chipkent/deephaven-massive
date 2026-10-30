@@ -30,12 +30,13 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     Namespace,
     accepted_values,
     build_query,
     day_argument,
     list_params,
+    optional_text,
 )
 
 if TYPE_CHECKING:
@@ -198,24 +199,6 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
     return _REST_ASSET_CLASS[member]
 
 
-def _text(name: str, value: object) -> str | None:
-    """Check an optional text argument.
-
-    Args:
-        name: The parameter's name, for the message.
-        value: The argument as passed.
-
-    Returns:
-        The text, or None.
-
-    Raises:
-        TypeError: If `value` is neither None nor a `str`.
-    """
-    if value is not None and not isinstance(value, str):
-        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
-    return value
-
-
 def _event_types(types: object) -> str | None:
     """Join the `types` argument of `ticker_events` into its comma-separated wire form.
 
@@ -261,7 +244,7 @@ class _Reference(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "reference"
 
-    @raises_through(build_query, list_params, day_argument, _require_enum, _text)
+    @raises_through(build_query, list_params, day_argument, _require_enum, optional_text)
     def tickers(
         self,
         symbols: Symbols | None = None,
@@ -327,12 +310,12 @@ class _Reference(Namespace):
             "type": None
             if ticker_type is None
             else _require_enum(ticker_type, TickerType, "ticker_type"),
-            "exchange": _text("exchange", exchange),
-            "cusip": _text("cusip", cusip),
-            "cik": _text("cik", cik),
+            "exchange": optional_text("exchange", exchange),
+            "cusip": optional_text("cusip", cusip),
+            "cik": optional_text("cik", cik),
             "date": None if as_of is None else day_argument(TICKERS, as_of, "as_of"),
             "active": active,
-            "search": _text("search", search),
+            "search": optional_text("search", search),
             **list_params(sort=sort, order=order),
         }
         query = build_query(

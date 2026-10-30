@@ -3,7 +3,7 @@
 The first group runs against the vendored snapshot, and skips where there is none (an sdist
 leaves it out). The rest build small synthetic specifications and pages, so each rule and
 gate is shown in isolation; every gate has a test that fails when the gate is removed. The
-field rules every transport shares are tested with `fields` and `rest`.
+field rules every transport shares are tested with `fields` and `rest_sources`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from deephaven_massive._massive.refresh import exclusions, lexicon, overrides
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
-from deephaven_massive._massive.refresh.ws import WsCoverage, channel_key, generate_ws
+from deephaven_massive._massive.refresh.ws_sources import WsCoverage, channel_key, generate_ws
 from deephaven_massive._massive.spec.convert import convert_field
 from deephaven_massive._massive.spec.types import Conversion, Source, Transport, WireType, WireUnit
 

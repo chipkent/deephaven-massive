@@ -25,10 +25,10 @@ This module turns those documents into plain values and nothing else:
 - `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`,
   `example_header(page)`, and `example_rows(page)` read what one page documents.
 
-`fetch` and `snapshot` use them to store and find the pages; `rest`, `ws`, and `flatfiles` to
-decide what is documented. Every input is untrusted vendor text: it is parsed with anchored
-regular expressions, never evaluated, and a page URL outside its area is rejected before it
-can name a file.
+`fetch` and `snapshot` use them to store and find the pages; `rest_sources`, `ws_sources`, and
+`flat_file_sources` to decide what is documented. Every input is untrusted vendor text: it is parsed
+with anchored regular expressions, never evaluated, and a page URL outside its area is rejected
+before it can name a file.
 
 This module imports only the standard library.
 """

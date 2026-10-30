@@ -72,6 +72,7 @@ from tests._live import (
     probe,
     streams,
     summary,
+    ticker_lists,
     week_windows,
 )
 
@@ -545,7 +546,7 @@ def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
     `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
-    (`"datasets/symbols"` for `tests/datasets/test_symbols.py`), or a test package's path
+    (`"datasets/wire_symbols"` for `tests/datasets/test_wire_symbols.py`), or a test package's path
     (`"massive/rest"`), so each owner's fixtures stay together.
 
     Returns:
@@ -910,14 +911,14 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
     """
     core = importlib.import_module("deephaven_massive._tables.session_core")
     session = importlib.import_module("deephaven_massive._session")
-    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    ws_connection = importlib.import_module("deephaven_massive._ingest.ws_connection")
     with core._live_lock:
         live: set[str] = {each.label for each in core._live.values()}
     with session._keys_lock:
         cores = [ref() for ref in session._open_sessions]
     alive = {each.label for each in cores if each is not None}
-    with ws._groups_lock:
-        groups: set[object] = set(ws._groups.values())
+    with ws_connection._groups_lock:
+        groups: set[object] = set(ws_connection._groups.values())
     threads = {
         t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
     }
@@ -1787,12 +1788,13 @@ _PLANS: Final = {
     "test_forex_integration.py": "a Currencies plan that includes this data",
     "test_timestamps_integration.py": "a Currencies plan that includes this data",
     "test_stocks_integration.py": "a Stocks plan that includes this data",
+    "test_stock_filings_integration.py": "a Stocks plan that includes this data",
     "test_options_integration.py": "an Options plan that includes this data",
     "test_indices_integration.py": "an Indices plan that includes this data",
     "test_futures_integration.py": "a Futures plan that includes this data",
     "test_reference_integration.py": "a plan that includes this reference data",
     "test_flatfiles_integration.py": "flat-file access to this dataset",
-    "test_hosts_integration.py": "the plan this check names in its docstring",
+    "test_host_decision_integration.py": "the plan this check names in its docstring",
     "test_ws_integration.py": "the plan this check names in its docstring",
 }
 """The plan a live test module's data needs, named in a skip when the key lacks it."""
@@ -1985,6 +1987,113 @@ def basic_class(live_plans: plans.LivePlans) -> str:
     if not basic:
         pytest.skip("needs at least one class left on Basic")
     return basic[0]
+
+
+@pytest.fixture
+def market_lookup(live_plans: plans.LivePlans) -> classes.MarketLookup:
+    """Return the class on Basic whose market-filtered ticker lookups a rate-limit check tests.
+
+    `/v3/reference/tickers` filters by market only the tickers of indices, currencies (forex
+    and crypto), and stocks, so the check needs one of those on Basic (`classes.market_lookup`
+    prefers them in that order).
+
+    Args:
+        live_plans: The run's plans.
+
+    Returns:
+        The class, its markets, and a market of another class; the test is skipped when none
+        of the three classes is on Basic.
+    """
+    lookup = classes.market_lookup(live_plans.tiers)
+    if lookup is None:
+        pytest.skip("needs Indices, Currencies, or Stocks left on Basic")
+    return lookup
+
+
+@pytest.fixture
+def one_request_call(basic_class: str) -> Callable[[MassiveSession], object]:
+    """Return a library call of the Basic class that sends exactly one REST request.
+
+    The calls are the live-run upgrade check's (`upgrade_check.CALLS`): the previous day's bar
+    of AAPL, of an option contract, of `I:NDX` (which Indices Basic includes), and of
+    `C:EURUSD`, and the market status of ES.
+
+    Args:
+        basic_class: The class on Basic, such as `"indices"`.
+
+    Returns:
+        A function that makes the call in a session and returns its result.
+    """
+    upgrade_check = importlib.import_module("tests._live.live_run.upgrade_check")
+    call: Callable[[MassiveSession], object] = upgrade_check.CALLS[basic_class]
+    return call
+
+
+@pytest.fixture
+def own_governors(rest_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> GovernorRegistry:
+    """Give a live test a registry of REST rate governors of its own, on the real clock.
+
+    A live test's sessions share the run's registry (`rest_clock`), whose governors the run
+    holds for the whole run, so what a governor learned there outlives every session. A test
+    of how a governor forgets needs one only its own sessions hold. Its requests are counted
+    by Massive with the run's, but not by the run's governors.
+
+    Args:
+        rest_clock: Installs the run's registry first; this fixture replaces it.
+        monkeypatch: Installs the registry as the library's `GOVERNORS` until the test ends.
+
+    Returns:
+        The registry; its governors wait on the real clock.
+    """
+    del rest_clock  # requested only for its order: it is set up before this fixture
+    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
+    registry: GovernorRegistry = rate_limits.GovernorRegistry()
+    monkeypatch.setattr(rate_limits, "GOVERNORS", registry)
+    return registry
+
+
+@pytest.fixture
+def futures_spread_reads(
+    classes_on_basic: frozenset[str],
+) -> Callable[[Sequence[Mapping[str, Any]]], tuple[list[ticker_lists.SpreadRead], list[str]]]:
+    """Return a function that chooses the reads of futures combo contracts, one per venue.
+
+    With Futures on Basic it keeps 4 reads, the four exchanges' (CME, CBOT, NYMEX, COMEX), so
+    the products read and the contracts reads make 5 requests (`ticker_lists.spread_reads`).
+
+    Args:
+        classes_on_basic: The classes on Basic.
+
+    Returns:
+        A function taking the combo products and returning the reads and the venues left out.
+    """
+    reads = 4 if "futures" in classes_on_basic else None
+    return functools.partial(ticker_lists.spread_reads, reads=reads)
+
+
+@pytest.fixture
+def futures_spread_report() -> Callable[
+    [Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]
+]:
+    """Return a function that describes the futures spread tickers read, by venue and form.
+
+    Returns:
+        A function taking the combo products and the combo contracts by venue, and returning
+        evidence lines (`ticker_lists.spread_report`) judged by the library's
+        `canonical_symbol_future_spread`.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    return functools.partial(ticker_lists.spread_report, spread=dm.canonical_symbol_future_spread)
+
+
+@pytest.fixture
+def crypto_report() -> Callable[..., list[str]]:
+    """Return a function that describes Massive's crypto ticker list and its unsplittable rows.
+
+    Returns:
+        `ticker_lists.crypto_report`.
+    """
+    return ticker_lists.crypto_report
 
 
 @pytest.fixture
@@ -3225,7 +3334,7 @@ def stamped_bar() -> Callable[[Mapping[str, Any]], StampedBar]:
 
     Returns:
         A function mapping a row to its stamp in epoch milliseconds and its open, high, low,
-        close, and volume (see `_stamped`).
+        close, and volume (see `stamped`).
     """
     return _stamped
 

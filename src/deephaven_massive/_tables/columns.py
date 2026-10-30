@@ -40,7 +40,8 @@ from deephaven.column import string_col
 from deephaven.jcompat import j_hashmap
 from deephaven.table import Table
 
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS, ColumnType
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._datasets.schema import ColumnType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
