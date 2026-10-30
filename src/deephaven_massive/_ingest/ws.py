@@ -667,8 +667,9 @@ class Connection:
         """Handle a call for a stream this connection does not hold.
 
         A stream that moved away is forwarded to the connection that took it; one that is
-        moving here but not adopted yet keeps the call until `adopt` applies it; any other
-        (a stream whose open failed before it was attached) is ignored.
+        moving here but not adopted yet keeps the call until `adopt` applies it. Any other (a
+        stream whose open failed before it was attached, or one that was moving here when it
+        shut down) is dropped, with the calls kept for it, and the connection may go idle.
 
         Args:
             stream_id: The stream.
@@ -684,7 +685,15 @@ class Connection:
         if awaited:
             self._early.setdefault(stream_id, []).append((callback, args))
         else:
-            self._after_change()  # a stream that never arrived may have been the last lease
+            # A stream that never arrived may have been the last lease, and calls kept for it
+            # while it was still awaited are no longer needed.
+            logger.debug(
+                "%s: stream %d is neither held nor awaited here; %s is dropped",
+                self.url,
+                stream_id,
+                getattr(callback, "__name__", callback),
+            )
+            self.check_idle()
 
     def check_idle(self) -> None:
         """Arm the idle close if the connection has no stream left.
@@ -754,9 +763,6 @@ class Connection:
                 leased = self._group.streams
                 moving = [s for s in streams if s.stream_id in leased]
                 gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
-                for stream_id in gone:
-                    successor.awaiting.discard(stream_id)
-                    successor.cap_pending.pop(stream_id, None)
                 failure = successor.failure
                 if failure is None:
                     for stream in moving:
@@ -2229,16 +2235,19 @@ class WsConnections:
         """
         with self._lock:
             current = self._forget(stream_id)
-            touched = {connection} if current is None else {connection, current}
-            for each in touched:
-                each.cap_pending.pop(stream_id, None)
-                each.awaiting.discard(stream_id)
+        touched = {connection} if current is None else {connection, current}
         for each in touched:
             each.flusher.routes.remove(stream_id)
             each.post(each.check_idle)
 
     def _forget(self, stream_id: int) -> Connection | None:
         """Drop a stream's lease from the group; the group's lock is held. Idempotent.
+
+        The connection that held the lease also stops awaiting the stream and stops counting
+        its topics against the options cap, since a stream with no lease is never adopted.
+        This is what clears a successor when a verdict moved the stream and the old connection
+        failed before its hand-over ran: the failure fails the stream, the stream's shutdown
+        returns its lease here, and the hand-over then finds no stream to move.
 
         Args:
             stream_id: The stream; stream ids are unique in the process.
@@ -2253,6 +2262,8 @@ class WsConnections:
         del group.streams[stream_id]
         del group.owners[stream_id]
         self._mine.discard(stream_id)
+        current.awaiting.discard(stream_id)
+        current.cap_pending.pop(stream_id, None)
         current.give(self)
         return current
 
@@ -2490,8 +2501,6 @@ class WsConnections:
         """
         group = self.group
         mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
-        for stream_id, connection in mine:
-            connection.cap_pending.pop(stream_id, None)
         closing = []
         for connection in {*group.connections.values(), *(c for _, c in mine)}:
             if self not in connection.users:
