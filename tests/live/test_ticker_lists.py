@@ -102,7 +102,7 @@ def test_a_venue_read_names_at_most_the_products_per_read(
     monkeypatch.setattr(ticker_lists, "PRODUCTS_PER_READ", 2)
     products = [
         {"product_code": code, "strategy_type": kind, "trading_venue": "XNYM"}
-        for code, kind in (("A", "x"), ("B", "x"), ("C", "y"), ("", "y"))
+        for code, kind in (("A", "x"), ("B", "x"), ("", "y"), ("C", "y"))
     ]
     reads, _ = ticker_lists.spread_reads(products, reads=3)
     assert reads[2].product_codes == ("CL", "NG", "A", "C")
