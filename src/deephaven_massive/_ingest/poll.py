@@ -569,13 +569,14 @@ class Poller:
             published,
             self._clock.monotonic() - began,
         )
-        # A successful cycle clears an earlier cycle's error, unless rows are being skipped.
+        # A successful cycle clears an earlier cycle's error; the skipped rows are kept apart.
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
             symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
-            error=skipped_rows_text(skipped) if skipped else None,
-            clear_error=not skipped,
+            clear_error=True,
+            skipped=skipped_rows_text(skipped) if skipped else None,
+            clear_skipped=not skipped,
         )
         core.update_streams({self._stream_id: update})
         return True

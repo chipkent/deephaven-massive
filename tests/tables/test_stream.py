@@ -1002,8 +1002,8 @@ def test_skipped_watchlist_rows_reach_the_streams_error(
     stream._show_skipped(weakref.ref(sink), ("msft",))
     stream._show_skipped(weakref.ref(sink), ())
     assert reported == [
-        {sink.stream_id: StreamUpdate(error=skipped_rows_text(["msft"]))},
-        {sink.stream_id: StreamUpdate(clear_error=True)},
+        {sink.stream_id: StreamUpdate(skipped=skipped_rows_text(["msft"]))},
+        {sink.stream_id: StreamUpdate(clear_skipped=True)},
     ]
 
 

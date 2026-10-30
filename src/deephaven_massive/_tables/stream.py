@@ -1215,6 +1215,9 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
 def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) -> None:
     """A watch's `on_skipped`: show the symbol-table values its stream skips in `m.streams()`.
 
+    The text is kept apart from the transport's own warning (`StreamRow.skipped`), so neither
+    replaces or clears the other in the row's `Error`.
+
     Runs in the watch's listener, under the update-graph lock: `SessionCore.update_streams`
     takes only the leaf `registry_lock` and makes no Deephaven call, so it never blocks there.
     The sink and its session are held weakly, as in `_fail_later`.
@@ -1229,9 +1232,9 @@ def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) ->
     if sink is None or core is None:
         return
     if values:
-        update = StreamUpdate(error=skipped_rows_text(values))
+        update = StreamUpdate(skipped=skipped_rows_text(values))
     else:
-        update = StreamUpdate(clear_error=True)
+        update = StreamUpdate(clear_skipped=True)
     core.update_streams({sink.stream_id: update})
 
 

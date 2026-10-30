@@ -3810,7 +3810,10 @@ is final: no later failure replaces it.
 Symbol problems show in `Error` with their own text. Under `noncanonical_symbols=LOG` or
 `IGNORE` (`LOG` is the default), the rows of a stream's or poll's symbol table that are skipped
 because they are not Massive's exact tickers are listed as a warning (`skipping 1 symbol-table
-row that is not Massive's ticker: 'msft'`), cleared once none is left. Under `RAISE`, such a
+value that is not Massive's ticker: 'msft'; fix or delete that row`), cleared once none is
+left. That text is kept apart from the transport's own warning (a wait for a connection slot,
+deferred options contracts, a poll cycle's error), and `Error` shows both, joined by `; `, so
+neither hides or clears the other. Under `RAISE`, such a
 later row fails the result (`a symbol table holds 'msft' (...). Fix the row, or pass the table
 through dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.LOG), ...`),
 and under `unreadable_symbols=RAISE` a symbol Massive sent in a spelling the library cannot
