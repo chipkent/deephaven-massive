@@ -206,6 +206,8 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
+_ROW_NUMBER: Final = "__row_number"
+"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
 
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
@@ -938,6 +940,21 @@ class _Converter:
                     )
             arrays[name] = widen(values, target)
         return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+
+
+def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
+    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+
+    Args:
+        rows: The rows of every request, in request order.
+        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
+
+    Returns:
+        The rows, each identity once, in the order of their first copies.
+    """
+    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
+    firsts = numbered.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
+    return rows.take(firsts[f"{_ROW_NUMBER}_min"].sort())
 
 
 def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
@@ -1971,7 +1988,8 @@ class RestReader:
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit`, and the request
+            The rows of every path, in path order, capped at `Request.limit` (each request's
+            rows, for a dataset whose symbols overlap; `_read_planned`), and the request
             count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
@@ -1999,6 +2017,10 @@ class RestReader:
         cancel: Cancel | None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the total rows at `Request.limit`.
+
+        For a dataset whose symbols overlap (`DatasetSpec.symbols_overlap`), such as the news
+        of a watchlist, each request is capped instead, and a row several requests returned
+        is kept once, at its first copy (`_first_copies`).
 
         Args:
             spec: The dataset.
@@ -2037,6 +2059,9 @@ class RestReader:
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
+        if spec.symbols_overlap:
+            # Each request was capped on its own, so one symbol's rows never crowd out another's.
+            return _first_copies(rows, spec.poll_keys), requests
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
         return rows, requests

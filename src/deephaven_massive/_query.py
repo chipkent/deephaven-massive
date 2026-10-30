@@ -37,8 +37,8 @@ worker threads after it (`massive #1 call-7 rest_0`), so every line of one call 
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
-The classes are importable from this private module for type annotations only; users never
-construct them.
+Users import the classes for type annotations from the public module
+`deephaven_massive.queries`, and never construct them.
 """
 
 from __future__ import annotations
@@ -92,6 +92,7 @@ __all__ = [
     "QueryBase",
     "StreamHistoryQuery",
     "StreamQuery",
+    "verbs",
 ]
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,23 @@ def _serves(spec: DatasetSpec, verb: str) -> bool:
     if verb == "history":
         return spec.has_history
     return spec.has_fetch
+
+
+def verbs(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return the verbs a dataset's queries can have, in the order `_VERBS` lists them.
+
+    A `bars` dataset streams at some timespans only, and its stream verbs are listed all the
+    same; the verbs of one `bars()` call follow its timespan (`bar_query_class` in
+    `_namespaces/base.py`). `dm.datasets()` shows the result.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The verbs' names, such as `("fetch", "poll")` or `("blink", "append_only", "ring",
+        "last_by", "history")`.
+    """
+    return tuple(verb for verb in _VERBS if _serves(spec, verb))
 
 
 def _read_symbol_table(
@@ -838,14 +856,17 @@ class HistoryQuery(QueryBase):
 
         The two bounds are of one kind, never mixed:
 
-        - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
+        - **Dates** (`"2025-03-03"`, a `date`, a Java `LocalDate` such as `dh_today()`, or a
+          day-precision `numpy.datetime64`) are whole days, inclusive at both ends:
           `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
           the asset class's day zone: New York for stocks, options, and indices, UTC for forex
           and crypto. For futures a date names the trading session whose `Date`
           (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
           (earlier after a holiday).
-        - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
-          end` (for bars, `TimestampStart`). Equal instants give an empty table.
+        - **Instants** (an aware `datetime`, ISO text with an offset, or a Java `Instant` or
+          `ZonedDateTime` such as `dh_now()` or a cell of an `Instant` column) are exact
+          instants, half-open: rows with `start <= Timestamp < end` (for bars,
+          `TimestampStart`). Equal instants give an empty table.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
         lies inside the range and has ended: its `TimestampStart` lies in the range, and its
@@ -911,7 +932,8 @@ class HistoryQuery(QueryBase):
 
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
-                or a timezone-aware `datetime`.
+                a timezone-aware `datetime`, a Java `LocalDate`, `Instant`, or
+                `ZonedDateTime`, or a day-precision `numpy.datetime64` (`DateLike`).
             end: The last day included, or the first instant excluded, of the same kind as
                 `start`; None (the default) reads through now: the current instant for a
                 datetime `start`, today in the day zone (for futures, the current session)
@@ -924,9 +946,10 @@ class HistoryQuery(QueryBase):
             symbol over REST, in file order over flat files; empty, with every column, when
             no row lies in the range.
 
-        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
-        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
-        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
+        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is none of the
+        `DateLike` types. `ValueError`, synchronously, before any request: a naive or
+        unparseable bound, a `numpy.datetime64` finer than a day, or a Java instant finer than
+        a microsecond; a date mixed with a datetime; `start` after `end` (or after now when
         `end` is None); a symbol table without a symbol, or with a row that is not canonical;
         futures trades or quotes named by session dates on a query that also filters
         `session_end_date` in any form; a source that cannot serve the request (`REST` without

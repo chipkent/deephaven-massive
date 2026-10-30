@@ -1,9 +1,16 @@
 """Date parsing and the day rules of `history()` and the time-axis filters.
 
-Every time bound a user passes is a `DateLike`: an ISO-8601 string, a `date`, or a
-timezone-aware `datetime`. A bound with a time of day but no timezone is ambiguous across the
-three day zones Massive uses, so it is rejected with a `ValueError` that names the parameter,
-the value, and the fix (`require_aware`).
+Every time bound a user passes is a `DateLike`: an ISO-8601 string, a `date`, a
+timezone-aware `datetime`, one of the Java time values Deephaven hands its users (`Instant`,
+`ZonedDateTime`, `LocalDate`), or a day-precision `numpy.datetime64`. `parse_date_like` turns
+each into a `date` or an aware `datetime`, the only two forms the rest of the library sees. A
+bound with a time of day but no timezone is ambiguous across the three day zones Massive uses,
+so it is rejected with a `ValueError` that names the parameter, the value, and the fix
+(`require_aware`).
+
+A Java value is recognized by its class name, so the dataset layer imports neither Deephaven
+nor jpy, and reading its fields calls only that immutable `java.time` object, which takes no
+Deephaven lock.
 
 A range has two kinds of bounds, and one range never mixes them (`check_order`):
 
@@ -36,9 +43,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from operator import methodcaller
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
+
+import numpy as np
 
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
@@ -106,6 +116,15 @@ _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # in the extended (`09:30:00.1234567`) and the basic (`093000.1234567`) time form alike. Only a
 # fraction of a second can hold a `.` or `,` in ISO-8601 text, so the separator marks it.
 _BELOW_MICROSECOND: Final = re.compile(r"[.,]\d{7,}")
+_BELOW_MICROSECOND_MESSAGE: Final = (
+    "has more than six fractional digits of a second, which a datetime cannot hold; cutting "
+    "them would move the time, so give at most microseconds"
+)
+_JAVA_INSTANTS: Final = frozenset({"java.time.Instant", "java.time.ZonedDateTime"})
+"""The Java classes whose values are instants, by their jpy class name."""
+_NUMPY_DAY: Final = ("D", 1)
+"""The unit of a day-precision `numpy.datetime64` (`numpy.datetime_data`), the only precision
+a bound takes."""
 _ONE_DAY: Final = timedelta(days=1)
 _INDEX_DAY_END: Final = timedelta(hours=1)
 """How much later an index day ends than the New York day: 01:00 New York time, midnight in
@@ -123,18 +142,22 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
 
     Args:
         value: An ISO-8601 string (`"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`), a `date`,
-            or a timezone-aware `datetime`.
+            a timezone-aware `datetime`, a Java `LocalDate` (a date), a Java `Instant` or
+            `ZonedDateTime` (an aware `datetime` at the same instant), or a `numpy.datetime64`
+            of day precision (a date).
         name: The parameter's name, used in error messages (`"start"`, `"end"`, `"date"`).
 
     Returns:
         A `date` for a date-only value; otherwise an aware `datetime`.
 
     Raises:
-        TypeError: If `value` is not a `str`, `date`, or `datetime`.
         ValueError: For a naive `datetime` or a string with a time but no offset (the message
             names the parameter, the value, and the fix; `require_aware`), a string that is
             not ISO-8601, or a string with more than six fractional digits of a second, which
             a `datetime` would silently cut to microseconds.
+
+    A Java or numpy value raises the `ValueError` of `_foreign_bound` when it cannot be a
+    bound, and a value of none of the accepted types its `TypeError`.
     """
     if isinstance(value, datetime):
         parsed = value
@@ -143,11 +166,7 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
     elif isinstance(value, str):
         text = value.strip()
         if _BELOW_MICROSECOND.search(text):
-            raise ValueError(
-                f"{name}={value!r} has more than six fractional digits of a second, which a "
-                "datetime cannot hold; cutting them would move the time, so give at most "
-                "microseconds"
-            )
+            raise ValueError(f"{name}={value!r} {_BELOW_MICROSECOND_MESSAGE}")
         try:
             if _DATE_ONLY.match(text):
                 return date.fromisoformat(text)
@@ -155,9 +174,80 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
         except ValueError:
             raise ValueError(f"{name}={value!r} is not an ISO-8601 date or datetime") from None
     else:
-        raise TypeError(f"{name} must be a str, date, or datetime, not {type(value).__name__}")
+        return _foreign_bound(value, name)
     require_aware(name, value, parsed)
     return parsed
+
+
+def _foreign_bound(value: object, name: str) -> date | datetime:
+    """Parse a time bound that is a Java time value or a `numpy.datetime64`.
+
+    A Java value is recognized by its class name, which jpy sets as `jclassname` on every Java
+    type it wraps, so jpy is not imported. An `Instant` becomes a UTC `datetime` and a
+    `ZonedDateTime` one at its own offset; only the instant matters to a bound, so the zone's
+    later rules are not needed.
+
+    Args:
+        value: The bound, which is not a `str`, `date`, or `datetime`.
+        name: The parameter's name, for messages.
+
+    Returns:
+        A `date` for a `LocalDate` or a day-precision `numpy.datetime64`; an aware `datetime`
+        for an `Instant` or a `ZonedDateTime`.
+
+    Raises:
+        TypeError: If `value` is none of the accepted types.
+        ValueError: If a Java value has more than six fractional digits of a second, which a
+            `datetime` would silently cut to microseconds; if a `numpy.datetime64` has a
+            precision other than a day, since it has no timezone; or if it holds no date
+            (`NaT`) or one outside years 1 to 9999.
+    """
+    java = getattr(type(value), "jclassname", None)
+    if java == "java.time.LocalDate":
+        return date(
+            _java_int(value, "getYear"),
+            _java_int(value, "getMonthValue"),
+            _java_int(value, "getDayOfMonth"),
+        )
+    if java in _JAVA_INSTANTS:
+        zoned = java == "java.time.ZonedDateTime"
+        instant = methodcaller("toInstant")(value) if zoned else value
+        nanos = _java_int(instant, "getNano")
+        if nanos % 1_000:
+            raise ValueError(f"{name}={value} {_BELOW_MICROSECOND_MESSAGE}")
+        seconds = _java_int(instant, "getEpochSecond")
+        moment = _EPOCH + timedelta(seconds=seconds, microseconds=nanos // 1_000)
+        if not zoned:
+            return moment
+        offset = _java_int(methodcaller("getOffset")(value), "getTotalSeconds")
+        return moment.astimezone(timezone(timedelta(seconds=offset)))
+    if isinstance(value, np.datetime64):
+        if np.datetime_data(value.dtype) != _NUMPY_DAY:
+            raise ValueError(
+                f"{name}={value!r} is a numpy.datetime64 of {value.dtype}, which has no "
+                "timezone; pass one of day precision, an aware datetime, or a Java Instant"
+            )
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:  # NaT, or a year a `date` cannot hold
+            raise ValueError(f"{name}={value!r} is not a date from year 1 to 9999") from None
+    raise TypeError(
+        f"{name} must be a str, date, datetime, Java Instant, ZonedDateTime, or LocalDate, or "
+        f"a numpy.datetime64 of day precision, not {type(value).__name__}"
+    )
+
+
+def _java_int(value: object, method: str) -> int:
+    """Call a Java time value's no-argument method that returns a whole number.
+
+    Args:
+        value: The Java object, through jpy.
+        method: The method's name, such as `"getYear"`.
+
+    Returns:
+        The result, as a Python `int`.
+    """
+    return int(methodcaller(method)(value))
 
 
 def require_aware(name: str, raw: object, moment: datetime) -> None:

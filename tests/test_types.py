@@ -3,6 +3,7 @@ import typing
 from collections.abc import Sequence
 from datetime import date, datetime
 
+import numpy as np
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -31,7 +32,7 @@ def test_symbols_alias() -> None:
 
 
 def test_date_and_filter_aliases() -> None:
-    assert set(typing.get_args(DateLike)) == {str, date, datetime}
+    assert set(typing.get_args(DateLike)) == {str, date, datetime, np.datetime64}
     assert set(typing.get_args(FilterValue)) == {
         str,
         int,

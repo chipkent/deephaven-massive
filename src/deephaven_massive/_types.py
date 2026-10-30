@@ -11,8 +11,8 @@
   overloads use to pick a query class statically. They are `Literal`s of enum members, never of
   strings.
 
-The aliases are importable from this private module for annotations; users never need to
-construct anything here except through `dm.ALL`.
+Users import `Symbols`, `DateLike`, and `FilterValue` for annotations from the public module
+`deephaven_massive.queries`, and never need to construct anything here except through `dm.ALL`.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypeVar
 
+import numpy as np
 from deephaven.table import Table
 
 from deephaven_massive._enums import Timespan
@@ -101,11 +102,22 @@ ticker (`"C:EURUSD"`, not `"EUR/USD"`); `dm.canonical_symbol` and `dm.canonicali
 convert other spellings.
 """
 
-DateLike: TypeAlias = str | date | datetime
-"""A time-axis bound: an ISO-8601 string, a `date`, or a timezone-aware `datetime`.
+DateLike: TypeAlias = str | date | datetime | np.datetime64
+"""A time bound: `history()`'s `start` and `end`, a list's `start`, `end`, and `as_of`, a day.
 
-A naive `datetime`, or an ISO string with a time but no UTC offset, raises a `ValueError` that names
-the parameter and the fix ("needs a timezone: pass an aware datetime or a date"). A date-only value
+One of:
+
+- an ISO-8601 string, `"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`;
+- a `date`, or a timezone-aware `datetime`;
+- a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant),
+  the values Deephaven's own time functions return, such as `deephaven.time.dh_now()` or
+  `dh_today()` and the cells of an `Instant` column;
+- a `numpy.datetime64` of day precision (a date), such as `numpy.datetime64("2025-03-03")`.
+
+Type checkers see Deephaven's Java values as `Any`, so the alias does not name them. A naive
+`datetime`, an ISO string with a time but no UTC offset, or a `numpy.datetime64` finer than a
+day raises a `ValueError` that names the parameter and the fix ("needs a timezone: pass an
+aware datetime or a date"), since a time without a zone cannot be placed. A date-only value
 is a whole day in the asset class's day zone.
 """
 

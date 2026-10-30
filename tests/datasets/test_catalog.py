@@ -441,6 +441,13 @@ def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys(
         change(EXCHANGES, poll_keys=())
     # A one-row dataset keys on nothing, and appends by its revision.
     assert change(EXCHANGES, poll_keys=(), revision_keys=("Name",)).poll_keys == ()
+
+
+def test_rows_several_symbols_return_are_found_by_poll_keys() -> None:
+    # A row that answers several symbols' requests is kept once, by its poll keys.
+    with pytest.raises(ValueError, match=r"reference.exchanges: a dataset whose symbols overlap"):
+        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), symbols_overlap=True)
+    assert change(EXCHANGES, symbols_overlap=True).symbols_overlap
     with pytest.raises(ValueError, match=r"revision_keys repeat poll_keys \['Id'\]"):
         change(EXCHANGES, revision_keys=("Name", "Id"))
     assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)

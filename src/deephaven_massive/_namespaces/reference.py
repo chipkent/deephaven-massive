@@ -21,14 +21,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
-from deephaven.table import Table
-
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
-from deephaven_massive._datasets.symbols import normalize
 from deephaven_massive._enums import (
     AssetClass,
-    ClassFromPrefix,
     ConditionDataType,
     Locale,
     Market,
@@ -40,7 +36,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -112,7 +107,10 @@ NEWS: Final = DatasetSpec(
     summary="News articles about tickers, with their publishers and sentiment insights.",
     fetch_path="/v2/reference/news",
     time_axis=("published_utc.gte", "published_utc.lt"),
+    # `ticker` takes one value, so a watchlist fans out one request per ticker, and an
+    # article that mentions two of its tickers comes back twice.
     symbol_param="ticker",
+    symbols_overlap=True,
     poll_mode=PollMode.APPEND,
     poll_keys=("Id",),
     page_size=_LIST_PAGE,
@@ -496,54 +494,46 @@ class _Reference(Namespace):
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
         so pass `start`: a poll without it re-reads the news archive every cycle. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
-        (JSON text), and
-        `symbols` only selects the articles that mention one ticker. The endpoint's `ticker`
-        parameter takes a single ticker, so `symbols` is one symbol; for several, build one
-        query per symbol. `symbols=None` reads every article; `dm.ALL` is not accepted (use
-        `symbols=None`). Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
+        (JSON text), and `symbols` selects the articles that mention any of its tickers.
+
+        The endpoint takes one ticker per request, so the library sends one request per
+        ticker and keeps an article that mentions several of them once, by its `Id`. Rows
+        come ticker by ticker, in ticker order. `limit`, `sort`, and `order` apply to each
+        ticker's request, not to the whole table: `limit=10` reads up to ten articles per
+        ticker, and `order` sorts within each ticker's articles; sort the table itself for one
+        order. A watchlist table is followed: `fetch()` reads its rows once, and `poll()`
+        re-reads them every cycle, so a ticker added to the table is read from the next cycle.
+        Each ticker costs one request a cycle or more: on a plan limited to 5 requests a
+        minute, `poll(60)` of a 50-ticker watchlist cannot keep up, and the table logs the
+        slow-poll WARNING. `symbols=None` reads every article in one request series;
+        `dm.ALL` is not accepted (use `symbols=None`). Its columns, and what each means, are
+        in https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            symbols: The one ticker whose articles to read, as a `str` or a one-element
-                sequence; None for every article.
+            symbols: The tickers whose articles to read: one symbol, a list, or a Deephaven
+                table with a `Symbol` column (a watchlist); None for every article.
             start: The earliest publication: a date is its 00:00 in New York, a `datetime`
                 is used as is; None for no lower bound, which reads the whole archive.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.
-            sort: The field to sort by (`"published_utc"`); None for the endpoint's default.
-            order: The sort direction; None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            sort: The field each ticker's request sorts by (`"published_utc"`); None for the
+                endpoint's default.
+            order: The sort direction of each ticker's request; None for the endpoint's
+                default.
+            limit: The maximum number of articles per ticker, or in total without `symbols`;
+                None for every article. The page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
                 as underscores; the publication axis is set only through `start` and `end`.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        Raises:
-            TypeError: If `symbols` is a Deephaven table.
-            ValueError: If `symbols` names more than one symbol.
-
-        `dm.ALL`, an invalid symbol, a naive `datetime`, a range that ends before it starts,
-        or an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a range that ends
+        before it starts, or an unknown filter raises `ValueError`; an argument of the wrong
+        type raises `TypeError`.
         """
-        if isinstance(symbols, Table):
-            raise TypeError(
-                "reference.news takes one symbol, not a table; build one query per symbol"
-            )
-        if symbols is not None and not isinstance(symbols, _All):
-            one = cast(
-                "tuple[str, ...]", normalize(ClassFromPrefix.ANY, symbols)
-            )  # not ALL: checked above
-            if len(one) > 1:
-                raise ValueError(
-                    "reference.news takes one symbol: the endpoint's ticker parameter is "
-                    f"single-valued; build one query per symbol, not {list(one)}"
-                )
-            symbols = one
         query = build_query(
             self._core,
             NEWS,

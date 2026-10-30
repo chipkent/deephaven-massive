@@ -2,9 +2,11 @@
 
 import re
 from datetime import UTC, date, datetime, timedelta
-from typing import cast
+from typing import TypeVar, cast
 
+import numpy as np
 import pytest
+from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_zdt
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
@@ -30,6 +32,8 @@ from deephaven_massive._datasets.futures_sessions import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._massive import WireUnit
+
+T = TypeVar("T")
 
 NOW = datetime(2025, 6, 18, 15, tzinfo=UTC)
 """A Wednesday afternoon, after every range of these tests unless a test says otherwise."""
@@ -76,7 +80,7 @@ def test_unparseable_and_wrong_types() -> None:
         parse_date_like("tomorrow", "start")
     with pytest.raises(ValueError, match="ISO-8601"):
         parse_date_like("2025-13-45", "end")
-    with pytest.raises(TypeError, match="end must be a str, date, or datetime"):
+    with pytest.raises(TypeError, match=r"^end must be a str, date, datetime, Java Instant, "):
         parse_date_like(cast("str", 20250303), "end")
 
 
@@ -370,3 +374,57 @@ def test_a_day_ends_by_its_class() -> None:
     assert day_end(AssetClass.INDICES, sunday) == datetime(2025, 3, 10, 5, tzinfo=UTC)
     assert day_end(AssetClass.CRYPTO, sunday) == datetime(2025, 3, 10, tzinfo=UTC)
     assert day_end(AssetClass.FUTURES, sunday) == datetime(2025, 3, 9, 22, tzinfo=UTC)
+
+
+def _present(value: T | None) -> T:
+    # Deephaven's converters return None for None; these tests never pass one.
+    assert value is not None
+    return value
+
+
+def test_deephaven_java_dates_and_instants_are_bounds() -> None:
+    # The values Deephaven's own time functions return, as a Deephaven console holds them.
+    day = _present(to_j_local_date("2025-03-03"))
+    instant = _present(to_j_instant("2025-03-03T14:30:00.123456Z"))
+    zoned = _present(to_j_zdt("2025-03-03T09:30:00.5 America/New_York"))
+    assert parse_date_like(day, "start") == date(2025, 3, 3)
+    assert parse_date_like(instant, "start") == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    moment = parse_date_like(zoned, "end")
+    assert moment == datetime(2025, 3, 3, 14, 30, 0, 500000, tzinfo=UTC)
+    assert cast("datetime", moment).utcoffset() == timedelta(hours=-5)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("2025-03-03T14:30:00.123456789Z", id="instant"),
+        pytest.param("2025-03-03T09:30:00.000000001 America/New_York", id="zoned"),
+    ],
+)
+def test_java_instants_finer_than_a_microsecond_are_refused_not_cut(value: str) -> None:
+    java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
+    with pytest.raises(ValueError, match=r"^start=.* has more than six fractional digits"):
+        parse_date_like(java, "start")
+
+
+def test_a_numpy_day_is_a_date() -> None:
+    assert parse_date_like(np.datetime64("2025-03-03"), "start") == date(2025, 3, 3)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (np.datetime64("2025-03-03T09:30"), r"datetime64\[m\], which has no timezone"),
+        (np.datetime64("2025-03"), r"datetime64\[M\], which has no timezone"),
+        (np.datetime64("NaT", "D"), "is not a date from year 1 to 9999"),
+        (np.datetime64("10000-01-01"), "is not a date from year 1 to 9999"),
+    ],
+)
+def test_a_numpy_time_that_is_not_one_day_is_refused(value: np.datetime64, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_date_like(value, "start")
+
+
+def test_another_java_value_is_the_wrong_type() -> None:
+    with pytest.raises(TypeError, match=r"^start must be a str, date, datetime, Java Instant"):
+        parse_date_like(_present(to_j_local_time("09:30")), "start")

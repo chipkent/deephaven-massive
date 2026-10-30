@@ -52,6 +52,7 @@ EXPECTED_EXPORTS = [
     "canonical_symbol_forex",
     "canonical_symbol_crypto",
     "canonicalize_symbols",
+    "datasets",
     "enable_debug_logging",
     "LogOutput",
     "__version__",
@@ -75,7 +76,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 40
+    assert len(EXPECTED_EXPORTS) == 41
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
@@ -101,8 +102,9 @@ def test_helper_names_are_not_reachable(name: str) -> None:
 
 def test_no_public_names_outside_all() -> None:
     # Every public name resolves lazily, so the namespace itself holds no public name at all;
-    # anything else would be reachable as `dm.<name>` beyond the exports.
-    assert {name for name in vars(dm) if not name.startswith("_")} == set()
+    # anything else would be reachable as `dm.<name>` beyond the exports. The one exception is
+    # the public submodule `queries`, which Python binds here once anything imports it.
+    assert {name for name in vars(dm) if not name.startswith("_")} <= {"queries"}
 
 
 def test_type_checking_imports_mirror_all() -> None:
