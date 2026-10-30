@@ -13,7 +13,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `events`: the choice of recent splits and special dividends to check;
 - `streams`: when a stream on a delayed plan must have delivered rows;
 - `week_windows`: which seven days a week bar covers, and whether that is the library's week;
-- `summary`: the open-questions summary that ends a live run.
+- `summary`: the open-questions summary that ends a live run;
+- `parallel`: which selected tests are live, and the refusal to run them on parallel workers.
 
 `tests/conftest.py` turns them into fixtures, which the live test modules use; only the unit
 tests of this package, under `tests/live/` (one per module, against the fakes), import it.
