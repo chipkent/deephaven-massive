@@ -93,7 +93,8 @@ def _list_spec(
             describe no single instrument.
         symbol_param: The query parameter that carries the requested symbols, or None.
         poll_keys: The key columns of a keyed `poll()` table, unique per row.
-        page_size: The page size requested: the endpoint's documented maximum `limit`.
+        page_size: The page size requested: the endpoint's documented maximum `limit`, or
+            less for rows that carry long text, so one page stays at tens of megabytes.
         asset_class: The class whose symbol rules apply to `symbols`, or `ClassFromPrefix.ANY`
             for a dataset whose symbols span classes.
         time: The path's instant column that holds the row's time, renamed to `Timestamp`.
@@ -136,7 +137,8 @@ def _benzinga(
         name: The dataset's name below `partners.benzinga`, such as `"ratings"`.
         path: The REST path template.
         summary: The dataset's one-sentence summary.
-        page_size: The endpoint's documented maximum `limit`.
+        page_size: The endpoint's documented maximum `limit`, or less for rows that carry
+            long text.
         tickers: True when the endpoint filters by `ticker` and each row names at most one
             stock. The vendor marks `ticker` optional on every such endpoint, and its own
             analyst-insights sample has none, so a row without one keeps a null `Symbol`
@@ -195,7 +197,9 @@ BENZINGA_ANALYST_INSIGHTS: Final = _benzinga(
     "analyst_insights",
     "/benzinga/v1/analyst-insights",
     summary="Benzinga analyst insights on US stocks: a rating, a price target, and the reason.",
-    page_size=50_000,
+    # Below the documented 50,000: each row carries the analyst's reasoning as prose, so a page
+    # of 5,000 stays at a few megabytes.
+    page_size=5_000,
 )
 BENZINGA_RATINGS: Final = _benzinga(
     "ratings",
@@ -249,7 +253,10 @@ BENZINGA_NEWS: Final = _list_spec(
     symbol_param="tickers.any_of",
     poll_mode=PollMode.APPEND,
     poll_keys=("BenzingaId",),
-    page_size=50_000,
+    # Below the documented 50,000: each article carries its whole HTML body, often several
+    # kilobytes and sometimes tens, so a full page could reach hundreds of megabytes. A page of
+    # 1,000 stays at some tens of megabytes at most.
+    page_size=1_000,
 )
 
 ETF_GLOBAL_ANALYTICS: Final = _etf_global(

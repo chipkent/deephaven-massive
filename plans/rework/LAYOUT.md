@@ -118,6 +118,7 @@ _tables/
   liveness.py                  result scopes, ResultRegistry, Reaper, QueueWorker
   diagnostics.py               the diagnostics tables and writer, DriftRegistry, pascal_case (← schema)
   columns.py                   Deephaven column types, describe, column_table
+  publisher.py                 blink_publisher, BlinkPublisher: the publisher of every blink table
   stream.py                    stream sinks, Flusher, fan-out
   poll.py             ← _ingest/poll  Poller, Pollers, open_poll, SymbolRowError
   watchlist.py                 read_symbols, SymbolWatch

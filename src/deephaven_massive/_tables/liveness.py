@@ -29,6 +29,12 @@ it the stream or the poller: topic reference counts and pollers are bound to the
 weakly, so a result never keeps a session alive through its record; the session's live set does
 that (`_tables/core.py`).
 
+Two thread checks live here beside `entered`, since every library entry point runs them with
+the session's execution context: `refuse_update_graph_thread` refuses a call on one of the update
+graph's own threads, and `holds_update_graph_lock` tells whether the calling thread holds the
+update graph's lock, as every Deephaven console command does, so it must wait for nothing that
+needs the lock.
+
 Threading: `make_result` runs on the caller thread (liveness scopes are thread-local). The
 registry's state is guarded by the session's `registry_lock`, a leaf lock under which no
 Deephaven call is made. Scope releases happen on the reaper thread inside the session's
@@ -47,6 +53,7 @@ from typing import TYPE_CHECKING, Final, Generic, TypeVar, cast
 
 from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
+from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,8 +69,10 @@ __all__ = [
     "ResultRegistry",
     "StreamHandle",
     "entered",
+    "holds_update_graph_lock",
     "make_result",
     "new_scope",
+    "refuse_update_graph_thread",
 ]
 
 logger = logging.getLogger(__name__)
@@ -92,6 +101,45 @@ def entered(exec_ctx: ExecutionContext) -> ExecutionContext:
         A new wrapper of the same Java context; enter it once, on one thread.
     """
     return ExecutionContext(j_exec_ctx=exec_ctx.j_exec_ctx)
+
+
+def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
+    """Refuse a call on one of the update graph's own threads, such as inside a table listener.
+
+    An update-graph thread runs the graph's cycle: a library call there would create tables and
+    wait on library threads while the cycle, which those threads may need, cannot go on. A
+    thread that merely holds the update graph's lock, as the Deephaven console does for every
+    command, is not refused: the library never waits there for an update cycle or on a thread
+    that may need the lock.
+
+    Args:
+        exec_ctx: The session's execution context, or the one a new session captures.
+
+    Raises:
+        ValueError: On an update-graph thread.
+    """
+    if exec_ctx.update_graph.j_update_graph.currentThreadProcessesUpdates():
+        raise ValueError(
+            "deephaven_massive calls must not run on a Deephaven update-graph thread "
+            "(for example inside a table listener)"
+        )
+
+
+def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
+    """Tell whether the calling thread holds the update graph's exclusive or shared lock.
+
+    The Deephaven console runs every command holding the exclusive lock. While a thread holds
+    either lock no update cycle runs, so it must not wait for one, nor on a thread that may
+    need the lock. A Java call: never make it under `registry_lock`.
+
+    Args:
+        exec_ctx: The session's execution context.
+
+    Returns:
+        True while the thread holds either lock.
+    """
+    update_graph = exec_ctx.update_graph
+    return has_exclusive_lock(update_graph) or has_shared_lock(update_graph)
 
 
 def new_scope() -> LivenessScope:
@@ -136,13 +184,13 @@ def make_result(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
 class StreamHandle:
     """A live stream as the WebSocket transport hands it to the session.
 
-    The transport creates the stream's `TablePublisher` and blink table inside `scope` (the
-    stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
+    The transport creates the stream's publisher (`BlinkPublisher`) and blink table inside `scope`
+    (the stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
     registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
-    released. The session's registry record holds the handle until the record is deleted (its
-    holds released and its blink table shut down), and releases `scope` when the last result is
-    released. Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist
-    listener, which Deephaven itself keeps only weakly.
+    released. The session's registry record holds the handle until the record is deleted (its holds
+    released and its blink table shut down), and releases `scope` when the last result is released.
+    Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist listener,
+    which Deephaven itself keeps only weakly.
 
     Attributes:
         stream_id: The stream's identifier, minted by the session before the open and unique

@@ -21,6 +21,12 @@ forever. A fatal failure (a rejected key, a TLS certificate failure, an HTTP sta
 retrying cannot fix) ends it with `FAILED`. `close()` ends it with `CLOSED` at once, whatever it
 is waiting for.
 
+**Logging.** The client's thread is named `<thread_prefix> ws <host><path>`. It logs connecting,
+authenticating, closing, and each backoff at INFO or WARNING; each status object Massive sends
+(an acknowledgement, a refusal) and each subscription frame it sends at DEBUG; and each rejected
+row, whole, at DEBUG (`ws.protocol`). Never the authentication frame: websockets' own frame log
+is kept off, and a server text that echoes the key has it replaced with `***`.
+
 This module imports the standard library, `websockets`, `net`, and `spec` (through
 `ws.protocol`).
 """
@@ -235,9 +241,9 @@ class WsClient:
                 library passes its configuration's value (at least 15 s); tests pass less.
             max_reconnect_backoff: Seconds the doubling backoff stops at; at least
                 `reconnect_backoff`. It also caps an HTTP 429's `Retry-After`, so every wait
-                lies within `[reconnect_backoff, max_reconnect_backoff]`. The REST client
-                instead gives up on a `Retry-After` above 60 s, because a caller is blocked on
-                that request; this client never gives up, so honouring an unbounded
+                lies within `[reconnect_backoff, max_reconnect_backoff]`. A REST read instead
+                gives up once a pause outlasts its patience, because a caller is blocked on
+                that read; this client never gives up, so honouring an unbounded
                 `Retry-After` would leave its streams silent for as long as the server named,
                 while a capped wait only retries sooner and meets another 429 at worst.
             clock: The time source the wire clients share (`net.retry.Clock`). Its
@@ -619,6 +625,7 @@ class WsClient:
                 for event in self._decoder.decode(self._clean(frame)):
                     if isinstance(event, Status):
                         no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
+                        logger.debug("%s status %s: %s", self._url, event.kind.name, event.message)
                         self._on_status(generation.number, event)
                     else:
                         self._on_data(

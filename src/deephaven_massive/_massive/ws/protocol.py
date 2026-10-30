@@ -16,7 +16,10 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   field with a named `conversion` through that conversion), so a value means the same on both
   transports. Drift is reported as REST reports it: `extra` holds the keys a channel does not
   declare, which are dropped, and `missing` only the fields the vendor marks required
-  (`Field.required`) that some object lacked or held as null.
+  (`Field.required`) that some object lacked or held as null. Each drifted key carries a
+  sample (`DriftReport.samples`): the symbol of the first object that showed it and, for an
+  extra key, its value. A rejected row carries its whole raw text (`Reject.raw`) and is logged
+  whole at DEBUG on this module's logger, once, where it is decoded.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
   one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
@@ -48,9 +51,11 @@ from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
     convert_field,
+    excerpt,
     missing_key_message,
+    row_excerpt,
 )
-from deephaven_massive._massive.spec.types import DriftReport, Source, Transport
+from deephaven_massive._massive.spec.types import DriftReport, DriftSample, Source, Transport
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -149,11 +154,14 @@ class Reject:
             no symbol column is declared or the row's value is missing or not text.
         error: Why the row was rejected: a missing required key or an unconvertible value,
             naming the field, the expected type, and the value.
+        raw: The whole row as it arrived, its compact JSON text cut to 2,000 characters
+            (`spec.convert.row_excerpt`), so a log line can show every field it held.
     """
 
     channel: str
     symbol: str | None
     error: WireError
+    raw: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -364,6 +372,8 @@ class _Accumulator:
     rejects: list[Reject] = field(default_factory=list)
     extra: set[str] = field(default_factory=set)
     missing: set[str] = field(default_factory=set)
+    # The first object's symbol (and value, for an extra key) for each drifted key.
+    samples: dict[str, DriftSample] = field(default_factory=dict)
 
 
 class FrameDecoder:
@@ -561,11 +571,18 @@ class FrameDecoder:
         keys = item.keys()
         # An object of exactly the declared shape, the common case, has no extra key, which one
         # set comparison decides; the vendor-required scan runs only on a channel that has such
-        # fields, and covers every object, a rejected one included.
+        # fields, and covers every object, a rejected one included. Samples are taken only for
+        # a key not seen before in this frame, so a drifting frame costs one lookup per key.
         if keys != spec.shape:
-            into.extra |= keys - spec.shape
+            for key in keys - spec.shape:
+                if key not in into.extra:
+                    into.extra.add(key)
+                    into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(item[key]))
         if spec.vendor_required:
-            into.missing.update(k for k in spec.vendor_required if item.get(k) is None)
+            for key in spec.vendor_required:
+                if item.get(key) is None and key not in into.missing:
+                    into.missing.add(key)
+                    into.samples[key] = DriftSample(self._symbol(channel, item), None)
         row: dict[str, object] = {}
         for step in spec.steps:
             f = step.field
@@ -596,16 +613,31 @@ class FrameDecoder:
             The reject, whose error names the connection, the channel, the symbol, and
             `problem`.
         """
-        key = self._channels[channel].symbol
-        symbol = item.get(key) if key is not None else None
-        text = symbol if isinstance(symbol, str) else None
+        text = self._symbol(channel, item)
         about = f" for {text}" if text is not None else ""
         error = WireError(
             f"rejected a {channel} row{about} from {self._host}{self._path}: {problem}",
             host=self._host,
             path=self._path,
         )
-        return Reject(channel=channel, symbol=text, error=error)
+        raw = row_excerpt(item)
+        logger.debug("%s; the row: %s", error, raw)
+        return Reject(channel=channel, symbol=text, error=error, raw=raw)
+
+    def _symbol(self, channel: str, item: dict[str, object]) -> str | None:
+        """Return an object's symbol as the wire spells it, for a reject or a drift sample.
+
+        Args:
+            channel: The object's channel.
+            item: The object.
+
+        Returns:
+            The value of the key `set_required` declared as the channel's symbol, or None when
+            none is declared or the value is missing or not text.
+        """
+        key = self._channels[channel].symbol
+        symbol = item.get(key) if key is not None else None
+        return symbol if isinstance(symbol, str) else None
 
     @staticmethod
     def _data(channel: str, frame: dict[str, _Accumulator]) -> Data:
@@ -619,5 +651,7 @@ class FrameDecoder:
             The channel's rows, rejects, and drift.
         """
         acc = frame[channel]
-        drift = DriftReport(extra=frozenset(acc.extra), missing=frozenset(acc.missing))
+        drift = DriftReport(
+            extra=frozenset(acc.extra), missing=frozenset(acc.missing), samples=acc.samples
+        )
         return Data(channel=channel, rows=acc.rows, rejects=acc.rejects, drift=drift)

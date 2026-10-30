@@ -5,21 +5,21 @@ runs one verb, and asserts only that the call worked and that the result has exa
 dataset's columns (an empty result included). No human reads anything:
 
 - `fetch()`: one call, with `limit` 5 where the dataset takes a limit.
-- `history()`: one recent weekday; whole days for bars, a five-minute window (15:00 to 15:05
-  New York time) for ticks.
+- `history()`: the last trading day before today, holidays skipped; whole days for bars, a
+  five-minute window (15:00 to 15:05 New York time) for ticks.
 - `poll()` (for the datasets served by REST alone): the first cycle, up to 20 s, then the
   table is released.
-- `append_only()`: up to 15 s of the stream, then the table is released (a closed market
-  sends nothing, which passes).
+- `append_only()`: until Massive acknowledges the topic (up to 15 s), then the table is
+  released; a closed market still acknowledges, so the check holds at any hour.
 
 A dataset the key's plan does not include is a skip, "not entitled: needs <plan>", never a
 failure. The terminal summary ends with a coverage count: passed, not entitled, failed.
 
-The tier is marked `integration_smoke` (and `integration`) and runs only with
-`uv run pytest -m integration_smoke`. On a free key it stays within Massive's rate limits:
-every REST request to a class declared Basic (`MASSIVE_LIVE_PLANS`) waits for a place in that
-class's 5 a minute, and the streams of a Basic class (Basic has no WebSocket access) skip
-before any call, naming the Starter plan they need. How to run it is in `docs/live-tests.md`.
+The tier is marked `integration_smoke` (and `integration`) and runs only with `uv run pytest -m
+integration_smoke`. On a free key it stays within Massive's rate limits: every REST request to a
+class on Basic waits for a place in that class's 5 a minute, each case's time limit grows with its
+request count, and the streams of a Basic class (Basic has no WebSocket access) skip before any
+call, naming the Starter plan they need. How to run it is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import inspect
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -39,7 +39,7 @@ from deephaven_massive._massive import RestClient, Transport, source
 from deephaven_massive._session import CATALOG
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from datetime import date
     from typing import TypeAlias
 
@@ -84,7 +84,6 @@ _PLAN_NAMES = {
 }
 _SYMBOLS: dict[dm.AssetClass | ClassFromPrefix, str] = {
     dm.AssetClass.STOCKS: "AAPL",
-    dm.AssetClass.INDICES: "I:SPX",
     dm.AssetClass.FOREX: "C:EURUSD",
     dm.AssetClass.CRYPTO: "X:BTCUSD",
 }
@@ -110,7 +109,11 @@ _STREAM_CLOSED = [float("-inf")]
 """When the last stream test's session closed."""
 
 _FOUND: dict[str, str] = {}
-"""Symbols looked up once per run: an options contract and a futures contract."""
+"""Symbols looked up once per run: an options contract."""
+
+_REQUESTS: Final = {"fetch": 2, "poll": 2, "history": 4, "stream": 1}
+"""The REST requests one case makes at most, by verb: an option contract's lookup and the call,
+the pages of one day's history, and a stream's host decision."""
 
 
 def _cases() -> list[tuple[str, str]]:
@@ -132,16 +135,27 @@ def _cases() -> list[tuple[str, str]]:
     return cases
 
 
-def _recent_weekday() -> date:
-    """Return the weekday before today in New York.
+def _params() -> list[Any]:
+    """Return every (dataset, verb) pair as a test case with its plan and request count.
+
+    A dataset of one class needs that class's Basic plan for REST and its Starter plan for a
+    stream (Basic has no WebSocket access); the `needs` marker skips it before any call when
+    the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
+    left on Basic, whose five requests a minute pace it.
 
     Returns:
-        The day; a holiday's results are empty, which passes.
+        One `pytest.param` per pair, with its id `<dataset>-<verb>`.
     """
-    day = datetime.now(_NEW_YORK).date() - timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
+    params = []
+    for name, verb in _cases():
+        spec = CATALOG.by_name[name]
+        subscription = _subscription(spec)
+        marks = [pytest.mark.requests(_REQUESTS[verb])]
+        if subscription is not None:
+            plan = "starter" if verb == "stream" else "basic"
+            marks.append(pytest.mark.needs(f"{subscription}:{plan}"))
+        params.append(pytest.param(name, verb, marks=marks, id=f"{name}-{verb}"))
+    return params
 
 
 def _subscription(spec: DatasetSpec) -> str | None:
@@ -169,19 +183,6 @@ def _plan(name: str, spec: DatasetSpec, verb: str) -> str:
     return f"{plan} with {access} {name}"
 
 
-def _front_future() -> str:
-    """Return the E-mini S&P 500 contract of the next quarterly month.
-
-    Returns:
-        Such as `"ESZ6"` in October 2026.
-    """
-    today = datetime.now(UTC).date()
-    month = next((m for m in (3, 6, 9, 12) if m > today.month), 3)
-    year = today.year + (month == 3 and today.month >= 12)
-    code = {3: "H", 6: "M", 9: "U", 12: "Z"}[month]
-    return f"ES{code}{year % 10}"
-
-
 def _option(client: RestClient) -> str:
     """Return one listed AAPL option contract expiring a month or more out, looked up once.
 
@@ -201,7 +202,7 @@ def _option(client: RestClient) -> str:
     return _FOUND["options"]
 
 
-def _symbol(name: str, spec: DatasetSpec, client: RestClient) -> str:
+def _symbol(name: str, spec: DatasetSpec, client: RestClient, *, symbols: Mapping[Any, str]) -> str:
     """Return the one symbol a dataset is called with.
 
     Returns:
@@ -211,18 +212,24 @@ def _symbol(name: str, spec: DatasetSpec, client: RestClient) -> str:
         return _ETF
     if spec.asset_class is dm.AssetClass.OPTIONS:
         return _option(client)
-    if spec.asset_class is dm.AssetClass.FUTURES:
-        return _FOUND.setdefault("futures", _front_future())
-    return _SYMBOLS.get(spec.asset_class, "AAPL")
+    return symbols.get(spec.asset_class, "AAPL")
 
 
-def _query(session: dm.MassiveSession, name: str, verb: str, *, client: RestClient) -> QueryBase:
+def _query(
+    session: dm.MassiveSession,
+    name: str,
+    verb: str,
+    *,
+    client: RestClient,
+    symbols: Mapping[Any, str],
+    day: date,
+) -> QueryBase:
     """Build a dataset's query for one verb, with one symbol and the fewest rows.
 
-    Every required argument gets a value (`_FIXED_ARGUMENTS`, the recent weekday for a
-    `date`); `symbols` gets the class's symbol even where it is optional, and `limit` 5 where
-    the dataset takes one. A bars dataset uses `Timespan.DAY` for `fetch()` and `poll()` (the
-    previous day's bar) and its default timespan otherwise.
+    Every required argument gets a value (`_FIXED_ARGUMENTS`, `day` for a `date`); `symbols`
+    gets the class's symbol even where it is optional, and `limit` 5 where the dataset takes
+    one. A bars dataset uses `Timespan.DAY` for `fetch()` and `poll()` (the previous day's bar)
+    and its default timespan otherwise.
 
     Returns:
         The query.
@@ -238,7 +245,7 @@ def _query(session: dm.MassiveSession, name: str, verb: str, *, client: RestClie
     arguments: dict[str, object] = {}
     for parameter in inspect.signature(method).parameters.values():
         if parameter.name == "symbols":
-            arguments["symbols"] = _symbol(name, spec, client)
+            arguments["symbols"] = _symbol(name, spec, client, symbols=symbols)
         elif parameter.name == "timespan" and verb in {"fetch", "poll"}:
             arguments["timespan"] = dm.Timespan.DAY
         elif parameter.name == "limit" and verb in {"fetch", "poll"}:
@@ -246,7 +253,7 @@ def _query(session: dm.MassiveSession, name: str, verb: str, *, client: RestClie
         elif parameter.default is not inspect.Parameter.empty:
             continue
         elif parameter.name == "date":
-            arguments["date"] = _recent_weekday()
+            arguments["date"] = day
         elif parameter.name in _FIXED_ARGUMENTS:
             arguments[parameter.name] = _FIXED_ARGUMENTS[parameter.name]
         else:
@@ -271,15 +278,15 @@ class _Histories(Protocol):
         ...
 
 
-def _run(query: QueryBase, verb: str, *, bars: bool) -> Table:
+def _run(query: QueryBase, verb: str, *, bars: bool, day: date) -> Table:
     """Run one fetch or history verb on a query that offers it.
 
     Returns:
-        The static result.
+        The static result: for `history()`, the whole day for bars and 15:00 to 15:05 New York
+        time for ticks.
     """
     if verb == "fetch":
         return cast("_Fetches", query).fetch()
-    day = _recent_weekday()
     histories = cast("_Histories", query)
     if bars:
         return histories.history(day, day)
@@ -288,24 +295,30 @@ def _run(query: QueryBase, verb: str, *, bars: bool) -> Table:
 
 
 @pytest.mark.timeout(100)
-@pytest.mark.parametrize(("name", "verb"), _cases(), ids=[f"{n}-{v}" for n, v in _cases()])
+@pytest.mark.parametrize(("name", "verb"), _params())
 def test_every_dataset_and_verb_returns_its_columns(
     live_session: dm.MassiveSession,
     name: str,
     verb: str,
     *,
     live_rest: RestClient,
+    index_symbol: str,
+    previous_trading_day: date,
+    front_contract: Callable[[str, date], str],
     table_rows: TableRows,
+    wait_acked: Callable[[dm.MassiveSession, int, float], int],
     skip_if_not_entitled: SkipIfNotEntitled,
-    require_plans: Callable[[tuple[str, ...]], None],
+    record_property: Callable[[str, object], None],
     evidence: Evidence,
 ) -> None:
     """One dataset's verb, called once, works and returns exactly the dataset's columns.
 
     Reading it needs nobody: a pass means the call succeeded (an empty result included) with
-    exactly the dataset's columns, in the order `columns()` lists them; "not entitled: needs
-    <plan>" is a skip; anything else fails. A history the request cannot be served without S3
-    credentials skips, naming them.
+    exactly the dataset's columns, in the order `columns()` lists them, and, for a stream,
+    that Massive acknowledged its topic, which it does whether or not the market is open (a
+    stream that passed without a row is counted "acknowledged only" in the coverage);
+    "not entitled: needs <plan>" is a skip; anything else fails. A history the request cannot
+    be served without S3 credentials skips, naming them.
 
     Raises:
         ValueError: When a verb refuses its arguments for any reason but missing S3
@@ -313,18 +326,23 @@ def test_every_dataset_and_verb_returns_its_columns(
     """
     spec = CATALOG.by_name[name]
     plan = _plan(name, spec, verb)
-    subscription = _subscription(spec)
     if verb == "stream":
         since = time.monotonic() - _STREAM_CLOSED[0]
         if since < _STREAM_GAP:
             threading.Event().wait(_STREAM_GAP - since)
-    if verb == "stream" and subscription is not None:
-        require_plans((f"{subscription}:starter",))
-    query = _query(live_session, name, verb, client=live_rest)
+    symbols = {
+        **_SYMBOLS,
+        dm.AssetClass.INDICES: index_symbol,
+        dm.AssetClass.FUTURES: front_contract("ES", datetime.now(UTC).date()),
+    }
+    query = _query(
+        live_session, name, verb, client=live_rest, symbols=symbols, day=previous_trading_day
+    )
     expected = [row["Name"] for row in table_rows(query.columns())]
+    acked = None
     if verb in {"fetch", "history"}:
         try:
-            table = _run(query, verb, bars=spec.is_bars)
+            table = _run(query, verb, bars=spec.is_bars, day=previous_trading_day)
         except dm.EntitlementError as error:
             pytest.skip(f"not entitled: needs {plan} ({error})")
         except ValueError as error:
@@ -334,9 +352,11 @@ def test_every_dataset_and_verb_returns_its_columns(
     else:
         live: Any = query
         table = live.poll(60) if verb == "poll" else live.append_only()
-        pause = threading.Event()  # never set; only paces the polling
         deadline = time.monotonic() + (_POLL_WAIT if verb == "poll" else _STREAM_WAIT)
-        while time.monotonic() < deadline and not (verb == "poll" and table_rows(table)):
+        if verb == "stream":
+            acked = wait_acked(live_session, 1, deadline)
+        pause = threading.Event()  # never set; only paces the polling
+        while verb == "poll" and time.monotonic() < deadline and not table_rows(table):
             if any(r["State"] == "FAILED" for r in table_rows(live_session.streams())):
                 break
             pause.wait(0.5)
@@ -347,5 +367,9 @@ def test_every_dataset_and_verb_returns_its_columns(
         skip_if_not_entitled(live_session, plan)
         assert not failed, f"{name} {verb} failed: {failed[0]['Error']}"
     columns = list(table.column_names)
-    evidence(f"{name} {verb}: {table.size} rows; columns {columns}")
+    if verb == "stream" and not table.size:
+        # A closed market sends nothing: the pass then rests on the acknowledgement alone.
+        record_property("stream", "acknowledged only")
+    evidence(f"{name} {verb}: {table.size} rows; columns {columns}; acknowledged {acked}")
     assert columns == expected
+    assert acked is None or acked >= 1, f"{name}: Massive acknowledged no topic"

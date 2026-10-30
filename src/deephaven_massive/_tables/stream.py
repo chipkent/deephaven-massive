@@ -1,16 +1,17 @@
 """Live streams on the Deephaven side: publishers, the flush thread, and the shared-batch fan-out.
 
-A WebSocket *stream* is one `(dataset, channel, symbols)` with its own `TablePublisher` and blink
-table. The WebSocket transport (`_ingest/ws.py`) owns the connections and decides which topics
-are subscribed; this module owns everything that touches Deephaven for a stream:
+A WebSocket *stream* is one `(dataset, channel, symbols)` with its own publisher and blink table.
+The WebSocket transport (`_ingest/ws.py`) owns the connections and decides which topics are
+subscribed; this module owns everything that touches Deephaven for a stream:
 
 - `ChannelPlan`, how one dataset reads one channel: the channel's generated columns, renamed
   for the dataset (`schema.rename`), their wire types, the dataset's merged schema, and the
   required keys and symbol column the wire client checks (`set_required`). Pure; built once
   per (dataset, channel).
-- `open_stream_tables`, which creates a stream's liveness scope and, inside it, the publisher,
-  its blink table, and, for a reactive symbol table, the `SymbolWatch` that follows it. It runs
-  on the caller thread, inside the session's execution context.
+- `open_stream_tables`, which creates a stream's liveness scope and, inside it, the publisher
+  and its blink table (`blink_publisher`, whose failure is delivered exactly once) and, for a
+  reactive symbol table, the `SymbolWatch` that follows it. It runs on the caller thread,
+  inside the session's execution context.
 - `StreamSink`, a stream as the flush thread sees it: its session, the publisher, the symbols it
   receives (`None` for `dm.ALL`), and its count of published rows.
 - `Flusher`, one per connection: a daemon thread that every `flush_interval` drains the
@@ -69,7 +70,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import new_table
 from deephaven.column import string_col
-from deephaven.stream.table_publisher import table_publisher
 
 from deephaven_massive._datasets.row_times import TimeRule, time_column
 from deephaven_massive._datasets.schema import (
@@ -93,6 +93,7 @@ from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import StreamHandle, entered, new_scope
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import SymbolWatch
 from deephaven_massive._types import _All
 
@@ -100,7 +101,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
-    from deephaven.stream.table_publisher import TablePublisher
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -500,8 +500,11 @@ class StreamSink:
       its connection failed while it was opening, from the closing thread at `m.close()`, and
       from the reaper when its watchlist failed. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
-      `fail` calls); the publish lock is never taken under `registry_lock` or the update-graph
-      lock.
+      `fail` calls); the publish lock is never taken under `registry_lock`. A caller that holds
+      the update-graph lock (a console command) takes it to fail the stream, which is safe
+      because nothing done under it takes the update-graph lock or waits for an update cycle:
+      `where_in` of static tables, `publisher.add` of a static table, `publish_failure`, and
+      `SessionCore.fail_stream`.
 
     A failed stream publishes nothing more, and is failed once, so a failure queued behind the
     session's close never replaces the close.
@@ -534,7 +537,7 @@ class StreamSink:
         *,
         core: SessionCore,
         plan: ChannelPlan,
-        publisher: TablePublisher,
+        publisher: BlinkPublisher,
         symbols: frozenset[str] | None,
     ) -> None:
         """Create the sink.
@@ -1276,10 +1279,11 @@ def open_stream_tables(
     scope = new_scope()
     try:
         with scope.open():
-            blink, publisher = table_publisher(
+            blink, publisher = blink_publisher(
                 f"massive.{plan.dataset}#{stream_id}",
                 col_defs(schema),
-                on_shutdown_callback=on_shutdown,
+                on_shutdown=on_shutdown,
+                defer=core.defer,
             )
             watch = None
             received: frozenset[str] | None

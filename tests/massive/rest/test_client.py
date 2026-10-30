@@ -24,7 +24,13 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.rest import client as client_module
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import Admission, Permit, RequestGovernor
+from deephaven_massive._massive.rest.governor import (
+    UNLIMITED,
+    Admission,
+    Patience,
+    Permit,
+    RequestGovernor,
+)
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -198,6 +204,185 @@ def test_every_request_sends_the_bearer_key_agent_and_gzip_and_no_key_in_the_url
 def test_a_gzip_body_is_decoded(client: RestClient, fake_rest: FakeRestServer) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"i": 2}]), gzip=True))
     assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 2}]
+
+
+def test_a_gzip_bomb_is_refused_at_the_cap_and_never_retried(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 64 * 1024)
+    bomb = Reply(b"\0" * (64 * 1024 * 1024), gzip=True)  # 64 MiB in about 64 KiB of gzip
+    assert len(bomb.payload()) < 128 * 1024
+    fake_rest.reply("/v3/trades/AAPL", bomb, _ok())
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    error = caught.value
+    assert error.status == 200
+    assert (error.host, error.path) == ("127.0.0.1", "/v3/trades/AAPL")
+    assert "more than 1048576 bytes" in error.message
+    assert _KEY not in str(error)
+    assert clock.waits == []  # never retried
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    # The next request is answered at its first attempt: the bomb's unread rest never
+    # stands in for its response.
+    assert len(fake_rest.requests) == 2
+    assert clock.waits == []
+
+
+def test_an_abandoned_body_never_stands_in_for_the_next_reply(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 4 * 1024)
+    tail = threading.Event()
+    bomb = Reply(b"\0" * (64 * 1024 * 1024), gzip=True, hold=tail, hold_after=32 * 1024)
+    fake_rest.reply("/v3/trades/AAPL", bomb, _ok())
+    try:
+        with pytest.raises(WireError, match="more than 1048576 bytes"):
+            client.get(_TRADES, _AAPL, {}, bucket="stocks")
+        # The bomb's tail has not arrived, so its connection looks idle to the pool; reusing
+        # it would read the tail as the next reply.
+        assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+        assert clock.waits == []
+    finally:
+        tail.set()
+
+
+def test_an_oversized_429_still_pauses_its_bucket(
+    fake_rest: FakeRestServer, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024)
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"x" * 4096, status=429, headers={"Retry-After": "5"}))
+    with pytest.raises(WireError, match="more than 1024 bytes") as caught:
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 429
+    state = governor.snapshot()[0]
+    assert (state.refusals, state.in_flight) == (1, 0)
+    assert state.paused_until is not None
+    rest.close()
+
+
+def test_an_oversized_reply_ends_the_run_of_refusals_as_any_answer_does(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024)
+    limited = Reply({"message": "slow down"}, status=429)
+    fake_rest.reply("/v3/trades/AAPL", limited, Reply(b"x" * 4096), limited, _ok())
+    with pytest.raises(WireError, match="more than 1024 bytes"):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    # Massive answered between the two refusals, so the second pause starts the schedule over.
+    assert clock.waits == [15.0, 15.0]
+
+
+def test_a_body_of_exactly_the_cap_is_read(
+    client: RestClient, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = Reply(envelope([{"i": 3}]), gzip=True)
+    size = len(Reply(envelope([{"i": 3}])).payload())
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 7)
+    fake_rest.reply("/v3/trades/AAPL", reply)
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", size)
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 3}]
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", size - 1)
+    with pytest.raises(WireError, match=f"more than {size - 1} bytes"):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+
+
+def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    corrupt = Reply(b"not gzip at all", headers={"Content-Encoding": "gzip"})
+    fake_rest.reply("/v3/trades/AAPL", corrupt, _ok())
+    with pytest.raises(WireError, match="does not decompress") as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 200
+    assert "not gzip" not in caught.value.message  # the body itself is never quoted
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [f"{caught.value.message} (HTTP 200); not retried"]
+    assert not any("not gzip" in r.getMessage() for r in caplog.records)
+    assert clock.waits == []
+    assert len(fake_rest.requests) == 1
+
+
+def test_a_body_that_breaks_off_is_retried(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    cut = Reply(envelope([{"i": 9}] * 100), cut_after=50)
+    fake_rest.reply("/v3/trades/AAPL", cut, _ok())
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    assert clock.waits == pytest.approx([0.55])
+    assert len(fake_rest.requests) == 2
+
+
+def test_a_429_whose_body_breaks_off_is_still_a_refusal(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    cut = Reply({"message": "slow down " * 50}, status=429, cut_after=20)
+    fake_rest.reply("/v3/trades/AAPL", cut, _ok())
+    assert rest.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    assert clock.waits == [15.0]  # the refusal's pause, not a transient retry's
+    assert governor.snapshot()[0].refusals == 1
+    rest.close()
+
+
+def test_a_429_whose_body_does_not_decompress_is_a_refusal_that_fails(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    corrupt = Reply(b"not gzip", status=429, headers={"Content-Encoding": "gzip"})
+    fake_rest.reply("/v3/trades/AAPL", corrupt)
+    with pytest.raises(WireError, match="does not decompress") as caught:
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 429
+    state = governor.snapshot()[0]
+    assert (state.refusals, state.in_flight) == (1, 0)
+    assert len(fake_rest.requests) == 1
+    rest.close()
+
+
+@pytest.mark.parametrize("escaped", [False, True], ids=["plain", "escaped"])
+def test_a_streamed_body_is_cleaned_of_the_key_before_any_error_or_log(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    escaped: bool,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    # Small reads, so the key straddles the pieces the body arrives in.
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 5)
+    spelled = "\\u0073" + _KEY[1:] if escaped else _KEY  # `s` as a JSON escape
+    body = f'{{"status":"ERROR","request_id":"r1","message":"bad key {spelled}"}}'.encode()
+    fake_rest.reply("/v3/trades/AAPL", Reply(body, status=400, gzip=True))
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert "bad key ***" in caught.value.message
+    every = [caught.value.message, *(r.getMessage() for r in caplog.records)]
+    assert not any(_KEY in text or _KEY[1:] in text for text in every)
 
 
 def test_get_returns_the_page_with_its_envelope(
@@ -549,7 +734,7 @@ def test_a_429_pauses_only_its_bucket_and_every_client_of_the_governor(
     second.close()
 
 
-def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
+def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_request(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     refusal = Reply(
@@ -557,20 +742,21 @@ def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
     )
     fake_rest.reply("/v3/trades/AAPL", refusal)
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks")
-    assert str(caught.value) == (
-        "Massive has refused stocks requests with HTTP 429 for 0 s, and its pauses come to "
-        "601 s, past the 600 s the library waits out; they fail at once for 601 s more, until "
-        "the pause ends (latest refusal: HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 "
-        "(request_id r): quota)"
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(600.0))
+    assert str(caught.value).startswith(
+        "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429 from GET "
+        "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
+        "2027-01-15T08:10:01+00:00 ("
     )
-    assert (caught.value.status, caught.value.request_id) == (429, "r")
+    assert "waits out at most 600 s of pauses and has spent 0 s of its patience" in str(
+        caught.value
+    )
+    assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
-    assert type(caught.value.__cause__) is WireError
-    # Another request of the bucket fails at once, without being sent.
+    # Another call with the same patience fails at once, without being sent.
     fake_rest.reply("/v3/trades/MSFT", _ok())
-    with pytest.raises(WireError, match="601 s") as again:
-        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks")
+    with pytest.raises(WireError, match="Its next request, a probe, goes at") as again:
+        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(600.0))
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1
     assert clock.waits == []
@@ -1073,7 +1259,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
     cancel = Cancel()
     # A short pause makes the request queue, so its admission sends a change notice.
     refused = governor.admission("stocks", lane=object()).acquire(Cancel())
-    governor.refused(refused, retry_after=1.0, message="slow down", request_id=None)
+    governor.refused(refused, retry_after=1.0, message="slow down")
 
     def admitted() -> None:  # the change notice of the admission sets the token
         if governor.snapshot()[0].attempts == 2:
@@ -1108,20 +1294,41 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
 # Logging.
 
 
+def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
+    client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"<html>not json</html>"))
+    with (
+        caplog.at_level(logging.DEBUG, logger=client_module.__name__),
+        pytest.raises(WireError) as info,
+    ):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    [line] = [m for m in caplog.messages if " -> 200 " in m]
+    assert line.startswith(f"GET {fake_rest.url}/v3/trades/AAPL -> 200 in 0.000 s, but the page ")
+    assert line.endswith(f"cannot be read ({info.value}); body: <html>not json</html>")
+
+
 def test_requests_retries_and_failures_are_logged_without_the_key(
     client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
+    body = '{"status":"ERROR","error":"' + "e" * 2500 + '"}'
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=503), _ok(request_id="r1"))
-    fake_rest.reply("/v3/trades/MSFT", Reply(b"x", status=502))
+    fake_rest.reply("/v3/trades/MSFT", Reply(body.encode(), status=502))
     client.get(_TRADES, _AAPL, {"limit": 1}, bucket="stocks")
     with pytest.raises(WireError):
         client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks")
     ours = [r for r in caplog.records if r.name == client_module.__name__]
     messages = [(r.levelno, r.getMessage()) for r in ours]
+    url = fake_rest.url
+    # Each attempt names the whole URL; a failed one quotes its body, up to 2,000 characters.
     assert (
         logging.DEBUG,
-        "GET /v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s",
+        f"GET {url}/v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s; body: ",
+    ) in messages
+    assert (
+        logging.DEBUG,
+        f"GET {url}/v3/trades/MSFT -> 502 (request_id None) in 0.000 s; body: {body[:2000]}",
     ) in messages
     assert (
         logging.INFO,
@@ -1132,11 +1339,12 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     ) in messages
     assert (
         logging.DEBUG,
-        "GET /v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s",
+        f"GET {url}/v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s",
     ) in messages
+    # The error quotes only the envelope's message, cut to 200 characters.
     assert (
-        logging.ERROR,
-        "HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: x; giving up after 4 attempts",
+        logging.WARNING,
+        f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]
     assert every
@@ -1165,8 +1373,8 @@ def test_a_retry_after_of_now_pauses_on_the_schedule_and_gives_up_in_time(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers))
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks")
-    # Never a resend at once: 15, 30, then 60 s, until the run would pass ten minutes.
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(600.0))
+    # Never a resend at once: 15, 30, then 60 s, until a pause would end past the patience.
     assert caught.value.status == 429
     assert clock.waits[:3] == [15.0, 30.0, 60.0]
     assert len(fake_rest.requests) == 12
@@ -1200,9 +1408,11 @@ class _RecordingGovernor(RequestGovernor):
         self.lanes: list[object] = []
 
     @override
-    def admission(self, bucket: str, *, lane: Hashable) -> Admission:
+    def admission(
+        self, bucket: str, *, lane: Hashable, patience: Patience = UNLIMITED
+    ) -> Admission:
         self.lanes.append(lane)
-        return super().admission(bucket, lane=lane)
+        return super().admission(bucket, lane=lane, patience=patience)
 
 
 def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(

@@ -108,7 +108,7 @@ _NOT_SKELETON = bytes(sorted(set(range(256)) - set(b'[]{}"')))
 _STEPS = bytes.maketrans(b"[]{}", b"\x01\xff\x01\xff")
 
 
-def _too_deep(data: bytes) -> bool:
+def _too_deep(data: bytes | bytearray) -> bool:
     """Return whether a document nests arrays and objects deeper than `MAX_DEPTH`.
 
     The scan reads only the brackets outside strings, without parsing, so it never recurses.
@@ -119,7 +119,7 @@ def _too_deep(data: bytes) -> bool:
     parser rejects such a document anyway.
 
     Args:
-        data: The document as UTF-8 bytes.
+        data: The document as UTF-8 bytes or a `bytearray`.
 
     Returns:
         True when some point of the document lies inside more than `MAX_DEPTH` open arrays
@@ -134,7 +134,7 @@ def _too_deep(data: bytes) -> bool:
     return max(accumulate(array("b", outside.translate(_STEPS))), default=0) > MAX_DEPTH
 
 
-def loads(data: bytes | str) -> object:
+def loads(data: bytes | bytearray | str) -> object:
     """Decode one JSON document strictly.
 
     Call it once per REST body or WebSocket text frame; the caller then checks the shape of
@@ -151,7 +151,8 @@ def loads(data: bytes | str) -> object:
     `ValueError`.
 
     Args:
-        data: The document, as UTF-8 bytes or as text.
+        data: The document, as UTF-8 bytes (a REST body arrives as a `bytearray`) or as
+            text.
 
     Returns:
         The decoded value: a `dict`, `list`, `str`, `int`, `float`, `bool`, or `None`.
@@ -163,7 +164,7 @@ def loads(data: bytes | str) -> object:
     if _orjson is not None:
         value: object = _orjson.loads(data)
         return value
-    if isinstance(data, bytes):
+    if isinstance(data, (bytes, bytearray)):
         text = data.decode("utf-8")
         too_deep = _too_deep(data)
     else:

@@ -1,9 +1,10 @@
 """Live checks of index data against Massive: `I:` encoding, ticker spellings, and bar stamps.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, settles the open question. Raw responses come from the wire REST
-client, because the library rewrites the very spellings in question; the library's own answer
-is recorded beside them. How to run these tests is in `docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
+requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
+asserts the answer the library assumes, and fails when Massive no longer gives it. Raw responses
+come from the wire REST client, because the library rewrites the very spellings in question; the
+library's own answer is recorded beside them. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -35,7 +36,6 @@ pytestmark = pytest.mark.integration
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
-HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
 RestRows: TypeAlias = (
     "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
 )
@@ -60,15 +60,16 @@ LargestError: TypeAlias = (
 )
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
-_DAY = date(2026, 6, 1)
-"""A past Monday, inside a Basic plan's two years of history, for the endpoints that take a date."""
-
 _SNAPSHOTS_PLAN = "Indices Starter ($49/month)"
 """The plan of the indices snapshot and the unified snapshot of an index."""
 
 
-def _raw_requests(index: str) -> tuple[tuple[str, dict[str, object], dict[str, object]], ...]:
+def _raw_requests(
+    index: str, day: date
+) -> tuple[tuple[str, dict[str, object], dict[str, object]], ...]:
     """Return one request of each REST endpoint that serves an index.
+
+    The endpoints that take a date read `day`.
 
     Returns:
         Each request's path template, path values, and query.
@@ -77,10 +78,10 @@ def _raw_requests(index: str) -> tuple[tuple[str, dict[str, object], dict[str, o
         ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": index}, {}),
         (
             "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
-            {"indicesTicker": index, "multiplier": 1, "timespan": "day", "from": _DAY, "to": _DAY},
+            {"indicesTicker": index, "multiplier": 1, "timespan": "day", "from": day, "to": day},
             {},
         ),
-        ("/v1/open-close/{indicesTicker}/{date}", {"indicesTicker": index, "date": _DAY}, {}),
+        ("/v1/open-close/{indicesTicker}/{date}", {"indicesTicker": index, "date": day}, {}),
         ("/v3/snapshot/indices", {}, {"ticker.any_of": [index]}),
         ("/v3/snapshot", {}, {"ticker.any_of": [index]}),
         (
@@ -106,7 +107,7 @@ def _spellings(value: object) -> dict[str, object]:
 
 
 @pytest.mark.needs("indices:basic")
-@pytest.mark.settles("26")
+@pytest.mark.verifies("26")
 @pytest.mark.requests(2)
 def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     live_session: dm.MassiveSession,
@@ -135,6 +136,7 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     live_session: dm.MassiveSession,
     *,
     index_symbol: str,
+    recent_monday: date,
     live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
@@ -142,7 +144,8 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     """Which index endpoints spell an index with its `I:` prefix and which without.
 
     Sends one raw request of each REST endpoint that serves the index (`I:SPX`, or `I:NDX` on
-    Indices Basic): `/prev`, the range, open-close, the indices snapshot, the unified
+    Indices Basic), the dated ones for the most recent published Monday: `/prev`, the range,
+    open-close, the indices snapshot, the unified
     snapshot, and an indicator. Records the ticker keys of the body and of the first row,
     then the library's `Symbol` for the same datasets. The two snapshots need Indices
     Starter; on Basic their lines say "not entitled" and the rest still settle. Reading it: an
@@ -150,7 +153,7 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     library's `Symbol` column shows whether it already does.
     """
     answered = 0
-    for path, path_params, query in _raw_requests(index_symbol):
+    for path, path_params, query in _raw_requests(index_symbol, recent_monday):
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
         except WireEntitlementError as error:
@@ -174,7 +177,7 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         "indices.bars(DAY) fetch()": live_session.indices.bars(index_symbol, dm.Timespan.DAY).fetch,
         "indices.snapshots fetch()": live_session.indices.snapshots(index_symbol).fetch,
         "indices.daily_open_close fetch()": live_session.indices.daily_open_close(
-            index_symbol, _DAY
+            index_symbol, recent_monday
         ).fetch,
         "snapshots (unified) fetch()": live_session.snapshots(index_symbol).fetch,
         "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
@@ -187,26 +190,6 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
     assert answered
-
-
-@pytest.mark.needs("indices:basic")
-@pytest.mark.settles("half-day stamps")
-@pytest.mark.requests(4)
-@pytest.mark.timeout(100)
-def test_half_day_index_bars_and_their_stamps(
-    index_symbol: str, *, half_day_report: HalfDayReport, evidence: Evidence
-) -> None:
-    """How REST stamps an index's bars on a half trading day (13:00 New York close).
-
-    For 2025-11-28 and 2025-12-24, records the index's range day bar and its first and last
-    minute bars (`I:SPX`, or `I:NDX` on Indices Basic), each in UTC and New York time. Reading
-    it: an index computed until 13:00 or past it shows whether the index day ends with the
-    stock half day; the day bar's stamp shows the library's day label holds.
-    """
-    lines = half_day_report("indicesTicker", index_symbol)
-    for line in lines:
-        evidence(line)
-    assert lines
 
 
 _STAMP_INDICES = ("I:SPX", "I:AAVE100")
@@ -259,9 +242,12 @@ def _day_window(day: date, zone: ZoneInfo, days: int = 1) -> tuple[datetime, dat
 
 
 def _day_rebuilds(
-    range_bars: RangeBars, index: str, days: tuple[date, ...]
+    range_bars: RangeBars, index: str, days: tuple[date, ...], *, evidence: Evidence
 ) -> dict[str, dict[date, list[StampedBar]]]:
     """Rebuild an index's stamp days from minute bars over the New York and the Chicago day.
+
+    Also records the first and last minute bar of each New York day, in UTC and New York time,
+    which show where a half day's values end.
 
     Returns:
         By source name (`"rebuilt over the New York day"`, `"... Chicago day"`) and day, the
@@ -270,6 +256,10 @@ def _day_rebuilds(
     found: dict[str, dict[date, list[StampedBar]]] = {}
     for day in days:
         minutes = range_bars(index, "minute", (day - timedelta(days=1), day + timedelta(days=1)))
+        start, end = (int(edge.timestamp() * 1000) for edge in _day_window(day, _NEW_YORK))
+        own = [m for m in minutes if start <= m["t"] < end]
+        ends = [_wall_clock(int(m["t"])) for m in own[:1] + own[-1:]]
+        evidence(f"{index} {day}: {len(own)} minute bars; first and last {ends}")
         for name, zone in _ZONES:
             bar = _rebuilt(minutes, *_day_window(day, zone))
             found.setdefault(f"rebuilt over the {name} day", {})[day] = [] if bar is None else [bar]
@@ -394,8 +384,9 @@ def _record_library_index_stamps(
 ) -> None:
     """Record the library's windows of an index's 1-day, week, and longer bars, call by call.
 
-    A longer unit's history that the plan refuses (a range beyond the plan's history) is
-    recorded rather than raised, so the evidence of the other calls is kept.
+    A longer unit's history that the plan refuses is recorded and the other calls still run;
+    the first refusal is then raised, for the run to judge (a day outside the plan's history
+    skips the test).
     """
     rest = dm.HistorySource.REST
     daily = session.indices.bars(index, dm.Timespan.DAY)
@@ -404,13 +395,17 @@ def _record_library_index_stamps(
         + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
     )
     evidence(f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}")
+    refused: list[dm.EntitlementError] = []
     for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)
         try:
             outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
         except dm.EntitlementError as error:
-            outcome = f"refused, beyond the plan's history? ({error})"
+            outcome = f"refused ({error})"
+            refused.append(error)
         evidence(f"library {index} {span.value} history: {outcome}")
+    if refused:
+        raise refused[0]
 
 
 @pytest.mark.needs("indices:starter")
@@ -431,18 +426,19 @@ def test_index_day_and_longer_bar_stamps_from_rest(
 ) -> None:
     """How REST stamps index 1-day and longer bars, and which day and week they cover.
 
-    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full trading
-    day, and its Friday, a half day. For `I:SPX` and `I:AAVE100` (which updates around the clock) it
-    records, each stamp in UTC and New York time: the range endpoint's 1-day bars around both days
-    beside each day rebuilt from minute bars over the New York day and over the Chicago day (an hour
-    later), with which day's bar each rebuild matches and its largest relative error; `/prev`, which
-    serves only the most recent completed trading day (a short-day stamp shows only on a run the
-    trading day after a half day), beside the range bars of that day; the week bars of Thanksgiving
-    week and the week before, each against its weekdays, its whole calendar week, and the seven days
-    from its stamp, rebuilt in both zones; the bars of the two whole months and quarters before the
-    current ones and of the years from January 1 of last year, each read refused for the plan's
-    history recorded as such; and the library's windows for the same requests. Reading it: a day bar
-    matching the Chicago rebuild means index days are Chicago days, and the library's 01:00 New York
+    The days are the most recent half day whose week has ended (the Friday after Thanksgiving, July
+    3, or December 24) and the full trading day before it. For `I:SPX` and `I:AAVE100` (which
+    updates around the clock) it records, each stamp in UTC and New York time: the range endpoint's
+    1-day bars around both days beside each day rebuilt from minute bars over the New York day and
+    over the Chicago day (an hour later), with which day's bar each rebuild matches and its largest
+    relative error, and each day's first and last minute bar; `/prev`, which serves only the most
+    recent completed trading day (a short-day stamp shows only on a run the trading day after a half
+    day), beside the range bars of that day; the week bars of the half day's week and the week
+    before, each against its weekdays, its whole calendar week, and the seven days from its stamp,
+    rebuilt in both zones; the bars of the two whole months and quarters before the current ones and
+    of the years from January 1 of last year, each read refused for the plan's history recorded as
+    such; and the library's windows for the same requests. Reading it: a day bar matching the
+    Chicago rebuild means index days are Chicago days, and the library's 01:00 New York
     `TimestampEnd` is right; matching the New York rebuild means the extra hour can go. A week bar
     matching the whole-week rebuild of `I:AAVE100` means weekend values count, as the library
     assumes; longer bars stamped 00:00 or 01:00 New York time on their period's first day are ones
@@ -452,7 +448,7 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     days = stamp_days["day"]
     complete = {}
     for index in _STAMP_INDICES:
-        rebuilds = _day_rebuilds(range_bars, index, days)
+        rebuilds = _day_rebuilds(range_bars, index, days, evidence=evidence)
         missing = day_bar_report(index, days, rebuilds)
         prevs = prev_bar_report(index)
         weeks = _record_weeks(
@@ -499,8 +495,8 @@ def test_index_day_bar_stamps_of_the_day_file(
 ) -> None:
     """How `us_indices/day_aggs_v1` stamps `I:SPX`'s and `I:AAVE100`'s 1-day bars.
 
-    Records each index's file row of the most recent finished Thanksgiving week's Wednesday
-    (a full day) and Friday (a half day), its `window_start` in UTC and New York time, beside
+    Records each index's file row of the most recent half day whose week has ended and of
+    the full trading day before it, its `window_start` in UTC and New York time, beside
     the range endpoint's bars around those days and which day's bar it matches with the
     largest relative error, and the library's `history(source=FLAT_FILES)` windows. Reading
     it: a stamp at 01:00 New York time (midnight in Chicago) matching the range bar of the
@@ -520,3 +516,13 @@ def test_index_day_bar_stamps_of_the_day_file(
         evidence(f"library {index} history(FLAT_FILES): {outcome}")
     missing = [(i, d) for i in _STAMP_INDICES for d in days if not files[i].get(d)]
     assert not missing, f"the day files lack {missing}"
+
+
+def _wall_clock(stamp_ms: int) -> str:
+    """Write an epoch-millisecond stamp as UTC and New York wall time.
+
+    Returns:
+        Such as `"2025-11-28T18:00:00Z = 13:00 New York"`.
+    """
+    utc = datetime.fromtimestamp(stamp_ms / 1000, UTC)
+    return f"{utc:%Y-%m-%dT%H:%M:%SZ} = {utc.astimezone(_NEW_YORK):%H:%M} New York"

@@ -223,8 +223,10 @@ __marimo__/
 # Project-specific additions (everything above is GitHub's Python template, unmodified)
 # ---------------------------------------------------------------------------
 
-# JVM crash reports from the embedded Deephaven server. A crash is a bug: investigate it.
+# JVM crash reports from the embedded Deephaven server, and the messages of its fatal errors
+# (tests/conftest.py). A crash is a bug: investigate it.
 hs_err_pid*.log
+jvm_fatal_pid*.log
 
 # Claude Code: the shared settings and hooks are committed; local settings and agent
 # worktrees are not.
@@ -243,6 +245,8 @@ vendor/massive-previous/
 # rows, so they are never committed.
 live-checks.log
 live-evidence.log
+# The plans the live tests probed today; it names the key only by a digest.
+.live-plans.json
 
 # Extra project environments, such as the free-threaded one (UV_PROJECT_ENVIRONMENT=.venv-314t).
 .venv-*/

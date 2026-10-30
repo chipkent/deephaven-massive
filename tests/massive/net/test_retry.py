@@ -40,10 +40,6 @@ def test_a_rate_limit_pauses_what_retry_after_asks() -> None:
     assert retry.rate_limit_wait(1, 3600.0) == 3600.0
 
 
-def test_refusals_pause_and_resume_for_ten_minutes() -> None:
-    assert retry.RATE_LIMIT_PATIENCE == 600.0
-
-
 @pytest.mark.parametrize(
     ("header", "seconds"),
     [("30", 30.0), (" 5 ", 5.0), ("0", 0.0), ("120", 120.0)],

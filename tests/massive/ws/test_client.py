@@ -36,6 +36,7 @@ from deephaven_massive._massive.ws.protocol import Status, StatusKind
 # Imported directly, as the REST client's tests do: each client needs its own clock, built
 # with the client inside the factory fixture below, which a shared fixture cannot provide.
 from tests._fakes.clock import FakeClock
+from tests._fakes.ws import NoReply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -248,6 +249,16 @@ def test_the_key_is_never_logged_by_anyone(
     assert KEY not in text
 
 
+def test_each_status_is_logged_at_debug(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = _log_a_session(make_client, caplog)
+    url = fake_ws_server.url()
+    assert f"{client_module.__name__} {url} status ACK: subscribed to: T.AAPL" in text
+
+
 def test_websockets_would_log_the_key_without_the_quiet_logger(
     make_client: Callable[..., Harness],
     caplog: pytest.LogCaptureFixture,
@@ -302,17 +313,37 @@ def test_max_connections_without_a_close_ends_at_the_handshake_timeout(
 
 
 def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
+    *,
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Only this attempt runs under the short timeout: the held wait stops any second one.
-    monkeypatch.setattr(client_module, "HANDSHAKE_TIMEOUT", 0.2)
-    fake_ws_server.greet_next(None)
-    h = make_client(free_waits=0)
+    # The server greets and reads the key, then never answers. The attempt's deadline is read
+    # from the client loop's clock, which runs true until the server holds the key, so the
+    # upgrade and the greeting have all the time they need; then it jumps past the deadline,
+    # so the timeout cuts off the silent server at once. The held backoff wait stops a second
+    # attempt.
+    fake_ws_server.auth_replies.append(NoReply.TO_KEY)
+    h = make_client(free_waits=0, start=False)
+    loop = h.client.loop
+    true_time = loop.time
+    late = threading.Event()
+
+    def skewed() -> float:
+        return true_time() + (2 * client_module.HANDSHAKE_TIMEOUT if late.is_set() else 0.0)
+
+    monkeypatch.setattr(loop, "time", skewed)
+    h.client.start()
+    fake_ws_server.wait_for(lambda s: bool(s.connections) and s.connections[0].auth is not None)
+    late.set()
+    loop.call_soon_threadsafe(lambda: None)  # wake the loop to see its clock's jump
     h.sleeper.wait_for_count(1)
     assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING]
     assert len(fake_ws_server.connections) == 1
+    assert any(
+        "handshake" in r.getMessage() and "TimeoutError" in r.getMessage() for r in caplog.records
+    )
 
 
 @pytest.fixture(

@@ -29,15 +29,21 @@ A value that does not fit raises `WireError`: values are never coerced.
   held as null. Every other absent field is a null, silently: JSON omits absent values and the
   vendor marks almost nothing required.
 
-A key the caller names in `required` (the dataset's key columns for this path) that is absent
-or null in any row is not drift: it raises `WireError`, because the row cannot be placed.
+  Each extra key carries a sample (`DriftReport.samples`): its value in the first row that had
+  it, so the library's WARNING can quote it.
 
-The function is pure and safe from any thread. This module imports only the standard library,
-`pyarrow`, `net`, and `spec`.
+A key the caller names in `required` (the dataset's key columns for this path) that is absent
+or null in any row is not drift: it raises `WireError`, because the row cannot be placed. Such a
+row, and one whose value does not fit, is logged whole at DEBUG (up to 2,000 characters of its
+JSON) on this module's logger before the error is raised, so the log shows every field it held.
+
+The function is safe from any thread and changes nothing but its own result and that DEBUG
+line. This module imports only the standard library, `pyarrow`, `net`, and `spec`.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -48,13 +54,16 @@ from deephaven_massive._massive.spec.convert import (
     convert_field,
     excerpt,
     missing_key_message,
+    row_excerpt,
 )
-from deephaven_massive._massive.spec.types import DriftReport, WireType
+from deephaven_massive._massive.spec.types import DriftReport, DriftSample, WireType
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Mapping, Sequence
 
     from deephaven_massive._massive.spec.types import Field, RestPath
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["to_batch"]
 
@@ -115,38 +124,36 @@ def _leaves(
 
 def _row(
     row: Mapping[str, object],
-    rest_path: RestPath,
     *,
     keys: frozenset[str],
     objects: frozenset[str],
-    extra: set[str],
+    extra: dict[str, object],
 ) -> dict[str, object]:
     """Return the declared values of one row, by wire key, and collect its undeclared keys.
 
     Args:
         row: The row.
-        rest_path: The path.
         keys: The wire keys of the path's fields.
         objects: The dotted prefixes of the fields' wire keys.
-        extra: Updated in place with the row's undeclared keys.
+        extra: Updated in place with each undeclared key of the row not already in it, and
+            the key's value, so it keeps the first value seen.
 
     Returns:
         Each field's raw value by wire key; an absent field is absent here too.
 
     Raises:
-        WireError: If an object the fields reach into is neither an object nor null.
+        UnconvertibleError: If an object the fields reach into is neither an object nor null,
+            with the clause `"wire key <key> expects an object, got <value>"`, which `to_batch`
+            puts after the row's index.
     """
     found: dict[str, object] = {}
     for key, value in _leaves(row, "", objects=objects):
         if key in objects:
-            raise WireError(
-                f"{rest_path.template}: wire key {key!r} expects an object, got {excerpt(value)}",
-                path=rest_path.template,
-            )
+            raise UnconvertibleError(f"wire key {key!r} expects an object, got {excerpt(value)}")
         if key in keys:
             found[key] = value
         else:
-            extra.add(key)
+            extra.setdefault(key, value)
     return found
 
 
@@ -175,10 +182,10 @@ def to_batch(
         WireError: If a row lacks a `required` column or holds it as null, or a value does not
             fit its field's type or named conversion: the message is the path's template and
             the row's index, then the clause `spec.convert` shares with every decoder (the
-            field, the expected type, and the first 50 characters of the value's JSON text).
-            Also if an object the fields reach into is neither an object nor null, naming its
-            wire key and quoting the value the same way. Its `path` is the path's template and
-            its `status` is `None`.
+            field, the expected type, and the first 200 characters of the value's JSON text).
+            Also if an object the fields reach into is neither an object nor null, after the
+            row's index too, naming its wire key and quoting the value the same way. Its
+            `path` is the path's template and its `status` is `None`.
     """
     fields = rest_path.fields
     unknown = set(required) - {f.column for f in fields}
@@ -187,17 +194,19 @@ def to_batch(
     keys = frozenset(f.wire_key for f in fields)
     objects = _prefixes(fields)
     columns: list[list[object]] = [[] for _ in fields]
-    extra: set[str] = set()
+    extra: dict[str, object] = {}
     missing: set[str] = set()
     for index, row in enumerate(rows):
-        found = _row(row, rest_path, keys=keys, objects=objects, extra=extra)
+        try:
+            found = _row(row, keys=keys, objects=objects, extra=extra)
+        except UnconvertibleError as error:
+            message = _rejected(rest_path, index=index, row=row, problem=str(error))
+            raise WireError(message, path=rest_path.template) from None
         for f, column in zip(fields, columns, strict=True):
             value = found.get(f.wire_key)
             if value is None and f.column in required:
-                raise WireError(
-                    f"{rest_path.template}: row {index}: {missing_key_message(f)}",
-                    path=rest_path.template,
-                )
+                message = _rejected(rest_path, index=index, row=row, problem=missing_key_message(f))
+                raise WireError(message, path=rest_path.template)
             if value is None:
                 if f.required:
                     missing.add(f.wire_key)
@@ -206,10 +215,33 @@ def to_batch(
             try:
                 column.append(convert_field(f, value))
             except UnconvertibleError as error:
-                message = f"{rest_path.template}: row {index}: {error}"
+                message = _rejected(rest_path, index=index, row=row, problem=str(error))
                 raise WireError(message, path=rest_path.template) from None
     types = [_ARROW[f.wire_type] for f in fields]
     schema = pa.schema([pa.field(f.column, t) for f, t in zip(fields, types, strict=True)])
     arrays = [pa.array(c, type=t) for c, t in zip(columns, types, strict=True)]
     batch = pa.RecordBatch.from_arrays(arrays, schema=schema)
-    return batch, DriftReport(extra=frozenset(extra), missing=frozenset(missing))
+    return batch, DriftReport(
+        extra=frozenset(extra),
+        missing=frozenset(missing),
+        samples={key: DriftSample(None, excerpt(value)) for key, value in extra.items()},
+    )
+
+
+def _rejected(rest_path: RestPath, *, index: int, row: Mapping[str, object], problem: str) -> str:
+    """Log a row that cannot be converted, whole, at DEBUG, and return its error's message.
+
+    Args:
+        rest_path: The path the row came from.
+        index: The row's index in the page.
+        row: The row, as decoded.
+        problem: The clause `spec.convert` shares with every decoder: the field, the expected
+            type, and the value, or the missing key.
+
+    Returns:
+        `"<template>: row <index>: <problem>"`, the message of the `WireError` to raise.
+    """
+    message = f"{rest_path.template}: row {index}: {problem}"
+    if _log.isEnabledFor(logging.DEBUG):  # the row's JSON is built only for the line
+        _log.debug("%s; the row: %s", message, row_excerpt(row))
+    return message

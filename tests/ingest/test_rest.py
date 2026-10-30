@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import gc
 import logging
+import math
 import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -46,7 +47,9 @@ from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
+from deephaven_massive._namespaces import stocks as stocks_ns
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
@@ -502,6 +505,114 @@ def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
     assert by_path["/v1/indicators/sma/AAPL"]["timestamp.gte"] == [str(new_york_day)]
 
 
+class _Patiences:
+    """Record each read's patience and the patience every claim is opened with."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.taken: list[_massive.Patience] = []
+        self.claims: list[tuple[str, _massive.Patience]] = []
+        admission = _massive.RequestGovernor.admission
+        claims = self.claims
+
+        def recording(
+            governor: _massive.RequestGovernor,
+            bucket: str,
+            *,
+            lane: object,
+            patience: _massive.Patience,
+        ) -> object:
+            claims.append((bucket, patience))
+            return admission(governor, bucket, lane=lane, patience=patience)
+
+        taken = self.taken
+
+        def patience(_reader: rest.RestReader) -> _massive.Patience:
+            taken.append(_massive.Patience(600.0))
+            return taken[-1]
+
+        monkeypatch.setattr(rest.RestReader, "patience", patience)
+        monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
+
+    def shared(self) -> bool:
+        """Tell whether one patience was taken and every claim was opened with it.
+
+        Returns:
+            True when so.
+        """
+        return len(self.taken) == 1 and all(p is self.taken[0] for _, p in self.claims)
+
+
+def test_a_read_of_several_paths_shares_one_patience(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stock and crypto indicator paths are one fetch: its patience is taken once, so the
+    # second path never gets a fresh ten minutes after the first spent its own.
+    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
+    patiences = _Patiences(monkeypatch)
+    fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
+    assert len(patiences.claims) == 2
+    assert patiences.shared()
+
+
+def test_a_history_read_takes_one_patience_for_its_pages(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = epoch_ns(datetime(2025, 3, 3, 15, tzinfo=UTC))
+    target = "/v3/trades/AAPL?cursor=next"
+    fake_rest.reply(target, Reply(envelope([{"sip_timestamp": start + 1, "price": 2.0}])))
+    fake_rest.reply(
+        TRADES_PATH.format(stockTicker="AAPL"),
+        Reply(
+            envelope([{"sip_timestamp": start, "price": 1.0}], next_url=f"{fake_rest.url}{target}")
+        ),
+    )
+    patiences = _Patiences(monkeypatch)
+    history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [bucket for bucket, _ in patiences.claims] == ["stocks", "stocks"]  # both pages
+    assert patiences.shared()
+
+
+def test_a_host_decision_takes_a_patience_of_its_own(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patiences = _Patiences(monkeypatch)
+    session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert [bucket for bucket, _ in patiences.claims] == ["stocks"]
+    assert patiences.shared()
+
+
+def test_the_futures_calendars_lookups_take_a_patience_each(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_rest.reply("/futures/v1/schedules", Reply(envelope([{"product_code": "ES"}])))
+    patiences = _Patiences(monkeypatch)
+    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    rows = transport.fetch_rows(
+        "/futures/v1/schedules", {"product_code": "ES"}, bucket="futures", cancel=Cancel()
+    )
+    assert rows == [{"product_code": "ES"}]
+    assert [bucket for bucket, _ in patiences.claims] == ["futures"]
+    assert patiences.shared()
+
+
+def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    patiences = _Patiences(monkeypatch)
+    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
+    assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
+    assert patiences.shared()
+
+
 def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:
     path = cast("RestPath", _massive.source(R, SMA_CRYPTO))
     day = date(2025, 3, 3)
@@ -706,17 +817,23 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
     ]
 
 
-def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
+def test_the_crypto_ticker_list_is_charged_to_other_in_one_lane_of_its_own(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The list is crypto reference data: its pages count against the currencies subscription,
-    # and they take one turn at a time among the bucket's other reads, as one read does.
+    # The list is reference data, which Massive counts in a bucket of its own (`other`),
+    # and its pages take one turn at a time among the bucket's other reads, as one read does.
     admitted: list[tuple[str, object]] = []
     admission = _massive.RequestGovernor.admission
 
-    def recording(governor: _massive.RequestGovernor, bucket: str, *, lane: object) -> object:
+    def recording(
+        governor: _massive.RequestGovernor,
+        bucket: str,
+        *,
+        lane: object,
+        patience: _massive.Patience,
+    ) -> object:
         admitted.append((bucket, lane))
-        return admission(governor, bucket, lane=lane)
+        return admission(governor, bucket, lane=lane, patience=patience)
 
     monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
@@ -728,8 +845,8 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     )
     reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
-    assert requests_by_bucket(session) == {"currencies": 3}
-    assert [bucket for bucket, _ in admitted] == ["currencies"] * 3
+    assert requests_by_bucket(session) == {"other": 3}
+    assert [bucket for bucket, _ in admitted] == ["other"] * 3
     lanes = {id(lane) for _, lane in admitted}
     assert len(lanes) == 1  # every page, listed and delisted, in the read's one lane
     assert isinstance(admitted[0][1], _massive.Cancel)  # the read's own token
@@ -1349,12 +1466,18 @@ def test_refusals_raise_their_public_errors(
 def test_a_lasting_rate_limit_names_itself_and_warns_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Massive asks for a pause beyond the ten minutes the library waits: it gives up at once.
+    # Massive asks for a pause beyond the ten minutes a read waits: the read gives up at once.
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
-        r"^rate limited: Massive has refused stocks requests .*; "
-        r"m\.rate_limits\(\) shows when requests resume$"
+        r"^rate limited: Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
+        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:11:40\+00:00 "
+        r"\(.* local time\), but this read waits out at most 600 s of pauses and has spent "
+        r"0 s of its patience\. The usual cause is another program or process using the same "
+        r"Massive account, whose limit they share\. "
+        r"To go on: retry after that time; stop the other program; or, if this subscription is "
+        r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
+        r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
     )
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
@@ -1362,7 +1485,11 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
     # The second call failed without a request: the bucket's pause still stands.
     assert len(sent(fake_rest)) == 1
-    warnings = [r.getMessage() for r in caplog.records if "with HTTP 429 (" in r.getMessage()]
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "with HTTP 429 (" in r.getMessage()
+    ]
     assert len(warnings) == 1
     assert warnings[0].startswith(
         f"{session._core.label}: Massive refused a stocks request with HTTP 429 (HTTP 429 from GET "
@@ -2029,7 +2156,13 @@ def test_a_read_fans_out_on_the_callers_pool(
     calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(
-            CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            patience=_massive.Patience(math.inf),
         )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
@@ -2112,7 +2245,15 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     monkeypatch.setattr(pool, "submit", recorded)
     request = Request(symbols=symbols)
     with pool, pytest.raises(dm.AuthenticationError):
-        reader.read(CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool)
+        reader.read(
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            patience=_massive.Patience(math.inf),
+        )
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
 
@@ -2533,40 +2674,61 @@ def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
 
 
 def test_each_request_is_charged_to_its_subscription() -> None:
-    assert rest.call_bucket(DIVIDENDS, rest.Call({}, {"ticker.any_of": ("AAPL",)})) == "stocks"
-    assert rest.call_bucket(CRYPTO_LAST, rest.Call({}, {}, "X:BTCUSD")) == "currencies"
-    assert rest.call_bucket(CONVERSION, rest.Call({}, {}, "C:EURUSD")) == "currencies"
-    assert rest.call_bucket(NEWS, rest.Call({}, {})) == "other"  # no subscription: unpaced
+    aapl = rest.Call({}, {"ticker.any_of": ("AAPL",)})
+    assert rest.call_bucket(DIVIDENDS, DIVIDENDS_PATH, aapl) == "stocks"
+    btc = rest.Call({}, {}, "X:BTCUSD")
+    assert rest.call_bucket(CRYPTO_LAST, CRYPTO_LAST_PATH, btc) == "currencies"
+    eur = rest.Call({}, {}, "C:EURUSD")
+    assert rest.call_bucket(CONVERSION, CONVERSION_PATH, eur) == "currencies"
     # A dataset with a path per symbol class follows the class its request's symbols share.
-    assert rest.call_bucket(NEWS_BY_CLASS, rest.Call({}, {}, "C:EURUSD")) == "currencies"
-    assert rest.call_bucket(SMA, rest.Call({}, {}, "AAPL")) == "stocks"
+    assert rest.call_bucket(SMA, SMA_CRYPTO, btc) == "currencies"
+    assert rest.call_bucket(SMA, SMA_STOCK, rest.Call({}, {}, "AAPL")) == "stocks"
+
+
+@pytest.mark.parametrize("market", list(Market))
+def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
+    market: Market,
+) -> None:
+    # Massive counts reference requests in a bucket of their own, not under the asset class
+    # they filter by; the session's own crypto ticker list goes there too.
+    call = rest.Call({}, {"market": market, "active": True})
+    tickers = "/v3/reference/tickers"
+    assert rest.call_bucket(reference.TICKERS, tickers, call) == "other"
+    assert rest.call_bucket(reference.TICKERS, tickers, rest.Call({}, {"active": True})) == "other"
 
 
 @pytest.mark.parametrize(
-    ("market", "bucket"),
+    ("spec", "template"),
     [
-        (Market.CRYPTO, "currencies"),
-        (Market.FX, "currencies"),
-        (Market.STOCKS, "stocks"),
-        (Market.OTC, "stocks"),
-        (Market.INDICES, "indices"),
+        (options_ns.CONTRACTS, "/v3/reference/options/contracts"),
+        (stocks_ns.IPOS, "/vX/reference/ipos"),
+        (NEWS, NEWS_PATH),
     ],
+    ids=["options contracts", "IPOs", "news"],
 )
-def test_a_request_of_no_class_is_charged_to_the_market_it_filters(
-    market: Market, bucket: str
+def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class(
+    spec: DatasetSpec, template: str
 ) -> None:
-    # A user's crypto ticker listing and the session's own read of it share one bucket.
-    call = rest.Call({}, {"market": market, "active": True})
-    assert rest.call_bucket(reference.TICKERS, call) == bucket
-    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": str(market)})) == bucket
+    # A dataset of one class (options contracts, IPOs) still reads a reference endpoint,
+    # which Massive counts in the reference bucket.
+    assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
 
 
-def test_a_request_of_no_class_and_no_market_is_charged_to_other() -> None:
-    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"active": True})) == "other"
-    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": None})) == "other"
-    # A dataset of one class keeps its class, whatever a market filter says.
-    call = rest.Call({}, {"ticker.any_of": ("AAPL",), "market": Market.CRYPTO})
-    assert rest.call_bucket(DIVIDENDS, call) == "stocks"
+def test_each_request_logs_its_bucket_and_why_once(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    snapshots.reply(NEWS_PATH, Reply(envelope([])))
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        fetch(session, DIVIDENDS, symbols=["AAPL"])
+        fetch(session, NEWS)
+    charged = [message for message in caplog.messages if " is charged to the " in message]
+    stocks = "is charged to the stocks bucket: its data's class"
+    other = "is charged to the other bucket: a reference endpoint"
+    assert charged == [
+        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}",
+        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}",
+    ]
 
 
 def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
@@ -2638,7 +2800,10 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     # A manual clock: a call waiting for a slot can only stop by being cancelled.
     clock = FakeClock(manual=True)
     create = functools.partial(
-        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
@@ -2746,7 +2911,10 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
 ) -> None:
     clock = FakeClock(manual=True)  # a waiting cycle can only stop through its poller's token
     create = functools.partial(
-        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))

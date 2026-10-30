@@ -57,7 +57,8 @@ the WebSocket channel, symbol, and host):
   "1.5"`.
 - `missing_key_message` gives the clause for a row that lacks a key the dataset needs:
   `no SipTimestamp (wire key 't'), which the dataset needs`.
-- `excerpt` quotes a value as every message does: its JSON text, cut to 50 characters.
+- `excerpt` quotes a value as every message does: its JSON text, cut to 200 characters, and
+  `row_excerpt` quotes a whole offending row the same way, cut to 2,000, for a DEBUG line.
 
 The functions are pure and safe from any thread. This module imports only the standard
 library and `spec.types`.
@@ -79,7 +80,14 @@ if TYPE_CHECKING:
 
     from deephaven_massive._massive.spec.types import Field
 
-__all__ = ["UnconvertibleError", "convert", "convert_field", "excerpt", "missing_key_message"]
+__all__ = [
+    "UnconvertibleError",
+    "convert",
+    "convert_field",
+    "excerpt",
+    "missing_key_message",
+    "row_excerpt",
+]
 
 _T = TypeVar("_T")
 
@@ -97,8 +105,11 @@ _INSTANT = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
-# How many characters of a value's JSON text a message quotes.
-_EXCERPT = 50
+# How many characters of a value's JSON text a message quotes: enough for any value Massive
+# sends, so the quote shows the whole problem.
+_EXCERPT = 200
+# How many characters of a whole row's JSON text a DEBUG line quotes.
+_ROW_EXCERPT = 2000
 _SECONDS_PER_DAY = 86_400
 _NANOS_PER_SECOND = 1_000_000_000
 
@@ -460,9 +471,21 @@ def excerpt(value: object) -> str:
 
     Returns:
         The value's JSON text (so `true`, `"1.5"`, `null`), non-ASCII kept, cut to its first
-        50 characters.
+        200 characters.
     """
     return json.dumps(value, ensure_ascii=False)[:_EXCERPT]
+
+
+def row_excerpt(row: object) -> str:
+    """Quote a whole decoded row for a DEBUG line, so the line shows every field it held.
+
+    Args:
+        row: A decoded JSON object, as a decoder received it.
+
+    Returns:
+        Its compact JSON text, non-ASCII kept, cut to its first 2,000 characters.
+    """
+    return json.dumps(row, ensure_ascii=False, separators=(",", ":"))[:_ROW_EXCERPT]
 
 
 def missing_key_message(field: Field) -> str:

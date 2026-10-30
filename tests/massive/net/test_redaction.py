@@ -24,9 +24,11 @@ import pytest
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact
+from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import RequestGovernor
+from deephaven_massive._massive.rest.governor import Patience, RequestGovernor
 from deephaven_massive._massive.spec.types import (
+    DriftReport,
     Field,
     Param,
     ParamKind,
@@ -36,7 +38,7 @@ from deephaven_massive._massive.spec.types import (
     WireType,
 )
 from deephaven_massive._massive.ws.client import WsClient, WsState
-from deephaven_massive._massive.ws.protocol import Status, StatusKind
+from deephaven_massive._massive.ws.protocol import Reject, Status, StatusKind
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply, envelope
 
@@ -99,6 +101,14 @@ def test_the_redactor_finds_a_secret_spelled_by_json_escapes(kind: type) -> None
     cleaned = Redactor(PLANTED_KEY).received(data)
     assert type(cleaned) is kind
     assert json.loads(cleaned) == {"error": "bad key ***", "key": ["***", 1]}
+
+
+def test_the_redactor_cleans_a_bytearray_and_leaves_a_clean_one_uncopied() -> None:
+    clean = bytearray(b'{"status":"OK"}')
+    assert Redactor(PLANTED_KEY).received(clean) is clean
+    for spelled in (PLANTED_KEY, ESCAPED_KEY):
+        data = bytearray(f'{{"error":"bad key {spelled}"}}'.encode())
+        assert json.loads(Redactor(PLANTED_KEY).received(data)) == {"error": "bad key ***"}
 
 
 def test_the_redactor_passes_on_escapes_that_spell_no_secret_character() -> None:
@@ -271,7 +281,8 @@ def test_the_rest_client_never_shows_the_api_key(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", reply)
     with pytest.raises(WireError) as info:
-        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+        # A 429 fails once its pauses outlast the call's patience, quoting the refusal.
+        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks", patience=Patience(600.0))
     # The server's words are kept, with the key replaced, so the failure still explains itself.
     assert REDACTED in info.value.message
     _assert_no_secret(every_logger_at_debug, info.value)
@@ -334,18 +345,35 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
 ) -> None:
     received: list[Status] = []
     rows: list[dict[str, object]] = []
+    rejects: list[Reject] = []
+    drifts: list[DriftReport] = []
     trades = Source(
         key="stocks/T",
         transport=Transport.WS,
-        fields=(Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),),
+        fields=(
+            Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),
+        ),
     )
+
+    def on_data(
+        _generation: int,
+        _channel: str,
+        data: list[dict[str, object]],
+        rejected: list[Reject],
+        drift: DriftReport,
+    ) -> None:
+        rows.extend(data)
+        rejects.extend(rejected)
+        drifts.append(drift)
+
     client = WsClient(
         fake_ws_server.url(),
         api_key=PLANTED_KEY,
         sources=(trades,),
         on_open=lambda _generation: None,
         on_status=lambda _generation, status: received.append(status),
-        on_data=lambda _generation, _channel, data, _rejects, _drift: rows.extend(data),
+        on_data=on_data,
         on_state=lambda *_: None,
         reconnect_backoff=1.0,
         max_reconnect_backoff=1.0,
@@ -356,7 +384,9 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
         frame = (
             f'[{{"ev":"status","status":"error","message":"refused for {spelled}"}},'
-            f'{{"ev":"T","sym":"{spelled}"}}]'
+            f'{{"ev":"T","sym":"{spelled}"}},'
+            # A rejected row, whose whole text is logged and kept, with a drifted field.
+            f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}}]'
         )
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         fake_ws_server.send(frame)
@@ -365,8 +395,27 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         client.close()
         assert client.join(10.0)
     assert received == [Status(kind=StatusKind.REFUSED, message=f"refused for {REDACTED}")]
-    assert rows == [{"Ticker": REDACTED}]
+    assert rows == [{"Ticker": REDACTED, "Price": None}]
+    [reject] = rejects
+    assert reject.raw == '{"ev":"T","sym":"AAPL","p":"bad","echo":"***"}'
+    assert drifts[0].samples["echo"].value == '"***"'
     _assert_no_secret(every_logger_at_debug)
+
+
+def test_a_rejected_rest_row_echoing_the_api_key_is_logged_cleaned(
+    rest: RestClient, fake_rest: FakeRestServer, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"v": "bad", "note": PLANTED_KEY}])))
+    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+    path = RestPath(
+        key="/v3/trades/{stockTicker}",
+        fields=(Field(wire_key="v", column="V", wire_type=WireType.LONG),),
+        params=_TRADES.params,
+    )
+    with pytest.raises(WireError) as info:
+        to_batch(page.rows, path, required=())
+    assert any('"note":"***"' in record.getMessage() for record in every_logger_at_debug.records)
+    _assert_no_secret(every_logger_at_debug, info.value)
 
 
 def _flat_files() -> FlatFileClient:
@@ -390,6 +439,21 @@ def test_the_flat_file_client_never_shows_the_s3_secret(
             client.open(_FILE)
     finally:
         client.close()
+    _assert_no_secret(every_logger_at_debug, info.value)
+
+
+def test_an_s3_error_code_echoing_the_secret_is_cleaned(
+    fake_s3: FakeS3, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    # The code is the server's text too: the DEBUG line of the refused request cleans it.
+    fake_s3.refuse("us_", status=403, code=f"Denied{PLANTED_S3}", message="Rejected")
+    client = _flat_files()
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(_FILE)
+    finally:
+        client.close()
+    assert any(f"-> 403 Denied{REDACTED} " in m for m in every_logger_at_debug.messages)
     _assert_no_secret(every_logger_at_debug, info.value)
 
 

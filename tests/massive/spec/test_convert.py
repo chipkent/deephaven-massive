@@ -11,6 +11,7 @@ from deephaven_massive._massive.spec.convert import (
     convert_field,
     excerpt,
     missing_key_message,
+    row_excerpt,
 )
 from deephaven_massive._massive.spec.types import Conversion, Field, WireType, WireUnit
 
@@ -288,11 +289,18 @@ def test_convert_alone_refuses_without_a_message() -> None:
         (None, "null"),
         ("é", '"é"'),
         ({"a": [1]}, '{"a": [1]}'),
-        ("x" * 100, '"' + "x" * 49),
+        ("x" * 100, '"' + "x" * 100 + '"'),
+        ("x" * 300, '"' + "x" * 199),
     ],
 )
-def test_an_excerpt_is_the_json_text_cut_to_50_characters(value: object, quoted: str) -> None:
+def test_an_excerpt_is_the_json_text_cut_to_200_characters(value: object, quoted: str) -> None:
     assert excerpt(value) == quoted
+
+
+def test_a_row_excerpt_is_the_compact_json_text_cut_to_2000_characters() -> None:
+    assert row_excerpt({"ev": "T", "sym": "AAPL", "p": "é"}) == '{"ev":"T","sym":"AAPL","p":"é"}'
+    long = row_excerpt({"v": "x" * 3000})
+    assert long == '{"v":"' + "x" * 1994
 
 
 def test_the_missing_key_clause_names_the_column_and_wire_key() -> None:
