@@ -66,7 +66,9 @@ Public API:
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
     - `datasets()`: a static table of every dataset, with its summary, verbs, transports, and
       the link to its columns; it needs no session and no API key.
-    - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions.
+    - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions; each one's
+      `cause`, an `ErrorCause`, says whose problem it is: expected, a defect in the user's code
+      or input, or a defect of the library (whose message says how to report it).
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
     - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's
       exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
@@ -116,6 +118,7 @@ __all__ = [
     "ContractType",
     "Direction",
     "EntitlementError",
+    "ErrorCause",
     "FuturesVenue",
     "HistorySource",
     "Locale",
@@ -163,6 +166,7 @@ _EXPORTS: dict[str, str] = {
     "ContractType": "deephaven_massive._enums",
     "Direction": "deephaven_massive._enums",
     "EntitlementError": "deephaven_massive._errors",
+    "ErrorCause": "deephaven_massive._errors",
     "FuturesVenue": "deephaven_massive._enums",
     "HistorySource": "deephaven_massive._enums",
     "Locale": "deephaven_massive._enums",
@@ -241,7 +245,12 @@ if TYPE_CHECKING:
         Timeframe,
         Timespan,
     )
-    from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+    from deephaven_massive._errors import (
+        AuthenticationError,
+        EntitlementError,
+        ErrorCause,
+        MassiveError,
+    )
     from deephaven_massive._session import MassiveSession
     from deephaven_massive._tables.symbols import canonicalize_symbols
     from deephaven_massive._types import ALL

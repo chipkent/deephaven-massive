@@ -19,8 +19,8 @@ the client ends its waits and nobody else's. No call modifies its arguments.
 **Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
-up at WARNING: the call that fails logs the one ERROR, so a failure shows once in the
-console. Nothing logs a header.
+up at DEBUG: the call that fails raises the error, which the library logs at the level its
+cause gives, so a failure shows once in the console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -540,7 +540,7 @@ class RestClient:
                 if not isinstance(outcome, _Retryable):
                     return cast("Page", outcome)
                 if retry == MAX_RETRIES:
-                    _log.warning("%s; giving up after %d attempts", outcome.error, retry + 1)
+                    _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
                 wait = transient_wait(retry, _JITTER.random())
                 _log.info(
@@ -630,7 +630,7 @@ class RestClient:
                 )
             # The call that fails logs the one error; this records which reply it was. Never the
             # body: it was not read, or not in full.
-            _log.warning("%s (HTTP %d); not retried", unreadable, response.status)
+            _log.debug("%s (HTTP %d); not retried", unreadable, response.status)
             # The status arrived whole, so the governor hears of it: a refusal pauses the bucket,
             # and any other status is an answer.
             if response.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -790,13 +790,14 @@ class RestClient:
 
         Returns:
             A `WireError` with the response's status that names the request and the reason,
-            never the body.
+            never the body, marked `unreadable`: the body arrived whole.
         """
         return WireError(
             f"GET {request.target}: the response from {self._host} {reason}",
             status=response.status,
             host=self._host,
             path=request.target,
+            unreadable=True,
         )
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
@@ -901,7 +902,7 @@ class RestClient:
             response: The response, for its headers.
 
         The governor hears of the refusal even when the hook or the log raises (an interrupt
-        while the WARNING is written), so the bucket pauses and the permit is reported. The
+        while the record is written), so the bucket pauses and the permit is reported. The
         attempt is then made again once the governor allows; the next permit fails instead,
         with status 429, if the call's patience cannot cover the pause.
         """

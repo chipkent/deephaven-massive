@@ -287,7 +287,7 @@ def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
         ["2025-03-07T15:00:00", "2025-03-07T15:00:01", "2025-03-07T15:00:02"],
         ends=["2025-03-07T15:01:00", None, "2025-03-07T15:00:03"],
     )
-    with caplog.at_level(logging.WARNING, logger=row_times.__name__):
+    with caplog.at_level(logging.INFO, logger=row_times.__name__):
         assert fill(rule, sent)[END] == [
             "2025-03-07T15:01:00+00:00",
             "2025-03-07T15:00:02+00:00",
@@ -295,7 +295,7 @@ def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
         ]
         fill(rule, sent)
     warned = [r for r in caplog.records if "is not its start plus one second" in r.message]
-    assert len(warned) == 1  # once per process
+    assert [r.levelno for r in warned] == [logging.INFO]  # once per process; nothing to act on
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()
     assert fill(rule, agreeing)[END] == ["2025-03-07T15:00:01+00:00"]
@@ -708,6 +708,7 @@ def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], of
             remedy="read the flat files",
         )
     message = str(caught.value)
+    assert caught.value.cause is dm.ErrorCause.LIBRARY_DEFECT  # a stamp the library cannot place
     assert ", which is not a stamp Massive is known to use for such a bar (00:00:00.000" in message
     assert message.endswith(
         f"; read the flat files, and report the stamp at {ISSUES_URL} so the day cut can be settled"

@@ -421,7 +421,7 @@ def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
     # A diagnostics writer sleeps until the next change: always a bounded, finite wait.
     assert governor.next_change() == 600.0
     [record] = caplog.records
-    assert record.levelname == "WARNING"
+    assert record.levelname == "INFO"
     assert record.getMessage() == (
         f"stocks: a refusal's Retry-After asks for {asked} s; pausing 600.0 s, the most honoured"
     )

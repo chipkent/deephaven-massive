@@ -316,9 +316,11 @@ def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
     with pytest.raises(WireError, match="does not decompress") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 200
+    assert caught.value.unreadable  # the body arrived whole but cannot be read
     assert "not gzip" not in caught.value.message  # the body itself is never quoted
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [f"{caught.value.message} (HTTP 200); not retried"]
+    # The call that raises is what the user sees, so the client records the reply at DEBUG.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert f"{caught.value.message} (HTTP 200); not retried" in caplog.messages
     assert not any("not gzip" in r.getMessage() for r in caplog.records)
     assert clock.waits == []
     assert len(fake_rest.requests) == 1
@@ -1349,7 +1351,7 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     ) in messages
     # The error quotes only the envelope's message, cut to 200 characters.
     assert (
-        logging.WARNING,
+        logging.DEBUG,
         f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]

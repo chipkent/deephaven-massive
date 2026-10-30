@@ -709,7 +709,7 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
     cache: dict[str, str | None] = {}
     with caplog.at_level(logging.DEBUG, logger=symbols.__name__):
         read = reader.read(raw, cache)
-        reader.read(raw, {})  # a fresh read warns no spelling twice
+        reader.read(raw, {})  # a fresh read reports no spelling twice
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
     assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
     assert read.unreadable == ("!!", "##", "??")

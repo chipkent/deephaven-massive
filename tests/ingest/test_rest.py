@@ -46,6 +46,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._log_limits import BoundedLog
@@ -913,7 +914,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
 
 
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     claimed: list[Future[Any]] = []
@@ -925,12 +926,40 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
         raise RuntimeError("the reader broke")
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
-    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the reader broke"),  # the reader's own error
+    ):
         reader.crypto_pair("X:DOTUSD")
+    # A defect of the library: one ERROR, with its trace and how to report it.
+    [record] = caplog.records
+    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
+    assert record.getMessage().endswith(f"reading Massive's crypto tickers failed. {LIBRARY_BUG}")
     (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
         future.result()  # the waiters get a MassiveError
+    assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert str(waited.value).endswith(LIBRARY_BUG)
     assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(*_: object, **__: object) -> NoReturn:
+        raise RuntimeError("the rule broke")
+
+    monkeypatch.setattr(hosts, "decide", broken)
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the rule broke"),
+    ):
+        session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    [record] = caplog.records
+    assert (record.levelno, record.getMessage()) == (
+        logging.ERROR,
+        f"deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
+    )
 
 
 class _WatchedFuture(Future[rest.CryptoTickers]):
@@ -1137,7 +1166,8 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
         f"at most {patience} s of its pauses"
     ) in caplog.messages
     stopped = [r for r in caplog.records if "stops waiting for the crypto" in r.getMessage()]
-    assert [r.levelno for r in stopped] == ([logging.ERROR] if console == "joiner" else [])
+    # The caller raises the error, so giving up on the shared wait is only DEBUG detail.
+    assert [r.levelno for r in stopped] == ([logging.DEBUG] if console == "joiner" else [])
     retried = [r for r in caplog.records if "this caller tries again" in r.getMessage()]
     assert [r.levelno for r in retried] == ([logging.INFO] if console == "maker" else [])
 
@@ -1186,6 +1216,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     monkeypatch: pytest.MonkeyPatch,
     load_fixture: Callable[[str, str], bytes],
     console: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
@@ -1211,6 +1242,8 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert decision.host == "delayed.massive.com"
     assert len(sent(fake_rest)) == 3
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
+    # The caller that gave up raises; its expected failure logs nothing above DEBUG.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
 
 
 def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
@@ -1864,9 +1897,13 @@ def test_refusals_raise_their_public_errors(
         DIVIDENDS_PATH,
         Reply({"status": "ERROR", "request_id": "r9", "message": "no"}, status=status),
     )
-    with caplog.at_level(logging.ERROR, LOGGER), pytest.raises(error) as info:
+    with caplog.at_level(logging.DEBUG), pytest.raises(error) as info:
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert (info.value.status, info.value.request_id) == (status, "r9")
+    assert info.value.cause is dm.ErrorCause.EXPECTED
+    # A refusal the caller receives is expected: the call logs it at DEBUG, never higher.
+    failed = [r for r in caplog.records if r.getMessage().startswith("call ")]
+    assert [r.levelno for r in failed if "failed" in r.getMessage()] == [logging.DEBUG]
     assert f"HTTP {status}" in caplog.text
     assert "test-key" not in caplog.text
 
@@ -1894,16 +1931,18 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
         r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
         r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
     )
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         for _ in range(2):
             with pytest.raises(dm.MassiveError, match=given_up):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
     # The second call failed without a request: the bucket's pause still stands.
     assert len(sent(fake_rest)) == 1
+    # The first 429 is a notice at INFO, once; the calls raise, and log nothing above it.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "with HTTP 429 (" in r.getMessage()
+        if r.levelno == logging.INFO and "with HTTP 429 (" in r.getMessage()
     ]
     assert len(warnings) == 1
     assert warnings[0].startswith(
@@ -2629,9 +2668,10 @@ def test_a_failed_history_is_logged_and_raised(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"{}", status=403))
-    with caplog.at_level(logging.ERROR, LOGGER), pytest.raises(dm.EntitlementError):
+    with caplog.at_level(logging.DEBUG), pytest.raises(dm.EntitlementError):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert "HTTP 403" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_a_404_without_a_symbol_fails_the_call(
@@ -3254,7 +3294,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
     basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
     fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
     try:
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
         assert rest_clock.waits == [61.0]
         assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text

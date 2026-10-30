@@ -116,8 +116,10 @@ def test_an_undocumented_timeframe_fails_loudly(snapshot: Callable[[str], Snapsh
     with pytest.raises(
         dm.MassiveError,
         match=r"last_trade\.timeframe is 'END-OF-DAY'.*ws_hosts=\{dm\.AssetClass\.STOCKS",
-    ):
+    ) as info:
         run(AssetClass.STOCKS, snapshot("stocks_unknown_timeframe.json"))
+    # A value the library cannot interpret is its own defect, never an expected failure.
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
 
 
 def test_a_business_key_without_trades_streams_from_business(

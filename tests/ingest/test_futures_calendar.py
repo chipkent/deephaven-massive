@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 import pyarrow as pa
 import pytest
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
 from deephaven_massive._ingest.futures_calendar import (
     LOAD_PATIENCE,
     RELOAD_SPACING,
@@ -271,7 +271,7 @@ def test_a_row_between_sessions_keeps_the_rule_date(
     calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched(calendar, "ESM4")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [("ESM4", "2024-03-28T21:30:00", "2024-03-28")])
     assert (dates, misses) == (["2024-03-28"], [])
     assert not caplog.records
@@ -316,7 +316,7 @@ def test_a_lookup_still_loading_after_a_minute_makes_misses(
     assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
     # A minute after it was asked for, its rows are misses, logged once.
     clock.now += 1
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [FOLDED, FOLDED])
     assert dates == ["2024-03-29", "2024-03-29"]
     assert misses == [
@@ -329,6 +329,8 @@ def test_a_lookup_still_loading_after_a_minute_makes_misses(
         )
     ]
     assert caplog.text.count("not loaded after 60 s") == 1
+    # The rows keep a date, so a miss is stale data to know about, not a broken result.
+    assert {r.levelno for r in caplog.records} == {logging.WARNING}
     # Once it loads, the rows place again.
     fetch.release.set()
     idle(calendar)
@@ -340,7 +342,7 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
 ) -> None:
     watched(calendar, "ESM4")
     row = ("ESM4", "2024-04-01T22:00:00", "2024-04-02")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [row, row])
         again = correct(calendar, [row])
     assert dates == ["2024-04-02", "2024-04-02"]
@@ -423,10 +425,11 @@ def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
     *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     fetch.answers[CONTRACTS_PATH] = MassiveError("HTTP 500")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert "futures schedules: looking up its product failed: HTTP 500 (ESM4)" in caplog.text
+    assert {r.levelno for r in caplog.records} == {logging.WARNING}
     assert "not confirmed: looking up its product failed: HTTP 500" in misses[0][1]
     # Asked again after the spacing; a second failure keeps what the calendar knew.
     clock.now += SPACING
@@ -441,11 +444,25 @@ def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
 
 
+def test_an_unreadable_lookup_answer_is_logged_as_a_library_defect(
+    *, calendar: FuturesCalendar, fetch: FakeFetch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fetch.answers[CONTRACTS_PATH] = MassiveError("bad page", cause=ErrorCause.LIBRARY_DEFECT)
+    with caplog.at_level(logging.WARNING):
+        watched(calendar, "ESM4")
+        correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
+    [record] = [r for r in caplog.records if "futures schedules: looking up" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == (
+        f"test: futures schedules: looking up its product failed: bad page (ESM4). {LIBRARY_BUG}"
+    )
+
+
 def test_a_failed_schedule_is_logged_its_rows_are_misses_and_it_is_retried(
     *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 429")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert "futures schedules: loading its schedule failed: HTTP 429 (ES)" in caplog.text
@@ -575,7 +592,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
     calendar.watch(["ESM4"])
     fetch.wait(1)
     closing = threading.Thread(target=calendar.close)
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         closing.start()
         assert calendar.wait_idle(TIMEOUT)  # closed
         fetch.release.set()
@@ -606,7 +623,8 @@ def test_the_worker_outlives_an_unexpected_error(
     with caplog.at_level(logging.ERROR):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
-    assert "futures schedules: a lookup failed" in caplog.text
+    assert "futures schedules: a lookup failed. This is a bug in deephaven-massive." in caplog.text
+    assert logging.ERROR in {r.levelno for r in caplog.records}
     assert "not confirmed: looking it up failed: ValueError('bad answer')" in misses[0][1]
     fetch.answers[CONTRACTS_PATH] = list(CONTRACTS)
     clock.now += SPACING

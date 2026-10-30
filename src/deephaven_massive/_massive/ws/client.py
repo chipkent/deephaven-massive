@@ -22,7 +22,9 @@ retrying cannot fix) ends it with `FAILED`. `close()` ends it with `CLOSED` at o
 is waiting for.
 
 **Logging.** The client's thread is named `<thread_prefix> ws <host><path>`. It logs connecting,
-authenticating, closing, and each backoff at INFO or WARNING; each status object Massive sends
+authenticating, and closing at INFO, each backoff, refused handshake, and reconnect attempt at
+DEBUG (the library's connection logs one WARNING per outage), a handshake that breaks protocol
+or an internal error at ERROR with how to report it; each status object Massive sends
 (an acknowledgement, a refusal) and each subscription frame it sends at DEBUG; and each rejected
 row, whole, at DEBUG (`ws.protocol`). Never the authentication frame: websockets' own frame log
 is kept off, and a server text that echoes the key has it replaced with `***`.
@@ -47,7 +49,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.capture import capture_frame
-from deephaven_massive._massive.net.errors import WireAuthError, WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireAuthError, WireError
 from deephaven_massive._massive.net.http import TlsConsumer, ssl_context
 from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
@@ -460,17 +462,22 @@ class WsClient:
         except asyncio.CancelledError:
             failure = None  # only `close()` cancels the task
         except Exception as error:
-            logger.exception("the WebSocket client for %s stopped on an internal error", self._url)
+            logger.exception(
+                "the WebSocket client for %s stopped on an internal error. %s",
+                self._url,
+                LIBRARY_BUG_REPORT,
+            )
             failure = WireError(
                 f"the WebSocket client for {self._host}{self._path} stopped on an internal "
                 f"error: {error!r}",
                 host=self._host,
                 path=self._path,
+                client_defect=True,
             )
             failure.__cause__ = error
         else:
-            if failure is not None:
-                logger.error("the WebSocket client for %s failed: %s", self._url, failure)
+            if failure is not None:  # the library logs it, at the level its cause gives
+                logger.debug("the WebSocket client for %s failed: %s", self._url, failure)
         if failure is None:
             logger.info("closed the WebSocket client for %s", self._url)
         try:
@@ -479,7 +486,9 @@ class WsClient:
             else:
                 self._on_state(WsState.FAILED, failure)
         except Exception:
-            logger.exception("on_state raised while the client for %s ended", self._url)
+            logger.exception(
+                "on_state raised while the client for %s ended. %s", self._url, LIBRARY_BUG_REPORT
+            )
 
     async def _connect_until_fatal(self) -> WireError:
         """Attempt, run, and back off, forever, until a fatal failure.
@@ -492,7 +501,7 @@ class WsClient:
             if isinstance(ended, WireError):
                 return ended
             if ended.least_wait > self._max_wait:
-                logger.warning(
+                logger.debug(
                     "%s asked to wait %.1f s (Retry-After); waiting at most %.1f s",
                     self._url,
                     ended.least_wait,
@@ -500,7 +509,7 @@ class WsClient:
                 )
             least = min(ended.least_wait, self._max_wait)
             wait = max(self._backoff.next_wait(ended.uptime), least)
-            logger.warning("reconnecting to %s in %.1f s", self._url, wait)
+            logger.debug("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
             self._on_state(state, self._clock.time() + wait)
             await self._sleep(wait)
@@ -553,12 +562,14 @@ class WsClient:
             async with asyncio.timeout_at(deadline):
                 reply = await self._handshake(websocket)
         except (TimeoutError, ConnectionClosed) as error:
-            logger.warning("the handshake with %s failed: %r", self._url, error)
+            logger.debug("the handshake with %s failed: %r", self._url, error)
             return _Ended()
         except ValueError:
             # The server spoke a protocol this client does not know: vendor drift, not a
             # network hiccup, so it is logged at ERROR, though the attempt is still retried.
-            logger.exception("the handshake with %s broke protocol", self._url)
+            logger.exception(
+                "the handshake with %s broke protocol. %s", self._url, LIBRARY_BUG_REPORT
+            )
             return _Ended()
         if isinstance(reply, WireError):
             return reply

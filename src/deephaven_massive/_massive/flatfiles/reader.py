@@ -367,6 +367,8 @@ class FlatFile:
                 f"cannot read {self._location}: {_describe(error, names, read_types)}",
                 host=self._host,
                 path=self._key,
+                # A body that broke off is a transport failure; any other is the file's content.
+                unreadable=not self._dropped.is_set(),
             ) from error
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
@@ -408,9 +410,15 @@ class FlatFile:
             reason: What is wrong with the file.
 
         Returns:
-            `WireError("cannot read <location>: <reason>")`, for the caller to raise.
+            `WireError("cannot read <location>: <reason>")`, marked `unreadable`, for the
+            caller to raise.
         """
-        return WireError(f"cannot read {self._location}: {reason}", host=self._host, path=self._key)
+        return WireError(
+            f"cannot read {self._location}: {reason}",
+            host=self._host,
+            path=self._key,
+            unreadable=True,
+        )
 
     def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> pa.RecordBatch:
         """Filter one block and turn its surviving rows into the plan's columns.
@@ -443,6 +451,7 @@ class FlatFile:
                     "sessions",
                     host=self._host,
                     path=self._key,
+                    unreadable=True,
                 )
         if plan.symbols is not None:
             block = block.filter(pc.is_in(block[plan.symbol_header], value_set=plan.symbols))
