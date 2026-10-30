@@ -4104,9 +4104,7 @@
     {"column": "Type", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "type"},
     {"column": "Value", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "value"}
    ],
-   "memberships": [
-    {"group": "indices", "kind": "values", "position": 0, "projection": {"last_updated": "Timestamp", "ticker": "Ticker", "value": "Value"}}
-   ]
+   "memberships": []
   },
   {
    "key": "/v3/snapshot/options/{underlyingAsset}",

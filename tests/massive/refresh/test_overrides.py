@@ -225,13 +225,19 @@ def test_every_projection_is_of_a_listed_kind_member() -> None:
         assert any(source in sources for sources in overrides.KINDS[kind].values())
 
 
-def test_the_indices_snapshot_joins_the_values_kind_as_ticker_value_and_timestamp() -> None:
-    projection = overrides.PROJECTIONS["values", "/v3/snapshot/indices"]
+def test_the_forex_last_quote_joins_the_quotes_kind_under_its_price_names() -> None:
+    projection = overrides.PROJECTIONS["quotes", "/v1/last_quote/currencies/{from}/{to}"]
     assert {k: naming.column_name([v]) for k, v in projection.named.items()} == {
-        "ticker": "Ticker",
-        "value": "Value",
-        "last_updated": "Timestamp",
+        "ask": "AskPrice",
+        "bid": "BidPrice",
     }
+
+
+def test_the_indices_snapshot_is_in_no_kind() -> None:
+    # Its current state is `indices.snapshots`, read in full; index values come from the
+    # stream and the flat files only.
+    assert "/v3/snapshot/indices" not in overrides.KINDS["values"]["indices"]
+    assert all(key != "/v3/snapshot/indices" for _, key in overrides.PROJECTIONS)
 
 
 def test_every_transport_only_column_is_of_a_kind_s_group() -> None:

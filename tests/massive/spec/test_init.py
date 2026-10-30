@@ -104,8 +104,15 @@ def test_channels_and_prefixes_carry_their_memberships_and_descriptions() -> Non
     futures = spec.source(Transport.FLAT_FILES, "us_futures_{venue}/trades_v1")
     assert [f.wire_key for f in futures.fields][:2] == ["ticker", "timestamp"]
     assert futures.field("Timestamp").unit is WireUnit.NS
-    (values,) = spec.source(Transport.REST, "/v3/snapshot/indices").memberships
-    assert values.projection == {"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}
+    (quotes,) = spec.source(Transport.REST, "/v1/last_quote/currencies/{from}/{to}").memberships
+    assert quotes.projection == {
+        "ask": "AskPrice",
+        "bid": "BidPrice",
+        "exchange": "Exchange",
+        "timestamp": "Timestamp",
+    }
+    (values,) = spec.source(Transport.FLAT_FILES, "us_indices/values_v1").memberships
+    assert values == Membership(kind="values", group="indices", position=1)
 
 
 def test_sixteen_threads_share_one_first_load(

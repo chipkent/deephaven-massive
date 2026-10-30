@@ -6,7 +6,7 @@ Each section lists one dataset's columns in the order every verb returns them. *
 
 A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.forex.quotes`, `m.forex.bars`, `m.forex.fmv`, `m.forex.snapshots`, `m.forex.movers`, and `m.forex.conversion` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.forex.quotes`, `m.forex.bars`, `m.forex.previous_day_bar`, `m.forex.fmv`, `m.forex.snapshots`, `m.forex.movers`, and `m.forex.conversion` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
 
 <a id="quotes"></a>
 
@@ -16,22 +16,41 @@ Foreign exchange quotes: the best bid and ask of each currency pair, tick by tic
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter; REST: the request's `fxTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `p`: "The current pair." | REST, flat files, WebSocket | request | `ticker` | `p` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `fxTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `p`: "The current pair." | REST, flat files, WebSocket | request | `ticker` | `p` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp."; REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `participant_timestamp` | `participant_timestamp` | `t` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files | `ask_exchange` | `ask_exchange` |  |
-| `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask`, `ask_price` | `ask_price` | `a` |
+| `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `a` |
 | `BidExchange` | long | The bid exchange ID | REST, flat files | `bid_exchange` | `bid_exchange` |  |
-| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid`, `bid_price` | `bid_price` | `b` |
-| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, WebSocket | `exchange` |  | `x` |
+| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `b` |
+| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | WebSocket |  |  | `x` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
 - <https://massive.com/docs/flat-files/forex/quotes.md>
-- <https://massive.com/docs/rest/forex/quotes/last-quote.md>
 - <https://massive.com/docs/rest/forex/quotes/quotes.md>
 - <https://massive.com/docs/websocket/forex/quotes.md>
+
+<a id="last_quote"></a>
+
+## `m.forex.last_quote`
+
+The latest best bid and ask of each currency pair.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter. | REST | request |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST |  |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp." | REST | `timestamp` |
+| `AskPrice` | double | The ask price. | REST | `ask` |
+| `BidPrice` | double | The bid price. | REST | `bid` |
+| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `exchange` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/forex/quotes/last-quote.md>
 
 <a id="bars"></a>
 
@@ -41,7 +60,7 @@ Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `forexTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The currency pair." | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `forexTicker` parameter; REST `T`: "The exchange symbol that this item is traded under."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The currency pair." | REST, flat files, WebSocket | request, `T` | `ticker` | `pair` |
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the UTC date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Monday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
@@ -60,9 +79,33 @@ Massive's documentation of this dataset:
 - <https://massive.com/docs/flat-files/forex/minute-aggregates.md>
 - <https://massive.com/docs/rest/forex/aggregates/custom-bars.md>
 - <https://massive.com/docs/rest/forex/aggregates/daily-market-summary.md>
-- <https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md>
 - <https://massive.com/docs/websocket/forex/aggregates-per-minute.md>
 - <https://massive.com/docs/websocket/forex/aggregates-per-second.md>
+
+<a id="previous_day_bar"></a>
+
+## `m.forex.previous_day_bar`
+
+The previous UTC day's open, high, low, close, and volume of each currency pair.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the UTC date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Monday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." | REST | `t` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST |  |
+| `Volume` | double | The trading volume of the symbol in the given time period. | REST | `v` |
+| `Open` | double | The open price for the symbol in the given time period. | REST | `o` |
+| `Close` | double | The close price for the symbol in the given time period. | REST | `c` |
+| `High` | double | The highest price for the symbol in the given time period. | REST | `h` |
+| `Low` | double | The lowest price for the symbol in the given time period. | REST | `l` |
+| `Transactions` | long | The number of transactions in the aggregate window. | REST | `n` |
+| `Vwap` | double | The volume weighted average price. | REST | `vw` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md>
 
 <a id="fmv"></a>
 

@@ -51,11 +51,9 @@ from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -164,15 +162,15 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
     path, or flat-file prefixes) gives `history()`, and a fetch path gives `fetch()`. Each
     namespace factory's return annotation is this class, which the namespace tests check.
 
-    | Channels | History | Fetch | Class                      |
-    |----------|---------|-------|----------------------------|
-    | no       | no      | yes   | `Query`                    |
-    | yes      | no      | no    | `StreamQuery`              |
-    | no       | yes     | no    | `HistoryQuery`             |
-    | yes      | yes     | no    | `StreamHistoryQuery`       |
-    | yes      | yes     | yes   | `StreamHistoryLatestQuery` |
+    | Channels | History | Fetch | Class                |
+    |----------|---------|-------|----------------------|
+    | no       | no      | yes   | `Query`              |
+    | yes      | no      | no    | `StreamQuery`        |
+    | no       | yes     | no    | `HistoryQuery`       |
+    | yes      | yes     | no    | `StreamHistoryQuery` |
 
-    `DatasetSpec` rejects every other combination when it is created. A `bars` dataset gives
+    `DatasetSpec` rejects every other combination when it is created: a fetch path is a
+    dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset gives
     `HistoryQuery`, the class of its most general overload: `bar_query_class` picks the class
     of each call from its timespan and multiplier.
 
@@ -186,17 +184,15 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
         return HistoryQuery
     if not spec.has_channels:
         return Query if spec.has_fetch else HistoryQuery
-    if not spec.has_history:
-        return StreamQuery
-    return StreamHistoryLatestQuery if spec.has_fetch else StreamHistoryQuery
+    return StreamHistoryQuery if spec.has_history else StreamQuery
 
 
 def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
     """Pick the query class of a `bars()` call from its actual timespan and multiplier.
 
     With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a
-    `StreamHistoryQuery`, and `DAY` on a dataset with a previous-session endpoint gives a
-    `HistoryLatestQuery`. Every other combination is history only (`HistoryQuery`). A
+    `StreamHistoryQuery`. Every other combination is history only (`HistoryQuery`); the
+    previous session's bar is the `previous_day_bar` dataset, not a verb of `bars()`. A
     `timespan` that is not a `dm.Timespan` raises `TypeError` (`_require_enum`), and a
     `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`
     (`require_positive_int`).
@@ -222,8 +218,6 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
         raise ValueError("Timespan.SESSION exists only for futures bars")
     if count == 1 and span in spec.channels:
         return StreamHistoryQuery
-    if count == 1 and span is Timespan.DAY and spec.has_fetch:
-        return HistoryLatestQuery
     return HistoryQuery
 
 

@@ -42,16 +42,14 @@ from deephaven_massive._namespaces.base import (
     require_bool,
 )
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
 from deephaven_massive._session import CATALOG
-from deephaven_massive._types import DaySpan, StreamSpan
+from deephaven_massive._types import StreamSpan
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
@@ -63,7 +61,6 @@ STOCK_BARS = DatasetSpec(
     is_bars=True,
     asset_class=AssetClass.STOCKS,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
-    fetch_path="/v2/aggs/ticker/{stocksTicker}/prev",
     history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
 )
 FUTURES_BARS = DatasetSpec(
@@ -119,7 +116,7 @@ def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Qu
     [
         ((STOCK_BARS, Timespan.SECOND, 1), StreamHistoryQuery),
         ((STOCK_BARS, Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((STOCK_BARS, Timespan.DAY, 1), HistoryLatestQuery),
+        ((STOCK_BARS, Timespan.DAY, 1), HistoryQuery),
         ((STOCK_BARS, Timespan.MINUTE, 5), HistoryQuery),
         ((STOCK_BARS, Timespan.DAY, 2), HistoryQuery),
         ((STOCK_BARS, Timespan.HOUR, 1), HistoryQuery),
@@ -448,7 +445,6 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
-        ({**_CHANNELS, **_HISTORY, **_FETCH}, StreamHistoryLatestQuery),
     ],
 )
 def test_the_query_class_follows_the_transports(
@@ -461,6 +457,22 @@ def test_the_query_class_follows_the_transports(
         **changes,
     )
     assert query_class(spec) is expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{**_CHANNELS, **_FETCH}, {**_HISTORY, **_FETCH}, {**_CHANNELS, **_HISTORY, **_FETCH}],
+    ids=["stream", "history", "both"],
+)
+def test_a_fetch_path_is_a_dataset_of_its_own(changes: dict[str, Any]) -> None:
+    # A one-row endpoint is never a verb of a stream or history dataset.
+    with pytest.raises(ValueError, match=r"^stocks\.trades: a fetch path is a dataset of its own"):
+        DatasetSpec(
+            name="stocks.trades",
+            summary="A dataset for the tests.",
+            asset_class=AssetClass.STOCKS,
+            **changes,
+        )
 
 
 def test_flat_files_are_a_history_source() -> None:
@@ -654,8 +666,6 @@ class _Good(Namespace):
         self, timespan: StreamSpan = Timespan.MINUTE, *, multiplier: Literal[1] = 1
     ) -> StreamHistoryQuery: ...
     @overload
-    def bars(self, timespan: DaySpan, *, multiplier: Literal[1] = 1) -> HistoryLatestQuery: ...
-    @overload
     def bars(
         self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery: ...
@@ -670,7 +680,9 @@ class _Bad(Namespace):
     __slots__ = ()
 
     @overload
-    def bars(self, timespan: DaySpan, *, multiplier: Literal[1] = 1) -> StreamHistoryQuery: ...
+    def bars(
+        self, timespan: Literal[Timespan.DAY], *, multiplier: Literal[1] = 1
+    ) -> StreamHistoryQuery: ...
     @overload
     def bars(
         self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
@@ -748,7 +760,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         "options.bars: the bars implementation must return HistoryQuery",
         (
             "options.bars: an overload returns StreamHistoryQuery, but its timespans give "
-            "['HistoryLatestQuery']"
+            "['HistoryQuery']"
         ),
         "options.trades: the factory must return StreamQuery",
         "options.minute_bars: a bars factory needs its overloads",
@@ -933,13 +945,16 @@ def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
     notes = adjustment_notes(("Close",), ("Volume",))
     assert notes == {"Close": ADJUSTED_PRICE, "Volume": ADJUSTED_VOLUME}
     assert "never adjusts for cash dividends" in ADJUSTED_PRICE
-    # Only stocks and options have an adjustment choice; their bars and open-close carry it.
+    # Only stocks and options have an adjustment choice; their bars, previous day's bar, and
+    # open-close carry it.
     noted = sorted(name for name, spec in CATALOG.by_name.items() if spec.column_notes)
     assert noted == [
         "options.bars",
         "options.daily_open_close",
+        "options.previous_day_bar",
         "stocks.bars",
         "stocks.daily_open_close",
+        "stocks.previous_day_bar",
     ]
     for name in noted:
         spec = CATALOG.by_name[name]

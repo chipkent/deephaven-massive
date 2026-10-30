@@ -38,7 +38,7 @@ from deephaven_massive._tables.columns import col_defs
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 ALL_TYPES = Schema("all", tuple(Column(t.name.title().replace("_", ""), t) for t in ColumnType))
 # The wire interface names `Source.memberships` but exports no constructor for an element.
-MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
+MEMBERSHIP = type(source(W, "stocks/T").memberships[0])
 
 
 # --- Column types and Schema -----------------------------------------------------------------
@@ -371,15 +371,37 @@ def test_a_projection_belongs_to_the_dataset_group() -> None:
 
 
 def test_required_keys_resolve_to_the_fields_behind_them() -> None:
-    snapshot = (R, "/v3/snapshot/indices")
+    # A source that joins the values kind with a few of its fields, `last_updated` as Timestamp.
+    snapshot = Source(
+        key="/snapshot",
+        transport=R,
+        fields=(
+            Field(wire_key="ticker", column="Ticker", wire_type=WireType.STRING),
+            Field(wire_key="value", column="Value", wire_type=WireType.DOUBLE),
+            Field(
+                wire_key="last_updated",
+                column="LastUpdated",
+                wire_type=WireType.EPOCH,
+                unit=WireUnit.NS,
+            ),
+        ),
+        memberships=(
+            MEMBERSHIP(
+                kind="values",
+                group="indices",
+                position=0,
+                projection={"ticker": "Ticker", "last_updated": "Timestamp"},
+            ),
+        ),
+    )
     values = spec(
         "indices.values",
-        {snapshot: SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+        {(R, "/snapshot"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
         asset_class=AssetClass.INDICES,
         kind="values",
     )
-    # The kind's Timestamp is the snapshot's own LastUpdated, which the wire client decodes.
-    fields = required_fields(values, source(*snapshot))
+    # The kind's Timestamp is the source's own LastUpdated, which the wire client decodes.
+    fields = required_fields(values, snapshot)
     assert [(f.wire_key, f.column) for f in fields] == [
         ("ticker", "Ticker"),
         ("last_updated", "LastUpdated"),
@@ -602,8 +624,8 @@ def test_only_options_datasets_have_an_option_root() -> None:
 
 
 def test_the_merge_follows_the_membership_positions() -> None:
-    # Declared fetch, history, stream, files; the stocks trades group puts the history path
-    # (position 0) before the last-trade path (position 1).
+    # The stocks trades group puts the history path (position 0) before the last-trade path
+    # (position 1) and the stream (position 2), whichever dataset of the group reads each.
     sip = SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))
     history = (R, "/v3/trades/{stockTicker}")
     last = (R, "/v2/last/trade/{stocksTicker}")
@@ -612,14 +634,20 @@ def test_the_merge_follows_the_membership_positions() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
-        fetch_path=last[1],
         history_path=history[1],
         channels={NotBars.ANY: "T"},
         keys={
-            last: sip,
             history: SourceKeys(KeySpec("stockTicker", from_request=True), sip.time),
             (W, "stocks/T"): sip,
         },
+    )
+    last_trade = DatasetSpec(
+        name="stocks.last_trade",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        kind="trades",
+        fetch_path=last[1],
+        keys={last: sip},
     )
     made = Source(
         key=last[1],
@@ -635,11 +663,16 @@ def test_the_merge_follows_the_membership_positions() -> None:
     def tables(transport: Transport, key: str) -> Source:
         return made if key == last[1] else source(transport, key)
 
-    names = dataset_schema(trades, (trades,), tables).column_names
-    # The history path's columns come before the last-trade path's own Zeta.
-    assert names.index("Conditions") < names.index("Zeta")
+    names = dataset_schema(trades, (trades, last_trade), tables).column_names
+    # Only the last-trade path fills Zeta, so the trades dataset has none of it.
     assert names[:3] == ("Symbol", "Date", "Timestamp")
-    assert names[-2:] == ("Zeta", "TimestampInsert")
+    assert "Zeta" not in names
+    last_names = dataset_schema(last_trade, (trades, last_trade), tables).column_names
+    assert last_names == ("Symbol", "Date", "Timestamp", "Zeta", "TimestampInsert")
+    # The group's sources keep their positions whichever member comes first, so each dataset
+    # of the group has the same columns in the same order.
+    assert dataset_schema(trades, (last_trade, trades), tables).column_names == names
+    assert dataset_schema(last_trade, (last_trade, trades), tables).column_names == last_names
 
 
 def test_the_merge_joins_types_across_sources() -> None:
@@ -650,12 +683,12 @@ def test_the_merge_joins_types_across_sources() -> None:
         name="stocks.quotes",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        fetch_path=nbbo[1],
         history_path="/v3/quotes/{stockTicker}",
         channels={NotBars.ANY: "Q"},
-        keys={nbbo: both, stream: both},
+        keys={stream: both},
     )
-    schema = dataset_schema(quotes, (quotes,), lookup)
+    last = spec("stocks.last_quote", {nbbo: both}, asset_class=AssetClass.STOCKS)
+    schema = dataset_schema(quotes, (quotes, last), lookup)
     types = {c.name: c.type for c in schema.columns}
     assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["AskSize"] is ColumnType.DOUBLE  # long on the stream, double on /v3/quotes
@@ -740,8 +773,8 @@ def test_rest_text_wins_and_source_order_breaks_ties() -> None:
         name="stocks.x",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        fetch_path="/first",
-        history_path="/second",
+        history_path="/first",
+        extra_paths=("/second",),
         channels={NotBars.ANY: "T"},
     )
     made = {
@@ -842,18 +875,24 @@ STOCK_TRADES = DatasetSpec(
     summary="Trades of US-listed stocks, tick by tick.",
     asset_class=AssetClass.STOCKS,
     kind="trades",
-    fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
-        (R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS,
         (R, "/v3/trades/{stockTicker}"): SourceKeys(
             KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
         ),
         (W, "stocks/T"): TRADES_KEYS,
         (F, "us_stocks_sip/trades_v1"): TRADES_KEYS,
     },
+)
+STOCK_LAST_TRADE = DatasetSpec(
+    name="stocks.last_trade",
+    summary="The latest trade of each US-listed stock.",
+    asset_class=AssetClass.STOCKS,
+    kind="trades",
+    fetch_path="/v2/last/trade/{stocksTicker}",
+    keys={(R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS},
 )
 CRYPTO_TRADES = DatasetSpec(
     name="crypto.trades",
@@ -869,7 +908,7 @@ CRYPTO_TRADES = DatasetSpec(
         (W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp")),
     },
 )
-TRADES = Catalog((STOCK_TRADES, CRYPTO_TRADES))
+TRADES = Catalog((STOCK_TRADES, STOCK_LAST_TRADE, CRYPTO_TRADES))
 
 
 def wire(transport: Transport, key: str, column: str) -> Field:
@@ -889,7 +928,7 @@ def test_a_dataset_keeps_only_the_columns_its_own_sources_fill() -> None:
     assert all(stock_columns[n].type is crypto_columns[n].type for n in shared)
     # Each dataset gets its own text, never the kind's: the stocks Tape is the vendor's.
     assert stock_columns["Tape"].description == (
-        wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
+        wire(R, "/v3/trades/{stockTicker}", "Tape").description
     )
 
 
@@ -942,10 +981,9 @@ def test_every_transport_has_one_user_facing_spelling() -> None:
 
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
-    last, history = "/v2/last/trade/{stocksTicker}", "/v3/trades/{stockTicker}"
+    history = "/v3/trades/{stockTicker}"
     files = "us_stocks_sip/trades_v1"
     symbol = [
-        f'REST `T`: "{wire(R, last, "Ticker").description}"',
         "REST: the request's `stockTicker` parameter",
         f'flat files `ticker`: "{wire(F, files, "Ticker").description}"',
         f'WebSocket `sym`: "{wire(W, "stocks/T", "Ticker").description}"',
@@ -953,10 +991,9 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     assert columns["Symbol"].description == (
         f"The instrument, in the library's canonical symbol form. From {'; '.join(symbol)}"
     )
-    assert dict(columns["Symbol"].wire_keys) == {R: ("T", None), F: ("ticker",), W: ("sym",)}
+    assert dict(columns["Symbol"].wire_keys) == {R: (None,), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
     timestamp = [
-        f'REST `t`: "{wire(R, last, "SipTimestamp").description}"',
         f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
         f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',

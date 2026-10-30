@@ -93,7 +93,7 @@ from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -1291,7 +1291,7 @@ def open_stream_tables(
                 f"massive.{plan.dataset}#{stream_id}",
                 col_defs(schema),
                 on_shutdown=on_shutdown,
-                defer=core.defer,
+                release_later=core.release_later,
             )
             watch = None
             received: frozenset[str] | None
@@ -1312,7 +1312,7 @@ def open_stream_tables(
                 )
                 watch.keep_alive_with(blink)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
-        scope.release()
+        release_scope(core.exec_ctx, scope)
         raise
     handle = StreamHandle(
         stream_id,

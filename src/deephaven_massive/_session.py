@@ -487,13 +487,14 @@ class MassiveSession:
         """Release one live result now instead of waiting for garbage collection.
 
         The library's hold on the table is released on the session's reaper thread, right
-        away. The table keeps ticking only while something else holds it (a derived table, an
-        open UI panel); once nothing does, its stream unsubscribes, or its poller stops. A table
-        derived in the console is held only weakly by the console, so after `del` it keeps its
-        stream running until the JVM next collects it: usually seconds, but unbounded on an idle
-        heap; `close()` stops everything at once. Releasing a result twice does nothing, and
-        `release()` keeps working after `close()`. Static results (`fetch()`, `history()`) are
-        not tracked.
+        away; inside a console command, which holds the update graph's lock, it is released
+        once the command ends. The table keeps ticking only while something else holds it (a
+        derived table, an open UI panel); once nothing does, its stream unsubscribes, or its
+        poller stops. A table derived in the console is held only weakly by the console, so after
+        `del` it keeps its stream running until the JVM next collects it: usually seconds, but
+        unbounded on an idle heap; `close()` stops everything at once. Releasing a result twice
+        does nothing, and `release()` keeps working after `close()`. Static results (`fetch()`,
+        `history()`) are not tracked.
 
         Args:
             table: A live table returned by a verb of this session.

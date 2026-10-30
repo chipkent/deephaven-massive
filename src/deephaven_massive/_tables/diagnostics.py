@@ -39,6 +39,7 @@ where it is found, and never reaches the registry.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -54,7 +55,7 @@ from deephaven_massive._datasets.schema import Column, ColumnType, Schema, pasca
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._tables.liveness import QueueWorker, new_scope
+from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -762,13 +763,13 @@ class Diagnostics:
                 exec_ctx,
                 name,
                 handle=self._apply,
-                on_exit=self._scope.release,
+                on_exit=functools.partial(release_scope, exec_ctx, self._scope),
                 timeout=self._rate_wait,
                 on_timeout=self._rate_due_now,
                 on_death=on_death,
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
-            self._scope.release()
+            release_scope(exec_ctx, self._scope)
             raise
 
     @property
@@ -868,7 +869,7 @@ class Diagnostics:
         """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
 
         No row is queued after it. The writer applies the rows queued before it, then releases
-        the scope and exits.
+        the scope, under the update graph's shared lock (`release_scope`), and exits.
 
         Args:
             wait: True to block until the writer has finished, so the rows are in the tables

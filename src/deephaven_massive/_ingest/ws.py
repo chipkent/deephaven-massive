@@ -93,6 +93,7 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
 )
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
+from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import read_symbols
@@ -1996,7 +1997,7 @@ class WsConnections:
             if opened.watch is not None:
                 opened.watch.start()
         except BaseException:
-            opened.handle.scope.release()
+            release_scope(core.exec_ctx, opened.handle.scope)
             self._abandon(connection, stream_id)
             raise
         return opened.handle
@@ -2313,8 +2314,11 @@ class WsConnections:
     def _change_pairs(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
         """Resolve a crypto stream's added pairs, then post the change; fail it if one fails.
 
-        Runs on the lookup worker, which makes no Deephaven call: a failed lookup goes to the
-        flush thread (`Flusher.fail`), and the change to the connection's loop thread.
+        Runs on the lookup worker. Its only Deephaven call is the check, when a lookup starts or
+        joins one already under way, of whether its thread holds the update graph's lock, which
+        sets how long the lookup waits out rate-limit pauses (`rate_limits.read_patience`; the
+        worker never holds it, so 10 minutes). A failed lookup goes to the flush thread
+        (`Flusher.fail`), and the change to the connection's loop thread.
 
         Args:
             stream_id: The stream.

@@ -97,7 +97,7 @@ from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import make_result
+from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import read_symbols
 
@@ -831,7 +831,7 @@ def build_table(
     *,
     stream_id: int,
     on_shutdown: Callable[[], None],
-    defer: Callable[[Callable[[], None]], None],
+    release_later: Callable[[LivenessScope], None],
 ) -> tuple[Table, BlinkPublisher]:
     """Create a `poll()` table's publisher and the result shaped from its blink table.
 
@@ -846,8 +846,8 @@ def build_table(
         stream_id: The table's `StreamId`.
         on_shutdown: The blink table's `on_shutdown_callback`: it stops the poller and tells
             the session (`_shut_down`).
-        defer: Where a failed table's pin is released (`blink_publisher`): the session's
-            reaper.
+        release_later: Releases a failed table's pin later, on the session's reaper
+            (`blink_publisher`, `SessionCore.release_later`).
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
@@ -880,7 +880,10 @@ def build_table(
             LIST_KEY_COLUMN,
         )
     blink, publisher = blink_publisher(
-        f"massive.{spec.name}#{stream_id}", definitions, on_shutdown=on_shutdown, defer=defer
+        f"massive.{spec.name}#{stream_id}",
+        definitions,
+        on_shutdown=on_shutdown,
+        release_later=release_later,
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
@@ -942,12 +945,17 @@ def _build(
     def shape() -> Table:
         on_shutdown = functools.partial(_shut_down, weakref.ref(core), stream_id, stop)
         table, publisher = build_table(
-            spec, schema, mode, stream_id=stream_id, on_shutdown=on_shutdown, defer=core.defer
+            spec,
+            schema,
+            mode,
+            stream_id=stream_id,
+            on_shutdown=on_shutdown,
+            release_later=core.release_later,
         )
         built.append(publisher)
         return describe(table, spec, schema)
 
-    result, scope = make_result(shape)
+    result, scope = make_result(core.exec_ctx, shape)
     return (result, built[0]), scope
 
 
@@ -1041,8 +1049,7 @@ def open_poll(
             if registered:
                 core.release_poll(stream_id)
         finally:
-            with entered(core.exec_ctx):
-                scope.release()
+            release_scope(core.exec_ctx, scope)
         raise
     if core.closed:  # close() failed the table meanwhile; never start its poller
         core.results.release(result)

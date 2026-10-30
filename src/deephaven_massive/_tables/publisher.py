@@ -10,29 +10,37 @@ the table, which fails every table derived from it too. The library's WebSocket 
 update cycle, Deephaven's `StreamToBlinkTableAdapter` fails the blink table and then closes
 itself, and the close takes the adapter off the update graph. The adapter never forgets a queued
 failure, so it relies on that close to stop it running. A blink table's `destroy()` closes the
-adapter too, and only the first closer does the work. When another thread destroys the table
-while the failure is queued (a released result, a session's close, a user's derived table going
-away) and is preempted before it takes the adapter off the update graph, the adapter runs on the
-next two cycles and delivers the same failure twice. Deephaven asserts that a table fails only
-once, and its fatal-error handler then calls `System.exit(1)`: in a user's Deephaven server, that
-ends the server.
+adapter too, and only the first closer does the work. When a thread that does not hold the update
+graph's lock destroys the table while the failure is queued, and is preempted before it takes the
+adapter off the update graph, the adapter runs on the next two cycles and delivers the same
+failure twice. Deephaven asserts that a table fails only once, and its fatal-error handler then
+calls `System.exit(1)`: in a user's Deephaven server, that ends the server.
+
+The library releases every scope under the update graph's shared lock (`release_scope`), so its
+own releases never destroy a table that way. Deephaven's own releases do not take the lock: a
+gRPC thread drops a released export's reference when a user closes a panel in the web UI, and
+the liveness-cleanup thread drops the references of a table the JVM collected. A user's thread
+may release a derived table the same way. Any of them can drop the last reference to the blink
+table while its failure is queued, so the library pins the table as well.
 
 **The pin.** `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table,
 so nothing can destroy it while the failure is queued; then it publishes. The failure's delivery
 closes the adapter on the update-graph thread, inside the cycle, so no second run can follow.
-That close runs the table's shutdown callback, which hands the pin's release to `defer` (the
-session's reaper) before it runs the owner's callback.
+That close runs the table's shutdown callback, which hands the pin to `release_later` (the
+session's reaper, which releases it under the update graph's lock) before it runs the owner's
+callback.
 
 **Threads and locks.** `add` and `publish_failure` run on any thread with an execution context
-except an update-graph thread; the owner serializes them. The pin's state is shared with the
-shutdown callback, which may run on any thread, under one leaf lock that is never held across a
-Deephaven call.
+except an update-graph thread. The owner serializes them under a lock of its own, which a console
+command may take while it holds the update graph's lock, so neither may wait for that lock: every
+release goes to `release_later`. The pin's state is shared with the shutdown callback, which may
+run on any thread, under one leaf lock that is never held across a Deephaven call.
 """
 
 from __future__ import annotations
 
 import functools
-import operator
+import logging
 import threading
 from typing import TYPE_CHECKING, Final
 
@@ -50,31 +58,37 @@ if TYPE_CHECKING:
 
 __all__ = ["BlinkPublisher", "blink_publisher"]
 
+logger = logging.getLogger(__name__)
+
 
 class _FailurePin:
     """The liveness hold a failing blink table keeps until its failure has been delivered.
 
     Shared by a `BlinkPublisher` and its blink table's shutdown callback, and guarded by its own
-    leaf lock: `BlinkPublisher.publish_failure` sets it, and the shutdown callback hands its
-    release to a library thread and marks the table shut down. Java holds the shutdown callback
-    for as long as the publisher lives, so the pin refers to no Python wrapper of the table: the
-    scope it holds tracks the table the way every Deephaven scope does, without keeping it
-    reachable.
+    leaf lock: `BlinkPublisher.publish_failure` sets it, and the shutdown callback hands it on
+    for release and marks the table shut down. Java holds the shutdown callback for as long as
+    the publisher lives, so the pin refers to no Python wrapper of the table: the scope it holds
+    tracks the table the way every Deephaven scope does, without keeping it reachable.
     """
 
-    __slots__ = ("_lock", "_scope", "_shut_down")
+    __slots__ = ("_lock", "_scope", "_shut_down", "name")
 
-    def __init__(self) -> None:
-        """Start with no hold, before the table has shut down."""
+    def __init__(self, name: str) -> None:
+        """Start with no hold, before the table has shut down.
+
+        Args:
+            name: The publisher's name, such as `massive.trades#7`, for the log.
+        """
+        self.name: Final = name
         self._lock = threading.Lock()
         self._scope: LivenessScope | None = None
         self._shut_down = False
 
     def hold(self, scope: LivenessScope) -> bool:
-        """Keep a scope that manages the blink table until `release` hands it on.
+        """Keep a scope until `release` hands it on; the caller then makes it manage the table.
 
         Args:
-            scope: A new scope that manages the table.
+            scope: A new scope that manages nothing yet.
 
         Returns:
             False, keeping nothing, when a failure already holds a scope or the table has shut
@@ -88,13 +102,16 @@ class _FailurePin:
             return True
 
     def release(
-        self, run: Callable[[Callable[[], None]], None], *, shut_down: bool = False
+        self, release_later: Callable[[LivenessScope], None], *, shut_down: bool = False
     ) -> None:
-        """Hand the held scope's release to `run`, once; do nothing when no scope is held.
+        """Hand the held scope to `release_later`, once; do nothing when no scope is held.
+
+        The pin is free at once, so a later `hold` succeeds unless the table has shut down. The
+        hand-over is logged at DEBUG.
 
         Args:
-            run: Runs the release, a Deephaven call: now (`operator.call`) on a thread that may
-                make one, or later on a library thread (`defer`).
+            release_later: Releases the scope on a library thread, under the update graph's
+                lock (`SessionCore.release_later`); never blocks.
             shut_down: True from the shutdown callback: the table has shut down, and no later
                 failure is held or published.
         """
@@ -102,7 +119,8 @@ class _FailurePin:
             self._shut_down |= shut_down
             scope, self._scope = self._scope, None
         if scope is not None:
-            run(scope.release)
+            logger.debug("%s: its failure pin is handed to the reaper for release", self.name)
+            release_later(scope)
 
 
 class BlinkPublisher:
@@ -119,7 +137,10 @@ class BlinkPublisher:
 
     Example:
         blink, publisher = blink_publisher(
-            "massive.trades#7", {"Price": dtypes.double}, on_shutdown=stopped, defer=reaper.submit
+            "massive.trades#7",
+            {"Price": dtypes.double},
+            on_shutdown=stopped,
+            release_later=core.release_later,
         )
         publisher.add(rows)  # a static table with the blink table's columns
         publisher.publish_failure(MassiveError("the stream failed"))
@@ -129,19 +150,28 @@ class BlinkPublisher:
             reachable while the publisher's owner (a stream's sink, a poller) lives.
     """
 
-    __slots__ = ("_pin", "_publisher", "table")
+    __slots__ = ("_pin", "_publisher", "_release_later", "table")
 
-    def __init__(self, table: Table, publisher: TablePublisher, pin: _FailurePin) -> None:
+    def __init__(
+        self,
+        table: Table,
+        publisher: TablePublisher,
+        *,
+        pin: _FailurePin,
+        release_later: Callable[[LivenessScope], None],
+    ) -> None:
         """Wrap a publisher; use `blink_publisher`, which also wires the shutdown callback.
 
         Args:
             table: The publisher's blink table.
             publisher: Deephaven's publisher.
             pin: The pin the blink table's shutdown callback releases.
+            release_later: Where this publisher's scopes are released (`blink_publisher`).
         """
         self.table: Final = table
         self._publisher: Final = publisher
         self._pin: Final = pin
+        self._release_later: Final = release_later
 
     def add(self, table: Table) -> None:
         """Add a snapshot of a table's rows to the blink table's next update cycle.
@@ -157,24 +187,47 @@ class BlinkPublisher:
 
         The table is pinned first, so the failure is delivered on the next update cycle and
         exactly once, whatever else releases the table meanwhile. Nothing is published, and
-        nothing pinned, for a table that is already being destroyed, that has already shut down,
-        or whose earlier failure is still pinned. Whatever `TablePublisher.publish_failure`
-        raises (such as a `KeyboardInterrupt`) propagates after the pin is released, so the
-        table can still be destroyed and the call may be repeated. An interrupt that lands after
-        Java has queued the failure therefore releases the pin early, and the table is
-        unprotected again until the failure is delivered.
+        nothing pinned, for a table that has already shut down, whose earlier failure is still
+        pinned, or that is being destroyed (its shutdown callback, which the destroy runs,
+        releases the pin's empty scope). Whatever `TablePublisher.publish_failure` raises (such
+        as a `KeyboardInterrupt`) propagates after the pin is handed to `release_later`, so the
+        table can still be destroyed and the call may be repeated at once. An interrupt that
+        lands after Java has queued the failure therefore unpins the table early, and the table
+        is unprotected again until the failure is delivered.
+
+        It never releases a scope itself: the owner calls it under a lock that a holder of the
+        update graph's lock may wait for, so every release goes to `release_later`. A refused
+        failure, and each hand-over to `release_later`, is logged at DEBUG with the table's name.
 
         Args:
             error: The failure; the table fails with a `RuntimeException` carrying its text.
         """
         pin = new_scope()
-        if not pin.j_scope.tryManage(self.table.j_table) or not self._pin.hold(pin):
-            pin.release()  # being destroyed, shut down, or already failing: publish nothing
+        # The Java scope, kept before the pin is reserved: a destroy racing this call may run
+        # the shutdown callback, and the reaper release the reserved scope (which clears the
+        # wrapper's `j_scope`), before the scope manages the table. A released scope manages
+        # nothing (`tryManage` returns False), so the failure is then declined.
+        j_scope = pin.j_scope
+        if not self._pin.hold(pin):  # shut down, or already failing: publish nothing
+            logger.debug(
+                "%s: failure not published, the table has shut down or an earlier failure is "
+                "still pinned (%s); its unused scope is handed to the reaper for release",
+                self._pin.name,
+                error,
+            )
+            self._release_later(pin)  # it manages nothing
             return
+        if not j_scope.tryManage(self.table.j_table):
+            logger.debug(
+                "%s: failure not published, the table is being destroyed (%s)",
+                self._pin.name,
+                error,
+            )
+            return  # its shutdown callback releases the pin, or already has
         try:
             self._publisher.publish_failure(error)
         except BaseException:
-            self._pin.release(operator.call)
+            self._pin.release(self._release_later)
             raise
 
 
@@ -183,53 +236,54 @@ def blink_publisher(
     columns: dict[str, dtypes.DType],
     *,
     on_shutdown: Callable[[], None],
-    defer: Callable[[Callable[[], None]], None],
+    release_later: Callable[[LivenessScope], None],
 ) -> tuple[Table, BlinkPublisher]:
     """Create a blink table and its `BlinkPublisher`, as `table_publisher` does.
 
     Run it on the caller thread, inside the scope that is to manage the blink table and inside
     the session's execution context. The table lives as long as a liveness scope or a derived
     table refers to it. When it shuts down (it was destroyed, or its failure was delivered), the
-    shutdown callback first queues the release of a failure's pin on `defer`, then runs
-    `on_shutdown`, on whichever thread shut it down.
+    shutdown callback first hands a failure's pin to `release_later`, then runs `on_shutdown`,
+    on whichever thread shut it down.
 
     Args:
         name: The publisher's name, for Deephaven's logs, such as `massive.trades#7`.
         columns: The blink table's columns (`col_defs`).
         on_shutdown: The table's shutdown callback. It must follow the rules of a Deephaven
             shutdown callback: no Deephaven call, no blocking, no exception.
-        defer: Runs a job later on a library thread that has entered the session's execution
-            context, without blocking the caller (the session's reaper, `SessionCore.defer`).
-            It receives one job per failed table: the release of its pin.
+        release_later: Releases a scope later on a library thread, under the update graph's
+            shared lock, without blocking the caller (`SessionCore.release_later`, which runs
+            it on the session's reaper). It receives each failure's pin once, and the unused
+            scope of each refused failure.
 
     Returns:
         The blink table and its publisher.
     """
-    pin = _FailurePin()
+    pin = _FailurePin(name)
     table, publisher = table_publisher(
         name,
         columns,
-        on_shutdown_callback=functools.partial(_shut_down, pin, on_shutdown, defer),
+        on_shutdown_callback=functools.partial(_shut_down, pin, on_shutdown, release_later),
     )
-    return table, BlinkPublisher(table, publisher, pin)
+    return table, BlinkPublisher(table, publisher, pin=pin, release_later=release_later)
 
 
 def _shut_down(
     pin: _FailurePin,
     on_shutdown: Callable[[], None],
-    defer: Callable[[Callable[[], None]], None],
+    release_later: Callable[[LivenessScope], None],
 ) -> None:
     """A `blink_publisher` table's shutdown callback: release a failure's pin, then the owner's.
 
     The pin's release is a Deephaven call, which a shutdown callback must not make (it may run
-    on an update-graph thread inside the update cycle), so it is queued on `defer`. It is queued
-    before `on_shutdown` runs, while the owner's record still keeps the session, and with it
-    the `defer` thread, alive.
+    on an update-graph thread inside the update cycle), so it goes to `release_later`. It is
+    handed on before `on_shutdown` runs, while the owner's record still keeps the session, and
+    with it the reaper, alive.
 
     Args:
         pin: The table's failure pin.
         on_shutdown: The owner's shutdown callback.
-        defer: Where the pin's release runs.
+        release_later: Where the pin is released.
     """
-    pin.release(defer, shut_down=True)
+    pin.release(release_later, shut_down=True)
     on_shutdown()
