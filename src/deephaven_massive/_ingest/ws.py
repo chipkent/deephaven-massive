@@ -72,7 +72,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
 from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
 from deephaven_massive._ingest.subscriptions import (
@@ -997,8 +997,10 @@ class Connection:
         if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
             hint += " (index values may need business.massive.com)"
         error = EntitlementError(
-            f"{self.decision.host}{self.path} refused {', '.join(sorted(refused))}: {message}; "
-            f"the plan may not include this data on this host; {hint}"
+            f"the WebSocket server {self.decision.host}{self.path} refused the subscription to "
+            f"{', '.join(sorted(refused))}; Massive said: {message}; the "
+            f"{subscription_of(self.asset_class)} subscription's plan may not include this data "
+            f"on this host; {hint}"
         )
         self._last_error = str(error)
         ids = [s.stream_id for s in self._streams.values() if s.topics & refused]

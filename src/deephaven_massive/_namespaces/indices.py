@@ -374,7 +374,10 @@ class _Indices(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
         )
         return cast("Query", query)
@@ -493,7 +496,7 @@ class _Indices(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="m.indices.snapshots(dm.ALL)",
+                all_alternative="use m.indices.snapshots(dm.ALL)",
                 params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

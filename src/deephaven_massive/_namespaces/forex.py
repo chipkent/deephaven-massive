@@ -347,7 +347,7 @@ class _Forex(Namespace):
             self._core,
             LAST_QUOTE,
             symbols=symbols,
-            all_alternative="m.forex.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -490,7 +490,10 @@ class _Forex(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
         )
         return cast("Query", query)

@@ -351,18 +351,16 @@ def test_each_endpoint_accepts_its_own_asset_classes(
 def test_dm_all_names_the_alternative(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     alternatives = {
-        "tickers": "symbols=None for every ticker",
-        "news": "symbols=None for every article",
+        "tickers": "leave symbols out for every ticker",
+        "news": "leave symbols out for every article",
     }
     for method, alternative in alternatives.items():
-        with pytest.raises(
-            ValueError, match=re.escape(f"does not accept dm.ALL; use {alternative}")
-        ):
+        with pytest.raises(ValueError, match=re.escape(f"does not accept dm.ALL; {alternative}")):
             getattr(ref, method)(symbols=dm.ALL)
     with pytest.raises(ValueError, match=r"use m\.reference\.tickers\(\) for every ticker"):
         ref.ticker_details(dm.ALL)
     for method in ("ticker_events", "related_companies"):
-        with pytest.raises(ValueError, match=r"does not accept dm\.ALL; use a list of symbols"):
+        with pytest.raises(ValueError, match=r"does not accept dm\.ALL; pass a list of symbols"):
             getattr(ref, method)(dm.ALL)
 
 

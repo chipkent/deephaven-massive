@@ -280,7 +280,10 @@ def test_a_refused_topic_fails_only_its_streams(
     ws_session.flush()
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert "socket.test/stocks refused Q.AAPL: not authorized to access Q.AAPL" in rows[1]["Error"]
+    assert (
+        "socket.test/stocks refused the subscription to Q.AAPL; Massive said: not authorized "
+        "to access Q.AAPL"
+    ) in rows[1]["Error"]
     assert "MassiveConfig.ws_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
     ws_session.send(trade("AAPL"))
     ws_session.flush()

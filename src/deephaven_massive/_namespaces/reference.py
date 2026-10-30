@@ -335,7 +335,8 @@ class _Reference(Namespace):
             self._core,
             TICKERS,
             symbols=symbols,
-            all_alternative="symbols=None for every ticker",
+            symbols_optional=True,
+            all_alternative="leave symbols out for every ticker",
             params=params,
             arguments={"type": "ticker_type"},
             filters=filters,
@@ -369,7 +370,7 @@ class _Reference(Namespace):
             self._core,
             TICKER_DETAILS,
             symbols=symbols,
-            all_alternative="m.reference.tickers() for every ticker",
+            all_alternative="use m.reference.tickers() for every ticker",
             params={"date": None if date is None else calendar_day(TICKER_DETAILS, date, "date")},
         )
         return cast("Query", query)
@@ -429,7 +430,7 @@ class _Reference(Namespace):
             self._core,
             TICKER_EVENTS,
             symbols=symbols,
-            all_alternative="a list of symbols",
+            all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
         )
         return cast("Query", query)
@@ -455,7 +456,7 @@ class _Reference(Namespace):
         raises `TypeError`.
         """
         query = build_query(
-            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="a list of symbols"
+            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
         )
         return cast("Query", query)
 
@@ -534,7 +535,7 @@ class _Reference(Namespace):
             self._core,
             NEWS,
             symbols=symbols,
-            all_alternative="symbols=None for every article",
+            all_alternative="leave symbols out for every article",
             start=start,
             end=end,
             params=list_params(sort=sort, order=order),

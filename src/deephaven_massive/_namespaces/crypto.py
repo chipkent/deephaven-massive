@@ -355,7 +355,7 @@ class _Crypto(Namespace):
             self._core,
             LAST_TRADE,
             symbols=symbols,
-            all_alternative="m.crypto.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.crypto.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -561,7 +561,10 @@ class _Crypto(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
         )
         return cast("Query", query)
@@ -737,7 +740,10 @@ class _Crypto(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+                all_alternative=(
+                    "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                    "every ticker's bar of that day"
+                ),
                 params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

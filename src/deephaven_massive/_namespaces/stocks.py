@@ -72,7 +72,7 @@ _W: Final = Transport.WS
 _F: Final = Transport.FLAT_FILES
 _STOCKS: Final = AssetClass.STOCKS
 
-_EVERY_TICKER: Final = "symbols=None, which returns every ticker"
+_EVERY_TICKER: Final = "leave symbols out, which returns every ticker"
 """The alternative to `dm.ALL` that the REST list datasets name in their `ValueError`."""
 
 
@@ -741,6 +741,7 @@ def _list_query(
         core,
         spec,
         symbols=symbols,
+        symbols_optional=True,
         all_alternative=_EVERY_TICKER,
         start=start,
         end=end,
@@ -2137,7 +2138,7 @@ class _Stocks(Namespace):
             self._core,
             LAST_TRADE,
             symbols=symbols,
-            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -2216,7 +2217,7 @@ class _Stocks(Namespace):
             self._core,
             LAST_QUOTE,
             symbols=symbols,
-            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -2388,7 +2389,10 @@ class _Stocks(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
         )
@@ -2610,7 +2614,10 @@ class _Stocks(Namespace):
             self._core,
             DAILY_OPEN_CLOSE,
             symbols=symbols,
-            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
+            all_alternative=(
+                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
         )

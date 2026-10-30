@@ -108,6 +108,9 @@ INDICATOR = DatasetSpec(
 
 
 def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+    # Most tests build a list dataset without symbols, which only filter it; the refusal of
+    # None for a dataset that needs symbols has its own test.
+    kwargs.setdefault("symbols_optional", True)
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -239,9 +242,30 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         build(massive_session, INDICATOR, symbols="aapl")
 
 
+def test_none_is_refused_where_the_dataset_needs_symbols(
+    massive_session: dm.MassiveSession,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^stocks\.trades needs symbols, got None: pass a ticker, a list of tickers, a "
+        r"table with a Symbol column, or dm\.ALL for every ticker$",
+    ):
+        build(massive_session, TRADES_SPEC, symbols_optional=False)
+    with pytest.raises(
+        ValueError,
+        match=r"^stocks\.trades needs symbols, got None: pass a ticker, a list of tickers, or a "
+        r"table with a Symbol column \(it does not take dm\.ALL: use X\)$",
+    ):
+        build(massive_session, TRADES_SPEC, symbols_optional=False, all_alternative="use X")
+    # A dataset whose symbols only filter it takes None, and one without symbols takes none.
+    assert build(massive_session, DIVIDENDS)._request.symbols is None
+    with pytest.raises(ValueError, match=r"^stocks\.trades needs symbols"):
+        massive_session.stocks.trades(None)  # type: ignore[arg-type]  # the refused value
+
+
 def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"stocks\.dividends does not accept dm\.ALL; use X"):
-        build(massive_session, DIVIDENDS, symbols=dm.ALL, all_alternative="X")
+    with pytest.raises(ValueError, match=r"stocks\.dividends does not accept dm\.ALL; use X$"):
+        build(massive_session, DIVIDENDS, symbols=dm.ALL, all_alternative="use X")
     assert build(massive_session, TRADES_SPEC, symbols=dm.ALL)._request.symbols is dm.ALL
 
 

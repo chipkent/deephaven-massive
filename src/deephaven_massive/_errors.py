@@ -118,21 +118,26 @@ class EntitlementError(MassiveError):
     """The key is valid, but the plan does not include what was requested.
 
     Raised when Massive answers HTTP 403 (`NOT_AUTHORIZED`) to a REST request, when a WebSocket
-    subscription is refused with an explicit error for its topic, or when a plan has no
-    WebSocket access for an asset class at all. The message names the nearest entitled
-    alternative when one exists, for example `m.stocks.snapshots(symbols).poll(15)` for delayed
-    NBBO on a plan without real-time quotes. Only the affected table fails; other tables on the
-    same connection keep running.
+    subscription is refused with an explicit error for its topic, when a plan has no WebSocket
+    access for an asset class at all, or when S3 refuses a flat file. Only the affected table
+    fails; other tables on the same connection keep running.
+
+    The library does not model Massive's plans, so the message reports what happened rather than
+    guessing at what the plan holds: the subscription (stocks, options, indices, currencies, or
+    futures), the transport, the request that was refused, and Massive's own text. When the
+    refused request was the library's own, such as the snapshot request that checks a plan's
+    WebSocket host before the first stream of a class, the message says so. Where the library
+    has another way to read the same data, the message names it: a refused flat-file
+    `history()` names `source=dm.HistorySource.REST` when REST can serve the read.
 
     Example:
-        ::
+        Read a day of trades, and report it when the plan lacks them::
 
             import deephaven_massive as dm
 
-            # A plan gap is a MassiveError, so one handler can catch every library failure.
-            assert issubclass(dm.EntitlementError, dm.MassiveError)
+            m = dm.MassiveSession()
             try:
-                raise dm.EntitlementError("NBBO quotes are not on this plan")
+                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06")
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """

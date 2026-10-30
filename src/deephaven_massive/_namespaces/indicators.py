@@ -206,7 +206,7 @@ class _Indicators(Namespace):
             self._core,
             spec,
             symbols=symbols,
-            all_alternative="a list of symbols",
+            all_alternative="pass a list of symbols",
             timespan=span,
             adjusted=adjusted,
             start=start,

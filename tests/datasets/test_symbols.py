@@ -3,6 +3,7 @@
 import csv
 import io
 import logging
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -635,9 +636,9 @@ def test_normalize_materializes_generators() -> None:
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
-    with pytest.raises(ValueError, match=r"^no symbols$"):
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         normalize(STK, cast("Iterable[str]", items))
-    with pytest.raises(ValueError, match=r"^no symbols$"):
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         normalize(STK, [])
 
 
@@ -823,3 +824,15 @@ def test_the_spread_converter_names_surrounding_whitespace() -> None:
         ValueError, match=r"^' GCQ6-GCZ6 ' has surrounding whitespace; write 'GCQ6-GCZ6'$"
     ):
         dm.canonical_symbol_future_spread(" GCQ6-GCZ6 ")
+
+
+def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
+    message = (
+        "cannot read 'EURUSD=X' as a forex pair: it looks like Yahoo Finance's spelling; "
+        "Massive's forex tickers look like 'C:EURUSD', two three-letter currency codes after "
+        "C:, and this function reads 'EUR/USD', 'EUR-USD', or 'EURUSD'"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        dm.canonical_symbol_forex("EURUSD=X")
+    with pytest.raises(ValueError, match="Yahoo Finance"):
+        dm.canonical_symbol_forex("eurusd=x")

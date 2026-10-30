@@ -613,11 +613,20 @@ def _convert_forex(text: str) -> str:
         `C:` and the two codes, such as `C:EURUSD`.
 
     Raises:
-        ValueError: If the codes are not two three-letter currency codes, or the text names
-            another class.
+        ValueError: If the codes are not two three-letter currency codes (text ending in `=X`,
+            Yahoo Finance's spelling, gets a message that shows Massive's form), or the text
+            names another class.
     """
     _refuse_other_prefix(AssetClass.FOREX, text)
     symbol = _forex(text.upper(), ("C:",))
+    if symbol is None and text.upper().endswith("=X"):
+        # Yahoo Finance writes a pair as `EURUSD=X`; reading it would guess at another vendor's
+        # grammar, so the message only shows Massive's form.
+        raise ValueError(
+            f"cannot read {text!r} as a forex pair: it looks like Yahoo Finance's spelling; "
+            "Massive's forex tickers look like 'C:EURUSD', two three-letter currency codes "
+            "after C:, and this function reads 'EUR/USD', 'EUR-USD', or 'EURUSD'"
+        )
     if symbol is None:
         raise ValueError(
             f"cannot read {text!r} as a forex pair of two three-letter codes; write it as "
@@ -1044,7 +1053,9 @@ def canonical_symbol_forex(text: str | None) -> str | None:
         `C:` and the two codes, or None for None.
 
     Errors: `TypeError` if `text` is neither a `str` nor None, and `ValueError` if the text is not
-    two three-letter codes, or carries another class's prefix (`X:` is crypto).
+    two three-letter codes, or carries another class's prefix (`X:` is crypto). Yahoo Finance's
+    spelling, `EURUSD=X`, is refused with a message that shows Massive's form: nothing is guessed
+    from another vendor's grammar.
     """
     return canonical_symbol(text, AssetClass.FOREX)
 
@@ -1174,7 +1185,10 @@ def normalize(
                 f"got {type(symbols).__name__}"
             ) from None
     if not items:
-        raise ValueError("no symbols")
+        raise ValueError(
+            "no symbols: the list is empty; pass at least one ticker, or dm.ALL for every "
+            "ticker where the dataset takes it"
+        )
     return tuple(sorted({check_symbol(asset_class, i, as_written=as_written) for i in items}))
 
 

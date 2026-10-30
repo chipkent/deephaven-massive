@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 _REST = Transport.REST
 
-_NO_TICKER_FILTER: Final = "symbols=None, which applies no ticker filter"
+_NO_TICKER_FILTER: Final = "leave symbols out, which applies no ticker filter"
 """The alternative a list dataset names when it is given `dm.ALL`."""
 
 _ETF_KEYS: Final = ("Symbol", "EffectiveDate", "ProcessedDate")
@@ -376,7 +376,7 @@ def _list_query(
         core: The session core.
         spec: The dataset.
         symbols: The requested tickers, or None for none.
-        all_alternative: What the `ValueError` for `dm.ALL` tells the caller to pass instead.
+        all_alternative: What the `ValueError` for `dm.ALL` tells the caller to do instead.
         start: The lower bound of the dataset's time axis, or None.
         end: The upper bound of the dataset's time axis, or None.
         sort: The `sort` parameter, or None for the endpoint's default.
@@ -392,6 +392,8 @@ def _list_query(
         core,
         spec,
         symbols=symbols,
+        # A ticker filter is optional; a ticker in the path (consensus ratings) is not.
+        symbols_optional=spec.symbol_param is not None,
         all_alternative=all_alternative,
         start=start,
         end=end,
@@ -657,7 +659,7 @@ class _Benzinga(Namespace):
             self._core,
             BENZINGA_CONSENSUS_RATINGS,
             symbols=symbols,
-            all_alternative="a list of symbols; the endpoint takes one ticker per request",
+            all_alternative="pass a list of symbols; the endpoint takes one ticker per request",
             filters=filters,
         )
 

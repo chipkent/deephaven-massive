@@ -561,7 +561,7 @@ def test_list_datasets_filter_by_optional_symbols(
     assert type(make()) is Query
     assert make()._request.symbols is None
     assert make("AAPL")._request.symbols == ("AAPL",)
-    with pytest.raises(ValueError, match="use symbols=None, which returns every ticker"):
+    with pytest.raises(ValueError, match="leave symbols out, which returns every ticker"):
         make(dm.ALL)
 
 

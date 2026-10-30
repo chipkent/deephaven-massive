@@ -457,7 +457,7 @@ class _Options(Namespace):
             self._core,
             LAST_TRADE,
             symbols=symbols,
-            all_alternative="m.options.chain(underlying).fetch()",
+            all_alternative="use m.options.chain(underlying).fetch()",
         )
         return cast("Query", query)
 
@@ -667,7 +667,8 @@ class _Options(Namespace):
             PREVIOUS_DAY_BAR,
             symbols=symbols,
             all_alternative=(
-                "m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)"
+                "use m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day), "
+                "every contract's bar of that day"
             ),
             timespan=Timespan.DAY,
             adjusted=adjusted,
@@ -950,7 +951,8 @@ class _Options(Namespace):
                 self._core,
                 CONTRACTS,
                 symbols=symbols,
-                all_alternative="m.options.contracts() without symbols",
+                symbols_optional=True,
+                all_alternative="use m.options.contracts() without symbols",
                 params=params,
                 filters=filters,
                 limit=limit,
@@ -1002,7 +1004,7 @@ class _Options(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="m.options.snapshots(dm.ALL)",
+                all_alternative="use m.options.snapshots(dm.ALL)",
                 adjusted=adjusted,
                 params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),

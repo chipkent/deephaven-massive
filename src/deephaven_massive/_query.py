@@ -73,7 +73,7 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
@@ -1058,11 +1058,36 @@ class HistoryQuery(QueryBase):
                 self._core.rest_transport().history(self._spec, request, window, call=call),
                 note=note,
             )
-        return self._described(
-            self._core.flat_file_transport().history(
+        try:
+            table = self._core.flat_file_transport().history(
                 self._spec, request, window, dates=dates, call=call
-            ),
-            note=note,
+            )
+        except EntitlementError as error:
+            raise self._refused_flat_files(error, request) from error
+        return self._described(table, note=note)
+
+    def _refused_flat_files(self, error: EntitlementError, request: Request) -> EntitlementError:
+        """Name REST as the other transport when the plan refuses the flat files a read needs.
+
+        Under `AUTO` too the refusal is raised, never answered by switching to REST: the two
+        sources fill different columns, so a silent switch would change the table's columns.
+
+        Args:
+            error: The flat-file refusal, which names the files and Massive's text.
+            request: The request, with its symbols read.
+
+        Returns:
+            The same error when REST cannot serve the request either; otherwise a new
+            `EntitlementError` with the same status and request id whose message ends by
+            naming `source=dm.HistorySource.REST`.
+        """
+        if rest_history_problem(self._spec, request) is not None:
+            return error
+        return EntitlementError(
+            f"{error}; REST serves this read too: pass source=dm.HistorySource.REST to "
+            "history() (it can fill other columns; columns() shows which)",
+            status=error.status,
+            request_id=error.request_id,
         )
 
     def _warn_unfilled(self, choice: SourceChoice) -> None:

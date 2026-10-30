@@ -342,7 +342,7 @@ def _class_of(name: str) -> str:
 @pytest.mark.parametrize("name", [*LIST_WITH_SYMBOLS, "partners.benzinga.news"])
 def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, name: str) -> None:
     make = factory(massive_session, name)
-    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; use symbols=None"):
+    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
         make(symbols=dm.ALL)
 
 
