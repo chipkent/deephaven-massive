@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import enum
+import logging
 import os
 import ssl
 import threading
@@ -37,6 +38,8 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import certifi
 
 __all__ = ["TlsConsumer", "ca_file", "https_proxy", "proxy_credentials", "ssl_context"]
+
+_log = logging.getLogger(__name__)
 
 
 class TlsConsumer(enum.Enum):
@@ -97,7 +100,9 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
     `stat` call per entry, on every call; no certificate is read unless a context is built.
     It happens before the module lock is taken. The first call for a key builds the context
     under the lock, reading the bundle from local disk while it is held, so concurrent first
-    calls build exactly one; later calls take the lock only to look the context up.
+    calls build exactly one; later calls take the lock only to look the context up. Building a
+    context logs the settings it was built for at DEBUG, and a `SSL_CERT_DIR` directory that
+    cannot be listed logs a WARNING on every call, both after the lock is released.
 
     Args:
         consumer: The library that will use the context. urllib3 and `websockets` never share
@@ -115,24 +120,32 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
     """
     cert_file = os.environ.get("SSL_CERT_FILE", "")
     cert_dir = os.environ.get("SSL_CERT_DIR", "")
-    key = (
-        consumer,
-        cert_file,
-        _identity(cert_file),
-        cert_dir,
-        _directories_identity(cert_dir),
-        os.environ.get("SSLKEYLOGFILE", ""),
-    )
+    key_log = os.environ.get("SSLKEYLOGFILE", "")
+    directories = _directories_identity(cert_dir)
+    key = (consumer, cert_file, _identity(cert_file), cert_dir, directories, key_log)
     with _CONTEXTS_LOCK:
-        context = _CONTEXTS.get(key)
-        if context is None:
+        cached = _CONTEXTS.get(key)
+        if cached is None:
             if cert_file or cert_dir:
                 context = ssl.create_default_context()
             else:
                 context = ssl.create_default_context(cafile=certifi.where())
             context.set_alpn_protocols(_ALPN_PROTOCOLS)
             _CONTEXTS[key] = context
-        return context
+        else:
+            context = cached
+    if cached is None:
+        _log.debug(
+            "built a TLS context for %s trusting %s (SSL_CERT_FILE=%r, SSL_CERT_DIR=%r, "
+            "certificate directory entries: %d, SSLKEYLOGFILE=%r)",
+            consumer.value,
+            "the OpenSSL locations" if cert_file or cert_dir else "certifi's bundle",
+            cert_file,
+            cert_dir,
+            sum(len(entries) for _, _, entries in directories),
+            key_log,
+        )
+    return context
 
 
 def _identity(path: str | Path) -> tuple[int, ...]:
@@ -156,7 +169,9 @@ def _identity(path: str | Path) -> tuple[int, ...]:
     return (status.st_mtime_ns, status.st_size, status.st_ino)
 
 
-def _directories_identity(cert_dir: str) -> tuple[object, ...]:
+def _directories_identity(
+    cert_dir: str,
+) -> tuple[tuple[str, tuple[int, ...], tuple[tuple[str, tuple[int, ...]], ...]], ...]:
     """Return what tells one version of the `SSL_CERT_DIR` certificate directories from another.
 
     OpenSSL looks a certificate up in these directories by the hash of its subject, reading
@@ -193,13 +208,19 @@ def _entries_identity(directory: str) -> tuple[tuple[str, tuple[int, ...]], ...]
     Returns:
         One `(name, identity)` pair per entry, where the identity is that of the file the
         entry resolves to, as `_identity` returns it. Empty when the directory does not exist
-        or cannot be listed. An entry removed while it is examined, or a link to a missing
-        file, gets the identity `()`.
+        or cannot be listed, which logs a WARNING naming the directory and the error. An entry
+        removed while it is examined, or a link to a missing file, gets the identity `()`.
     """
     root = Path(directory)
     try:
         names = sorted(entry.name for entry in root.iterdir())
-    except OSError:
+    except OSError as error:
+        _log.warning(
+            "cannot list the certificate directory %r named by SSL_CERT_DIR (%s): certificates "
+            "OpenSSL cannot find there are not trusted, and edits to it go unnoticed",
+            directory,
+            error,
+        )
         return ()
     return tuple((name, _identity(root / name)) for name in names)
 

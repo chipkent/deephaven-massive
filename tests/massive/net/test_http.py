@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 import ssl
 import threading
@@ -271,6 +272,40 @@ def test_every_directory_in_ssl_cert_dir_is_examined(
     assert http.ssl_context(REST) is trusting
     hashed.write_bytes(b"")
     assert http.ssl_context(REST) is not trusting
+
+
+def test_a_cert_directory_that_cannot_be_listed_logs_a_warning(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    missing = tmp_path / "missing"
+    clean_env.setenv("SSL_CERT_DIR", str(missing))
+    with caplog.at_level(logging.WARNING, logger=http.__name__):
+        http.ssl_context(REST)
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert repr(str(missing)) in record.getMessage()
+    assert isinstance(record.args, tuple)
+    assert isinstance(record.args[1], FileNotFoundError)  # the error is named, not swallowed
+
+
+def test_building_a_context_logs_its_settings_once(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = tmp_path / "certs"
+    _cert_directory(clean_env, directory)
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.ssl_context(WEBSOCKET)
+        http.ssl_context(WEBSOCKET)  # cached: nothing is built, so nothing is logged
+    expected = (
+        "built a TLS context for websockets trusting the OpenSSL locations (SSL_CERT_FILE='', "
+        f"SSL_CERT_DIR={str(directory)!r}, certificate directory entries: 1, SSLKEYLOGFILE='')"
+    )
+    assert [record.getMessage() for record in caplog.records] == [expected]
+    caplog.clear()
+    clean_env.delenv("SSL_CERT_DIR")
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.ssl_context(REST)
+    assert "for urllib3 trusting certifi's bundle" in caplog.records[0].getMessage()
 
 
 def test_a_key_log_file_gets_its_own_context(clean_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
