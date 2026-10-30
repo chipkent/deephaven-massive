@@ -1,7 +1,7 @@
 """A stand-in for the WebSocket transport's stream factory, for the liveness tests.
 
-Each stream is a bare `table_publisher` blink table created in its own stream scope, exactly as
-the real transport creates one, without any network. The fake records every stream it opens and
+Each stream is a `blink_publisher` blink table created in its own stream scope, exactly as the
+real transport creates one, without any network. The fake records every stream it opens and
 every `on_shutdown_callback` Deephaven runs, so tests can observe exactly when a stream is torn
 down. Like the real transport, the callback first tells the session
 (`SessionCore.stream_shut_down`), which drops the stream's registry record, and the handle's
@@ -18,10 +18,9 @@ import types
 import weakref
 from typing import TYPE_CHECKING, Any
 
-from deephaven.stream.table_publisher import TablePublisher, table_publisher
-
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import StreamHandle, new_scope
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,7 +41,7 @@ class FakeStreamTransport:
     def __init__(self, core: SessionCore) -> None:
         self._core = weakref.ref(core)
         self.opened: list[tuple[str, str]] = []
-        self.publishers: dict[int, TablePublisher] = {}
+        self.publishers: dict[int, BlinkPublisher] = {}
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
         self.failed: dict[int, str] = {}
@@ -77,10 +76,11 @@ class FakeStreamTransport:
             self.shutdown[stream_id] = threading.Event()
         scope = new_scope()
         with scope.open():
-            blink, publisher = table_publisher(
+            blink, publisher = blink_publisher(
                 f"massive.{spec.name}#{stream_id}",
                 col_defs(schema),
-                on_shutdown_callback=lambda: self._on_shutdown(stream_id),
+                on_shutdown=lambda: self._on_shutdown(stream_id),
+                defer=core.defer,
             )
         with self._lock:
             self.opened.append((spec.name, channel))

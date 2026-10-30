@@ -192,20 +192,27 @@ jobs:
           uv sync --python ${{ matrix.python-version }}
           ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
       - name: Pytest with 100% statement and branch coverage
-        run: uv run pytest --cov --cov-report=xml
+        # tests/conftest.py writes the message of a JVM fatal error, which exits the process, to
+        # jvm_fatal_pid*.log (uploaded below) and to file descriptor 2. --capture=sys captures
+        # Python's output only and leaves that descriptor alone, so the message also shows in
+        # the job log.
+        run: uv run pytest --capture=sys --cov --cov-report=xml
       - name: Upload coverage XML
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-py${{ matrix.python-version }}
           path: coverage.xml
       - name: Upload JVM crash logs
-        # tests/conftest.py points the JVM's crash log (-XX:ErrorFile) at the repository root.
+        # tests/conftest.py points the JVM's crash log (-XX:ErrorFile) at the repository root,
+        # and writes the message of a JVM fatal error (System.exit, no crash log) beside it.
         # A job cancelled by its timeout can be a hung or crashed JVM too.
         if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hs-err-py${{ matrix.python-version }}
-          path: hs_err_pid*.log
+          path: |
+            hs_err_pid*.log
+            jvm_fatal_pid*.log
           if-no-files-found: ignore
 
   test-lowest:
@@ -247,15 +254,19 @@ jobs:
           '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest|pytest-xdist) '
       - name: Pytest
         # Coverage is the newest-versions jobs' gate; this job checks only that the floors work.
-        run: uv run --no-sync pytest
+        # --capture=sys lets a JVM fatal error's message reach the job log, as in the test job.
+        run: uv run --no-sync pytest --capture=sys
       - name: Upload JVM crash logs
-        # tests/conftest.py points the JVM's crash log (-XX:ErrorFile) at the repository root.
+        # tests/conftest.py points the JVM's crash log (-XX:ErrorFile) at the repository root,
+        # and writes the message of a JVM fatal error (System.exit, no crash log) beside it.
         # A job cancelled by its timeout can be a hung or crashed JVM too.
         if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hs-err-py3.11-lowest-direct
-          path: hs_err_pid*.log
+          path: |
+            hs_err_pid*.log
+            jvm_fatal_pid*.log
           if-no-files-found: ignore
 
   build:

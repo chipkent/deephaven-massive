@@ -314,8 +314,9 @@ _tables/                 the Deephaven side: tables, liveness, library threads
                          (section 10)
   symbols.py             canonicalize_symbols(), the table form of the symbol converters
                          (section 10)
-  stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
-                         (section 14)
+  publisher.py           blink_publisher(), BlinkPublisher: the publisher of every blink
+                         table, whose failure pins the table until it is delivered (section 6.1)
+  stream.py              streams, flush thread, fan-out, bound-failure routing (section 14)
 _ingest/                 the only holder of wire clients
   __init__.py            docstring only
   clients.py             SessionClients: the session's wire clients and connections, the ports
@@ -723,6 +724,18 @@ These facts are verified in `deephaven-core` `main`:
 - `StreamToBlinkTableAdapter`: the blink table's `destroy()` calls `adapter.close()`, which
   runs `streamPublisher.shutdown()`, which runs the `on_shutdown_callback` synchronously on the
   calling thread. The adapter holds the table only weakly.
+- `StreamToBlinkTableAdapter` (42.7) delivers a published failure on its next run and then
+  closes itself; the close takes the adapter off the update graph. It never clears its queue
+  of failures, so it relies on running no more once the close has started. A `destroy()` on
+  another thread can claim the close (`alive.compareAndSet`) while a failure is queued: the
+  next run delivers the failure, its own close does nothing, and if the destroying thread has
+  not yet called `removeSource` when the cycle after that starts, the adapter runs again and
+  delivers the same failure a second time. `BaseTable.notifyListenersOnError` asserts the
+  table has not failed yet, and the fatal-error handler calls `System.exit(1)`. A failure the
+  adapter queues itself (`deliverUpdate` when `notifyListeners` throws) races a destroy the same
+  way. With a debugger pausing the destroying thread before `removeSource`, the process exits
+  on the first or second failure. Unforced, under heavy load (eight test processes beside 20 CPU
+  burners), 3 in 100,000 failures whose result is released at once ended the process.
 - `LivenessScopeStack` is thread-local. `LivenessScope.release()` decrements the scope's count,
   and referents are dropped on the thread that releases.
 - `deephaven.liveness_scope.LivenessScope` exposes `open()`, `manage()`, `unmanage()`, and
@@ -836,6 +849,16 @@ return result
   failure lands while the shape derives from the blink table. A stream's failure is recorded
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
   meets the failed table always finds the failure to name.
+- **A failure pins its table.** Every blink table the library feeds (a stream's, a `poll()`
+  table's) is created by `blink_publisher` (`_tables/publisher.py`), whose
+  `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table, then
+  publishes the failure. While the failure is queued nothing can destroy the table, so only
+  the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
+  run follows. The shutdown callback that close runs queues the pin's release on the session's
+  reaper (a Deephaven call, which the callback must not make itself). A table that is already
+  being destroyed, already shut down, or already pinned by an earlier failure gets no failure.
+  The pin cannot cover a failure the adapter queues itself (`deliverUpdate`), which only a
+  Deephaven fix can.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -3188,8 +3211,8 @@ How a request is built from a `DatasetSpec` and a `Request`:
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
 - Each stream owns one
-  `table_publisher(name=f"massive.{dataset}#{stream_id}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
-  created inside the stream scope under the session's captured `ExecutionContext` by
+  `blink_publisher(name=f"massive.{dataset}#{stream_id}", columns=<dataset schema>, on_shutdown=..., defer=<the session's reaper>)`
+  (a `table_publisher` whose failure pins its table, section 6.1), created inside the stream scope under the session's captured `ExecutionContext` by
   `StreamTransport.open_stream(spec, request, channel, *, stream_id)`. The session mints
   `stream_id` and has registered the stream before the call, so the transport may call
   `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls
@@ -3623,8 +3646,9 @@ and pool named, no logging call under a leaf lock).
   row that showed it (a WebSocket sample's, else the per-symbol REST request's), and an extra
   field's first value: `stocks.trades: WS field 'zz' is not in the schema; it is dropped
   (schema drift) at wss://delayed.massive.com/stocks channel T; symbol AAPL; first value 1`.
-- A failed static call logs `call <id> failed: <message>` at ERROR, from the REST or flat-file
-  transport.
+- A failed `fetch()` or `history()` logs `call <id> failed after <s> s: <message>` at ERROR
+  once, from the call itself, whatever its source; a transport that gives up logs only a
+  WARNING.
 - A stream's open, reuse, each released hold, and its shutdown (with its route and topics) log
   at DEBUG with its stream id; so do a reactive symbol table's changes, each subscription step
   (with the desired, acknowledged, and deferred counts), and each `poll()` cycle (requests,
@@ -5292,12 +5316,14 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   (pytest-xdist): each worker is its own process with its own embedded JVM, and the controller
   that hands out the tests starts none. pytest-cov combines the workers' coverage, so the 100%
   gate is unchanged. A run that only collects or lists fixtures collects in the main process,
-  as xdist does, so that process starts a JVM; `-n` together with a `-m` expression that
-  selects live tests is a usage error, since they share rate limits and one evidence log: the
-  check tries `integration` with every combination of the markers only live tests carry
-  (`integration_limits`, `integration_smoke`, `needs`, `settles`, `requests`), so `-m needs` is
-  refused too. CI runs the suite in one process: its standard runners have 2 CPUs, where two
-  workers gained nothing once their startup was paid.
+  as xdist does, so that process starts a JVM. A parallel run that selects any live test is a
+  usage error, since live tests share rate limits and one evidence log: once a worker has
+  collected, the controller reads the ids of the tests it selected (after `-m`, `-k`, and every
+  other deselection) and ends the run before handing out any test if one is in a
+  `*_integration.py` file. The decision rests on the selection, never on the `-m` expression,
+  so `-m ""` and `-m "integration and needs"` are refused like `-m integration`. CI runs the
+  suite in one process: its standard runners have 2 CPUs, where two workers gained nothing
+  once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in

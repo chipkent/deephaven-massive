@@ -12,6 +12,7 @@ import statistics
 import sys
 import threading
 import time
+import types
 import weakref
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
@@ -724,7 +725,8 @@ def test_a_failure_is_recorded_before_the_table_fails(
     sink, _ = make_sink(core, ALL)
     order: list[str] = []
     monkeypatch.setattr(core, "fail_stream", lambda *_: order.append("recorded"))
-    monkeypatch.setattr(sink.publisher, "publish_failure", lambda _: order.append("failed"))
+    failing = types.SimpleNamespace(publish_failure=lambda _: order.append("failed"))
+    monkeypatch.setattr(sink, "publisher", failing)
     sink.fail(MassiveError("refused"))
     assert order == ["recorded", "failed"]
 

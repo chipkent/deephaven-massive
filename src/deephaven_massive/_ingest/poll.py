@@ -2,9 +2,10 @@
 
 `Query.poll(interval, mode=...)` returns a live table that one *poller* keeps current: a daemon
 thread that runs a cycle (one `fetch()` of the dataset, through the REST transport's reader),
-publishes its rows, and waits for the next cycle. Every mode publishes through one Deephaven
-`table_publisher`, created with the result inside its result scope on the caller thread, so a
-failure can fail the table (`publish_failure`) in every mode:
+publishes its rows, and waits for the next cycle. Every mode publishes through one blink table's
+publisher (`BlinkPublisher`, whose failure is delivered exactly once), created with the result
+inside its result scope on the caller thread, so a failure can fail the table
+(`publish_failure`) in every mode:
 
 - `APPEND`: the publisher's blink table made append-only, fed only the rows not seen before. A
   row's identity is its values of the poll keys and then the revision keys
@@ -72,7 +73,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
-from deephaven.stream.table_publisher import table_publisher
 
 from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.schema import RAW_SYMBOL
@@ -88,6 +88,7 @@ from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import read_symbols
 
 if TYPE_CHECKING:
@@ -95,7 +96,6 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from deephaven.liveness_scope import LivenessScope
-    from deephaven.stream.table_publisher import TablePublisher
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -347,7 +347,7 @@ class Poller:
         read: CycleReader,
         pollers: Pollers,
         clock: PollClock,
-        publisher: TablePublisher,
+        publisher: BlinkPublisher,
         stop: Cancel,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
@@ -762,7 +762,8 @@ def build_table(
     *,
     stream_id: int,
     on_shutdown: Callable[[], None],
-) -> tuple[Table, TablePublisher]:
+    defer: Callable[[Callable[[], None]], None],
+) -> tuple[Table, BlinkPublisher]:
     """Create a `poll()` table's publisher and the result shaped from its blink table.
 
     Runs on the caller thread, inside the result's liveness scope and the session's execution
@@ -776,6 +777,8 @@ def build_table(
         stream_id: The table's `StreamId`.
         on_shutdown: The blink table's `on_shutdown_callback`: it stops the poller and tells
             the session (`_shut_down`).
+        defer: Where a failed table's pin is released (`blink_publisher`): the session's
+            reaper.
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
@@ -787,8 +790,8 @@ def build_table(
     replace = mode is PollMode.REPLACE
     if replace:
         definitions[LIVE_COLUMN] = dtypes.bool_
-    blink, publisher = table_publisher(
-        f"massive.{spec.name}#{stream_id}", definitions, on_shutdown_callback=on_shutdown
+    blink, publisher = blink_publisher(
+        f"massive.{spec.name}#{stream_id}", definitions, on_shutdown=on_shutdown, defer=defer
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
@@ -827,7 +830,7 @@ def _build(
     mode: PollMode,
     stream_id: int,
     stop: Cancel,
-) -> tuple[tuple[Table, TablePublisher], LivenessScope]:
+) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
     Args:
@@ -844,13 +847,13 @@ def _build(
         the `last_by` of `UPSERT` and `REPLACE` put the poll keys first; the poller writes
         only through the publisher.
     """
-    built: list[TablePublisher] = []
+    built: list[BlinkPublisher] = []
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
         on_shutdown = functools.partial(_shut_down, weakref.ref(core), stream_id, stop)
         table, publisher = build_table(
-            spec, schema, mode, stream_id=stream_id, on_shutdown=on_shutdown
+            spec, schema, mode, stream_id=stream_id, on_shutdown=on_shutdown, defer=core.defer
         )
         built.append(publisher)
         return describe(table, spec, schema)
