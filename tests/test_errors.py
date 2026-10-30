@@ -5,7 +5,7 @@ import inspect
 import pkgutil
 import re
 import textwrap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 
 import pytest
 
@@ -183,17 +183,36 @@ def _subclasses(cls: type) -> Iterator[type]:
         yield from _subclasses(sub)
 
 
+_WIRE_PACKAGE = f"{dm.__name__}._massive"
+"""The wire package, which only its own tests import beyond its interface; it declares nothing."""
+
+
+def _library_modules(path: Sequence[str], prefix: str) -> Iterator[str]:
+    """Yield the names of the library's modules below a package, leaving the wire package out.
+
+    `pkgutil.walk_packages` would import every subpackage to look inside it, the wire package's
+    too; this walk never enters it.
+    """
+    for info in pkgutil.iter_modules(path, prefix):
+        if info.name == _WIRE_PACKAGE:
+            continue
+        yield info.name
+        if info.ispkg:
+            package = importlib.import_module(info.name)
+            yield from _library_modules(package.__path__, f"{info.name}.")
+
+
 def _declared() -> Iterator[Callable[..., object]]:
-    """Yield every function and method of the package that carries a `raises_through` record."""
-    for info in pkgutil.walk_packages(dm.__path__, f"{dm.__name__}."):
-        module = importlib.import_module(info.name)
+    """Yield every function and method of the library that carries a `raises_through` record."""
+    for name in _library_modules(dm.__path__, f"{dm.__name__}."):
+        module = importlib.import_module(name)
         for value in vars(module).values():
             members = vars(value).values() if isinstance(value, type) else (value,)
             for member in members:
                 function = member.fget if isinstance(member, property) else member
                 if (
                     callable(function)
-                    and getattr(function, "__module__", None) == info.name
+                    and getattr(function, "__module__", None) == name
                     and RAISES_THROUGH in getattr(function, "__dict__", {})
                 ):
                     yield function
@@ -325,3 +344,9 @@ def test_raises_through_records_the_helpers_and_keeps_the_function() -> None:
 
     assert raises_through(_parse_number)(count) is count
     assert getattr(count, RAISES_THROUGH) == (_parse_number,)
+
+
+def test_the_walk_never_enters_the_wire_package() -> None:
+    names = list(_library_modules(dm.__path__, f"{dm.__name__}."))
+    assert f"{dm.__name__}._namespaces.stocks" in names
+    assert not [name for name in names if name.startswith(_WIRE_PACKAGE)]

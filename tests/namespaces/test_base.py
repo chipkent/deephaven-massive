@@ -12,6 +12,7 @@ against synthetic namespaces that break it.
 import collections.abc
 import dataclasses
 import datetime as dt
+import logging
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -245,8 +246,16 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
 
 
 def test_none_is_refused_where_the_dataset_needs_symbols(
-    massive_session: dm.MassiveSession,
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive"),
+        pytest.raises(ValueError, match="needs symbols"),
+    ):
+        build(massive_session, TRADES_SPEC, symbols_optional=False)
+    assert caplog.messages == [
+        "stocks.trades refused: symbols=None on a dataset that needs symbols"
+    ]
     with pytest.raises(
         ValueError,
         match=r"^stocks\.trades needs symbols, got None: pass a ticker, a list of tickers, a "

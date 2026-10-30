@@ -646,6 +646,8 @@ def build_query(
             else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
             f"take dm.ALL: {all_alternative})"
         )
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
         raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
