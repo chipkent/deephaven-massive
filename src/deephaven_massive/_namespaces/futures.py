@@ -297,7 +297,7 @@ class _Futures(Namespace):
 
             m = dm.MassiveSession()
             active = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
-            es = m.futures.trades(active.view(["Symbol = Ticker"])).last_by()  # live
+            es = m.futures.trades(active).last_by()  # live
             daily = m.futures.bars("ESZ5", dm.Timespan.SESSION).history("2025-01-02", "2025-03-31")
     """
 

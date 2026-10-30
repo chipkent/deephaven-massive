@@ -951,9 +951,10 @@ class _Options(Namespace):
         `underlying`, `contract_type`, `expired=True`, `sort`, `order`, or a filter is set.
         `poll()` re-reads it each interval.
 
-        `limit` caps the total number of rows across pages (None, the default, returns every
-        row); it is not the page size. `dm.ALL` is not accepted: leave `symbols` out to list
-        every contract.
+        Without `symbols`, `limit` caps the total number of rows across pages (None, the
+        default, returns every row); it is not the page size. With explicit `symbols`, each
+        contract is its own request of one row, so `limit` caps each contract's rows and has
+        no effect. `dm.ALL` is not accepted: leave `symbols` out to list every contract.
 
         The deliverable: `Underlying` is the instrument Massive links the contract to, exactly
         as sent, not what the contract delivers. `SharesPerContract` is the number of shares
@@ -984,7 +985,8 @@ class _Options(Namespace):
             sort: The field to sort by: `"ticker"`, `"underlying_ticker"`,
                 `"expiration_date"`, or `"strike_price"`; None for the endpoint's order.
             order: The sort direction; None for the endpoint's default.
-            limit: The most rows to return, a positive `int`; None for every row.
+            limit: The most rows to return, a positive `int`: in total without `symbols`, and
+                per contract with them (one row each, so no effect); None for every row.
             filters: Further parameters of the endpoints, by wire name with dots written as
                 underscores: `strike_price`, `expiration_date`, and their `_gt`, `_gte`,
                 `_lt`, and `_lte` forms, such as `{"expiration_date_lte": "2026-01-16"}`.

@@ -8,7 +8,7 @@ except dm.MassiveError as error:
     print(f"the latest trade: {type(error).__name__}: {error}")
 
 try:
-    m.stocks.bars(["AAPL"]).append_only()
+    m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
     print("live minute bars: no error, so your plan includes them")
 except dm.MassiveError as error:
     print(f"live minute bars: {type(error).__name__}: {error}")

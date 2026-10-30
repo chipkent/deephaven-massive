@@ -189,7 +189,8 @@ def test_every_example_runs_against_the_fake_market(
     out = tmp_path / "out"
     printed = {p.stem: (out / f"{p.stem}.txt").read_text() for p in files}
     assert re.search(r"<MassiveSession #\d+ open>", printed["01_start_a_session"])
-    assert "<HistoryQuery stocks.bars" in printed["02_explore_datasets"]
+    query = "m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)"
+    assert query in printed["02_explore_datasets"]
     assert printed["11_plan_refusals"].count(": EntitlementError: ") == 3
     assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["13_check_the_log"]
