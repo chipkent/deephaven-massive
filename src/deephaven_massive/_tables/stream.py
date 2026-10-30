@@ -138,6 +138,17 @@ example). Nothing is dropped, so memory grows with the backlog; the WARNING says
 time the backlog crosses this level, and again only after it has fallen below half of it.
 """
 
+SYMBOL_CACHE_LIMIT: Final = 100_000
+"""Wire spellings a flush thread remembers for one dataset on one channel before it starts over.
+
+A flush thread reads each distinct wire symbol once and remembers its canonical symbol, so a
+stream's steady traffic costs no symbol reading. A `dm.ALL` stream of options, crypto, or forex
+meets new spellings every day (new contracts are listed, old ones expire), so the memory would
+grow for as long as the connection lives. Past this many spellings the memory is emptied after
+the flush and refilled from the next flushes' rows: some tens of megabytes at most, and
+one extra reading of each spelling still trading.
+"""
+
 _SYMBOL: Final = "Symbol"
 
 _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
@@ -853,6 +864,12 @@ class Flusher:
     own, and logs a WARNING when the count passes `BACKLOG_WARNING_ROWS`. The buffers are
     unbounded on purpose: a slow flush delays rows but never drops them.
 
+    It remembers the canonical symbol of each wire spelling it has read, per dataset and channel,
+    so steady traffic costs no symbol reading. That memory is bounded: a flush forgets the
+    datasets no longer routed, and empties a dataset's memory once it passes
+    `SYMBOL_CACHE_LIMIT` spellings. A spelling the library cannot read is still warned about
+    once, whatever is forgotten.
+
     Attributes:
         routes: The connection's streams by channel, and its row buffers.
     """
@@ -900,7 +917,8 @@ class Flusher:
         self._flush_lock = threading.Lock()
         self._stop = threading.Event()
         self._final = threading.Event()
-        # Flush-lock state: the raw-to-canonical symbol map of each plan.
+        # Flush-lock state: the raw-to-canonical symbol map of each routed plan, at most
+        # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
         self._shown: dict[int, str] = {}
@@ -1068,9 +1086,13 @@ class Flusher:
                 if isinstance(item, _Drift):
                     self._report_drift(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
+            routed = [sink for sinks in routes.values() for sink in sinks]
             if self._shown:  # forget the misses of streams no longer routed
-                live = {sink.stream_id for sinks in routes.values() for sink in sinks}
+                live = {sink.stream_id for sink in routed}
                 self._shown = {i: m for i, m in self._shown.items() if i in live}
+            if self._symbols:  # forget the spellings of datasets no longer routed
+                plans = {sink.plan for sink in routed}
+                self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
 
     def _drained(self, count: int) -> None:
         """Take rows a flush drained off the backlog; re-arm the WARNING below half the level.
@@ -1137,9 +1159,7 @@ class Flusher:
             arrived: When each row's frame arrived, epoch nanoseconds, one per row.
             updates: Receives each stream's new published-row total and session-date misses.
         """
-        converted = plan.convert(
-            rows, self._symbols.setdefault(plan, {}), arrived=arrived, sessions=self._sessions
-        )
+        converted = self._convert(plan, rows, arrived=arrived)
         missed: set[int] = set()
         for symbol, message in converted.misses:
             for sink in readers:
@@ -1166,6 +1186,34 @@ class Flusher:
                 updates[sink] = replace(
                     found, rows_published=sink.rows_published, clear_error=cleared
                 )
+
+    def _convert(
+        self, plan: ChannelPlan, rows: list[dict[str, object]], *, arrived: list[int]
+    ) -> Converted:
+        """Convert a channel's rows for one dataset, with the plan's remembered symbols.
+
+        The plan's memory of wire spellings is emptied after the conversion once it holds more
+        than `SYMBOL_CACHE_LIMIT` of them, logged at DEBUG; the next flushes refill it.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            rows: The channel's rows of this flush.
+            arrived: When each row's frame arrived, epoch nanoseconds, one per row.
+
+        Returns:
+            The plan's conversion of the rows (`ChannelPlan.convert`).
+        """
+        known = self._symbols.setdefault(plan, {})
+        converted = plan.convert(rows, known, arrived=arrived, sessions=self._sessions)
+        if len(known) > SYMBOL_CACHE_LIMIT:
+            logger.debug(
+                "%s: the %s symbol cache passed %d spellings and starts over",
+                plan.dataset,
+                plan.channel,
+                SYMBOL_CACHE_LIMIT,
+            )
+            known.clear()
+        return converted
 
     @staticmethod
     def _report_drift(sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str) -> None:
