@@ -2481,8 +2481,8 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
-        f"stream {stream_id}: watchlist change of 1 symbols dropped, the session is closing "
-        "(MassiveSession #1 is closed)"
+        f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
+        "is closing (MassiveSession #1 is closed)"
     ) in caplog.text
     ws_session.session.release(result)
 

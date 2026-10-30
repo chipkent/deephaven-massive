@@ -320,6 +320,28 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert sink.rows_published == 1
 
 
+def test_a_sink_whose_failure_is_refused_publishes_nothing_more(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deephaven refuses the failure: the row reads FAILED, so the stream stops publishing and
+    # is not failed again.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
+    converted = plan.convert([trade("AAPL")], {}, arrived=[ARRIVED])
+    batch = to_table(converted.batch)
+    sink, _ = make_sink(core, ALL)
+
+    def refused(_: Exception) -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(sink, "publisher", types.SimpleNamespace(publish_failure=refused))
+    with pytest.raises(RuntimeError, match="refused"):
+        sink.fail(MassiveError("entitlement"))
+    assert sink.failed
+    assert sink.publish(batch, converted) == 0
+    assert not sink.fail(MassiveError("again"))
+
+
 def test_open_stream_tables_releases_its_scope_on_failure(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

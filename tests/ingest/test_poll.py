@@ -753,6 +753,7 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
     assert escaped == []
+    assert not poller.fail(dm.MassiveError("closed"))  # counted as failed: not tried again
     assert (
         "stocks.dividends poll() stream 1: could not fail its table with HTTP 403 from GET "
         "/stocks/v1/dividends"

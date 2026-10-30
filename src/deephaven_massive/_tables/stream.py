@@ -654,8 +654,9 @@ class StreamSink:
         recorded too, and names it. When the session's close came first, the table fails with
         the close's error instead, so the table and its `CLOSED` row name the same cause, and
         nothing is logged (the close logs its count). Any other failure is logged at ERROR.
-        The stream counts as failed only once `publish_failure` has returned, so a failure
-        that raises can be retried. Never call it on an update-graph thread or under
+        The stream counts as failed even when `publish_failure` raises (the exception then
+        propagates): its row already reads `FAILED`, so it publishes no more rows, and the
+        failure is not tried again. Never call it on an update-graph thread or under
         `registry_lock`; the thread needs an execution context.
 
         Args:
@@ -671,10 +672,12 @@ class StreamSink:
             closed = None if core is None else core.fail_stream(self.stream_id, str(error))
             if closed is None:
                 logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
-            self.publisher.publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
-            )
-            self.failed = True
+            try:
+                self.publisher.publish_failure(
+                    error if closed in (None, str(error)) else MassiveError(closed)
+                )
+            finally:  # the row reads FAILED: the stream publishes nothing more either way
+                self.failed = True
             return True
 
     def fail_later(self, message: str) -> None:

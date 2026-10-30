@@ -2309,10 +2309,11 @@ class WsConnections:
                 calendar = self.futures_calendar()
             except MassiveError as error:
                 logger.debug(
-                    "stream %d: watchlist change of %d symbols dropped, the session is closing "
-                    "(%s)",
+                    "stream %d: a watchlist change (%d added, %d removed) was dropped; the "
+                    "session is closing (%s)",
                     stream_id,
-                    len(added) + len(removed),
+                    len(added),
+                    len(removed),
                     error,
                 )
                 return
