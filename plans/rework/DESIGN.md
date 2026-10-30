@@ -420,7 +420,8 @@ Supporting files outside the package:
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, clock, and stream helpers, and the shared streaming session harness ([section 4.2](#42-test-layout)). |
-| `tests/_live/` | The logic behind the live tests' fixtures: the plans' coverage and history windows, the plan probe, the exchange calendar, the futures front contract, the choice of recent corporate actions, the delayed-feed timing, the week-window rule, and the open-questions summary; and the live-run program, `scripts/live_run.py`'s logic ([section 4.2](#42-test-layout)). |
+| `tests/_live/` | The logic behind the live tests' fixtures: the plans' coverage and history windows, the plan probe, the exchange calendar, the futures front contract, the choice of recent corporate actions, the delayed-feed timing, the week-window rule, and the open-questions summary ([section 4.2](#42-test-layout)). |
+| `tests/_live/live_run/` | The live-run program, `scripts/live_run.py`'s logic ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
 `TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
@@ -506,8 +507,9 @@ others:
   covers and keeps, the probe that finds a key's plans and its cache, which class a request
   reads, the exchange calendar, the front futures contract, the recent splits and dividends to
   check, when a delayed stream must deliver rows, the week-window rule, and the open-questions
-  summary. `tests/conftest.py` turns it into fixtures. It also holds the logic of the live-run
-  program (`cli.py`, `live_run.py`, and the modules they name), which the tester runs with
+  summary. `tests/conftest.py` turns it into fixtures. Its subpackage `tests/_live/live_run/` holds the live-run
+  program (`cli.py`, `commands.py`, and the modules they name), tested under
+  `tests/live/live_run/`, which the tester runs with
   their own keys through `scripts/live_run.py`, a thin entry point: it runs every live check the
   key allows on a fixed timetable, records Massive's raw replies through the reply-capture hook,
   streams a trading day, and packs the results after a scan for the secrets. It runs against Massive only in a live

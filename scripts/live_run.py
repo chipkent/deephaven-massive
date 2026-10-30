@@ -15,11 +15,11 @@ The secrets come only from the environment (`MASSIVE_API_KEY`, and optionally
 `MASSIVE_S3_SECRET_ACCESS_KEY`) and are never written: every printed line and written file is
 cleaned of them, and `pack` refuses to zip a folder in which its scan finds one.
 
-All the logic is in `tests/_live/` (`cli`, `live_run`, and the modules they name), where the
-unit tests run it against the fake servers; this script only puts the repository root on the
-import path, starts the embedded Deephaven server when its hidden `_group` command needs one,
-and leaves through `os._exit`, since a normal interpreter shutdown after the JVM has run can
-crash.
+All the logic is in `tests/_live/live_run/` (`cli`, `commands`, and the modules they name),
+where the unit tests run it against the fake servers; this script only puts the repository
+root on the import path, starts the embedded Deephaven server when its hidden `_group`
+command needs one, and leaves through `os._exit`, since a normal interpreter shutdown after
+the JVM has run can crash.
 
 Exit status: 0 on success, 1 when a check, a pack, or an upgrade check failed, 2 when a
 command was refused (a folder in use, another commit, a rejected key), 130 after Control-C.

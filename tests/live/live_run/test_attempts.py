@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from tests._live.live_run.machine_checks import Item
     from tests._live.live_run.run_probe import ProbeResult
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 PLANTED_KEY = "PLANTED-attempts-key-90d2"
 

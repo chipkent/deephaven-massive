@@ -21,7 +21,7 @@ import pytest
 
 from tests._live.live_run import outcomes
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass

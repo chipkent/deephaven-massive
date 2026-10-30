@@ -18,7 +18,7 @@ import pytest
 from tests._live.live_run import machine_checks
 from tests._live.live_run.machine_checks import FAIL, GIB, OK, WARN
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 PLANTED = "PLANTED-machine-key-8d2e"
 
 

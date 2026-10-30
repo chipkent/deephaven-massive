@@ -261,9 +261,9 @@ URL-encoded), a proxy URL's password, and any `apiKey=`, `Authorization`, or `X-
 with `***`. `pack` scans every file of the results folder for each secret, plain,
 URL-encoded, and base64, and refuses to zip a folder in which it finds one. It also refuses
 unless the terminal holds exactly the secrets the run used: `run` records a salted fingerprint
-of each one, never its value, so a scan for other values cannot pass by mistake. The program's logic lives in `tests/_live/`
-(`cli.py` and the modules it names), unit-tested against the fakes; the script is its entry
-point.
+of each one, never its value, so a scan for other values cannot pass by mistake. The
+program's logic lives in `tests/_live/live_run/` (`cli.py` and the modules it names),
+unit-tested against the fakes; the script is its entry point.
 
 ## Reading the results
 

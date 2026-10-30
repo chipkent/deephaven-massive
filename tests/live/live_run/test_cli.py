@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 KEY = "PLANTED-cli-key-6b0e"
 S3_PAIR = ("PLANTED-cli-access", "PLANTED-cli-s3-value")
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def _probe() -> ProbeResult:
