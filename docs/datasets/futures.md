@@ -6,7 +6,7 @@ Each section lists one dataset's columns in the order every verb returns them. *
 
 A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
 
-`m.futures.trades`, `m.futures.quotes`, `m.futures.bars`, and `m.futures.snapshots` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
+`m.futures.trades`, `m.futures.quotes`, `m.futures.bars`, `m.futures.snapshots`, and `m.futures.contracts` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="trades"></a>
 
@@ -163,6 +163,8 @@ Futures contracts: the specification of every listed contract.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the contract." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Active` | boolean | Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise. | REST | `active` |
 | `Date` | String | The day, YYYY-MM-DD, whose point-in-time state the row describes: whether the contract was tradeable that day (`active`) and its days to maturity from it. | REST | `date` |
 | `DaysToMaturity` | long | The number of calendar days between the 'date' and the contract's final settlement date. | REST | `days_to_maturity` |
@@ -178,7 +180,6 @@ Futures contracts: the specification of every listed contract.
 | `SettlementDate` | String | The date on which this contract settles. | REST | `settlement_date` |
 | `SettlementTickSize` | double | The tick size for settlement. | REST | `settlement_tick_size` |
 | `SpreadTickSize` | double | The tick size for spreads. | REST | `spread_tick_size` |
-| `Ticker` | String | The ticker for the contract. | REST | `ticker` |
 | `TradeTickSize` | double | The tick size for trades. | REST | `trade_tick_size` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this contract trades. | REST | `trading_venue` |
 | `Type` | String | The type of contract, one of 'single' or 'combo'. Leaving this filter blank will query for contracts where type is 'single', 'combo' or empty. This field only exists on contracts as of 2025-03-12 and later. It will be null when date < 2025-03-12. | REST | `type` |

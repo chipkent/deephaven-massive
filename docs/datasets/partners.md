@@ -4,7 +4,7 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
-`m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
+`m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.consensus_ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="benzinga-analysts"></a>
 
@@ -105,7 +105,8 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `ticker` parameter. | REST | request |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The requested ticker." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `BuyRatings` | long | The count of 'Buy' ratings from contributing analysts. | REST | `buy_ratings` |
 | `ConsensusPriceTarget` | double | The average price target across all analysts, rounded to 2 decimal places. | REST | `consensus_price_target` |
 | `ConsensusRating` | String | The overall rating category determined by the average consensus weight. Possible values: 'strong_buy', 'buy', 'hold', 'sell', 'strong_sell'. | REST | `consensus_rating` |
@@ -118,7 +119,6 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 | `SellRatings` | long | The count of 'Sell' ratings from contributing analysts. | REST | `sell_ratings` |
 | `StrongBuyRatings` | long | The count of 'Strong Buy' ratings from contributing analysts. | REST | `strong_buy_ratings` |
 | `StrongSellRatings` | long | The count of 'Strong Sell' ratings from contributing analysts. | REST | `strong_sell_ratings` |
-| `Ticker` | String | The requested ticker. | REST | `ticker` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:

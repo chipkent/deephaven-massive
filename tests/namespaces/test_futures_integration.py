@@ -380,7 +380,7 @@ def test_shapes_of_futures_contract_tickers(
     evidence(f"NG contracts: {len(tickers)} tickers, e.g. {tickers[:10]} ... {tickers[-10:]}")
     evidence(f"NG tickers outside letters, a month code, and a 1-2 digit year: {odd}")
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
-    evidence(f"library contracts(NG): Ticker {[r['Ticker'] for r in library]}")
+    evidence(f"library contracts(NG): Symbol {[r['Symbol'] for r in library]}")
     assert tickers
 
 

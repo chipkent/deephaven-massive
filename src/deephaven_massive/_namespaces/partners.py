@@ -24,8 +24,8 @@ Columns, types, and descriptions come from the generated schemas, never from thi
 Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take Massive's
 stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS` and a symbol with another
 class's prefix (`X:BTCUSD`) is rejected when the query is built. Their rows each describe one
-instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; for
-consensus ratings, the symbol requested; for a TMX event or a Benzinga row without a ticker, null).
+instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; a
+Benzinga row's `ticker`; for a TMX event or a Benzinga row without a ticker, null).
 Benzinga news names several tickers per article, so it has no `Symbol`, keeps its `Tickers` column
 (a `String[]`), and uses `symbols` only to filter the request. Benzinga analysts and firms, and both
 Fable datasets, take no symbols at all. The TMX corporate events come from Wall Street Horizon's
@@ -94,8 +94,8 @@ def _list_spec(
         path: The REST path template behind `fetch()` and `poll()`.
         summary: The dataset's one-sentence summary, the first line of its factory's docstring.
         symbol: The path's column that holds the row's instrument, renamed to `Symbol`, or
-            a `KeySpec` that fills `Symbol` from the request; None for a dataset whose rows
-            describe no single instrument.
+            a `KeySpec` for a ticker some rows lack (`required=False`); None for a dataset
+            whose rows describe no single instrument.
         symbol_param: The query parameter that carries the requested symbols, or None.
         poll_keys: The key columns of a keyed `poll()` table, unique per row.
         page_size: The page size requested: the endpoint's documented maximum `limit`, or
@@ -217,9 +217,9 @@ BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     "/benzinga/v1/consensus-ratings/{ticker}",
     summary="The consensus of analyst ratings and price targets for each US stock, from Benzinga.",
     asset_class=AssetClass.STOCKS,
-    # The symbol requested fills `Symbol`, so it is canonical even when the row's own `ticker`
-    # echo is missing or spelled another way; `Ticker` keeps the echo.
-    symbol=KeySpec("ticker", from_request=True),
+    # The row's own `ticker` is its `Symbol`, as on the other Benzinga datasets; every row
+    # names its stock, so a row without one fails loudly.
+    symbol=KeySpec("Ticker"),
     poll_keys=("Symbol",),
     page_size=50_000,
     per_symbol=True,
@@ -605,8 +605,9 @@ class _Benzinga(Namespace):
 
         One row per requested stock: the counts of strong-buy, buy, hold, sell, and
         strong-sell ratings, the consensus rating and its numeric value, the consensus, high,
-        and low price targets, and the number of contributing analysts. `Symbol` is the
-        symbol requested, in its canonical form; `Ticker` is Benzinga's echo of it. By
+        and low price targets, and the number of contributing analysts. `Symbol` is the row's
+        ticker, as on the other Benzinga datasets; a ticker the library cannot read leaves it
+        null and keeps Benzinga's spelling in `RawSymbol`. By
         default the consensus aggregates every rating Benzinga holds for the stock; the
         `date` filters restrict it to the ratings published in a range
         (`{"date_gte": "2024-10-01", "date_lt": "2025-01-01"}` aggregates the fourth quarter

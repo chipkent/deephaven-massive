@@ -223,6 +223,28 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
         massive_session.futures.contracts(sort=cast("str", 1))
 
 
+def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) -> None:
+    contracts = massive_session.futures.contracts
+    q = contracts(["ESZ5", "NQZ5"], as_of="2025-06-02")
+    assert request(q).symbols == ("ESZ5", "NQZ5")
+    assert request(q).params == (("date", date(2025, 6, 2)),)
+    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
+        contracts(dm.ALL)
+    with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
+        contracts(filters={"ticker_any_of": ["ESZ5"]})
+    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+        contracts(filters={"date": "2025-06-02"})
+    with pytest.raises(ValueError, match="as_of"):
+        contracts(as_of=datetime(2025, 6, 2, 12, tzinfo=UTC))
+
+
+def test_products_take_a_day(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.futures.products(as_of=date(2025, 6, 2))
+    assert request(q).params == (("date", date(2025, 6, 2)),)
+    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+        massive_session.futures.products(filters={"date": "2025-06-02"})
+
+
 def test_products(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(
         product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
@@ -407,9 +429,20 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
     assert {"LastTradePrice", "LastQuoteBid", "SessionSettlementPrice"} <= set(schema.column_names)
 
 
-@pytest.mark.parametrize(
-    "name", ["contracts", "products", "exchanges", "market_status", "schedules"]
-)
+def test_contracts_name_the_contract_symbol_from_the_row() -> None:
+    spec = _spec("contracts")
+    assert CATALOG.takes_symbols(spec)
+    assert spec.keys[(Transport.REST, "/futures/v1/contracts")].declared() == (
+        ("symbol", KeySpec("Ticker")),
+    )
+    assert (spec.symbol_param, spec.symbols_per_request) == ("ticker.any_of", 250)
+    schema = CATALOG.dataset_schema(spec)
+    assert schema.column_names[:2] == ("Symbol", "RawSymbol")
+    assert "Ticker" not in schema.column_names
+    assert spec.poll_keys == ("Symbol", "Date")
+
+
+@pytest.mark.parametrize("name", ["products", "exchanges", "market_status", "schedules"])
 def test_reference_datasets_take_no_symbols(name: str) -> None:
     spec = _spec(name)
     assert not CATALOG.takes_symbols(spec)
@@ -738,11 +771,39 @@ def test_contracts_over_rest(
             {"product_code": ["ES"], "active": ["true"], "limit": ["5"]},
         )
     ]
-    assert [(r["Ticker"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
+    assert [(r["Symbol"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
         ("ESZ6", "ES", True, "2026-12-18")
     ]
     assert out[0]["TradeTickSize"] == 0.25
-    assert "Symbol" not in out[0]
+    assert out[0]["RawSymbol"] is None
+    assert "Ticker" not in out[0]
+
+
+def test_contract_symbols_and_day_go_on_the_wire(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    serve: Callable[[str, str], None],
+) -> None:
+    serve("/futures/v1/contracts", "contracts.json")
+    rest_session.futures.contracts(["NQZ6", "ESZ6"], as_of="2026-10-07").fetch()
+    assert sent(fake_rest) == [
+        (
+            "/futures/v1/contracts",
+            {"ticker.any_of": ["ESZ6,NQZ6"], "date": ["2026-10-07"], "limit": ["1000"]},
+        )
+    ]
+
+
+def test_a_long_contract_list_is_split_into_requests(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": []}))
+    # 360 contracts: three products, twelve months, ten years.
+    tickers = [f"{p}{m}{y}" for p in ("ES", "NQ", "GC") for y in range(10) for m in "FGHJKMNQUVXZ"]
+    rest_session.futures.contracts(tickers).fetch()
+    sizes = sorted(len(query["ticker.any_of"][0].split(",")) for _, query in sent(fake_rest))
+    assert sizes == [110, 250]
 
 
 def test_several_product_codes_go_in_one_request(
@@ -980,6 +1041,29 @@ def test_one_frame_lands_in_blink(
         # and Massive's `e`, which agree here.
         length = 1_000 if frame["ev"] == "A" else 60_000
         assert row["TimestampEnd"] == at_ms(frame["s"] + length)
+    ws_session.session.release(live)
+
+
+def test_a_contracts_table_feeds_a_stream(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    ws_session: WsSession,
+    load_fixture: Loader,
+    dh_exec_ctx: object,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    # A contracts table's `Symbol` is the contract, so a part of it is a stream's symbol table.
+    listed = [{"ticker": "ESZ4", "product_code": "ES"}, {"ticker": "ESH5", "product_code": "ES"}]
+    fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": listed}))
+    contracts = rest_session.futures.contracts(product_code="ES").fetch()
+    ws_session.rows.update(SCHEDULE_ROWS)
+    live = ws_session.session.futures.trades(contracts.head(1)).last_by()
+    assert ws_session.connections.futures_calendar().wait_idle(15.0)
+    ws_session.subscribed("T.ESZ4")
+    ws_session.publish(json.loads(load_fixture(OWNER, "ws_frames.json"))[0])
+    (row,) = rows_when(live, lambda arrived: len(arrived) == 1)
+    assert (row["Symbol"], row["Price"]) == ("ESZ4", 6064.5)
     ws_session.session.release(live)
 
 

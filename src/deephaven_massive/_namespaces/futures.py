@@ -25,8 +25,9 @@ Futures differ from the other asset classes in three ways that show here:
   `Timespan.SESSION` and rejects `Timespan.DAY`.
 
 The reference datasets keep the `FUTURES` asset class, which selects the session-day rule for
-their dates, but describe no single instrument: they take no symbols and have no `Symbol`
-column.
+their dates. `contracts` describes one contract per row, so its `Symbol` is the row's ticker
+and a contracts table feeds the market-data datasets directly; the others describe no single
+instrument: they take no symbols and have no `Symbol` column.
 """
 
 from __future__ import annotations
@@ -39,8 +40,10 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
+    day_argument,
     list_params,
     one_or_any_of,
 )
@@ -92,6 +95,9 @@ def _tick_keys(time: str) -> SourceKeys:
 
 _PRODUCT_CODE_ARGUMENT: Final = {"product_code.any_of": "product_code"}
 """The argument that sets `product_code.any_of`, for the message that rejects it in `filters`."""
+
+_REFERENCE_ARGUMENTS: Final = {**_PRODUCT_CODE_ARGUMENT, "date": "as_of"}
+"""The arguments of `contracts` and `products` named otherwise than their wire parameters."""
 
 
 @raises_through(one_or_any_of)
@@ -200,7 +206,12 @@ CONTRACTS: Final = DatasetSpec(
     summary="Futures contracts: the specification of every listed contract.",
     asset_class=AssetClass.FUTURES,
     fetch_path=_CONTRACTS_PATH,
-    poll_keys=("Ticker", "Date"),
+    # The row's own ticker is its `Symbol`, so a contracts table is a symbol table of the
+    # market-data datasets; explicit symbols travel in `ticker.any_of`, a list per request.
+    keys={(_REST, _CONTRACTS_PATH): SourceKeys(symbol=_TICKER)},
+    symbol_param="ticker.any_of",
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    poll_keys=("Symbol", "Date"),
     page_size=1_000,
 )
 
@@ -621,11 +632,13 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
-    @raises_through(build_query, list_params, _product_codes)
+    @raises_through(build_query, list_params, _product_codes, day_argument)
     def contracts(
         self,
+        symbols: Symbols | None = None,
         *,
         product_code: str | Sequence[str] | None = None,
+        as_of: DateLike | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -636,9 +649,11 @@ class _Futures(Namespace):
         Each row is one contract as of a date (`Date`): its ticker, product, trading venue,
         first and last trade dates, settlement date, tick sizes, and order-size limits, from
         the REST endpoint `/futures/v1/contracts`. Use it to find the tickers of a product's
-        contracts, for example the active `ES` contracts. The dataset takes no symbols and has
-        no `Symbol` column: the contract's ticker is the `Ticker` column, and the
-        `ticker_any_of` filter selects contracts.
+        contracts, for example the active `ES` contracts. The contract's ticker is the
+        `Symbol` column, as on the market data, so the table, or a part of it, passes straight
+        to `trades()`, `quotes()`, `bars()`, or `snapshots()`; a ticker the library cannot read
+        leaves `Symbol` null and keeps Massive's spelling in `RawSymbol`. Explicit `symbols`
+        are sent together as `ticker.any_of`, 250 to a request; None lists every contract.
 
         `limit` caps the total number of rows across pages; the page size is internal.
 
@@ -647,9 +662,18 @@ class _Futures(Namespace):
         in the web UI's column-header tooltips, and by `columns()` on the query.
 
         Args:
+            symbols: Only these contracts: one ticker such as `"ESZ5"`, a sequence of tickers,
+                or a Deephaven table with a `Symbol` column (`poll()` re-reads it each cycle);
+                None, the default, for every contract. `dm.ALL` is refused: leave `symbols`
+                out instead.
             product_code: Only contracts of this product, such as `"ES"` (sent as
                 `product_code`), or of these products, such as `["ES", "NQ"]` (sent as
                 `product_code.any_of`); None for every product.
+            as_of: The day whose contract specifications to list, sent as the wire parameter
+                `date`: an ISO-8601 date, a `date`, Deephaven date text such as `"2025-3-3"`, a
+                Java `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an
+                instant raises `ValueError`: it is a calendar date); None for Massive's
+                default, today.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default
                 (`product_code`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
@@ -663,10 +687,13 @@ class _Futures(Namespace):
             A query with `fetch()` and `poll()`.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
-                `product_code` is neither a `str` nor a sequence of `str`.
-            ValueError: For an unknown filter, a filter value of the wrong kind, an `order`
-                without `sort`, or an empty `product_code` sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`,
+                `product_code` is neither a `str` nor a sequence of `str`, or `symbols` or
+                `as_of` is of another type.
+            ValueError: For `dm.ALL` or an invalid symbol, an `as_of` that is a `datetime` or
+                not a date, an unknown filter or one a typed argument sets (`ticker_any_of` is
+                set through `symbols`), a filter value of the wrong kind, an `order` without
+                `sort`, or an empty `product_code` sequence.
 
         Example:
             ::
@@ -675,22 +702,33 @@ class _Futures(Namespace):
 
                 m = dm.MassiveSession()
                 es = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
+                front = m.futures.trades(es.sort("LastTradeDate").head(1)).last_by()
+                listed = m.futures.contracts(["ESZ5", "NQZ5"], as_of="2025-06-02").fetch()
         """
+        params = {
+            **_product_codes(product_code),
+            "date": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
+            **list_params(sort=sort, order=order),
+        }
         query = build_query(
             self._core,
             CONTRACTS,
-            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
+            symbols=symbols,
+            symbols_optional=True,
+            all_alternative="leave symbols out for every contract",
+            params=params,
             filters=filters,
-            arguments=_PRODUCT_CODE_ARGUMENT,
+            arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
         )
         return cast("Query", query)
 
-    @raises_through(build_query, list_params, _product_codes)
+    @raises_through(build_query, list_params, _product_codes, day_argument)
     def products(
         self,
         *,
         product_code: str | Sequence[str] | None = None,
+        as_of: DateLike | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -713,6 +751,11 @@ class _Futures(Namespace):
             product_code: Only this product, such as `"ES"` (sent as `product_code`), or
                 these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
                 None for every product.
+            as_of: The day whose product specifications to list, sent as the wire parameter
+                `date`: an ISO-8601 date, a `date`, Deephaven date text such as `"2025-3-3"`, a
+                Java `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an
+                instant raises `ValueError`: it is a calendar date); None for Massive's
+                default, today.
             sort: The field to sort by, such as `"name"`; None for the endpoint's default
                 (`date`).
             order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
@@ -726,11 +769,12 @@ class _Futures(Namespace):
             A query with `fetch()` and `poll()`.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
-                `product_code` is neither a `str` nor a sequence of `str`.
-            ValueError: For an unknown filter, a filter value of the wrong kind (a `sector`
-                outside the endpoint's values, for example), an `order` without `sort`, or an
-                empty `product_code` sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`,
+                `product_code` is neither a `str` nor a sequence of `str`, or `as_of` is of
+                another type.
+            ValueError: For an `as_of` that is a `datetime` or not a date, an unknown filter, a
+                filter value of the wrong kind (a `sector` outside the endpoint's values, for
+                example), an `order` without `sort`, or an empty `product_code` sequence.
 
         Example:
             ::
@@ -740,12 +784,17 @@ class _Futures(Namespace):
                 m = dm.MassiveSession()
                 energy = m.futures.products(filters={"asset_sub_class": "energy"}).fetch()
         """
+        params = {
+            **_product_codes(product_code),
+            "date": None if as_of is None else day_argument(PRODUCTS, as_of, "as_of"),
+            **list_params(sort=sort, order=order),
+        }
         query = build_query(
             self._core,
             PRODUCTS,
-            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
+            params=params,
             filters=filters,
-            arguments=_PRODUCT_CODE_ARGUMENT,
+            arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
         )
         return cast("Query", query)
