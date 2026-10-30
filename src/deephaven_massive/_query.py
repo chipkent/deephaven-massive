@@ -40,8 +40,8 @@ completes (`open_read` in `_tables/background_read.py`); that thread logs the ca
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
-The classes are importable from this private module for type annotations only; users never
-construct them.
+Users import the classes for type annotations from the public module
+`deephaven_massive.queries`, and never construct them.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
+from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
 from deephaven_massive._types import override
 
@@ -102,6 +103,7 @@ __all__ = [
     "QueryBase",
     "StreamHistoryQuery",
     "StreamQuery",
+    "verbs",
 ]
 
 logger = logging.getLogger(__name__)
@@ -215,6 +217,23 @@ def _serves(spec: DatasetSpec, verb: str) -> bool:
     if verb == "history":
         return spec.has_history
     return spec.has_fetch
+
+
+def verbs(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return the verbs a dataset's queries can have, in the order `_VERBS` lists them.
+
+    A `bars` dataset streams at some timespans only, and its stream verbs are listed all the
+    same; the verbs of one `bars()` call follow its timespan (`bar_query_class` in
+    `_namespaces/base.py`). `dm.datasets()` shows the result.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The verbs' names, such as `("fetch", "poll")` or `("blink", "append_only", "ring",
+        "last_by", "history")`.
+    """
+    return tuple(verb for verb in _VERBS if _serves(spec, verb))
 
 
 def _read_symbol_table(
@@ -999,14 +1018,24 @@ class HistoryQuery(QueryBase):
 
         The two bounds are of one kind, never mixed:
 
-        - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
+        - **Dates** (`"2025-03-03"` or `dh_today()`, which is that text; a `date`; a Java
+          `LocalDate`, such as `to_j_local_date("2025-03-03")` or a `LocalDate` cell read
+          with `iter_dict`; or a `numpy.datetime64` of day precision) are whole days,
+          inclusive at both ends:
           `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
           the asset class's day zone: New York for stocks, options, and indices, UTC for forex
           and crypto. For futures a date names the trading session whose `Date`
           (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
           (earlier after a holiday).
-        - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
-          end` (for bars, `TimestampStart`). Equal instants give an empty table.
+        - **Instants** (an aware `datetime` or `pandas.Timestamp`, ISO text with an offset,
+          Deephaven's own text such as `"2025-03-03T09:30 America/New_York"`, a Java `Instant`
+          or `ZonedDateTime` such as `dh_now()` or an `Instant` cell read with `iter_dict`, or a
+          `numpy.datetime64` finer than a day, read as UTC) are exact instants, half-open: rows
+          with `start <= Timestamp < end` (for bars, `TimestampStart`). Equal instants give an
+          empty table. An instant with nanoseconds below the microsecond (text, Java, numpy, or
+          pandas), which a `datetime` cannot hold, is moved outward to a microsecond: `start`
+          down, so a row it came from is still included, and `end` up, so `end` may include up
+          to 999 ns more but never loses a row.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
         lies inside the range and has ended: its `TimestampStart` lies in the range, and its
@@ -1079,7 +1108,8 @@ class HistoryQuery(QueryBase):
 
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
-                or a timezone-aware `datetime`.
+                a timezone-aware `datetime`, a Java `LocalDate`, `Instant`, or
+                `ZonedDateTime`, a `numpy.datetime64`, or a `pandas.Timestamp` (`DateLike`).
             end: The last day included, or the first instant excluded, of the same kind as
                 `start`; None (the default) reads through now: the current instant for a
                 datetime `start`, today in the day zone (for futures, the current session)
@@ -1105,12 +1135,12 @@ class HistoryQuery(QueryBase):
             no row lies in the range. With `wait=False`, a refreshing table that a background
             read fills once with that result.
 
-        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
-        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
-        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
-        `end` is None); a symbol table without a symbol, with only rows that are not canonical,
-        or with any such row under `noncanonical_symbols=RAISE` (otherwise such a row is
-        skipped);
+        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is none of the
+        `DateLike` types. `ValueError`, synchronously, before any request: a naive or
+        unparseable bound, or a `numpy.datetime64` that is `NaT`; a date mixed with a datetime;
+        `start` after `end` (or after now when `end` is None); a symbol table without a symbol,
+        with only rows that are not canonical, or with any such row under
+        `noncanonical_symbols=RAISE` (otherwise such a row is skipped);
         futures trades or quotes named by session dates on a query that also filters
         `session_end_date` in any form; a source that cannot serve the request (`REST` without
         REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES` when a
@@ -1175,8 +1205,12 @@ class HistoryQuery(QueryBase):
             The static table, or the refreshing one a background read fills.
         """
         chosen = _require_enum(source, HistorySource, "source")
-        first = parse_date_like(start, "start")
-        last = None if end is None else parse_date_like(end, "end")
+        first = parse_date_like(deephaven_time_text(start, "start"), "start")
+        last = (
+            None
+            if end is None
+            else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
+        )
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)
