@@ -28,8 +28,8 @@ from deephaven_massive._datasets.catalog import KeySpec
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._namespaces import futures
-from deephaven_massive._namespaces.base import Namespace, build_query, query_class
-from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery
+from deephaven_massive._namespaces.query_building import Namespace, build_query
+from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers

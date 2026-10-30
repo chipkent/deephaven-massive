@@ -34,7 +34,7 @@ from deephaven_massive._datasets.column_reference import (
 )
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Field, Provenance, Source, Transport, WireType, source
-from deephaven_massive._namespaces.base import Namespace
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._session import CATALOG
 
 if TYPE_CHECKING:

@@ -34,7 +34,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport, source
-from deephaven_massive._namespaces.base import Namespace, build_query
+from deephaven_massive._namespaces.query_building import Namespace, build_query
 
 if TYPE_CHECKING:
     from deephaven_massive._query import (

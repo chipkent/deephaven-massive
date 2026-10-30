@@ -51,7 +51,6 @@ from deephaven_massive._namespaces import (
     reference,
     stocks,
 )
-from deephaven_massive._namespaces.base import build_query, list_params
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
 from deephaven_massive._namespaces.forex import _Forex
@@ -60,6 +59,7 @@ from deephaven_massive._namespaces.indicators import _Indicators
 from deephaven_massive._namespaces.indices import _Indices
 from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Partners
+from deephaven_massive._namespaces.query_building import build_query, list_params
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.execution_context import (
@@ -95,7 +95,7 @@ NAMESPACE_MODULES: Final = (
     partners,
 )
 """Every namespace module, each exporting `DATASETS`, imported statically. A test asserts that
-this tuple names every module of `_namespaces/` except `base`."""
+this tuple names every module of `_namespaces/` except `query_building`."""
 
 CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session

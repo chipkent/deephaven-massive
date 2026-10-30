@@ -31,7 +31,6 @@ from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
 from deephaven_massive._namespaces.forex import _Forex
@@ -40,6 +39,7 @@ from deephaven_massive._namespaces.indicators import _Indicators
 from deephaven_massive._namespaces.indices import _Indices
 from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Query, StreamQuery
@@ -782,7 +782,7 @@ def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
 
 def test_every_namespace_module_feeds_the_catalog() -> None:
     package = Path(_namespaces.__file__).parent
-    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"base"}
+    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"query_building"}
     named = [module.__name__ for module in _session.NAMESPACE_MODULES]
     assert len(named) == len(set(named))
     assert set(named) == {f"deephaven_massive._namespaces.{name}" for name in found}

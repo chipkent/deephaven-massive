@@ -43,7 +43,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     Namespace,
     adjustment_notes,
     build_query,

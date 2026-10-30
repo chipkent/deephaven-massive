@@ -23,7 +23,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables.execution_context import (
     entered,

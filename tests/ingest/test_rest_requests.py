@@ -16,7 +16,7 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import QueryBase
 
 R = Transport.REST

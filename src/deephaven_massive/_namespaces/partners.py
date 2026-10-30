@@ -37,12 +37,12 @@ its tickers exactly as Massive writes them (`DatasetSpec.symbols_as_written`).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.query_building import Namespace, list_query
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -357,52 +357,6 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every partner dataset, one `DatasetSpec` each, in the order of the namespace tree."""
 
 
-def _list_query(
-    core: SessionCore,
-    spec: DatasetSpec,
-    *,
-    symbols: Symbols | None = None,
-    all_alternative: str = _NO_TICKER_FILTER,
-    start: DateLike | None = None,
-    end: DateLike | None = None,
-    sort: str | None = None,
-    order: Order | None = None,
-    limit: int | None = None,
-    filters: Mapping[str, FilterValue] | None = None,
-) -> Query:
-    """Build the query of a partner dataset from its factory's arguments.
-
-    Args:
-        core: The session core.
-        spec: The dataset.
-        symbols: The requested tickers, or None for none.
-        all_alternative: What the `ValueError` for `dm.ALL` tells the caller to pass instead.
-        start: The lower bound of the dataset's time axis, or None.
-        end: The upper bound of the dataset's time axis, or None.
-        sort: The `sort` parameter, or None for the endpoint's default.
-        order: The `order` parameter, or None for the endpoint's default.
-        limit: The cap on the total number of rows, or None for every row.
-        filters: The `filters` mapping, or None.
-
-    Returns:
-        The query. Invalid arguments raise the `TypeError` or `ValueError` of `build_query`
-        and `list_params`.
-    """
-    query = build_query(
-        core,
-        spec,
-        symbols=symbols,
-        all_alternative=all_alternative,
-        start=start,
-        end=end,
-        params=list_params(sort=sort, order=order),
-        filters=filters,
-        limit=limit,
-    )
-    # A partner spec has only a fetch path, so `build_query` builds its `Query`.
-    return cast("Query", query)
-
-
 class _Benzinga(Namespace):
     """`m.partners.benzinga`: Benzinga's analyst, earnings, guidance, and news datasets.
 
@@ -478,8 +432,14 @@ class _Benzinga(Namespace):
                     sort="smart_score", order=dm.Order.DESC, limit=50
                 ).fetch()
         """
-        return _list_query(
-            self._core, BENZINGA_ANALYSTS, sort=sort, order=order, limit=limit, filters=filters
+        return list_query(
+            self._core,
+            BENZINGA_ANALYSTS,
+            all_alternative=_NO_TICKER_FILTER,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
         )
 
     def analyst_insights(
@@ -534,9 +494,10 @@ class _Benzinga(Namespace):
                 q = m.partners.benzinga.analyst_insights("NVDA", filters={"date_gte": "2025-01-01"})
                 insights = q.fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_ANALYST_INSIGHTS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -595,9 +556,10 @@ class _Benzinga(Namespace):
 
                 live = m.partners.benzinga.ratings(["AAPL", "MSFT"]).poll(60)
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_RATINGS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -653,7 +615,7 @@ class _Benzinga(Namespace):
                     "AAPL", filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
                 ).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_CONSENSUS_RATINGS,
             symbols=symbols,
@@ -711,9 +673,10 @@ class _Benzinga(Namespace):
 
                 cases = m.partners.benzinga.bulls_bears_say(["TSLA"]).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_BULLS_BEARS_SAY,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -775,9 +738,10 @@ class _Benzinga(Namespace):
                 outlook = m.partners.benzinga.guidance("AAPL", filters={"fiscal_year": 2025})
                 rows = outlook.fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_GUIDANCE,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -838,9 +802,10 @@ class _Benzinga(Namespace):
                 calendar = m.partners.benzinga.earnings(filters={"date_gte": "2025-07-01"})
                 upcoming = calendar.fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_EARNINGS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -893,8 +858,14 @@ class _Benzinga(Namespace):
 
                 firms = m.partners.benzinga.firms().fetch()
         """
-        return _list_query(
-            self._core, BENZINGA_FIRMS, sort=sort, order=order, limit=limit, filters=filters
+        return list_query(
+            self._core,
+            BENZINGA_FIRMS,
+            all_alternative=_NO_TICKER_FILTER,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
         )
 
     def news(
@@ -969,9 +940,10 @@ class _Benzinga(Namespace):
                 yesterday = date.today() - timedelta(days=1)
                 feed = m.partners.benzinga.news(start=yesterday).poll(30)
         """
-        return _list_query(
+        return list_query(
             self._core,
             BENZINGA_NEWS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1059,9 +1031,10 @@ class _EtfGlobal(Namespace):
 
                 scores = m.partners.etf_global.analytics(["SPY", "QQQ"]).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             ETF_GLOBAL_ANALYTICS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1122,9 +1095,10 @@ class _EtfGlobal(Namespace):
                     filters={"constituent_ticker": "NVDA", "effective_date": "2025-09-18"}
                 ).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             ETF_GLOBAL_CONSTITUENTS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1183,9 +1157,10 @@ class _EtfGlobal(Namespace):
                     ["SPY", "IVV", "VOO"], filters={"effective_date_gte": "2025-01-01"}
                 ).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             ETF_GLOBAL_FUND_FLOWS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1243,9 +1218,10 @@ class _EtfGlobal(Namespace):
 
                 profile = m.partners.etf_global.profiles("ARKK").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             ETF_GLOBAL_PROFILES,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1303,9 +1279,10 @@ class _EtfGlobal(Namespace):
 
                 kinds = m.partners.etf_global.taxonomies(["SPY", "TQQQ"]).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             ETF_GLOBAL_TAXONOMIES,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1405,9 +1382,10 @@ class _Tmx(Namespace):
                 )
                 dates = q.fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             TMX_CORPORATE_EVENTS,
+            all_alternative=_NO_TICKER_FILTER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1508,9 +1486,10 @@ class _Fable(Namespace):
                 )
                 june = q.fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             FABLE_MERCHANT_AGGREGATES,
+            all_alternative=_NO_TICKER_FILTER,
             start=start,
             end=end,
             sort=sort,
@@ -1568,9 +1547,10 @@ class _Fable(Namespace):
                     filters={"listing_status": "public"}
                 ).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             FABLE_MERCHANT_HIERARCHY,
+            all_alternative=_NO_TICKER_FILTER,
             sort=sort,
             order=order,
             limit=limit,

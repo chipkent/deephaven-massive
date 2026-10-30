@@ -218,7 +218,7 @@ def _resolution_namespace() -> dict[str, object]:
         "_datasets.timestamps",
         "_tables.diagnostics",
         "_tables.watchlist",
-        "_namespaces.base",
+        "_namespaces.query_building",
         "_namespaces.partners",
         "_namespaces.stocks",
     ):

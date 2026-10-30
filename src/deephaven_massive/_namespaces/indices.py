@@ -34,7 +34,7 @@ from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.query_building import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

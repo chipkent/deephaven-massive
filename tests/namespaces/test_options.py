@@ -34,7 +34,7 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
-from deephaven_massive._namespaces.base import Namespace, query_class
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import (
     HistoryLatestQuery,
     HistoryQuery,
@@ -43,6 +43,7 @@ from deephaven_massive._query import (
     StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
+    query_class,
 )
 from deephaven_massive._session import CATALOG
 from tests._fakes.clock import FakeClock

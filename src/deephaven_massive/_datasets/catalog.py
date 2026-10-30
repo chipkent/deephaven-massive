@@ -16,7 +16,7 @@ holds each key (`KeySpec`, grouped per source in a `SourceKeys`). The catalog me
 (`Catalog.dataset_schema`).
 
 A spec also says which transports serve the dataset, and its query class follows from them:
-`query_class` in `_namespaces/base.py` maps the channels, the history sources, and the fetch
+`query_class` in `_query.py` maps the channels, the history sources, and the fetch
 path to one of the query classes, and `DatasetSpec` rejects, when it is created, the
 combinations no query class serves.
 
@@ -189,7 +189,7 @@ class DatasetSpec:
     `Catalog.dataset_schema` merges them from the sources. Specs are immutable singletons
     compared by identity, and safe to share across threads.
 
-    The transports decide the dataset's query class (`query_class` in `_namespaces/base.py`).
+    The transports decide the dataset's query class (`query_class` in `_query.py`).
     With S meaning the spec has channels, H that it has a history source (a history path, a
     grouped-daily path, or flat-file prefixes), and F that it has a fetch path: F alone gives
     `Query`, S alone `StreamQuery`, H alone `HistoryQuery`, S and H `StreamHistoryQuery`, and

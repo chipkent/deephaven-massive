@@ -26,7 +26,7 @@ from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces.base import Namespace
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
 from tests._fakes.clock import FakeClock
