@@ -228,14 +228,18 @@ def _wire_name(argument: str, wire: AbstractSet[str]) -> str:
         The argument itself when a path has a parameter of that name, or when nothing below
         applies; `"date"` for `as_of` (the day a reference list is read as of); otherwise its
         last word when a path has a parameter of that name (`ticker_type` sets `type`,
-        `condition_id` sets `id`).
+        `condition_id` sets `id`); otherwise the one path parameter that starts with the
+        argument and an underscore (`underlying` sets `underlying_ticker`).
     """
     if argument in wire:
         return argument
     if argument == _AS_OF:
         return "date"
     last = argument.rsplit("_", 1)[-1]
-    return last if last in wire else argument
+    if last in wire:
+        return last
+    longer = [name for name in wire if name.startswith(f"{argument}_")]
+    return longer[0] if len(longer) == 1 else argument
 
 
 def _default(value: object) -> str:

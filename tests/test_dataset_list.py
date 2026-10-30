@@ -11,6 +11,7 @@ import deephaven_massive as dm
 from deephaven_massive import _dataset_list
 from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS, dataset_calls
 from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall
+from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._session import CATALOG
 
 ToPylist = Callable[[Table], list[dict[str, Any]]]
@@ -98,8 +99,36 @@ def test_arguments_named_apart_from_their_wire_parameter() -> None:
     assert {"type", "date", "cik"} <= set(tickers.typed)
     assert "ticker_type" not in tickers.typed
     assert "id" in dataset_calls()["reference.conditions"].typed
+    # `underlying` sets the one wire parameter that starts with it, `underlying_ticker`.
+    assert "underlying_ticker" in dataset_calls()["options.contracts"].typed
     # An argument that sets no wire parameter keeps its name.
     assert "include_otc" in dataset_calls()["stocks.snapshots"].typed
+
+
+def test_no_filters_key_the_reference_lists_is_refused_as_an_argument(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Every key a dataset page lists must reach the filter check, never the refusal of a key
+    # that has its own argument: a wrong wire name for an argument would list such a key.
+    refused = []
+    for name, call in dataset_calls().items():
+        if "filters" not in call.arguments:
+            continue
+        method: Any = massive_session
+        for part in name.split("."):
+            method = getattr(method, part)
+        required = [
+            "AAPL" if argument == "symbols" else dm.Timespan.DAY
+            for argument in call.arguments
+            if f" {argument}," in f" {call.signature.split('(', 1)[1]}".split("*")[0]
+        ]
+        for key in filter_keys(CATALOG, CATALOG.by_name[name], typed=call.typed):
+            try:
+                method(*required, filters={key: "1"})
+            except (TypeError, ValueError) as error:
+                if "its own argument" in str(error) or "not a filter" in str(error):
+                    refused.append(f"{name}: {key}")
+    assert refused == []
 
 
 def test_a_default_set_of_some_members_is_written_as_its_repr() -> None:

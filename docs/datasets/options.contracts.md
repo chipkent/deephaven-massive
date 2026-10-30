@@ -16,7 +16,7 @@ m.options.contracts(symbols=None, *, underlying=None, contract_type=None, as_of=
 | Served by | REST |
 | `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` (`dm.PollMode.REPLACE`) |
 | `sort` | `ticker`, `underlying_ticker`, `expiration_date`, `strike_price` |
-| `filters` | `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`, `underlying_ticker`, `underlying_ticker_gt`, `underlying_ticker_gte`, `underlying_ticker_lt`, `underlying_ticker_lte` |
+| `filters` | `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte` |
 
 ## Plan access
 
