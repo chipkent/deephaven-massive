@@ -40,6 +40,7 @@ run on any thread, under one leaf lock that is never held across a Deephaven cal
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 from typing import TYPE_CHECKING, Final
 
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
 
 __all__ = ["BlinkPublisher", "blink_publisher"]
 
+logger = logging.getLogger(__name__)
+
 
 class _FailurePin:
     """The liveness hold a failing blink table keeps until its failure has been delivered.
@@ -68,10 +71,15 @@ class _FailurePin:
     tracks the table the way every Deephaven scope does, without keeping it reachable.
     """
 
-    __slots__ = ("_lock", "_scope", "_shut_down")
+    __slots__ = ("_lock", "_scope", "_shut_down", "name")
 
-    def __init__(self) -> None:
-        """Start with no hold, before the table has shut down."""
+    def __init__(self, name: str) -> None:
+        """Start with no hold, before the table has shut down.
+
+        Args:
+            name: The publisher's name, such as `massive.trades#7`, for the log.
+        """
+        self.name: Final = name
         self._lock = threading.Lock()
         self._scope: LivenessScope | None = None
         self._shut_down = False
@@ -98,7 +106,8 @@ class _FailurePin:
     ) -> None:
         """Hand the held scope to `release_later`, once; do nothing when no scope is held.
 
-        The pin is free at once, so a later `hold` succeeds unless the table has shut down.
+        The pin is free at once, so a later `hold` succeeds unless the table has shut down. The
+        hand-over is logged at DEBUG.
 
         Args:
             release_later: Releases the scope on a library thread, under the update graph's
@@ -110,6 +119,7 @@ class _FailurePin:
             self._shut_down |= shut_down
             scope, self._scope = self._scope, None
         if scope is not None:
+            logger.debug("%s: its failure pin is handed to the reaper for release", self.name)
             release_later(scope)
 
 
@@ -186,17 +196,29 @@ class BlinkPublisher:
         is unprotected again until the failure is delivered.
 
         It never releases a scope itself: the owner calls it under a lock that a holder of the
-        update graph's lock may wait for, so every release goes to `release_later`.
+        update graph's lock may wait for, so every release goes to `release_later`. A refused
+        failure, and each hand-over to `release_later`, is logged at DEBUG with the table's name.
 
         Args:
             error: The failure; the table fails with a `RuntimeException` carrying its text.
         """
         pin = new_scope()
         if not self._pin.hold(pin):  # shut down, or already failing: publish nothing
+            logger.debug(
+                "%s: failure not published, the table has shut down or an earlier failure is "
+                "still pinned (%s); its unused scope is handed to the reaper for release",
+                self._pin.name,
+                error,
+            )
             self._release_later(pin)  # it manages nothing
             return
         if not pin.j_scope.tryManage(self.table.j_table):
-            return  # being destroyed: its shutdown callback releases the pin
+            logger.debug(
+                "%s: failure not published, the table is being destroyed (%s)",
+                self._pin.name,
+                error,
+            )
+            return  # its shutdown callback releases the pin
         try:
             self._publisher.publish_failure(error)
         except BaseException:
@@ -232,7 +254,7 @@ def blink_publisher(
     Returns:
         The blink table and its publisher.
     """
-    pin = _FailurePin()
+    pin = _FailurePin(name)
     table, publisher = table_publisher(
         name,
         columns,

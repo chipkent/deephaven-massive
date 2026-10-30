@@ -855,7 +855,11 @@ return result
   listener, the holder of a publish lock) hands the scope to `SessionCore.release_later`, which
   queues the release on the reaper. The reaper and the diagnostics writer may now wait for a
   console command to end, which is not a deadlock: no thread that holds the UG lock waits for
-  them (section 18.3). The test suite wraps `LivenessScope.release` and fails any test in which
+  them (section 18.3). The cost is latency. A result released during a long console command
+  (by `m.release` or by garbage collection) is released only when the command ends: until then
+  a released `poll()` table keeps polling, a released stream stays subscribed, and every later
+  reaper job (other releases, a session's closers, a failed watchlist's failure) waits behind
+  the blocked release. None of it deadlocks. The test suite wraps `LivenessScope.release` and fails any test in which
   library code releases a scope without the lock; the suite runs every branch of the library.
 - **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
   only under `registry_lock`, never the other way round). A core is in it exactly while its
