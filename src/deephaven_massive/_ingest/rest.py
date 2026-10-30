@@ -1082,6 +1082,22 @@ class RestState:
             future = self._hosts[key] = Future()
             return future, True
 
+    def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
+        """Return the decision of a (class, family) if one is made, without claiming it.
+
+        A failed decision is removed before its future completes, so a completed future under
+        the key always holds a decision.
+
+        Args:
+            key: The asset class and channel family.
+
+        Returns:
+            The decision, or None while none is made or one is being made.
+        """
+        with self._lock:
+            future = self._hosts.get(key)
+        return future.result() if future is not None and future.done() else None
+
     def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
         """Cache a decision for a (class, family) in place of any earlier one.
 
@@ -1122,6 +1138,19 @@ class RestState:
                 return self._crypto, False
             self._crypto = Future()
             return self._crypto, True
+
+    def known_crypto(self) -> CryptoTickers | None:
+        """Return the session's crypto ticker list if it is read, without claiming it.
+
+        A failed read is removed before its future completes, so a completed future always
+        holds the list.
+
+        Returns:
+            The list, or None while it is not read or being read.
+        """
+        with self._lock:
+            future = self._crypto
+        return future.result() if future is not None and future.done() else None
 
     def forget_crypto(self) -> None:
         """Remove a failed read of the crypto ticker list, so that the next caller tries again.
@@ -1262,10 +1291,12 @@ class RestReader:
         error of the reader propagates to it, and its waiters get a `MassiveError` naming it.
         A waiting caller that gives up raises the error `wait_for_shared` describes.
         """
-        future, created = self.state.crypto_future()
-        if not created and future.done():
-            return future.result()  # a list already read needs no patience (a Java call)
+        known = self.state.known_crypto()
+        if known is not None:
+            return known  # a list already read needs no patience (a Java call)
+        # Taken before claiming the read: a claim is completed only by the block that reads.
         patience = self.patience()
+        future, created = self.state.crypto_future()
         while not created:
             if self.wait_for_shared(
                 future, bucket=OTHER, patience=patience, what="the crypto ticker list"
@@ -2102,12 +2133,15 @@ class RestEndpoints:
         waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
-        future, owner = self._state.host_future(key)
-        if not owner and future.done():
-            return _outcome(future)  # a decision already made needs no patience (a Java call)
+        known = self._state.known_host(key)
+        if known is not None:
+            return known  # a decision already made needs no patience (a Java call)
         reader = self._reader("hosts")
+        # Taken before claiming the decision: a claim is completed only by the block that
+        # decides.
         patience = reader.patience()
         bucket = bucket_of(subscription_of(asset_class))
+        future, owner = self._state.host_future(key)
         while not owner:
             what = f"the {asset_class.value} WebSocket host decision"
             if reader.wait_for_shared(future, bucket=bucket, patience=patience, what=what):

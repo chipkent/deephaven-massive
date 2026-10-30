@@ -1207,6 +1207,66 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
 
 
+def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
+    # A call that needs one of the session's shared lookups: the crypto ticker list or the
+    # stocks WebSocket host decision.
+    if kind == "crypto":
+        return _split_dot(m)
+    transport = m._core.rest_transport()
+    return functools.partial(transport.resolve_host, AssetClass.STOCKS, ChannelFamily.TICK)
+
+
+def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
+    # Claim the shared lookup of `kind`, as a caller does before making or joining it.
+    state = cast("rest.RestEndpoints", m._core.rest_transport())._state
+    if kind == "crypto":
+        return state.crypto_future()
+    return state.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    def interrupted(_: object) -> NoReturn:  # Ctrl-C while asking Deephaven for the patience
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rest, "read_patience", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _lookup(session, kind)()
+    assert _claim(session, kind)[1]  # nobody holds a lookup that nobody would complete
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
+    *,
+    session: dm.MassiveSession,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    # The caller claims a lookup another caller is making, which that caller abandons before
+    # this one first looks at it: it must try again, not raise the abandonment.
+    snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
+    name = "crypto_future" if kind == "crypto" else "host_future"
+    claim = getattr(rest.RestState, name)
+    abandoned: Future[Any] = Future()
+    abandoned.set_exception(rest._AbandonedError("rate limited: the maker gave up"))
+    claims = iter([(abandoned, False)])
+
+    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+        return next(claims, None) or claim(state, *args)
+
+    monkeypatch.setattr(rest.RestState, name, claiming)
+    result = _lookup(session, kind)()
+    if kind == "crypto":
+        assert result == ("DOT", "USD")
+    else:
+        assert isinstance(result, HostDecision)
+        assert result.host == "delayed.massive.com"
+
+
 def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
