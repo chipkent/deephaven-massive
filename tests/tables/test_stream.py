@@ -265,8 +265,12 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
 # --- StreamSink --------------------------------------------------------------------------------
 
 
-def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink, Table]:
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+def make_sink(
+    core: SessionCore, symbols: NormalizedSymbols, plan: ChannelPlan | None = None
+) -> tuple[StreamSink, Table]:
+    # A trades stream; streams given one `plan` share each flush's batch, as one dataset's do.
+    if plan is None:
+        plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
     opened = open_stream_tables(
         plan,
         core.catalog.dataset_schema(TRADES, raw_symbol=False),
@@ -282,10 +286,12 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
     return opened.sink, opened.handle.blink
 
 
-def shared_batch(plan: ChannelPlan, rows: list[dict[str, object]]) -> stream.SharedBatch:
+def shared_batch(
+    plan: ChannelPlan, rows: list[dict[str, object]], *, splits: bool = True
+) -> stream.SharedBatch:
     # A flush's batch of the rows, as the flusher shares it among its streams.
     converted = plan.convert(rows, {}, arrived=arrivals(rows))
-    return stream.SharedBatch(to_table(converted.batch), converted)
+    return stream.SharedBatch(to_table(converted.batch), converted, splits=splits)
 
 
 def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
@@ -349,6 +355,75 @@ def test_streams_of_one_batch_symbol_share_one_partition(
         ("AAPL", 3.0),
     ]
     assert [(r["Symbol"], r["Price"]) for r in dh_to_pylist(msft_rows)] == [("MSFT", 2.0)]
+
+
+def test_a_stream_of_one_batch_symbol_filters_when_the_batch_is_not_split(
+    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # Too few streams take one symbol each to pay for a partition: the stream filters.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    batch = shared_batch(plan, [trade("AAPL", 1), trade("MSFT", 2), trade("AAPL", 3)], splits=False)
+    aapl, _ = make_sink(core, ("AAPL", "SPY"))
+    rows = aapl._select(batch)
+    assert batch._partition is None
+    assert aapl._filter is not None
+    assert rows is not None
+    assert [r["Price"] for r in dh_to_pylist(rows)] == [1.0, 3.0]
+
+
+def test_a_stream_takes_one_symbol_only_when_it_holds_one_of_several(
+    massive_session: dm.MassiveSession,
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    two = shared_batch(plan, [trade("AAPL"), trade("MSFT")]).converted
+    one = shared_batch(plan, [trade("AAPL")]).converted
+    assert make_sink(core, ("AAPL", "SPY"))[0].takes_one_symbol(two)
+    assert not make_sink(core, ALL)[0].takes_one_symbol(two)
+    assert not make_sink(core, ("AAPL", "MSFT"))[0].takes_one_symbol(two)
+    assert not make_sink(core, ("SPY",))[0].takes_one_symbol(two)
+    assert not make_sink(core, ("AAPL",))[0].takes_one_symbol(one)  # the whole batch
+    warned = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.LOG)
+    nameless = shared_batch(warned, [trade("AAPL"), trade("not a symbol")]).converted
+    assert make_sink(core, ("AAPL",))[0].takes_one_symbol(nameless)  # leaves the null rows
+
+
+@pytest.mark.parametrize(
+    ("streams", "rows", "splits"),
+    [(3, 3, True), (2, 3, False), (3, 2, False)],
+    ids=["enough", "too-few-streams", "too-few-rows"],
+)
+def test_a_flush_splits_its_batch_only_for_enough_streams_and_rows(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    streams: int,
+    rows: int,
+    splits: bool,
+) -> None:
+    # With the thresholds lowered to three streams and three rows: a batch is split only when
+    # it is large enough and enough streams take one of its symbols each.
+    monkeypatch.setattr(stream, "SPLIT_MIN_STREAMS", 3)
+    monkeypatch.setattr(stream, "SPLIT_MIN_ROWS", 3)
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    symbols = [f"S{i}" for i in range(rows)]
+    for symbol in symbols[:streams]:
+        flusher.routes.add("T", make_sink(core, (symbol, "SPY"), plan)[0])
+    flusher.routes.add("T", make_sink(core, ALL, plan)[0])
+    made: list[stream.SharedBatch] = []
+    publish = StreamSink.publish
+
+    def recorded(sink: StreamSink, batch: stream.SharedBatch) -> int:
+        made.append(batch)
+        return publish(sink, batch)
+
+    monkeypatch.setattr(StreamSink, "publish", recorded)
+    flusher.rows("T", [trade(symbol) for symbol in symbols])
+    flusher.flush()
+    assert {batch.splits for batch in made} == {splits}
 
 
 def test_a_failed_sink_publishes_nothing_and_fails_once(
@@ -1275,7 +1350,10 @@ def test_benchmark_fan_out(
 
     def shared() -> None:
         converted = plan.convert(rows, {}, arrived=arrivals(rows))
-        batch = stream.SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
+        splits = rows_per_flush >= stream.SPLIT_MIN_ROWS and streams >= stream.SPLIT_MIN_STREAMS
+        batch = stream.SharedBatch(
+            dataset_table(converted.batch, plan.date_columns), converted, splits=splits
+        )
         for sink in sinks:
             sink.publish(batch)
 
@@ -1303,6 +1381,61 @@ def test_benchmark_fan_out(
             f"shared batch {rows_per_flush / shared_seconds:,.0f} rows/s "
             f"({shared_seconds * 1000:.2f} ms a flush, {sharing * 1000:.2f} ms of it sharing "
             f"dates), Python grouping {grouped_rate:,.0f} rows/s\n"
+        )
+
+
+# The default run measures one point, 1 stream of a 2,000-symbol batch, the shape where the
+# filter wins; the others carry the `benchmark` marker. `SPLIT_MIN_STREAMS` comes from these.
+_SPLIT_DEFAULT = (2_000, 2_000, 1)
+_SPLIT_POINTS = [
+    pytest.param(
+        rows,
+        distinct,
+        streams,
+        marks=() if (rows, distinct, streams) == _SPLIT_DEFAULT else pytest.mark.benchmark,
+        id=f"{rows}-{distinct}-{streams}",
+    )
+    for rows, distinct in ((2_000, 2_000), (5_000, 2_500), (20_000, 1_000), (50_000, 25_000))
+    for streams in (1, 4, 8, 16, 32)
+]
+
+
+@pytest.mark.parametrize(("rows_per_flush", "distinct", "streams"), _SPLIT_POINTS)
+def test_benchmark_symbol_split(
+    massive_session: dm.MassiveSession,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    rows_per_flush: int,
+    distinct: int,
+    streams: int,
+) -> None:
+    # Records, never gates: what streams that each take one symbol of a batch cost when they
+    # share a partition of the batch, against a filter each. Each repetition builds a fresh
+    # table, as each flush does: Deephaven remembers a partition of a table it has already
+    # split, so reusing one table would time only the lookups.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    rows = [trade(f"S{i % distinct}", float(i)) for i in range(rows_per_flush)]
+    converted = plan.convert(rows, {}, arrived=arrivals(rows))
+    sinks = [make_sink(core, (f"S{i}",))[0] for i in range(streams)]
+
+    def median_ms(*, splits: bool) -> float:
+        times = []
+        for repetition in range(15):
+            batch = stream.SharedBatch(to_table(converted.batch), converted, splits=splits)
+            started = time.perf_counter()
+            for sink in sinks:
+                sink.publish(batch)
+            if repetition >= 3:  # the first ones warm the JIT and the filters up
+                times.append(time.perf_counter() - started)
+        return statistics.median(times) * 1000
+
+    split_ms = median_ms(splits=True)
+    filter_ms = median_ms(splits=False)
+    with capsys.disabled():
+        sys.stderr.write(
+            f"\nsymbol split of {rows_per_flush} rows, {distinct} symbols, {streams} streams: "
+            f"partition {split_ms:.2f} ms, filters {filter_ms:.2f} ms\n"
         )
 
 

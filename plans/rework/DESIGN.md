@@ -3720,14 +3720,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   no row without a valid symbol) gets the whole batch with no filter, so the common
   single-stream case costs one `add`. One that holds exactly one of them gets that symbol's
   rows from `batch.partition_by("Symbol")`, built once per flush the first time a stream needs
-  it and shared by every stream of the flush (`SharedBatch`): a Java filter costs a few
-  milliseconds whatever its rows, so a hundred single-symbol streams filtering the batch each
-  would spend most of a flush there. One that holds two or more of them gets
+  it and shared by every stream of the flush (`SharedBatch`), when the batch holds at least
+  5,000 rows and at least 8 of the flush's streams take one symbol each. A filter scans the
+  whole batch (about 0.25 ms at 2,000 rows, 1.5 ms at 20,000), while the partition costs work
+  for each distinct symbol of the batch and then about 0.3 ms per stream, so below either
+  threshold each such stream filters; a non-gating benchmark records both paths. Every other
+  stream that holds some of them gets
   `publisher.add(batch.where_in(stream.filter_table, "Symbol"))`, which keeps arrival order
   across its symbols, where `filter_table` is a cached static one-column table rebuilt only when
-  the stream's symbol set changes. Target: Python work is O(rows) per channel per flush and
-  independent of the number of streams; per-stream work is at most one Java lookup or filter
-  and one `add`, O(rows) in Java with no Python per-row cost. A non-gating
+  the stream's symbol set changes. Target: Python work is O(rows) per channel per flush plus a
+  set intersection per stream; Java work is at most one partition per flush, which grows with
+  the batch's distinct symbols, plus one lookup or filter and one `add` per stream, with no
+  Python per-row cost. A non-gating
   benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
   2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping. The default
   run records only 10 streams at 2,000 rows; the other points are marked `benchmark` and
