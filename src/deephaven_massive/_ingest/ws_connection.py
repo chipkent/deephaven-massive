@@ -7,8 +7,9 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
 
 - **Refusals and failures.** A refused topic fails exactly the streams that want it; a
   refusal of a whole step fails the step, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown, which moves the connection's streams to the
-  `delayed.` host (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
+  `socket.` connection whose recency was unknown and that has never had a topic
+  acknowledged, which moves the connection's streams to the `delayed.` host
+  (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
   rejected key, a handshake error retrying cannot fix) fails every stream on it.
 - **Rows, drift, and its row.** Rows go to the flush thread; drift, and the rows the client
   dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
@@ -29,7 +30,7 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
 `ConnectionGroup` is what sessions share: sessions in one process with the same API key and
 equal connection settings (`CONNECTION_SETTINGS`, and the same Deephaven update graph) attach
 to one group, so their streams ride the same connections, and a connection is leased per
-stream. The group also holds the shared futures calendar and the record of `NO_ACK` topics.
+stream. The group also holds the shared futures calendar.
 Each session's own registry of streams and leases, and its `StreamTransport`, are `ws.py`'s
 (`WsConnections`, `WsTransport`); a `ClientFactory` builds each connection's client.
 
@@ -46,7 +47,6 @@ the same leases under the group's one lock, and a move to another host acts on b
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import itertools
 import logging
@@ -64,6 +64,7 @@ from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    AuthenticationError,
     EntitlementError,
     ErrorCause,
     MassiveError,
@@ -80,7 +81,14 @@ from deephaven_massive._ingest.subscriptions import (
     wildcard,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
-from deephaven_massive._massive import Cancel, DriftReport, Transport, WireAuthError, WsState
+from deephaven_massive._massive import (
+    Cancel,
+    DriftReport,
+    StatusKind,
+    Transport,
+    WireAuthError,
+    WsState,
+)
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -125,8 +133,12 @@ IDLE_GRACE: Final = 30.0
 
 OPTIONS_CAP: Final = 1000
 """The most explicit topics one `/options` connection carries. Massive allows 1,000 option
-contracts per connection; whether it counts contracts or topics is not documented, so the
-library counts topics (`T.X` and `Q.X` are two), the stricter reading. Wildcards count zero."""
+contracts per connection; whether it counts contracts or topics is not verified, so the
+library counts topics (`T.X` and `Q.X` are two), the stricter reading, until a live check
+shows otherwise. Wildcards count zero."""
+
+_NOTE_TOPICS: Final = 5
+"""The most unacknowledged topics a stream's `Error` names; it counts the rest."""
 
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
@@ -433,7 +445,6 @@ class Connection:
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
             on_step_refused=self._step_refused,
-            first_no_ack=functools.partial(group.first_no_ack, self.path),
             on_change=self._changed,
         )
         # Loop-confined from here on.
@@ -442,7 +453,9 @@ class Connection:
         self._required: dict[str, frozenset[str]] = {}
         self._idle: Timer | None = None
         self._successor: Connection | None = None
-        self._deferred_shown: dict[int, int] = {}
+        # Each stream's notes as its `Error` shows them: its deferred options topics and its
+        # topics Massive has not acknowledged; a stream with neither has no entry.
+        self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
         self._state = ConnectionState.CONNECTING
         self._reconnects = 0
         self._last_message_at: int | None = None
@@ -454,6 +467,9 @@ class Connection:
         self._traffic = _Traffic()
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
         self._ended = self._moving = False
+        # Set by the first acknowledgement, in any generation: the host serves this key, so a
+        # later real-time refusal never moves the connection to delayed data.
+        self._served = False
         self._episodes = _Episodes()
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
@@ -648,7 +664,7 @@ class Connection:
         if self._episodes.down_since is not None:  # it opens during an outage: held down
             self._hold_down(stream.stream_id, self._group.max_outage)
         if self._episodes.down_since is not None or self._episodes.quiet_note is not None:
-            self._show_notes([stream.stream_id])
+            self._show_outage_notes([stream.stream_id])
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
             self._required[stream.channel] = keys
@@ -669,7 +685,7 @@ class Connection:
             self._unknown(stream_id, self.release_stream, ())
             return
         self.flusher.routes.remove(stream_id)
-        self._deferred_shown.pop(stream_id, None)
+        self._notes_shown.pop(stream_id, None)
         self._release_down(stream_id)
         self.subscriptions.remove(stream.topics, static=stream.static)
         logger.debug(
@@ -788,7 +804,7 @@ class Connection:
         if self._ended:  # the client has ended: nothing to reconcile or to close
             return
         self.subscriptions.reconcile()
-        self._show_deferred(opened=opened)
+        self._show_notes(opened=opened)
         if not self._streams and self._idle is None:
             self._idle = self._client.loop.call_later(IDLE_GRACE, self._idle_close)
 
@@ -927,6 +943,8 @@ class Connection:
         self._episodes.last_frame_at = time.time_ns()
         self._heard()
         if generation == self.subscriptions.generation:
+            if status.kind is StatusKind.ACK:
+                self._served = True
             self.subscriptions.status(status)
 
     def _on_data(
@@ -1078,7 +1096,7 @@ class Connection:
             note: The text, or None to clear it.
         """
         self._episodes.quiet_note = note
-        self._show_notes(list(self._streams))
+        self._show_outage_notes(list(self._streams))
 
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         """Show the client's state; on a fatal failure, fail every stream.
@@ -1127,7 +1145,7 @@ class Connection:
             self._cancel_outage_timers()
             self._streams.clear()
             self._early.clear()
-            self._deferred_shown.clear()
+            self._notes_shown.clear()
 
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
@@ -1139,8 +1157,18 @@ class Connection:
         Args:
             error: The client's error.
         """
+        public: MassiveError
         if isinstance(error, WireAuthError):
-            public = from_wire(error)
+            # Massive answers `auth_failed` for a bad key, and may answer it for a key whose
+            # plan has no streams of the class too; its text, which the message keeps, tells.
+            wire = from_wire(error)
+            public = AuthenticationError(
+                f"{wire}; this can also mean the {subscription_of(self.asset_class)} plan "
+                f"includes no WebSocket streams for {self.asset_class.value}, not only a bad key",
+                status=wire.status,
+                request_id=wire.request_id,
+                cause=wire.cause,
+            )
         else:
             public = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "
@@ -1191,10 +1219,16 @@ class Connection:
         Args:
             status: A refusal naming no topic, of a step none of whose topics was resolved.
 
+        A connection that has ever had a topic acknowledged is never moved: the real-time host
+        serves this key, so a later real-time refusal is an `EntitlementError` for that step's
+        streams only, and no working stream jumps to 15-minute-old data.
+
         Returns:
             True when the connection is moving to the `delayed.` host (the streams keep
             running); False when the refusal fails the step's streams.
         """
+        if self._moving:
+            return True
         decision = self.decision
         with self._lock:
             tick = ChannelFamily.TICK in self.families
@@ -1205,8 +1239,15 @@ class Connection:
             or not decision.host.startswith("socket.")
         ):
             return False
-        if not self._moving:
-            self._moving = self._group.reroute(self, status.message)
+        if self._served:
+            logger.info(
+                "%s: a real-time refusal after acknowledgements on this host (%s); failing the "
+                "step's streams rather than moving the connection to delayed data",
+                self.url,
+                status.message,
+            )
+            return False
+        self._moving = self._group.reroute(self, status.message)
         return self._moving
 
     def _record_drift(
@@ -1289,7 +1330,7 @@ class Connection:
         )
         changed = note != episodes.down_note
         episodes.down_note = note
-        self._show_notes(list(episodes.down) if changed else newly)
+        self._show_outage_notes(list(episodes.down) if changed else newly)
 
     def _hold_down(self, stream_id: int, left: float) -> None:
         """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
@@ -1381,7 +1422,7 @@ class Connection:
             self._release_down(stream_id)
         if recovered:
             logger.debug("%s: streams %s receive data again", self.url, recovered)
-            self._show_notes(recovered)
+            self._show_outage_notes(recovered)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
         logger.debug(
@@ -1396,7 +1437,7 @@ class Connection:
         for stream_id in list(self._episodes.down):
             self._release_down(stream_id)
 
-    def _show_notes(self, stream_ids: Iterable[int]) -> None:
+    def _show_outage_notes(self, stream_ids: Iterable[int]) -> None:
         """Write each stream's outage and silence parts of its `Error`, or clear them.
 
         Only these two parts change (`NotePart.OUTAGE`, `NotePart.QUIET`): a down stream shows
@@ -1417,6 +1458,25 @@ class Connection:
                 )
                 for stream_id in stream_ids
             }
+        )
+
+    @staticmethod
+    def _no_ack_text(missing: frozenset[str]) -> str:
+        """Return the `Error` part of a stream whose topics Massive has not acknowledged.
+
+        Args:
+            missing: The stream's topics in `NO_ACK`; at least one.
+
+        Returns:
+            The text, naming the first `_NOTE_TOPICS` of them.
+        """
+        shown = sorted(missing)[:_NOTE_TOPICS]
+        more = len(missing) - len(shown)
+        return (
+            f"no acknowledgement from Massive for {', '.join(shown)}"
+            f"{f' and {more} more' if more else ''}; "
+            f"{'its' if len(missing) == 1 else 'their'} rows may be missing; the subscription "
+            "is re-sent until Massive acknowledges it"
         )
 
     def _cap_text(self) -> str:
@@ -1446,49 +1506,93 @@ class Connection:
         self._client.loop.call_soon(self._publish_change)
 
     def _publish_change(self) -> None:
-        """Publish the options-cap state and rewrite the row for the changes of a loop turn."""
+        """Publish the streams' notes and rewrite the row for the changes of a loop turn."""
         self._change_scheduled = False
-        self._show_deferred()
+        self._show_notes()
         self._check_recovered()
         self._write_row()
 
-    def _show_deferred(self, *, opened: Collection[int] = ()) -> None:
-        """Publish the admitted options contracts and show each stream's deferred count.
+    def _show_notes(self, *, opened: Collection[int] = ()) -> None:
+        """Publish the admitted options topics, and show each stream's notes in its `Error`.
 
-        The admitted set is published, and an opening stream's pending topics dropped, in one
-        section of the group's lock, so a verb's cap check never sees the stream's topics in
-        neither.
+        A stream's notes are its options topics the cap defers (with `Deferred`, the stream's
+        own deferred topics, one per contract since a stream reads one channel) and its topics
+        Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; each
+        is its own part of the `Error` (`NotePart.CAP`, `NotePart.NO_ACK`), shown beside the
+        stream's other warnings and never replacing them. A note is cleared once it no longer
+        holds: room frees, a late acknowledgement arrives, or a new generation starts. On
+        `/options`, the admitted set is published, and an opening stream's pending topics
+        dropped, in one section of the group's lock, so a verb's cap check never sees the
+        stream's topics in neither.
 
         Args:
             opened: The streams whose pending topics are now counted through the admitted set.
         """
-        if self.asset_class is not AssetClass.OPTIONS:
-            return
-        with self._lock:
-            self.cap_admitted = self.subscriptions.admitted
-            for stream_id in opened:
-                self.cap_pending.pop(stream_id, None)
+        options = self.asset_class is AssetClass.OPTIONS
+        if options:
+            with self._lock:
+                self.cap_admitted = self.subscriptions.admitted
+                for stream_id in opened:
+                    self.cap_pending.pop(stream_id, None)
         deferred = self.subscriptions.deferred
+        no_ack = self.subscriptions.no_ack
+        if not deferred and not no_ack and not self._notes_shown:
+            return
         updates: dict[int, StreamUpdate] = {}
         for stream in self._streams.values():
-            count = len(stream.topics & deferred)
-            if count == self._deferred_shown.get(stream.stream_id, 0):
+            count = len(stream.topics & deferred) if deferred else 0
+            missing = stream.topics & no_ack if no_ack else frozenset()
+            old = self._notes_shown.get(stream.stream_id)
+            old_count, old_missing = old or (0, frozenset())
+            if (count, missing) == (old_count, old_missing):
                 continue
-            self._deferred_shown[stream.stream_id] = count
-            if count:
-                text = self._cap_text()
-                logger.warning("%s stream %d: %s", stream.plan.dataset, stream.stream_id, text)
-                update = StreamUpdate(deferred=count, notes={NotePart.CAP: text})
+            note = (count, missing) if count or missing else None
+            if note is None:
+                del self._notes_shown[stream.stream_id]
             else:
-                logger.info(
-                    "%s stream %d: no contract is deferred any more",
-                    stream.plan.dataset,
-                    stream.stream_id,
-                )
-                update = StreamUpdate(deferred=0, notes={NotePart.CAP: None})
+                self._notes_shown[stream.stream_id] = note
+            self._log_note(stream, count=count, old_count=old_count, missing=missing)
+            # Two parts of the stream's `Error`, each set or cleared alone, beside its others.
+            notes = {
+                NotePart.CAP: self._cap_text() if count else None,
+                NotePart.NO_ACK: self._no_ack_text(missing) if missing else None,
+            }
+            update = StreamUpdate(notes=notes)
+            if options:
+                update = replace(update, deferred=count)
             updates[stream.stream_id] = update
         if updates:
             self._update_streams(updates)
+
+    def _log_note(
+        self, stream: ConnectionStream, *, count: int, old_count: int, missing: frozenset[str]
+    ) -> None:
+        """Log a change of a stream's notes: the cap's at WARNING and INFO, no-acks at DEBUG.
+
+        The no-acks were logged at WARNING, once per step, when they happened.
+
+        Args:
+            stream: The stream.
+            count: Its deferred options topics now.
+            old_count: Its deferred options topics before.
+            missing: Its unacknowledged topics now.
+        """
+        if count and count != old_count:
+            logger.warning(
+                "%s stream %d: %s", stream.plan.dataset, stream.stream_id, self._cap_text()
+            )
+        elif old_count and not count:
+            logger.info(
+                "%s stream %d: no contract is deferred any more",
+                stream.plan.dataset,
+                stream.stream_id,
+            )
+        logger.debug(
+            "%s stream %d: unacknowledged topics %s",
+            stream.plan.dataset,
+            stream.stream_id,
+            bounded_list(sorted(missing)),
+        )
 
     def _update_streams(self, updates: dict[int, StreamUpdate]) -> None:
         """Apply changes to streams' `m.streams()` rows, each in its own session.
@@ -1673,9 +1777,9 @@ class ConnectionGroup:
     stream (`attach`) and detaches when the session closes or is freed (`detach`); the group
     leaves the process's registry with its last session. The group owns what belongs to the
     connections rather than to a session: the connections by URL, the connection and the
-    session of each stream, the record of `NO_ACK` topics, the crypto pairs its sessions
-    looked up, and the server's real-time verdict (`reroute`), which moves a connection with
-    every session's streams and is kept by (class, family) for every session's later streams.
+    session of each stream, the crypto pairs its sessions looked up, and the server's real-time
+    verdict (`reroute`), which moves a connection with every session's streams and is kept by
+    (class, family) for every session's later streams.
     It holds no session core. Its lock, a leaf lock (`lock`), guards all of it and each
     connection's leases, users, failure, and options-cap bookkeeping; no Deephaven call,
     network call, or wait happens under it, and a session's `registry_lock` is never taken
@@ -1730,7 +1834,6 @@ class ConnectionGroup:
         self.streams: dict[int, Connection] = {}
         self.owners: dict[int, WsConnections] = {}
         self.sessions: set[WsConnections] = set()
-        self._no_acked: set[tuple[str, str]] = set()
         self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
@@ -1876,24 +1979,6 @@ class ConnectionGroup:
         if not open_:
             raise MassiveError("every session of the WebSocket connection group has closed")
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
-
-    def first_no_ack(self, path: str, topic: str) -> bool:
-        """Record a topic's `NO_ACK`; tell whether it is the topic's first on the cluster.
-
-        Kept here, not per connection, so a topic reconnects at most once for the group, also
-        across an idle close or a verdict's move. Takes the lock briefly.
-
-        Args:
-            path: The cluster path of the connection, such as `/stocks`.
-            topic: The topic.
-
-        Returns:
-            True for the first `NO_ACK` of the topic on the cluster.
-        """
-        with self.lock:
-            first = (path, topic) not in self._no_acked
-            self._no_acked.add((path, topic))
-        return first
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:
         """Take a connection out of the registry, so the next stream opens a new one.

@@ -173,7 +173,7 @@ class NotePart(StrEnum):
     """One named part of a running stream's `Error`: a warning that leaves the stream running.
 
     Several sources warn about one stream independently: its connection (an outage, silence,
-    the options cap), its flush thread (a futures session miss, `dm.ALL` symbols whose rows are
+    the options cap, unacknowledged topics), its flush thread (`dm.ALL` symbols whose rows are
     dropped), and a `poll()` table's poller (a failed cycle). Each sets or clears only its own
     part with `StreamUpdate.notes`, so no source replaces or clears another's warning, and the
     `Error` column joins the current parts in this order, with the skipped symbol-table values
@@ -186,8 +186,8 @@ class NotePart(StrEnum):
     """The connection has received nothing for a while during market hours."""
     CAP = "cap"
     """The options contract cap defers some of the stream's contracts."""
-    SESSION_MISS = "session_miss"
-    """A futures row whose trading session the schedules could not place."""
+    NO_ACK = "no_ack"
+    """Massive has not acknowledged some of the stream's topics after a re-send."""
     STALE_SYMBOLS = "stale_symbols"
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
     POLL_CYCLE = "poll_cycle"
@@ -386,7 +386,8 @@ class StreamRow:
             tables until the transport fills it in.
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
-        deferred: Options contracts deferred by the contract cap.
+        deferred: The stream's own options topics the cap defers (one per contract, since a
+            stream reads one channel).
         transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`, and for a
             background read the source it reads, `Transport.REST` or `Transport.FLAT_FILES`;
             the table shows its label, `WebSocket`, `REST`, or `flat files`.
@@ -447,7 +448,8 @@ class StreamUpdate:
     Attributes:
         rows_published: The stream's total rows published so far.
         requests_per_cycle: The REST requests of the latest `poll()` cycle.
-        deferred: Options contracts deferred by the contract cap.
+        deferred: The stream's own options topics the cap defers (one per contract, since a
+            stream reads one channel).
         symbol_count: How many symbols the stream now covers.
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.

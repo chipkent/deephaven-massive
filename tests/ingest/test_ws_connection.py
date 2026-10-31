@@ -27,7 +27,7 @@ from deephaven_massive._ingest import futures_calendar, ws, ws_connection
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics
 from deephaven_massive._tables.transports import HostDecision
-from tests._fakes.ws import FakeMassiveServer
+from tests._fakes.ws import FakeMassiveServer, status_frame
 from tests._fakes.ws_session import REALTIME, TIMEOUT, WsSession
 
 RowsWhen: TypeAlias = (
@@ -190,6 +190,11 @@ def test_a_rejected_key_fails_every_stream(
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert "rejected the API key" in row["LastError"]
+    # Massive may answer `auth_failed` to a key whose plan has no streams of the class, too.
+    assert row["LastError"].endswith(
+        "; this can also mean the stocks plan includes no WebSocket streams for stocks, not "
+        "only a bad key"
+    )
     assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
     assert len(ws_session.urls) == 2
@@ -268,19 +273,81 @@ def test_an_opening_stream_cancels_the_idle_close(ws_session: WsSession) -> None
         connection.leases -= 1
 
 
-def test_a_missing_acknowledgement_reconnects(
-    fake_ws_server: FakeMassiveServer, make_ws_session: Callable[..., WsSession]
+def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     custom_session = make_ws_session(ack_timeout=0.05)
     fake_ws_server.silent.add("T.AAPL")
-    result = custom_session.query(TRADES, ["AAPL"]).blink()
-    custom_session.wait(lambda s: s.opens >= 2)
-    assert [json.loads(f)["params"] for f in fake_ws_server.frames(0)] == ["T.AAPL", "T.AAPL"]
-    del result
+    quiet = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.wait(lambda s: s.opens == 1)
+    wait_for(lambda: connections_of(custom_session, dh_to_pylist)[0]["NoAckTopics"] == 1)
+    healthy = custom_session.query(TRADES, ["MSFT"]).blink()
+    custom_session.subscribed("T.MSFT")
+    # The topic was sent, re-sent once, and is counted; the connection, and the other stream
+    # on it, stays up.
+    params = [json.loads(f)["params"] for f in fake_ws_server.frames(0)]
+    assert params == ["T.AAPL", "T.AAPL", "T.MSFT"]
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert (row["State"], row["NoAckTopics"], row["AckedTopics"]) == ("CONNECTED", 1, 1)
+    assert custom_session.opens == 1
+    # The quiet stream says why its rows may be missing, without failing; the other is clean.
+    errors = [(r["State"], r["Error"]) for r in streams_of(custom_session, dh_to_pylist)]
+    assert errors == [
+        (
+            "RUNNING",
+            (
+                "no acknowledgement from Massive for T.AAPL; its rows may be missing; the "
+                "subscription is re-sent until Massive acknowledges it"
+            ),
+        ),
+        ("RUNNING", None),
+    ]
+    # A late acknowledgement clears it.
+    fake_ws_server.send(status_frame("success", "subscribed to: T.AAPL"))
+    custom_session.wait(lambda s: len(s.statuses) == 2)
+    wait_for(lambda: streams_of(custom_session, dh_to_pylist)[0]["Error"] is None)
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert (row["NoAckTopics"], row["AckedTopics"]) == (0, 2)
+    del quiet, healthy
 
 
 def unknown_futures(*_: object) -> HostDecision:
     return HostDecision("socket.test", Recency.UNKNOWN, "no timeframe in futures snapshot")
+
+
+def test_a_connection_that_was_served_is_never_moved_to_delayed_data(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The host acknowledged a topic, so it serves this key: a later real-time refusal fails
+    # only that step's streams, and the working stream stays on real-time data.
+    custom_session = make_ws_session(decide=unknown_futures)
+    first = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+    second = custom_session.query(FUTURES, ["NQZ5"]).blink()
+    custom_session.wait(lambda s: len(s.statuses) == 2)
+    settle(custom_session)
+    custom_session.flush()  # applies the failure
+    wait_for(
+        lambda: (
+            [r["State"] for r in streams_of(custom_session, dh_to_pylist)]
+            == [
+                "RUNNING",
+                "FAILED",
+            ]
+        )
+    )
+    assert custom_session.urls == ["wss://socket.test/futures"]
+    assert custom_session.verdicts == []
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert row["Host"] == "socket.test"
+    [_, failed] = streams_of(custom_session, dh_to_pylist)
+    assert "Real-time data requires an upgrade" in failed["Error"]
+    del first, second
 
 
 def test_the_real_time_verdict_moves_the_connection_once(
@@ -1236,12 +1303,6 @@ def test_a_hand_over_applies_what_the_old_flusher_queued(
     del refused
 
 
-def test_a_topic_reconnects_once_per_cluster(ws_session: WsSession) -> None:
-    assert ws_session.connections.group.first_no_ack("/stocks", "T.AAPL")
-    assert not ws_session.connections.group.first_no_ack("/stocks", "T.AAPL")
-    assert ws_session.connections.group.first_no_ack("/options", "T.AAPL")
-
-
 def join(ws_session: WsSession) -> dm.MassiveSession:
     # A second session with the same key and settings, sharing the wrapper's connections; the
     # wrapper's own session is closed by its fixture, this one by the test.
@@ -1855,6 +1916,10 @@ _DOWN = r"connection down since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ); no data"
 """The pattern of the `Error` of a stream whose connection is down; its group is the start."""
 
 
+_NO_ACK = r"no acknowledgement from Massive for T\.\w+; its rows may be missing; .*"
+"""The pattern of the `Error` part of a stream with a topic Massive never acknowledged."""
+
+
 def _outage_failure(since: str, limit: str) -> str:
     # The message a stream fails with once the outage held it down for `max_outage`.
     return (
@@ -2003,10 +2068,6 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     dh_to_pylist: ToPylist,
 ) -> None:
     custom_session = make_ws_session(ack_timeout=0.05)
-    # Each topic's first NO_ACK on the cluster is spent: none reconnects, so the socket stays
-    # as the server leaves it, authenticated and silent, with or without that reconnect.
-    for topic in ("T.AAPL", "T.MSFT"):
-        custom_session.connections.group.first_no_ack("/stocks", topic)
     result = custom_session.query(TRADES, ["AAPL"]).blink()
     other = custom_session.query(TRADES, ["MSFT"]).blink()
     custom_session.subscribed("T.AAPL", "T.MSFT")
@@ -2029,7 +2090,8 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     wait_for(silent_but_connected)  # NO_ACK: nothing waits for a reply, yet nothing arrived
     assert _down(custom_session, connection) == {1, 2}
     errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    assert all(re.fullmatch(_DOWN, e) for e in errors)
+    # Two warnings, each its own part: the outage, and the connection's no-ack note.
+    assert all(re.fullmatch(f"{_DOWN}; {_NO_ACK}", e) for e in errors)
 
     def data_for(symbol: str) -> None:
         custom_session.send(trade(symbol))
@@ -2040,10 +2102,12 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     data_for("AAPL")  # AAPL's data flows again; MSFT's does not
     assert _down(custom_session, connection) == {2}
     errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    assert errors[0] is None
-    assert re.fullmatch(_DOWN, errors[1])
+    # Clearing the outage's part keeps the no-ack part, which only its source clears.
+    assert re.fullmatch(_NO_ACK, errors[0])
+    assert re.fullmatch(f"{_DOWN}; {_NO_ACK}", errors[1])
     data_for("MSFT")
-    assert [r["Error"] for r in streams_of(custom_session, dh_to_pylist)] == [None, None]
+    errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
+    assert all(re.fullmatch(_NO_ACK, e) for e in errors)
     assert _down_since(custom_session, connection) is None
     custom_session.session.release(result)
     custom_session.session.release(other)
@@ -2056,7 +2120,6 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     dh_to_pylist: ToPylist,
 ) -> None:
     custom_session = make_ws_session(ack_timeout=0.05)
-    custom_session.connections.group.first_no_ack("/stocks", "T.MSFT")  # never reconnects
     result = custom_session.query(TRADES, ["AAPL"]).last_by()
     other = custom_session.query(TRADES, ["MSFT"]).last_by()
     custom_session.subscribed("T.AAPL", "T.MSFT")
@@ -2082,7 +2145,7 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     assert _down(custom_session, connection) == {2}
     errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
     assert errors[0] is None
-    assert re.fullmatch(_DOWN, errors[1])
+    assert re.fullmatch(f"{_DOWN}; {_NO_ACK}", errors[1])
     _expire(custom_session, connection, 2)
     wait_for(lambda: bool(other.j_table.isFailed()))
     rows = streams_of(custom_session, dh_to_pylist)

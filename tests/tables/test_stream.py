@@ -676,23 +676,23 @@ def futures_bar(start_ms: int, end_ms: int) -> dict[str, object]:
 
 
 class FakeSessionDates:
-    """A schedule calendar that moves one symbol's rows to a fixed date and misses another's."""
+    """A schedule calendar that moves one symbol's rows to a fixed date and misses another's.
+
+    A missed row gets a null date, as the real calendar gives it.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[str | None], list[int | None], list[str | None]]] = []
         self.missing = {"NQM5"}
 
-    def correct(
-        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
-    ) -> tuple[pa.Array, list[tuple[str, str]]]:
+    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
         names = symbols.to_pylist()
         self.calls.append((names, instants.to_pylist(), dates.to_pylist()))
         fixed = [
-            "2025-03-11" if name == "ESM5" else day
+            "2025-03-11" if name == "ESM5" else None if name in self.missing else day
             for name, day in zip(names, dates.to_pylist(), strict=True)
         ]
-        misses = [(name, f"{name} missed") for name in sorted(self.missing) if name in names]
-        return pa.array(fixed, pa.string()), misses
+        return pa.array(fixed, pa.string())
 
 
 def test_a_futures_row_gets_the_rule_session_corrected_by_the_schedules(
@@ -714,14 +714,13 @@ def test_a_futures_row_gets_the_rule_session_corrected_by_the_schedules(
         "2025-03-07",
         "2025-03-10",  # after Friday's roll: Monday's session
         "2025-03-11",  # moved by the schedules
-        "2025-03-07",
+        None,  # missed by the schedules: the rule's date may be wrong
     ]
     assert sessions.calls[0][2] == ["2025-03-07", "2025-03-10", "2025-03-07", "2025-03-07"]
-    assert converted.misses == (("NQM5", "NQM5 missed"),)
+    assert converted.batch.column("Timestamp").null_count == 0  # every instant is kept
     # Without a calendar, the rule's dates stand.
     alone = plan.convert(rows, {}, arrived=[ARRIVED] * 4)
     assert alone.batch.column("Date").to_pylist()[2] == "2025-03-07"
-    assert alone.misses == ()
 
 
 def test_a_streamed_bar_ends_its_length_after_its_start(
@@ -790,7 +789,7 @@ def test_every_row_takes_the_arrival_of_its_frame(
     assert inserted == [111, 111, 222]
 
 
-def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
+def test_a_session_miss_leaves_the_streams_error_alone_and_publishes_its_rows(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     core = massive_session._core
@@ -819,39 +818,17 @@ def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
     both = [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
     flusher.rows("T", both)
     flusher.flush()
-    # The same miss again: the row already shows it.
-    flusher.rows("T", both)
-    flusher.flush()
-    # Placed at last: the stream's next rows clear it.
     calendar.missing.clear()
     flusher.rows("T", both)
     flusher.flush()
-    # A stream no longer routed is forgotten.
-    calendar.missing.add("NQM5")
-    flusher.rows("T", both)
-    flusher.flush()
-    flusher.routes.remove(1)
-    flusher.flush()
     flusher.stop()
+    # A miss only leaves its rows without a date: the stream is healthy, so its `Error` is
+    # never written, and every row is published.
     assert not any(sink.failed for sink in sinks)
-    assert updates[:3] == [
-        {
-            1: StreamUpdate(
-                rows_published=1,
-                notes={NotePart.SESSION_MISS: "NQM5 missed", NotePart.STALE_SYMBOLS: None},
-            ),
-            2: StreamUpdate(rows_published=1),
-        },
+    assert updates[:2] == [
+        {1: StreamUpdate(rows_published=1), 2: StreamUpdate(rows_published=1)},
         {1: StreamUpdate(rows_published=2), 2: StreamUpdate(rows_published=2)},
-        {
-            1: StreamUpdate(
-                rows_published=3,
-                notes={NotePart.SESSION_MISS: None, NotePart.STALE_SYMBOLS: None},
-            ),
-            2: StreamUpdate(rows_published=3),
-        },
     ]
-    assert flusher._shown == {}
 
 
 # --- Flusher -----------------------------------------------------------------------------------
@@ -1088,9 +1065,7 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
     written.clear()
     flusher.rows("T", [trade("CCC")])
     flusher.flush()
-    assert [u.notes for u in written] == [
-        {NotePart.SESSION_MISS: None, NotePart.STALE_SYMBOLS: None}
-    ]
+    assert [u.notes for u in written] == [{NotePart.STALE_SYMBOLS: None}]
     written.clear()
     flusher.rows("T", [trade("CCC")])
     flusher.flush()

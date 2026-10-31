@@ -29,26 +29,26 @@ widened to the dataset schema, and the library's time columns filled (`row_times
 a bar's end, and `TimestampInsert`, the instant each row's frame arrived. Futures messages carry no
 session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected by the connection's
 `FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits; a row its
-schedules do not cover keeps the rule's date, and the streams that receive it show the miss in their
-`m.streams()` row. A row whose time column fails the bound cannot be placed, so it is dropped
-from the batch and counted, and any other timestamp that fails it is null and reported as schema
-drift; neither fails a stream. The batch becomes one static Deephaven table
-(`deephaven.arrow.to_table`), shared by the dataset's streams on the channel (`SharedBatch`). Each
-`dm.ALL` stream, and each symbol stream that holds every symbol of the batch, gets the whole batch;
-a symbol stream that holds none of them gets nothing. A symbol stream that holds exactly one of
-them gets that symbol's rows from a partition of the batch by `Symbol`, built once per flush the
-first time a stream needs it (`Table.partition_by`), when the batch holds at least
-`SPLIT_MIN_ROWS` rows and at least `SPLIT_MIN_STREAMS` streams take one symbol each: many
+schedules cannot place gets a null `Date` (the calendar logs it), since the rule's date can be wrong
+there, and the stream keeps running with its `Error` untouched. A row whose time column fails the
+bound cannot be placed, so it is dropped from the batch and counted, and any other timestamp that
+fails it is null and reported as schema drift; neither fails a stream. The batch becomes one static
+Deephaven table (`deephaven.arrow.to_table`), shared by the dataset's streams on the channel
+(`SharedBatch`). Each `dm.ALL` stream, and each symbol stream that holds every symbol of the batch,
+gets the whole batch; a symbol stream that holds none of them gets nothing. A symbol stream that
+holds exactly one of them gets that symbol's rows from a partition of the batch by `Symbol`, built
+once per flush the first time a stream needs it (`Table.partition_by`), when the batch holds at
+least `SPLIT_MIN_ROWS` rows and at least `SPLIT_MIN_STREAMS` streams take one symbol each: many
 single-symbol streams of a large batch then cost one partition and a lookup each rather than one
-scan of the batch each, while a lone single-symbol stream beside a busy channel filters, since
-the partition's cost grows with the batch's distinct symbols. Every other stream that holds
-some but not all of the batch's symbols gets `batch.where_in(filter, "Symbol")`, which keeps the
-rows in arrival order across its symbols, where `filter` is a static one-column table cached per
-stream and rebuilt only when the stream's symbols change. So the Python work is O(rows) per
-channel and flush plus a set intersection per stream; the Java work is one partition at most,
-which grows with the batch's distinct symbols, plus one lookup or filter and one `add` per
-stream. Each flush ends with one `SessionCore.update_streams` call per
-session, carrying the published-row total of each of its streams.
+scan of the batch each, while a lone single-symbol stream beside a busy channel filters, since the
+partition's cost grows with the batch's distinct symbols. Every other stream that holds some but not
+all of the batch's symbols gets `batch.where_in(filter, "Symbol")`, which keeps the rows in arrival
+order across its symbols, where `filter` is a static one-column table cached per stream and rebuilt
+only when the stream's symbols change. So the Python work is O(rows) per channel and flush plus a
+set intersection per stream; the Java work is one partition at most, which grows with the batch's
+distinct symbols, plus one lookup or filter and one `add` per stream. Each flush ends with one
+`SessionCore.update_streams` call per session, carrying the published-row total of each of its
+streams.
 
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
 (a refused topic, a rejected key) to the flush thread's control queue; the flush thread fails
@@ -233,14 +233,11 @@ class FuturesSessionDates(Protocol):
 
     The WebSocket transport gives a futures connection's flusher one
     (`_ingest/futures_calendar.py`); `ChannelPlan.convert` hands it the rule's dates of every
-    futures row. It never waits on the network: what its schedules do not cover yet keeps the
-    rule's date.
+    futures row. It never waits on the network.
     """
 
-    def correct(
-        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
-    ) -> tuple[pa.Array, list[tuple[str, str]]]:
-        """Return the rows' session dates, corrected by the schedules, and the new misses.
+    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
+        """Return the rows' session dates, corrected by the schedules.
 
         Args:
             symbols: The rows' canonical symbols, `string`.
@@ -249,8 +246,8 @@ class FuturesSessionDates(Protocol):
             dates: The 17:00 Chicago rule's session dates, ISO text.
 
         Returns:
-            The dates to keep, one per row; and each miss reported for the first time, as
-            `(symbol, message)`: a row its schedules cannot place, which keeps the rule's date.
+            The dates to keep, ISO text, one per row; null for a row the schedules cannot
+            place, whose rule date may be wrong.
         """
         ...
 
@@ -272,8 +269,6 @@ class Converted:
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
         null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
-        misses: The futures rows whose session the schedules could not place, reported for the
-            first time, as `(symbol, message)`; they keep the 17:00 Chicago rule's date.
         dropped_symbols: How many rows of each canonical symbol were dropped because their
             time column fails the timestamp routine; a row with no valid symbol is not
             counted here.
@@ -284,7 +279,6 @@ class Converted:
     unreadable: str = ""
     symbols: frozenset[str] = frozenset()
     null_symbols: bool = False
-    misses: tuple[tuple[str, str], ...] = ()
     dropped_symbols: Mapping[str, int] = dataclasses.field(default_factory=dict)
 
 
@@ -538,8 +532,7 @@ class ChannelPlan:
 
         Returns:
             The batch without the dropped rows, the drift of its timestamps, the failure of
-            its unreadable symbols, the batch's distinct symbols, and the futures session
-            misses reported for the first time.
+            its unreadable symbols, and the batch's distinct symbols.
         """
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
@@ -568,17 +561,10 @@ class ChannelPlan:
                 dropped = bad if dropped is None else pc.call_function("or", [dropped, bad])
             arrays[name] = widen(values, column_type.arrow_type)
         batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        misses: list[tuple[str, str]] = []
-
-        def corrected(symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
-            fixed, found = cast("FuturesSessionDates", sessions).correct(symbols, instants, dates)
-            misses.extend(found)
-            return fixed
-
         batch = self.times.fill(
             batch,
             received=pa.array(arrived, pa.int64()),
-            session_dates=None if sessions is None else corrected,
+            session_dates=None if sessions is None else sessions.correct,
         )
         if dropped is not None:
             batch = batch.filter(pc.call_function("invert", [dropped]))
@@ -589,7 +575,6 @@ class ChannelPlan:
             unreadable,
             symbols=frozenset(s for s in distinct if s is not None),
             null_symbols=None in distinct,
-            misses=tuple(misses),
             dropped_symbols=_counted_symbols(arrays[_SYMBOL], late),
         )
 
@@ -1113,7 +1098,6 @@ class Flusher:
         "_noted",
         "_runs",
         "_sessions",
-        "_shown",
         "_stale",
         "_stop",
         "_symbol_runs",
@@ -1151,12 +1135,10 @@ class Flusher:
         # Flush-lock state: the raw-to-canonical symbol map of each routed plan, at most
         # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
-        # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
-        self._shown: dict[int, str] = {}
         # Flush-lock state: per `dm.ALL` stream, the symbols whose rows are being dropped, with
-        # the first reason, which its `Error` names; and the two `Error` parts last written.
+        # the first reason, which its `Error` names; and the stale-symbol part last written.
         self._stale: dict[int, dict[str, str]] = {}
-        self._noted: dict[int, tuple[str | None, str | None]] = {}
+        self._noted: dict[int, str] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
@@ -1367,9 +1349,7 @@ class Flusher:
             routed: The streams the flush routed.
         """
         live = {sink.stream_id for sink in routed}
-        if self._shown:  # the misses of streams no longer routed
-            self._shown = {i: m for i, m in self._shown.items() if i in live}
-        if self._stale:  # and their stale symbols and warnings
+        if self._stale:  # the stale symbols and warnings of streams no longer routed
             self._stale = {i: m for i, m in self._stale.items() if i in live}
         if self._noted:
             self._noted = {i: m for i, m in self._noted.items() if i in live}
@@ -1426,7 +1406,7 @@ class Flusher:
         Args:
             batch: The channel's rows of this flush, and the rows the client dropped.
             sinks: The channel's streams.
-            updates: Receives each stream's new published-row total and session-date misses.
+            updates: Receives each stream's new published-row total and `Error` notes.
         """
         by_plan: dict[ChannelPlan, list[StreamSink]] = {}
         for sink in sinks:
@@ -1457,10 +1437,8 @@ class Flusher:
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
-        A futures session-date miss (a row the schedules cannot place, which keeps the 17:00
-        Chicago rule's date) is shown in the `Error` of every stream that receives its symbol,
-        written again only when the message changes; it does not fail the stream. A stream
-        whose next published rows all place clears it. The drift of the rows' timestamps is
+        A futures row the schedules cannot place has a null `Date` and leaves every stream's
+        `Error` alone (the calendar logs it). The drift of the rows' timestamps is
         reported like a frame's (`_report_drift`), and the rows dropped, here or by the client,
         count toward the plan's run (`_counted`).
 
@@ -1468,15 +1446,9 @@ class Flusher:
             plan: The dataset's plan for the channel.
             batch: The channel's rows of this flush, and the rows the client dropped.
             readers: The dataset's streams on the channel.
-            updates: Receives each stream's new published-row total and session-date misses.
+            updates: Receives each stream's new published-row total and `Error` notes.
         """
         converted = self._convert(plan, batch.rows, arrived=batch.arrived)
-        missed: set[int] = set()
-        for symbol, message in converted.misses:
-            for sink in readers:
-                if sink.receives(symbol):
-                    missed.add(sink.stream_id)
-                    self._shown[sink.stream_id] = message
         if converted.unreadable:  # a spelling the library cannot read is its own defect
             failure = MassiveError(converted.unreadable, cause=ErrorCause.LIBRARY_DEFECT)
             self._fail_each(readers, failure)
@@ -1488,7 +1460,7 @@ class Flusher:
         if self._counted(plan, converted, lost=batch.lost, readers=readers):
             return
         if converted.batch.num_rows:
-            self._publish_batch(plan, converted, readers=readers, missed=missed, updates=updates)
+            self._publish_batch(plan, converted, readers=readers, updates=updates)
         self._write_notes(readers, updates)
 
     def _publish_batch(
@@ -1497,18 +1469,14 @@ class Flusher:
         converted: Converted,
         *,
         readers: list[StreamSink],
-        missed: set[int],
         updates: dict[StreamSink, StreamUpdate],
     ) -> None:
         """Add a converted batch to the dataset's streams, and record their row totals.
-
-        A stream whose published rows all place clears its futures session miss.
 
         Args:
             plan: The dataset's plan for the channel.
             converted: The flush's conversion, with rows.
             readers: The dataset's streams on the channel.
-            missed: The streams that received a row the schedules could not place.
             updates: Receives each stream's new published-row total.
         """
         splits = (
@@ -1520,19 +1488,16 @@ class Flusher:
         )
         for sink in readers:
             if sink.publish(shared):
-                if sink.stream_id not in missed:
-                    self._shown.pop(sink.stream_id, None)
                 found = updates.get(sink, StreamUpdate())
                 updates[sink] = replace(found, rows_published=sink.rows_published)
 
     def _write_notes(
         self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
     ) -> None:
-        """Write each stream's two flush-thread parts of its `Error` when they changed.
+        """Write each `dm.ALL` stream's stale-symbol part of its `Error` when it changed.
 
-        The parts are its futures session miss (`NotePart.SESSION_MISS`) and, for a `dm.ALL`
-        stream, the symbols whose rows are being dropped (`NotePart.STALE_SYMBOLS`,
-        `_stale_text`); neither fails the stream, and the other sources' parts (the
+        The part (`NotePart.STALE_SYMBOLS`) names the symbols whose rows are being dropped
+        (`_stale_text`); it does not fail the stream, and the other sources' parts (the
         connection's outage or options-cap notes) stay as they are.
 
         Args:
@@ -1541,16 +1506,15 @@ class Flusher:
         """
         for sink in readers:
             key = sink.stream_id
-            parts = (self._shown.get(key), _stale_text(self._stale.get(key, {})) or None)
-            if parts == self._noted.get(key, (None, None)):
+            text = _stale_text(self._stale.get(key, {})) or None
+            if text == self._noted.get(key):
                 continue
-            if parts == (None, None):
+            if text is None:
                 del self._noted[key]
             else:
-                self._noted[key] = parts
+                self._noted[key] = text
             found = updates.get(sink, StreamUpdate())
-            notes = {NotePart.SESSION_MISS: parts[0], NotePart.STALE_SYMBOLS: parts[1]}
-            updates[sink] = replace(found, notes=notes)
+            updates[sink] = replace(found, notes={NotePart.STALE_SYMBOLS: text})
 
     def _counted(
         self,

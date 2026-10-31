@@ -20,6 +20,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven_massive._datasets.wire_symbols import ws_symbol
+from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Status
 
 __all__ = [
+    "NO_ACK_RESEND",
     "Sender",
     "Subscriptions",
     "Timer",
@@ -41,6 +43,15 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _WILDCARD: Final = "*"
+
+_NO_ACK_ATTEMPT: Final = 2
+"""The watchdog attempt that marks a topic `NO_ACK`: 1 re-sends it once, 3 and on re-send it
+every `NO_ACK_RESEND` seconds."""
+
+NO_ACK_RESEND: Final = 60.0
+"""Seconds between re-sends of a `NO_ACK` topic's subscribe, until it is acknowledged or no
+longer wanted. Each re-send is that topic alone, on the open socket, so it costs the other
+streams nothing; one a minute stays well above the 15 s Massive asks between reconnects."""
 
 
 def wildcard(channel: str) -> str:
@@ -115,10 +126,6 @@ class Sender(Protocol):
         """Send unsubscribe frames for `topics` in the generation."""
         ...
 
-    def reconnect(self) -> None:
-        """Close the current socket so the client reconnects under its backoff rules."""
-        ...
-
 
 class Timer(Protocol):
     """A scheduled call that can be cancelled (`asyncio.TimerHandle`)."""
@@ -148,27 +155,34 @@ class Subscriptions:
       are not awaited.
 
     **The options cap.** With a `cap`, at most that many explicit topics are admitted to the
-    wire; the rest are deferred, not failed. Topics of a static symbol list (`add(...,
-    static=True)`) are admitted first, since their verb already checked them against the cap;
-    a reactive table's topics then take the room left, the ones admitted before keeping their
-    place and the new ones entering in sorted order. The admitted set outlives a generation,
-    so a reconnect never reshuffles it. Every wanted explicit topic counts, also one covered by
-    an acknowledged wildcard of its channel and so not on the wire meanwhile: the wildcard may
-    go at any time, and a static contract must never be deferred then.
+    wire; the rest are deferred, not failed. The cap counts topics, so a contract's trades and
+    quotes are two: Massive documents "1,000 option contracts" per connection, but whether its
+    server counts contracts or topics is not verified, and the stricter count never crosses
+    it. Topics of a static symbol list (`add(..., static=True)`) are admitted first, since their
+    verb already checked them against the cap; a reactive table's topics then take the room
+    left, the ones admitted before keeping their place and the new ones entering in sorted
+    order. The admitted set outlives a generation, so a reconnect never reshuffles it. Every
+    wanted explicit topic counts, also one covered by an acknowledged wildcard of its channel
+    and so not on the wire meanwhile: the wildcard may go at any time, and a static contract
+    must never be deferred then.
 
     Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
-    an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`,
-    logs a WARNING (the topic's data is missing), and asks the client to reconnect if
-    `first_no_ack(topic)` says this is the topic's first `NO_ACK` (the session keeps that
-    record, so it survives this connection). A watchdog whose topic has left the wire or whose
-    generation has ended does nothing more.
+    an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`
+    (the topic's data may be missing; `no_ack` lists them, and the connection shows them in
+    its streams' `Error`). Once the step in flight has resolved, one WARNING per step counts
+    its `NO_ACK` topics. The topic stays wanted and on the wire, and its subscribe is re-sent,
+    alone, every `NO_ACK_RESEND` seconds until it is acknowledged, leaves the wire, or the
+    generation ends, but never while a step is in flight, so a status naming no topic is
+    always the step's; an acknowledgement that arrives later clears it. The connection is never
+    reconnected for it: a reconnect would cut every other stream on the connection over one
+    late answer. A watchdog whose topic has left the wire or whose generation has ended does
+    nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused,
     `on_step_refused(status)` for a refusal naming no topic of a step none of whose topics was
     resolved (returning True when the connection handles it as the server's real-time
-    verdict), `first_no_ack(topic)`, and `on_change()` after every change the connection's
-    diagnostics row shows.
+    verdict), and `on_change()` after every change the connection's diagnostics row shows.
 
     Example:
         ::
@@ -180,7 +194,6 @@ class Subscriptions:
                 cap=None,
                 on_refused=lambda topics, message: None,
                 on_step_refused=lambda status: False,
-                first_no_ack=lambda topic: True,
                 on_change=lambda: None,
             )
             subscriptions.add(["T.AAPL"])
@@ -196,7 +209,6 @@ class Subscriptions:
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
         on_step_refused: Callable[[Status], bool],
-        first_no_ack: Callable[[str], bool],
         on_change: Callable[[], None],
     ) -> None:
         """Start with no topic wanted and no generation open.
@@ -209,8 +221,6 @@ class Subscriptions:
             cap: The most explicit topics on the wire (1,000 for `/options`), or None.
             on_refused: Called with refused topics and the server's message.
             on_step_refused: Called for a refusal of a whole step that names no topic.
-            first_no_ack: Records a topic's `NO_ACK` for the session and tells whether it was
-                the topic's first.
             on_change: Called after every change of the counts or the deferred topics.
         """
         self._sender = sender
@@ -219,7 +229,6 @@ class Subscriptions:
         self._cap = cap
         self._on_refused = on_refused
         self._on_step_refused = on_step_refused
-        self._first_no_ack = first_no_ack
         self._on_change = on_change
         self.generation: int | None = None
         self._refs: Counter[str] = Counter()
@@ -231,6 +240,7 @@ class Subscriptions:
         self._sent: set[str] = set()
         self._acked: set[str] = set()
         self._noack: set[str] = set()
+        self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
         self._step: frozenset[str] = frozenset()
         self._pending: set[str] = set()
         self._watchdogs: dict[str, Timer] = {}
@@ -291,8 +301,13 @@ class Subscriptions:
 
     @property
     def deferred(self) -> frozenset[str]:
-        """The options contracts the cap keeps off the wire, as of the last reconcile."""
+        """The options topics the cap keeps off the wire, as of the last reconcile."""
         return self._deferred
+
+    @property
+    def no_ack(self) -> frozenset[str]:
+        """The topics in `NO_ACK` in the current generation: re-sent, still unacknowledged."""
+        return frozenset(self._noack)
 
     @property
     def acknowledged(self) -> frozenset[str]:
@@ -336,6 +351,7 @@ class Subscriptions:
         self._sent.clear()
         self._acked.clear()
         self._noack.clear()
+        self._unreported.clear()
         self._pending.clear()
         self._step = frozenset()
 
@@ -357,6 +373,8 @@ class Subscriptions:
         if self._admission_stale:
             self._admission_stale = False
             self._defer()
+        if self._unreported and not self._pending:
+            self._report_no_ack()
         if self.generation is not None and not self._pending:
             self._send_step(self.generation)
         self._on_change()
@@ -533,12 +551,12 @@ class Subscriptions:
         Args:
             topic: The topic just sent.
             generation: The generation it was sent in.
-            attempt: 1 after the step's send, 2 after the single-topic re-send.
+            attempt: 1 after the step's send, 2 after the single-topic re-send, 3 and on
+                after each re-send of a `NO_ACK` topic.
         """
         self._cancel(topic)
-        self._watchdogs[topic] = self._call_later(
-            self._ack_timeout, self._fire, topic, generation, attempt
-        )
+        delay = self._ack_timeout if attempt <= _NO_ACK_ATTEMPT else NO_ACK_RESEND
+        self._watchdogs[topic] = self._call_later(delay, self._fire, topic, generation, attempt)
 
     def _cancel(self, topic: str) -> None:
         """Cancel a topic's watchdog, if it has one.
@@ -551,30 +569,59 @@ class Subscriptions:
             timer.cancel()
 
     def _fire(self, topic: str, generation: int, attempt: int) -> None:
-        """A topic's acknowledgement is overdue: re-send it once, then mark it `NO_ACK`.
+        """A topic's acknowledgement is overdue: re-send it, mark it `NO_ACK`, keep re-sending.
+
+        The first timeout re-sends the topic alone; the second marks it `NO_ACK` and starts
+        its periodic re-send; each later one re-sends it again. Nothing reconnects (see the
+        class).
 
         Args:
             topic: The topic.
             generation: The generation the watchdog is bound to.
-            attempt: 1 for the first timeout, 2 for the second.
+            attempt: 1 for the first timeout, 2 for the second, 3 and on for a `NO_ACK`
+                topic's re-sends.
         """
         self._watchdogs.pop(topic, None)
         if generation != self.generation or topic not in self._sent or topic not in self._wire():
             self._pending.discard(topic)  # it left the wire: nothing to escalate
             self.reconcile()
             return
-        if attempt == 1:
+        if attempt > _NO_ACK_ATTEMPT and self._pending:
+            # A step is in flight: a status naming no topic would be credited to it, so the
+            # re-send waits for the next round.
+            logger.debug(
+                "generation %d: the re-send of %s waits; a subscription step is in flight",
+                generation,
+                topic,
+            )
+            self._arm(topic, generation, attempt=attempt)
+            return
+        if attempt != _NO_ACK_ATTEMPT:
+            if attempt > _NO_ACK_ATTEMPT:
+                logger.debug(
+                    "generation %d: re-sending the subscribe of %s, still unacknowledged",
+                    generation,
+                    topic,
+                )
             self._sender.subscribe(generation, [topic])
-            self._arm(topic, generation, attempt=2)
+            self._arm(topic, generation, attempt=attempt + 1)
             return
         self._pending.discard(topic)
         self._noack.add(topic)
-        first = self._first_no_ack(topic)
-        logger.warning(
-            "no acknowledgement for %s after a re-send; %s",
-            topic,
-            "reconnecting" if first else "it stays wanted (it already caused a reconnect)",
-        )
-        if first:
-            self._sender.reconnect()
+        self._unreported.append(topic)
+        self._arm(topic, generation, attempt=_NO_ACK_ATTEMPT + 1)
         self.reconcile()
+
+    def _report_no_ack(self) -> None:
+        """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""
+        logger.warning(
+            "generation %d: no acknowledgement from Massive after %.1f s and one re-send for "
+            "the topics %s; they stay subscribed and are re-sent every %.0f s, they count in "
+            "NoAckTopics of m.connections() and in their streams' Error, and the connection is "
+            "not reconnected for them",
+            self.generation,
+            2 * self._ack_timeout,
+            bounded_list(sorted(self._unreported)),
+            NO_ACK_RESEND,
+        )
+        self._unreported.clear()

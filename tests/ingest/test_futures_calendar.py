@@ -19,11 +19,11 @@ import pytest
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
 from deephaven_massive._ingest.futures_calendar import (
-    LOAD_PATIENCE,
     RELOAD_SPACING,
     FuturesCalendar,
 )
 from deephaven_massive._namespaces import futures
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -36,7 +36,6 @@ SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
 PATHS = {"contracts_path": CONTRACTS_PATH, "schedules_path": SCHEDULES_PATH}
 """The paths the session passes: those of the futures reference datasets."""
 SPACING = RELOAD_SPACING.total_seconds()
-PATIENCE = LOAD_PATIENCE.total_seconds()
 
 
 def instant(text: str) -> int:
@@ -149,14 +148,42 @@ def calendar(fetch: FakeFetch, clock: Clock) -> Iterator[FuturesCalendar]:
     sessions.close()
 
 
+class _Misses(logging.Handler):
+    # Gathers the miss WARNINGs one `correct` call logs, as `(symbol, message)`.
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.found: list[tuple[str, str]] = []
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage().removeprefix("test: ")
+        if message.startswith("futures session of "):
+            self.found.append((message.split()[3], message))
+
+
 def correct(
     calendar: FuturesCalendar, rows: list[tuple[str | None, str | None, str | None]]
 ) -> tuple[list[str | None], list[tuple[str, str]]]:
+    # The dates, and the misses this call logged (each is logged once per key and rule date).
     symbols = pa.array([s for s, _, _ in rows], pa.string())
     instants = pa.array([None if t is None else instant(t) for _, t, _ in rows], pa.int64())
     dates = pa.array([d for _, _, d in rows], pa.string())
-    fixed, misses = calendar.correct(symbols, instants, dates)
-    return fixed.to_pylist(), misses
+    handler = _Misses()
+    owner = logging.getLogger("deephaven_massive._ingest.futures_calendar")
+    owner.addHandler(handler)
+    try:
+        fixed = calendar.correct(symbols, instants, dates)
+    finally:
+        owner.removeHandler(handler)
+    return fixed.to_pylist(), handler.found
+
+
+def null_date(symbol: str, why: str, day: str) -> str:
+    return (
+        f"futures session of {symbol} not confirmed: {why}; its rows get a null Date, since "
+        f"the 17:00 Chicago rule's {day} may be wrong (a holiday or an early pre-open moves the "
+        "session); their Timestamp and every other column are kept, and the stream keeps running"
+    )
 
 
 def idle(calendar: FuturesCalendar) -> None:
@@ -188,9 +215,9 @@ def test_watch_looks_up_products_then_loads_their_schedules(
         "limit": 1000,
     }
     # ESM4 takes ES (the first row naming it), whose Monday session opened on Thursday; ESU4
-    # has no product in the answer, so its rows are misses.
+    # has no product in the answer, so its rows are misses, with no date.
     dates, misses = correct(calendar, [FOLDED, ("ESU4", "2024-03-28T15:00:00", "2024-03-28")])
-    assert dates == ["2024-04-01", "2024-03-28"]
+    assert dates == ["2024-04-01", None]
     assert [symbol for symbol, _ in misses] == ["ESU4"]
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
 
@@ -205,7 +232,7 @@ def test_a_watched_contract_is_asked_for_once(calendar: FuturesCalendar, fetch: 
     "spread",
     ["ZCK4-ZCN4", "BOB 02-01 U6", "BZ:BF F7-G7-H7", "6A:XF:AUDUSD:Q6", "ZZ:NEW COMBO Z6"],
 )
-def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
+def test_a_spread_is_never_looked_up_and_has_no_date(
     *,
     calendar: FuturesCalendar,
     fetch: FakeFetch,
@@ -216,12 +243,16 @@ def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
         watched(calendar, spread)
         assert caplog.records == []
         row = (spread, "2024-03-27T21:50:00", "2024-03-27")
-        assert correct(calendar, [row, row]) == (["2024-03-27", "2024-03-27"], [])
-        assert correct(calendar, [row]) == (["2024-03-27"], [])
+        why = "a spread or combination is never looked up in Massive's schedules"
+        assert correct(calendar, [row, row]) == (
+            [None, None],
+            [(spread.split(maxsplit=1)[0], null_date(spread, why, "2024-03-27"))],
+        )
+        assert correct(calendar, [row]) == ([None], [])
         idle(calendar)
     assert fetch.calls == []
-    # Its rows are dated by the rule, which a holiday can make wrong: one WARNING per spread,
-    # however many batches date it; watching it alone dates nothing and says nothing.
+    # The rule's date can be wrong around a holiday, so its rows get none: one WARNING per
+    # spread and rule date, however many batches it is in; watching it alone says nothing.
     assert [r.levelno for r in caplog.records if spread in r.getMessage()] == [logging.WARNING]
 
 
@@ -267,17 +298,21 @@ def test_a_pre_open_before_the_roll_moves_to_the_next_session(calendar: FuturesC
     assert dates == ["2024-03-28"]
 
 
-def test_a_row_between_sessions_keeps_the_rule_date(
+def test_a_row_between_sessions_gets_the_next_sessions_date(
     calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # After Thursday's close, before the folded Monday session opens: never the rule's guess
+    # (Thursday), but the next session the schedule knows.
     watched(calendar, "ESM4")
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [("ESM4", "2024-03-28T21:30:00", "2024-03-28")])
-    assert (dates, misses) == (["2024-03-28"], [])
+    assert (dates, misses) == (["2024-04-01"], [])
     assert not caplog.records
 
 
-def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
+def test_rows_without_a_symbol_or_an_instant_get_no_date(calendar: FuturesCalendar) -> None:
+    # Such a row (a symbol `unreadable_symbols` kept as null, say) cannot be placed, and the
+    # 17:00 rule's date may be wrong, so it has none.
     dates, misses = correct(
         calendar,
         [
@@ -286,51 +321,73 @@ def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
             ("ESM4", "2024-03-28T15:00:00", None),
         ],
     )
-    assert (dates, misses) == (["2024-03-28", "2024-03-28", None], [])
+    assert (dates, misses) == ([None, None, None], [])
 
 
-def test_an_unknown_contract_keeps_the_rule_date_silently_and_is_looked_up(
+def test_an_unknown_contract_has_no_date_until_it_is_looked_up(
     calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
+    dates, misses = correct(calendar, [FOLDED])
+    assert (dates, misses) == ([None], [])  # still loading: no date, and only DEBUG
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
 
 
-@pytest.mark.parametrize("path", [CONTRACTS_PATH, SCHEDULES_PATH])
-def test_a_lookup_still_loading_after_a_minute_makes_misses(
+def test_wait_loaded_returns_once_the_schedules_load(
+    calendar: FuturesCalendar, fetch: FakeFetch
+) -> None:
+    fetch.hold(SCHEDULES_PATH)
+    calendar.watch(["ESM4", "ZCK4-ZCN4"])  # the spread is never looked up, nor waited for
+    assert not calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], 0.05)
+    fetch.release.set()
+    assert calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], TIMEOUT)
+    assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_wait_loaded_returns_once_the_lookups_fail_or_find_nothing(
+    calendar: FuturesCalendar, fetch: FakeFetch
+) -> None:
+    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 429")
+    calendar.watch(["ESM4", "NOPZ5"])
+    assert calendar.wait_loaded(["ESM4", "NOPZ5"], TIMEOUT)
+
+
+def test_wait_loaded_returns_once_closed(fetch: FakeFetch, clock: Clock) -> None:
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
+    calendar.close()
+    assert calendar.wait_loaded(["ESM4"], 0)
+
+
+@pytest.mark.parametrize(
+    ("path", "why"),
+    [
+        (CONTRACTS_PATH, "its product is still being looked up"),
+        (SCHEDULES_PATH, "its schedule is still loading"),
+    ],
+)
+def test_a_row_whose_lookup_is_still_loading_is_a_miss(
     *,
     calendar: FuturesCalendar,
     fetch: FakeFetch,
-    clock: Clock,
     caplog: pytest.LogCaptureFixture,
     path: str,
+    why: str,
 ) -> None:
-    # The request is in flight: at first the row keeps the rule's date silently.
+    # The request is in flight: the rule's date may be wrong without the schedule, so the rows
+    # get none. A lookup still running is no news, so it logs at DEBUG only, not as a WARNING
+    # at every stream's start.
     fetch.hold(path)
     calendar.watch(["ESM4"])
     fetch.wait(1 if path == CONTRACTS_PATH else 2)
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
-    clock.now += PATIENCE - 1
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
-    # A minute after it was asked for, its rows are misses, logged once.
-    clock.now += 1
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.futures_calendar"):
         dates, misses = correct(calendar, [FOLDED, FOLDED])
-    assert dates == ["2024-03-29", "2024-03-29"]
-    assert misses == [
-        (
-            "ESM4",
-            (
-                "futures session of ESM4 not confirmed: its schedule was not loaded after 60 s; "
-                "its rows keep the session the 17:00 Chicago rule gives them, 2024-03-29"
-            ),
-        )
+        again = correct(calendar, [FOLDED])
+    assert (dates, misses, again) == ([None, None], [], ([None], []))
+    # Once per contract (or product), rule date, and reason, however many batches.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, f"test: futures session of ESM4: {why}; its rows get a null Date")
     ]
-    assert caplog.text.count("not loaded after 60 s") == 1
-    # The rows keep a date, so a miss is stale data to know about, not a broken result.
-    assert {r.levelno for r in caplog.records} == {logging.WARNING}
     # Once it loads, the rows place again.
     fetch.release.set()
     idle(calendar)
@@ -345,18 +402,10 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [row, row])
         again = correct(calendar, [row])
-    assert dates == ["2024-04-02", "2024-04-02"]
-    assert misses == [
-        (
-            "ESM4",
-            (
-                "futures session of ESM4 not confirmed: its loaded schedule (ES) ends with the "
-                "session of 2024-04-01; its rows keep the session the 17:00 Chicago rule gives "
-                "them, 2024-04-02"
-            ),
-        )
-    ]
-    assert again == (["2024-04-02"], misses)  # every batch shows it; the log once
+    assert dates == [None, None]
+    why = "its loaded schedule (ES) ends with the session of 2024-04-01"
+    assert misses == [("ESM4", null_date("ESM4", why, "2024-04-02"))]
+    assert again == ([None], [])  # every batch's rows have no date; the log is once
     assert caplog.text.count("not confirmed") == 1
     # The miss asked for a reload, which the spacing allows once the schedule's own load aged:
     # misses within `RELOAD_SPACING` of the load make no request, one after it makes one.
@@ -383,7 +432,7 @@ def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesCa
     # close of the last loaded session lies past every loaded session.
     watched(calendar, "ESM4")
     dates, misses = correct(calendar, [("ESM4", "2024-04-01T21:00:00", "2024-04-01")])
-    assert dates == ["2024-04-01"]
+    assert dates == [None]
     assert "its loaded schedule (ES) ends with the session of 2024-04-01" in misses[0][1]
     # A second earlier, the row is inside it.
     assert correct(calendar, [("ESM4", "2024-04-01T20:59:59", "2024-04-01")]) == (
@@ -403,16 +452,8 @@ def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
 ) -> None:
     watched(calendar, "NOPZ5")
     _, misses = correct(calendar, [("NOPZ5", "2024-03-28T15:00:00", "2024-03-28")])
-    assert misses == [
-        (
-            "NOPZ5",
-            (
-                "futures session of NOPZ5 not confirmed: Massive's futures contracts do not "
-                "list it; its rows keep the session the 17:00 Chicago rule gives them, "
-                "2024-03-28"
-            ),
-        )
-    ]
+    why = "Massive's futures contracts do not list it"
+    assert misses == [("NOPZ5", null_date("NOPZ5", why, "2024-03-28"))]
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH]  # asked within the spacing: no request
     clock.now += SPACING
@@ -495,7 +536,7 @@ def test_close_stops_the_worker_once_and_queues_nothing_after(
     calendar.close()
     assert "test futures schedules" not in {t.name for t in threading.enumerate()}
     calendar.watch(["ESM4"])
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
+    assert correct(calendar, [FOLDED])[0] == [None]
     assert calendar.wait_idle(0)
     assert fetch.calls == []
 
@@ -620,7 +661,7 @@ def test_the_worker_outlives_an_unexpected_error(
     # An answer the calendar cannot read (here a defect's ValueError) is a failed lookup: its
     # rows are misses, and the worker keeps serving later lookups.
     fetch.answers[CONTRACTS_PATH] = ValueError("bad answer")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert "futures schedules: a lookup failed. This is a bug in deephaven-massive." in caplog.text

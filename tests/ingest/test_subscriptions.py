@@ -42,9 +42,6 @@ class FakeSender:
     def unsubscribe(self, generation: int, topics: Sequence[str]) -> None:
         self.calls.append(("unsubscribe", generation, tuple(topics)))
 
-    def reconnect(self) -> None:
-        self.calls.append(("reconnect", 0, ()))
-
     def take(self) -> list[tuple[str, int, tuple[str, ...]]]:
         calls, self.calls = self.calls, []
         return calls
@@ -54,6 +51,7 @@ class FakeSender:
 class FakeTimer:
     callback: Callable[..., None]
     args: tuple[object, ...]
+    delay: float
     cancelled: bool = False
 
     def cancel(self) -> None:
@@ -67,8 +65,8 @@ class FakeTimers:
     timers: list[FakeTimer] = field(default_factory=list)
 
     def call_later(self, delay: float, callback: Callable[..., None], *args: object) -> FakeTimer:
-        assert delay == 5.0
-        timer = FakeTimer(callback, args)
+        assert delay in {5.0, subscriptions.NO_ACK_RESEND}  # the ack timeout, or a re-send
+        timer = FakeTimer(callback, args, delay)
         self.timers.append(timer)
         return timer
 
@@ -92,22 +90,7 @@ class Loop:
     changes: list[tuple[int, int, int, int]]
 
 
-class NoAcked:
-    """The session's record of `NO_ACK` topics, as `WsConnections.first_no_ack` keeps it."""
-
-    def __init__(self) -> None:
-        self.topics: set[str] = set()
-
-    def first(self, topic: str) -> bool:
-        first = topic not in self.topics
-        self.topics.add(topic)
-        return first
-
-
-def make_loop(
-    *, cap: int | None = None, verdict: bool = False, no_acked: NoAcked | None = None
-) -> Loop:
-    no_acked = no_acked or NoAcked()
+def make_loop(*, cap: int | None = None, verdict: bool = False) -> Loop:
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
     verdicts: list[Status] = []
@@ -124,7 +107,6 @@ def make_loop(
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_step_refused=step_refused,
-        first_no_ack=no_acked.first,
         on_change=lambda: changes.append(subs.counts()),
     )
     return Loop(subs, sender, timers, refused, verdicts, changes)
@@ -275,7 +257,7 @@ def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
     loop.timers.fire()  # T.MSFT: the single re-send
     assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
     loop.timers.fire()  # T.MSFT: NO_ACK resolves it, and the wildcard can go
-    assert loop.sender.take() == [("reconnect", 0, ()), ("unsubscribe", 1, ("T.*",))]
+    assert loop.sender.take() == [("unsubscribe", 1, ("T.*",))]
 
 
 def test_a_wildcard_removed_before_its_acknowledgement_leaves_after_the_step() -> None:
@@ -291,34 +273,114 @@ def test_a_wildcard_removed_before_its_acknowledgement_leaves_after_the_step() -
     ]
 
 
-def test_a_missing_acknowledgement_is_resent_once_then_no_ack_reconnects() -> None:
+def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconnect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.IBM", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(ack("T.MSFT"))
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",)), ("subscribe", 1, ("T.IBM",))]
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.subscriptions"):
+        loop.timers.fire()
+    # No reconnect: that would cut T.MSFT, and every other stream on the connection, over one
+    # late answer. The topics stay wanted and subscribed, and count as NO_ACK.
+    assert loop.sender.take() == []
+    assert loop.subs.counts() == (3, 1, 0, 2)
+    assert loop.subs.no_ack == {"T.AAPL", "T.IBM"}
+    assert loop.refused == []
+    # One WARNING for the step, however many of its topics went unacknowledged.
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "generation 1: no acknowledgement from Massive after 10.0 s and one re-send for the "
+        "topics 2 [T.AAPL, T.IBM]; they stay subscribed and are re-sent every 60 s, they count "
+        "in NoAckTopics of m.connections() and in their streams' Error, and the connection is "
+        "not reconnected for them"
+    )
+
+
+def test_a_no_ack_topic_is_resent_periodically_until_acknowledged() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL"])
     loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
     loop.sender.take()
-    loop.timers.fire()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
-    loop.timers.fire()
-    assert loop.sender.take() == [("reconnect", 0, ())]
-    assert loop.subs.counts() == (1, 0, 0, 1)  # still desired; the stream never fails
-    assert loop.refused == []
+    # Each re-send waits `NO_ACK_RESEND`, sends the topic alone, and never reconnects.
+    for _ in range(3):
+        assert [t.delay for t in loop.timers.live()] == [subscriptions.NO_ACK_RESEND]
+        loop.timers.fire()
+        assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+    loop.subs.status(ack("T.AAPL"))
+    assert loop.timers.live() == []
+    assert loop.subs.no_ack == frozenset()
 
 
-def test_a_second_no_ack_of_a_topic_does_not_reconnect(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_no_ack_topic_is_not_resent_while_a_step_is_in_flight() -> None:
+    # A status naming no topic is credited to the step in flight, so a re-send never overlaps
+    # one: it waits for the next round.
     loop = make_loop()
     loop.subs.add(["T.AAPL"])
-    for generation in (1, 2):
-        loop.subs.opened(generation)
-        loop.timers.fire()
-        loop.timers.fire()
-        loop.subs.ended()
-    calls = loop.sender.take()
-    assert [c for c in calls if c[0] == "reconnect"] == [("reconnect", 0, ())]
-    # A topic Massive never acknowledges leaves its data missing: a WARNING, never an ERROR.
-    assert [r.levelno for r in caplog.records if "no acknowledgement" in r.message] == [
-        logging.WARNING,
-        logging.WARNING,
-    ]
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    loop.sender.take()
+    loop.subs.add(["T.MSFT"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+    resend = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    for timer in resend:
+        loop.timers.timers.remove(timer)
+        timer.callback(*timer.args)
+    assert loop.sender.take() == []
+    [waiting] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    assert waiting.delay == subscriptions.NO_ACK_RESEND
+    loop.subs.status(ack("T.MSFT"))  # the step resolves
+    loop.timers.timers.remove(waiting)
+    waiting.callback(*waiting.args)
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+
+
+def test_a_no_ack_topic_no_longer_wanted_is_not_resent() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    loop.sender.take()
+    loop.subs.remove(["T.AAPL"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("unsubscribe", 1, ("T.AAPL",))]
+    assert loop.timers.live() == []
+    assert loop.subs.no_ack == frozenset()
+
+
+def test_a_new_generation_clears_the_no_acks() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    resend = loop.timers.live()
+    loop.subs.ended()
+    assert all(t.cancelled for t in resend)
+    loop.subs.opened(2)
+    assert loop.subs.no_ack == frozenset()
+
+
+def test_a_late_acknowledgement_clears_a_no_ack() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    assert loop.subs.counts() == (1, 0, 0, 1)
+    loop.subs.status(ack("T.AAPL"))
+    assert loop.subs.counts() == (1, 1, 0, 0)
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",)), ("subscribe", 1, ("T.AAPL",))]
 
 
 def test_a_watchdog_of_an_ended_generation_does_not_escalate() -> None:
@@ -433,6 +495,20 @@ def test_the_cap_admits_contracts_in_sorted_order_and_defers_the_rest() -> None:
     ]
 
 
+def test_a_refusal_fails_only_the_refused_topics_of_an_admitted_contract() -> None:
+    # A server that refuses some topics past its own limit fails only those, with its message;
+    # the contract's other topic keeps running.
+    loop = make_loop(cap=2)
+    loop.subs.add(["T.O:A", "Q.O:A"], static=True)
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(ack("T.O:A"))
+    loop.subs.status(refusal("Q.O:A", message="Maximum number of subscriptions exceeded"))
+    assert loop.refused == [(("Q.O:A",), "Maximum number of subscriptions exceeded")]
+    assert loop.subs.counts() == (1, 1, 0, 0)
+    assert loop.sender.take() == []
+
+
 def test_covered_contracts_count_against_the_cap() -> None:
     # A wildcard keeps covered contracts off the wire, but they count: it may go at any time.
     loop = make_loop(cap=1)
@@ -513,18 +589,6 @@ def test_static_contracts_beyond_the_cap_are_deferred_too() -> None:
     loop.subs.opened(1)
     assert loop.sender.take() == [("subscribe", 1, ("T.O:A",))]
     assert loop.subs.deferred == {"T.O:B"}
-
-
-def test_a_no_ack_reconnects_once_per_session_across_connections() -> None:
-    session = NoAcked()
-    for _connection in range(2):
-        loop = make_loop(no_acked=session)
-        loop.subs.add(["T.AAPL"])
-        loop.subs.opened(1)
-        loop.timers.fire()
-        loop.timers.fire()
-        reconnects = [c for c in loop.sender.take() if c[0] == "reconnect"]
-        assert len(reconnects) == (1 if _connection == 0 else 0)
 
 
 def test_topic_helpers() -> None:
