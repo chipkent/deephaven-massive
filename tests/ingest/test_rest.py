@@ -1936,6 +1936,31 @@ def test_a_row_without_its_symbol_is_a_data_failure(
     assert re.search(r"call 1 failed after \d+\.\d{3} s: stocks\.dividends: ", caplog.text)
 
 
+def test_one_odd_row_costs_the_call_only_itself(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A row without its symbol is dropped and counted; a value that does not fit is null.
+    nameless = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([nameless, odd, AAPL_DIVIDEND])))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = fetch(session, DIVIDENDS, symbols=["AAPL"])
+    assert [(r["Id"], r["Frequency"]) for r in out] == [("E2", None), ("E1", 4)]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        (
+            "stocks.dividends: REST field 'frequency' held a value that does not fit its type; it "
+            f"reads as null (schema drift) at GET {DIVIDENDS_PATH}; first value 4.5"
+        ),
+        (
+            "stocks.dividends: dropped 1 REST row(s) whose key cannot be read, the first at GET "
+            f"{DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), which the "
+            "dataset needs; such rows are dropped and counted, and the running count is logged at "
+            "DEBUG"
+        ),
+    ]
+
+
 def test_a_row_without_an_optional_symbol_keeps_a_null_symbol(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:

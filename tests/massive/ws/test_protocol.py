@@ -240,7 +240,7 @@ def test_rows_use_long_form_columns_and_absent_fields_are_none(decoder: FrameDec
         {"Ticker": "AAPL", "Price": 100.0, "Size": None, "SipTimestamp": None, "Conditions": [1, 2]}
     ]
     assert isinstance(data.rows[0]["Price"], float)
-    assert data.rejects == []
+    assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset(), 0)
 
 
 def test_a_null_value_is_none(decoder: FrameDecoder) -> None:
@@ -283,6 +283,7 @@ def test_drift_samples_name_the_first_symbol_and_value_of_each_key(decoder: Fram
             "new": DriftSample("A", '{"deep": [1, "é"]}'),  # the first row's value, not B's
             "z": DriftSample("B", json.dumps("x" * 300)[:200]),
             "t": DriftSample("B", None),  # first missing in B's row; a missing key has no value
+            "sym": DriftSample(None, "7"),  # a symbol that is not text reads as null
         }
     )
 
@@ -302,15 +303,51 @@ def test_drift_samples_are_read_only_and_outside_equality_and_repr() -> None:
         first.samples["y"] = DriftSample(None, None)  # type: ignore[index]  # the point: read-only
 
 
-def test_a_reject_carries_its_whole_row_and_logs_it_at_debug(
+def test_a_row_with_an_odd_value_is_logged_whole_at_debug(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
     decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
     row = {"ev": "T", "sym": "AAPL", "p": "182.33a", "s": 100, "t": 1761660187112}
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
-        [reject] = _decode_one(decoder, row).rejects
-    assert reject.raw == '{"ev":"T","sym":"AAPL","p":"182.33a","s":100,"t":1761660187112}'
+        data = _decode_one(decoder, row)
+    assert data.rows[0]["Price"] is None
+    assert caplog.messages == [
+        (
+            "read as null in a T row for AAPL from socket.massive.com/stocks: Price (wire key "
+            "'p') expects double, got \"182.33a\"; the row: "
+            '{"ev":"T","sym":"AAPL","p":"182.33a","s":100,"t":1761660187112}'
+        )
+    ]
+
+
+def test_a_dropped_row_is_logged_whole_at_debug(
+    decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
+) -> None:
+    decoder.set_required("T", frozenset({"SipTimestamp"}), symbol="Ticker")
+    row = {"ev": "T", "sym": "AAPL", "t": 4.0}
+    with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
+        data = _decode_one(decoder, row)
+    assert data.rows == []
+    [reject] = data.rejects
+    assert (reject.channel, reject.symbol) == ("T", "AAPL")
+    assert reject.error.message == (
+        "dropped a T row for AAPL from socket.massive.com/stocks: SipTimestamp (wire key 't') "
+        "expects epoch, got 4.0"
+    )
+    assert reject.raw == '{"ev":"T","sym":"AAPL","t":4.0}'
     assert caplog.messages == [f"{reject.error.message}; the row: {reject.raw}"]
+
+
+def test_an_odd_row_is_not_serialized_with_debug_off(
+    decoder: FrameDecoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(_row: object) -> str:
+        raise AssertionError("the row was serialized with DEBUG off")
+
+    monkeypatch.setattr(protocol, "row_excerpt", refuse)
+    # A dropped row's `Reject` always carries its text; a kept row's odd value needs none.
+    data = _decode_one(decoder, {"ev": "T", "p": "x", "t": 1})
+    assert (len(data.rows), data.drift.unconvertible) == (1, frozenset({"p"}))
 
 
 def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
@@ -320,7 +357,7 @@ def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) 
     assert data.drift == DriftReport(missing=frozenset({"t"}))
 
 
-def test_a_rejected_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
+def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Ticker"}))
     [data] = decoder.decode(
         _frame(
@@ -330,17 +367,20 @@ def test_a_rejected_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None
         )
     )
     assert isinstance(data, Data)
-    assert len(data.rows) == 1
-    assert len(data.rejects) == 2
-    assert data.drift == DriftReport(extra=frozenset({"new", "z"}), missing=frozenset({"t"}))
+    assert [r["Ticker"] for r in data.rows] == ["A", "B"]
+    assert len(data.rejects) == 1
+    # The dropped row's extra key counts; its odd value does not, since no row reads it.
+    assert data.drift == DriftReport(
+        extra=frozenset({"new", "z"}), missing=frozenset({"t"}), unconvertible=frozenset({"p"})
+    )
 
 
 def test_symbols_pass_through_as_the_wire_spells_them() -> None:
     decoder = FrameDecoder([FOREX], host=HOST, path="/forex")
     decoder.set_required("CA", frozenset({"Pair"}), symbol="Pair")
     data = _decode_one(decoder, {"ev": "CA", "pair": "EUR/USD", "c": "x"})
-    assert data.rows == []
-    assert data.rejects[0].symbol == "EUR/USD"
+    assert data.rows[0]["Pair"] == "EUR/USD"
+    assert data.drift.samples["c"].symbol == "EUR/USD"
 
 
 def test_each_channel_is_one_data_event_at_its_first_object(decoder: FrameDecoder) -> None:
@@ -369,7 +409,7 @@ def test_a_single_object_frame_is_decoded(decoder: FrameDecoder) -> None:
 # --- conversions --------------------------------------------------------------------------------
 # `spec.convert` owns the rules of every type and every named conversion and is tested there;
 # these tests show that the decoder applies it to every field, a field's named conversion
-# included, and turns its refusal into a reject.
+# included, and reads a value it refuses as null, or drops its row when the value is a key.
 
 
 def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) -> None:
@@ -399,12 +439,33 @@ def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) ->
         ("sym", "Ticker", 5, "string", "5"),
     ],
 )
-def test_an_unconvertible_value_rejects_its_row(
+def test_an_unconvertible_value_reads_as_null_and_is_drift(
+    decoder: FrameDecoder, case: tuple[str, str, object, str, str]
+) -> None:
+    key, column, value, _, quoted = case
+    data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
+    [row] = data.rows
+    assert row[column] is None
+    assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset({key}), 0)
+    assert data.drift.samples[key] == DriftSample(None, quoted)  # no symbol column declared
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("p", "Price", "1.5", "double", '"1.5"'),
+        ("t", "SipTimestamp", "1536036818784", "epoch", '"1536036818784"'),
+        ("sym", "Ticker", 5, "string", "5"),
+    ],
+)
+def test_an_unconvertible_required_key_drops_its_row(
     decoder: FrameDecoder, case: tuple[str, str, object, str, str]
 ) -> None:
     key, column, value, expects, quoted = case
+    decoder.set_required("T", frozenset({column}))
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
     assert data.rows == []
+    assert data.drift.unconvertible == frozenset()
     [reject] = data.rejects
     assert reject.channel == "T"
     assert reject.symbol is None  # no symbol column was declared
@@ -412,7 +473,7 @@ def test_an_unconvertible_value_rejects_its_row(
     # The clause after the prefix is the one `spec.convert` shares with the REST decoder,
     # quoting the value's JSON text.
     assert reject.error.message == (
-        f"rejected a T row from socket.massive.com/stocks: "
+        f"dropped a T row from socket.massive.com/stocks: "
         f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
     )
 
@@ -422,7 +483,7 @@ def test_a_named_conversion_applies_to_its_field() -> None:
     [data] = decoder.decode(_frame({"ev": "C", "x": "48", "i": 7}, {"ev": "C", "x": 49, "i": "ab"}))
     assert isinstance(data, Data)
     assert data.rows == [{"Exchange": 48, "TradeId": "7"}, {"Exchange": 49, "TradeId": "ab"}]
-    assert data.rejects == []
+    assert data.drift == DriftReport()
 
 
 @pytest.mark.parametrize(
@@ -434,30 +495,40 @@ def test_a_named_conversion_applies_to_its_field() -> None:
         ("i", "TradeId", 1.5, "string (by the conversion text-or-integer-id)", "1.5"),
     ],
 )
-def test_a_value_its_named_conversion_cannot_read_rejects_its_row(
-    case: tuple[str, str, object, str, str],
+def test_a_value_its_named_conversion_cannot_read_is_odd(
+    case: tuple[str, str, object, str, str], caplog: pytest.LogCaptureFixture
 ) -> None:
     key, column, value, expects, quoted = case
     decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
-    data = _decode_one(decoder, {"ev": "C", key: value})
-    assert data.rows == []
-    [reject] = data.rejects
-    assert reject.error.message == (
-        f"rejected a C row from socket.massive.com/forex: "
-        f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
+    with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
+        data = _decode_one(decoder, {"ev": "C", key: value})
+    assert data.rows[0][column] is None
+    assert data.drift.unconvertible == {key}
+    assert caplog.messages[0].startswith(
+        f"read as null in a C row from socket.massive.com/forex: "
+        f"{column} (wire key {key!r}) expects {expects}, got {quoted}; the row: "
     )
 
 
-def test_a_reject_quotes_at_most_200_characters_of_the_value(decoder: FrameDecoder) -> None:
+def test_an_odd_field_keeps_the_sample_of_its_first_row(decoder: FrameDecoder) -> None:
+    decoder.set_required("T", frozenset(), symbol="Ticker")
+    [data] = decoder.decode(
+        _frame({"ev": "T", "sym": "A", "p": "x"}, {"ev": "T", "sym": "B", "p": "y"})
+    )
+    assert isinstance(data, Data)
+    assert [r["Price"] for r in data.rows] == [None, None]
+    assert data.drift.samples["p"] == DriftSample("A", '"x"')
+
+
+def test_an_odd_value_sample_quotes_at_most_200_characters(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x" * 300})
-    message = data.rejects[0].error.message
-    assert message.endswith("got " + json.dumps("x" * 300)[:200])
+    assert data.drift.samples["p"].value == json.dumps("x" * 300)[:200]
 
 
 # --- required keys and symbols ------------------------------------------------------------------
 
 
-def test_a_missing_required_key_rejects_while_a_missing_optional_field_is_null(
+def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
     decoder: FrameDecoder,
 ) -> None:
     decoder.set_required("T", frozenset({"Ticker", "SipTimestamp"}), symbol="Ticker")
@@ -474,27 +545,44 @@ def test_a_missing_required_key_rejects_while_a_missing_optional_field_is_null(
     ]
     assert [(r.channel, r.symbol) for r in data.rejects] == [("T", "MSFT"), ("T", None)]
     assert data.rejects[0].error.message == (
-        "rejected a T row for MSFT from socket.massive.com/stocks: "
+        "dropped a T row for MSFT from socket.massive.com/stocks: "
         "no SipTimestamp (wire key 't'), which the dataset needs"
     )
     assert data.rejects[1].error.message == (
-        "rejected a T row from socket.massive.com/stocks: "
+        "dropped a T row from socket.massive.com/stocks: "
         "no Ticker (wire key 'sym'), which the dataset needs"
     )
 
 
-def test_a_reject_carries_the_raw_symbol_only_when_it_is_text(decoder: FrameDecoder) -> None:
+def test_a_dropped_row_without_a_text_symbol_names_none(decoder: FrameDecoder) -> None:
+    decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
+    data = _decode_one(decoder, {"ev": "T", "t": 3, "sym": 7})
+    [reject] = data.rejects
+    assert reject.symbol is None
+    assert reject.error.message == (
+        "dropped a T row from socket.massive.com/stocks: Ticker (wire key 'sym') expects "
+        "string, got 7"
+    )
+
+
+def test_a_drift_sample_carries_the_raw_symbol_only_when_it_is_text(
+    decoder: FrameDecoder,
+) -> None:
     decoder.set_required("T", frozenset(), symbol="Ticker")
-    [data] = decoder.decode(_frame({"ev": "T", "sym": "BRK.A", "p": "x"}, {"ev": "T", "sym": 7}))
+    [data] = decoder.decode(
+        _frame({"ev": "T", "sym": 7, "p": "x"}, {"ev": "T", "sym": "B", "s": 1.5})
+    )
     assert isinstance(data, Data)
-    assert [r.symbol for r in data.rejects] == ["BRK.A", None]
+    assert data.drift.samples["p"].symbol is None
+    assert data.drift.samples["s"].symbol == "B"
 
 
 def test_set_required_replaces_the_earlier_choice(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Size"}), symbol="Ticker")
     decoder.set_required("T", frozenset())
     data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "bad"})
-    assert data.rejects[0].symbol is None
+    assert len(data.rows) == 1
+    assert data.drift.samples["p"].symbol is None
 
 
 @pytest.mark.parametrize(

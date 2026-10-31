@@ -1378,6 +1378,28 @@ def test_a_cycle_reports_its_pages_drift(
     del table
 
 
+def test_a_cycle_with_odd_rows_keeps_the_table_and_shows_the_drift(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A row without its symbol is dropped, a value that does not fit is null, and the table
+    # keeps polling: one odd row never fails it.
+    rows = [{"id": "x"}, {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0}]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    clock.wait_for_sleepers(1)
+    (row,) = streams_of(rest_session, dh_to_pylist)
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("RUNNING", None, 1)
+    assert "REST:frequency?" in row["SchemaDrift"]
+    assert [(r["Id"], r["Frequency"]) for r in dh_to_pylist(table)] == [("a", None)]
+    del table
+
+
 def test_a_failure_while_publishing_keeps_the_poller(
     *,
     massive_session: dm.MassiveSession,

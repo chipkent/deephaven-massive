@@ -325,58 +325,79 @@ def test_publish_waits_for_every_channel_of_a_frame(
     rows_when(quotes, lambda rows: len(rows) == 1)
 
 
-def test_a_rejected_row_fails_only_the_streams_of_its_symbol(
+DROP_LOGGER = "deephaven_massive._tables.diagnostics"
+
+
+def drop_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == DROP_LOGGER and r.levelno == logging.WARNING and "dropped" in r.getMessage()
+    ]
+
+
+def test_a_row_without_its_time_is_dropped_and_fails_no_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
     *,
     rows_when: RowsWhen,
 ) -> None:
     aapl = ws_session.query(TRADES, ["AAPL"]).append_only()
     msft = ws_session.query(TRADES, ["MSFT"]).blink()
-    every = ws_session.query(TRADES, dm.ALL).blink()
+    every = ws_session.query(TRADES, dm.ALL).append_only()
     ws_session.subscribed("T.AAPL", "T.MSFT", "T.*")
     bad = trade("MSFT")
     del bad["t"]  # a required key
-    ws_session.send(bad, trade("AAPL"))
-    ws_session.flush()
-    rows_when(aapl, lambda rows: len(rows) == 1)
+    with caplog.at_level(logging.WARNING, logger=DROP_LOGGER):
+        ws_session.send(bad, trade("AAPL"))
+        ws_session.flush()
+        rows_when(aapl, lambda rows: len(rows) == 1)
+        rows_when(every, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
-    assert [r["State"] for r in rows] == ["RUNNING", "FAILED", "FAILED"]
-    assert "no SipTimestamp" in rows[1]["Error"]
-    del msft, every
+    assert [r["State"] for r in rows] == ["RUNNING"] * 3
+    [warning] = drop_warnings(caplog)
+    assert warning.startswith("test.trades: dropped 1 WS row(s) whose key cannot be read")
+    assert "/stocks channel T: dropped a T row for MSFT from 127.0.0.1/stocks: no SipTimestamp" in (
+        warning
+    )
+    del msft
 
 
-def test_a_row_without_a_symbol_fails_only_the_all_streams(
+def test_rows_without_a_symbol_are_dropped_and_the_all_stream_keeps_running(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     aapl = ws_session.query(TRADES, ["AAPL"]).blink()
-    every = ws_session.query(TRADES, dm.ALL).blink()
+    every = ws_session.query(TRADES, dm.ALL).append_only()
     ws_session.subscribed("T.AAPL", "T.*")
     nameless = trade("AAPL")
     del nameless["sym"]
     unreadable = trade("not a symbol")
     del unreadable["t"]
-    with (
-        caplog.at_level(logging.ERROR, logger=ws.__name__),
-        caplog.at_level(logging.ERROR, logger=ws_connection.__name__),
-    ):
-        ws_session.send(nameless, unreadable)
-    ws_session.flush()
+    with caplog.at_level(logging.WARNING, logger=DROP_LOGGER):
+        ws_session.send(nameless, unreadable, trade("MSFT"))
+        ws_session.flush()
+        shown = rows_when(every, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["MSFT"]
     rows = streams_of(ws_session, dh_to_pylist)
-    assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert caplog.text.count("; failing the channel's ALL streams") == 2
-    # Each line says why the row has no symbol: none at all, or the raw one that is not valid.
-    assert "a T row has no valid symbol (it has none)" in caplog.text
-    assert (
-        "a T row has no valid symbol ('not a symbol' is not a spelling the library reads)"
-        in caplog.text
+    assert [r["State"] for r in rows] == ["RUNNING", "RUNNING"]
+    # One WARNING for the dataset, counting both rows and naming the first one's reason.
+    [warning] = drop_warnings(caplog)
+    assert warning.startswith("test.trades: dropped 2 WS row(s) whose key cannot be read")
+    assert warning.endswith(
+        "/stocks channel T: dropped a T row from 127.0.0.1/stocks: no Ticker (wire key 'sym'), "
+        "which "
+        "the dataset needs; such rows are dropped and counted, and the running count is logged "
+        "at DEBUG"
     )
-    del aapl, every
+    del aapl
 
 
-def test_a_timestamp_out_of_bounds_fails_only_its_streams(
+def test_a_timestamp_out_of_bounds_drops_its_row_and_fails_no_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
@@ -391,12 +412,10 @@ def test_a_timestamp_out_of_bounds_fails_only_its_streams(
         ws_session.flush()
         rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
-    assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in rows[1]["Error"]
-    # A value the library cannot convert is its defect: an ERROR with how to report it.
-    [failed] = [r for r in caplog.records if "timestamp unit mismatch" in r.getMessage()]
-    assert failed.levelno == logging.ERROR
-    assert failed.getMessage().endswith(LIBRARY_BUG)
+    assert [r["State"] for r in rows] == ["RUNNING", "RUNNING"]
+    [warning] = drop_warnings(caplog)
+    assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in warning
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     del msft
 
 
@@ -1120,7 +1139,8 @@ def test_a_verb_never_sees_a_failed_table_before_its_failure(
         real(stream_id, error)
 
     monkeypatch.setattr(core, "fail_stream", gated)
-    ws_session.send(trade("AAPL", t=10))  # a timestamp out of bounds fails the stream
+    flusher = ws_session.connection().flusher
+    flusher.fail([sink.stream_id for sink in flusher.routes.sinks()], dm.MassiveError("failed"))
     flushing = threading.Thread(target=ws_session.flush)
     flushing.start()
     assert recording.wait(TIMEOUT)

@@ -10,6 +10,7 @@ from deephaven_massive._massive.spec.types import (
     ENVELOPE_KEYS,
     Conversion,
     DriftReport,
+    DriftSample,
     Field,
     Membership,
     Param,
@@ -404,6 +405,56 @@ def test_a_drift_report_defaults_to_no_drift() -> None:
     assert DriftReport() == DriftReport(
         extra=frozenset(), missing=frozenset(), statuses=frozenset()
     )
+
+
+def test_drift_reports_merge_their_sets_counts_and_first_samples() -> None:
+    first = DriftReport(
+        extra=frozenset({"a"}),
+        unconvertible=frozenset({"x"}),
+        dropped_rows=1,
+        dropped_reason="first",
+        samples={"x": DriftSample("A", "1")},
+    )
+    second = DriftReport(
+        missing=frozenset({"m"}),
+        unconvertible=frozenset({"x", "y"}),
+        statuses=frozenset({"S"}),
+        dropped_rows=2,
+        dropped_reason="second",
+        samples={"x": DriftSample("B", "2"), "y": DriftSample("B", "3")},
+    )
+    both = first.merge(second)
+    assert both == DriftReport(
+        extra=frozenset({"a"}),
+        missing=frozenset({"m"}),
+        unconvertible=frozenset({"x", "y"}),
+        statuses=frozenset({"S"}),
+        dropped_rows=3,
+    )
+    assert both.dropped_reason == "first"
+    assert dict(both.samples) == {"x": DriftSample("A", "1"), "y": DriftSample("B", "3")}
+    assert DriftReport().merge(second).dropped_reason == "second"
+
+
+@pytest.mark.parametrize(
+    ("report", "drifted"),
+    [
+        (DriftReport(), False),
+        (DriftReport(statuses=frozenset({"S"}), dropped_rows=1), False),
+        (DriftReport(extra=frozenset({"a"})), True),
+        (DriftReport(missing=frozenset({"a"})), True),
+        (DriftReport(unconvertible=frozenset({"a"})), True),
+    ],
+)
+def test_fields_drifted_names_only_field_drift(report: DriftReport, drifted: bool) -> None:
+    assert report.fields_drifted is drifted
+
+
+def test_a_dropped_rows_reason_is_outside_equality_and_repr() -> None:
+    assert DriftReport(dropped_rows=1, dropped_reason="a") == DriftReport(
+        dropped_rows=1, dropped_reason="b"
+    )
+    assert "dropped_reason" not in repr(DriftReport(dropped_reason="a"))
 
 
 # Provenance.

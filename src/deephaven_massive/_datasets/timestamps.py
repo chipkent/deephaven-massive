@@ -6,7 +6,7 @@ field (`Field.unit` in the wire package's generated schemas); `time_unit` reads 
 field of one source, applying the FMV magnitude rule below, and the routine converts values by
 it. No unit is declared, guessed, or inferred here.
 
-**The timestamp routine** (`instants`) turns one column of epoch integers into epoch
+**The timestamp routine** (`masked_instants`) turns one column of epoch integers into epoch
 nanoseconds, in this order:
 
 1. **Epoch 0 means absent.** In every `Instant` column except the dataset's time column, a `0`
@@ -14,20 +14,15 @@ nanoseconds, in this order:
    of a trade without a TRF). The time column keeps its `0`, which then fails step 3. Only
    timestamps are affected; a `0` price or size is data.
 2. **Checked multiply.** The integer is scaled to nanoseconds from its unit (`s`, `ms`, `us`,
-   or `ns`); a result that does not fit a signed 64-bit integer raises.
-3. **Bound.** Every result must lie in the years 1990 to 2100.
+   or `ns`); a result that does not fit a signed 64-bit integer fails.
+3. **Bound.** Every result must lie in the years 1990 to 2100, or it fails.
 
-Steps 2 and 3 raise `UnitMismatchError("timestamp unit mismatch for <label>: ...")`, naming
-the field, its unit, and the first offending value as Massive sent it. Together they catch
-every unit confusion: milliseconds read as nanoseconds land in January 1970, and nanoseconds
-read as milliseconds overflow. `to_epoch_ns_array` is steps 2 and 3 alone, for converting a
-time column to filter on it.
-
-**The masked form** (`masked_instants`) runs the same three steps without raising: it returns
-the converted column with every failing value null, and a mask of the rows that failed. The
-WebSocket flush uses it, because a bad timestamp there fails only the streams that would have
-received its row, and the rest of the batch is still published; `mismatch_message` then gives
-each failing value the exact message the raising form would have.
+A failing value becomes null, and the routine returns a mask of the rows that failed, so each
+transport decides what a failure costs: a row whose time column fails is dropped, since it
+cannot be placed, and any other failing value is null and reported as schema drift. Together
+steps 2 and 3 catch every unit confusion: milliseconds read as nanoseconds land in January
+1970, and nanoseconds read as milliseconds overflow. `first_failure` picks the first failing
+value as Massive sent it, and `mismatch_message` names it, the field, and its unit.
 
 **The FMV magnitude rule.** The WebSocket `FMV` channel's `t` field is documented as
 nanoseconds but the documentation sample is in milliseconds, so `time_unit` gives it
@@ -52,7 +47,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.epoch import epoch_ns
-from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import Transport
 
@@ -66,12 +60,10 @@ __all__ = [
     "MAX_INSTANT_NS",
     "MIN_INSTANT_NS",
     "TimeUnit",
-    "UnitMismatchError",
-    "instants",
+    "first_failure",
     "masked_instants",
     "mismatch_message",
     "time_unit",
-    "to_epoch_ns_array",
 ]
 
 logger = logging.getLogger(__name__)
@@ -88,19 +80,6 @@ _INT64_MAX: Final = 2**63 - 1
 
 _FMV_CHANNEL: Final = "FMV"
 """The WebSocket channel, on every cluster, whose time field takes the FMV magnitude rule."""
-
-
-class UnitMismatchError(MassiveError):
-    """A timestamp that overflows 64-bit nanoseconds or converts outside 1990 to 2100.
-
-    A `MassiveError`, so a caller that does nothing special reports it as one; a transport
-    catches it by this type to add where the value came from (the flat-file transport names
-    the file) and raises a plain `MassiveError` with the same text and cause. A value from
-    Massive the library cannot convert is the library's to fix, so its cause is
-    `ErrorCause.LIBRARY_DEFECT`.
-    """
-
-    default_cause = ErrorCause.LIBRARY_DEFECT
 
 
 class TimeUnit(StrEnum):
@@ -161,68 +140,34 @@ def time_unit(source: Source, field: Field) -> TimeUnit:
     return TimeUnit(field.unit.value)
 
 
-def to_epoch_ns_array(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:
-    """Convert a column of epoch integers to epoch nanoseconds, checked and bounded.
-
-    Steps 2 and 3 of the timestamp routine: the checked multiply and the 1990 to 2100 bound,
-    vectorized in Arrow (`masked_instants`), so no value becomes a Python object. Nulls stay
-    null. The flat-file reader uses it on the time column to filter rows by the requested
-    range, so a wrong unit fails there already.
+def first_failure(values: pa.Array, failed: pa.Array) -> int | None:
+    """Return the first value of a column that failed the timestamp routine, as Massive sent it.
 
     Args:
-        label: The field, as `<dataset>.<column>`, for the error message.
-        unit: The values' unit.
-        values: An integer Arrow array of epoch values as Massive sent them.
+        values: The integer Arrow array of epoch values given to `masked_instants`.
+        failed: The mask `masked_instants` returned with it.
 
     Returns:
-        An `int64` Arrow array of nanoseconds since the Unix epoch.
-
-    A value that overflows 64-bit nanoseconds, or a converted value outside 1990 to 2100,
-    raises the `UnitMismatchError` of `instants`.
+        The first failing value, for `mismatch_message` or a drift sample; None when no value
+        failed.
     """
-    return instants(label, unit, values, time_column=True)
-
-
-def instants(label: str, unit: TimeUnit, values: pa.Array, *, time_column: bool) -> pa.Array:
-    """Run the timestamp routine on one column: epoch 0 to null, checked multiply, bound.
-
-    Every epoch-integer `Instant` column a transport delivers goes through here, or through
-    `masked_instants`, which this calls: the two forms are one implementation, and this one
-    raises for the column's first failure instead of masking it.
-
-    Args:
-        label: The field, as `<dataset>.<column>`, for the error message.
-        unit: The values' unit (`time_unit`).
-        values: An integer Arrow array of epoch values as Massive sent them.
-        time_column: True for the dataset's time column (`Timestamp`), whose `0` is kept and
-            so fails the bound; False for every other `Instant` column, whose `0` becomes null.
-
-    Returns:
-        An `int64` Arrow array of nanoseconds since the Unix epoch.
-
-    Raises:
-        UnitMismatchError: If a value overflows 64-bit nanoseconds or lies outside 1990 to
-            2100: `"timestamp unit mismatch for <label>: ..."`, naming the unit and, as Massive
-            sent it, the first value that overflows, or else the first value out of bounds.
-    """
-    nanos, failed = masked_instants(unit, values, time_column=time_column)
-    if pc.call_function("any", [failed]).as_py():
-        sent = pc.call_function("filter", [pc.cast(values, pa.int64()), failed]).to_pylist()
-        overflow = [v for v in sent if _overflows(unit, v)]
-        raise UnitMismatchError(mismatch_message(label, unit, (overflow or sent)[0]))
-    return nanos
+    if not pc.call_function("any", [failed]).as_py():
+        return None
+    first: int = pc.call_function("filter", [values, failed])[0].as_py()
+    return first
 
 
 def masked_instants(
     unit: TimeUnit, values: pa.Array, *, time_column: bool
 ) -> tuple[pa.Array, pa.Array]:
-    """Run the timestamp routine on one column without raising: failing values become null.
+    """Run the timestamp routine on one column: failing values become null and are masked.
 
-    The same steps as `instants` (epoch 0 to null outside the time column, the scale to
-    nanoseconds, the 1990 to 2100 bound), vectorized in Arrow, but a value that overflows or
-    lies outside the bound is reported in the returned mask instead of raised, so the caller
-    can drop exactly those rows and fail exactly the readers of those rows. A null stays null
-    and is not a failure.
+    Every epoch-integer `Instant` column a transport delivers goes through here: epoch 0 to
+    null outside the time column, the scale to nanoseconds, and the 1990 to 2100 bound,
+    vectorized in Arrow, so no value becomes a Python object. A value that overflows or lies
+    outside the bound is null and marked in the returned mask, so the caller can drop exactly
+    the rows whose time column failed and report every other failure as drift. A null stays
+    null and is not a failure.
 
     Args:
         unit: The values' unit (`time_unit`).
@@ -289,8 +234,8 @@ def mismatch_message(label: str, unit: TimeUnit, value: int) -> str:
         value: The epoch integer as Massive sent it, which failed the routine.
 
     Returns:
-        The `UnitMismatchError` text: `timestamp unit mismatch for <label>: <value> <unit>
-        overflows 64-bit nanoseconds`, or `... is outside 1990 to 2100`.
+        `timestamp unit mismatch for <label>: <value> <unit> overflows 64-bit nanoseconds`, or
+        `... is outside 1990 to 2100`.
     """
     if _overflows(unit, value):  # named in the unit it was scaled from
         return (
