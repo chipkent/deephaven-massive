@@ -347,10 +347,14 @@ class WsConnections:
         decision = self._resolve(asset_class, spec.family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
-            if asset_class is AssetClass.FUTURES and wanted:
-                self._load_schedules(wanted, stream_id=stream_id)
+            # Started before the schedule wait, so a failure or interrupt during that wait
+            # leaves a running connection that `_abandon` retires once idle: a registered
+            # connection that never started would be reused by later streams and never
+            # connect. It subscribes nothing until `_attach`, after the schedules load.
             if created:
                 connection.start()
+            if asset_class is AssetClass.FUTURES and wanted:
+                self._load_schedules(wanted, stream_id=stream_id)
             opened = open_stream_tables(
                 plan,
                 core.dataset_schema(spec),
