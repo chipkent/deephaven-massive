@@ -786,10 +786,6 @@ def test_reactive_options_beyond_the_cap_are_deferred(
     del result
 
 
-def unknown_futures(*_: object) -> HostDecision:
-    return HostDecision("socket.test", Recency.UNKNOWN, "no timeframe in futures snapshot")
-
-
 def test_a_failed_open_returns_its_lease(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -875,19 +871,18 @@ def spare_connection(ws_session: WsSession, host: str) -> ws_connection.Connecti
     )
 
 
-def test_a_delayed_start_waits_and_close_cancels_it(ws_session: WsSession) -> None:
+def test_a_start_after_a_start_or_a_close_does_nothing(ws_session: WsSession) -> None:
     cancelled = spare_connection(ws_session, "never.test")
-    cancelled.start(delay=60.0)
-    cancelled.start()  # a second start does nothing
     cancelled.close()
-    cancelled.start()  # nor does a start after close
+    cancelled.start()  # a start after close does nothing
     assert cancelled.join(TIMEOUT)
     assert ws_session.opens == 0
-    late = spare_connection(ws_session, "late.test")
-    late.start(delay=0.01)
+    started = spare_connection(ws_session, "once.test")
+    started.start()
+    started.start()  # a second start does nothing
     ws_session.wait(lambda s: s.opens == 1)
-    late.close()
-    assert late.join(TIMEOUT)
+    started.close()
+    assert started.join(TIMEOUT)
 
 
 def test_stress_concurrent_verbs_and_releases(ws_session: WsSession) -> None:
@@ -1238,7 +1233,6 @@ def join(ws_session: WsSession) -> dm.MassiveSession:
     connections = ws.WsConnections(
         session._core,
         resolve_host=ws_session._resolve,
-        record_verdict=ws_session._record_verdict,
         fetch_rows=ws_session._fetch_rows,
         crypto_pair=ws_session._crypto_pair,
         client_factory=ws_session.factory,
@@ -1393,32 +1387,6 @@ def freed(core: weakref.ref[SessionCore]) -> bool:
     return core() is None
 
 
-def test_a_session_moved_by_a_verdict_is_freed_without_the_cyclic_collector(
-    fake_ws_server: FakeMassiveServer,
-) -> None:
-    # The old connection keeps the moved stream routed for its final flush; neither that nor
-    # anything else may keep the session once nothing uses it, cycles or not.
-    harness: WsSession = importlib.import_module("tests._fakes.ws_session").WsSession(
-        fake_ws_server, decide=unknown_futures
-    )
-    gc.collect()
-    gc.disable()
-    try:
-        harness.connections.group.reconnect_backoff = 0.01
-        fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
-        result = harness.query(FUTURES, ["ESZ5"]).blink()
-        harness.wait(lambda s: s.opens == 2)
-        harness.subscribed("T.ESZ5")
-        successor = harness.connection("wss://delayed.test/futures")
-        core = weakref.ref(harness.session._core)
-        harness.session.release(result)
-        del result, harness.session, harness.connections
-        assert freed(core)
-        assert successor.join(TIMEOUT)  # the session's closer closed it
-    finally:
-        gc.enable()
-
-
 def test_a_closed_session_that_shared_a_connection_is_freed_once_its_table_is_dropped(
     ws_session: WsSession,
 ) -> None:
@@ -1559,7 +1527,6 @@ def test_an_ended_connection_holds_no_stream(
     # The loop has ended: what still reaches the connection (here called directly, as no
     # post can run) leaves nothing behind.
     connection.add_stream(stream)
-    connection.adopt([stream])
     connection.check_idle()
     assert connection._streams == {}
     other.close()  # its stream's release finds the loop gone
@@ -1908,8 +1875,8 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
 ) -> None:
     # Every thread the library starts, recorded by name. The session's own (its writer and
     # reaper, a poller and its pool) carry the session's prefix; those of the connections,
-    # which serve every session of their group (a client and its flush thread, a verdict's move
-    # and delayed start, the futures schedule worker), carry the group's label.
+    # which serve every session of their group (a client and its flush thread, the futures
+    # schedule worker), carry the group's label.
     started: list[str] = []
     start = threading.Thread.start
 
@@ -1918,11 +1885,9 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
         start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", recording)
-    custom_session = make_ws_session(decide=unknown_futures)
-    custom_session.connections.group.reconnect_backoff = 0.01
-    fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+    custom_session = make_ws_session()
     result = custom_session.query(FUTURES, ["ESZ5"]).blink()
-    custom_session.wait(lambda s: s.opens == 2)  # moved to the delayed host, after a delay
+    custom_session.wait(lambda s: s.opens == 1)
     core = custom_session.session._core
     pooled = threading.Event()
 
@@ -1941,6 +1906,7 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
         pollers=poll.Pollers(core.label),
         host="api.test",
         path=_DIVIDENDS_PATH,
+        recency=None,
         clock=FakeClock(manual=True),
         stop=threading.Event(),
     )
@@ -1965,9 +1931,6 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     assert {
         "ws 127.0.0.1/futures",  # the client of each connection, on the fake server
         "flush socket.test/futures",
-        "move socket.test/futures",
-        "start delayed.test/futures",
-        "flush delayed.test/futures",
         "futures schedules",
     } <= shared
     polls = sorted(role for role in mine if role.startswith("poll-"))
@@ -2639,3 +2602,34 @@ def test_soak_sessions_close_under_load_without_disturbing_a_shared_connection(
     assert all_exactly_once(dh_to_pylist, every_stats)
     release_scope(core.exec_ctx, scope)
     harness.session.release(every)
+
+
+@pytest.mark.parametrize(
+    ("decision", "note"),
+    [
+        (
+            HostDecision("delayed.massive.com", Recency.DELAYED, "delayed_subscriptions"),
+            (
+                "Live data from Massive's delayed feed (delayed.massive.com), 15 minutes behind "
+                "(10 for futures)."
+            ),
+        ),
+        (
+            HostDecision("socket.massive.com", Recency.REALTIME, "timeframe=REAL-TIME"),
+            "Live data from Massive's real-time feed (socket.massive.com).",
+        ),
+    ],
+)
+def test_a_streams_row_and_description_name_its_recency(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    decision: HostDecision,
+    note: str,
+) -> None:
+    custom_session = make_ws_session(decide=lambda *_: decision)
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    assert result.attributes()["TableDescription"].endswith(note)
+    [row] = streams_of(custom_session, dh_to_pylist)
+    assert (row["Host"], row["Recency"]) == (decision.host, decision.recency.value)
+    custom_session.session.release(result)

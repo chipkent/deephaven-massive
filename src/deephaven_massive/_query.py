@@ -87,7 +87,13 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
-from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, _require_enum
+from deephaven_massive._enums import (
+    AssetClass,
+    HistorySource,
+    PollMode,
+    Timespan,
+    _require_enum,
+)
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -98,7 +104,12 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
-from deephaven_massive._tables.columns import column_table, describe
+from deephaven_massive._tables.columns import (
+    column_table,
+    describe,
+    recency_note,
+    rest_recency_note,
+)
 from deephaven_massive._tables.diagnostics import shown_query
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.session_core import SessionCore
@@ -778,7 +789,10 @@ class Query(QueryBase):
         request, on up to `max_concurrency` threads. A `limit` the query was built with caps the
         rows (README.md#sort-order-limit); a symbol table is read once, now. A symbol with no
         data (HTTP 404 on its first request) returns no rows, with a WARNING; HTTP 404 on a later
-        page raises `MassiveError`, since its data was cut short.
+        page raises `MassiveError`, since its data was cut short. Current data of a
+        subscription not in `MassiveConfig.delayed_subscriptions` must be real-time: a response
+        Massive labels `DELAYED` raises; a listed subscription's data is returned as the plan
+        serves it, and the table's description says so (README.md#real-time-or-delayed).
 
         Args:
             wait: True (the default) blocks and returns a static table; False returns at once a
@@ -797,7 +811,9 @@ class Query(QueryBase):
                 Massive's exact tickers, or any such row under `noncanonical_symbols=RAISE`.
             AuthenticationError: If Massive rejects the API key (HTTP 401). With `wait=False`
                 this and every other request failure fails the table instead.
-            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403), or Massive
+                labels the data `DELAYED` for a subscription not in
+                `MassiveConfig.delayed_subscriptions`; the message names the line to add.
             MassiveError: If the session is closed, a rate limit outlives the retries, a row
                 breaks the dataset's schema, a symbol's later page answers HTTP 404, or a
                 request fails in any other way.
@@ -829,12 +845,15 @@ class Query(QueryBase):
         rest = self._core.rest_transport()
         if not wait:  # a parameter error raises now, as it would before the first request
             rest.check_fetch(spec, request)
+        subscription = spec.current_subscription
+        listed = subscription in self._core.config.delayed_subscriptions
         return self._result(
             call,
             request,
             wait=wait,
             transport=Transport.REST,
-            note=None,
+            # A listed subscription's REST data is unchecked: the description says so.
+            note=rest_recency_note(listed=True) if listed else None,
             run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
         )
 
@@ -855,9 +874,12 @@ class Query(QueryBase):
         table under `noncanonical_symbols=RAISE`). A feed (a dataset whose default mode is
         `APPEND`: news and filings) needs a `start` or a `limit`. The poller runs while the
         table or anything derived from it is in use (README.md#live-tables). Once the table
-        exists, an authentication, entitlement, or schema failure, or a null or NaN poll key,
-        fails it and ends the poller; any other failed cycle shows in `m.streams()`'s `Error`,
-        logs a WARNING, and the next cycle runs. `TimestampInsert` is the latest cycle's time.
+        exists, an authentication, entitlement, or schema failure, a null or NaN poll key, or a
+        response Massive labels `DELAYED` for a subscription not in
+        `MassiveConfig.delayed_subscriptions` (README.md#real-time-or-delayed), fails it and
+        ends the poller; the table's description and its `m.streams()` row name its recency;
+        any other failed cycle shows in `m.streams()`'s `Error`, logs a WARNING, and the next
+        cycle runs. `TimestampInsert` is the latest cycle's time.
 
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
@@ -1021,7 +1043,12 @@ class StreamQuery(QueryBase):
             channel=self._channel,
             query=repr(self),
             verb=verb,
-            build=lambda blink: describe(shape(blink), spec, schema),
+            build=lambda handle: describe(
+                shape(handle.blink),
+                spec,
+                schema,
+                note=recency_note(handle.recency, host=handle.host),
+            ),
         )
 
     @_verb
@@ -1049,9 +1076,14 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection; or if the
+                stream is a fair-market-value stream of a subscription in
+                `MassiveConfig.delayed_subscriptions` (FMV is real-time only).
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
+            EntitlementError: If the dataset's subscription is not in
+                `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
+                delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1082,9 +1114,14 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection; or if the
+                stream is a fair-market-value stream of a subscription in
+                `MassiveConfig.delayed_subscriptions` (FMV is real-time only).
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
+            EntitlementError: If the dataset's subscription is not in
+                `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
+                delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1118,10 +1155,15 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection; or if the
+                stream is a fair-market-value stream of a subscription in
+                `MassiveConfig.delayed_subscriptions` (FMV is real-time only).
                 Also if `capacity` is outside 1 to 2**31 - 1.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
+            EntitlementError: If the dataset's subscription is not in
+                `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
+                delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1203,11 +1245,16 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection; or if the
+                stream is a fair-market-value stream of a subscription in
+                `MassiveConfig.delayed_subscriptions` (FMV is real-time only).
                 Also if `by` is empty, repeats a column, or names a column the dataset does
                 not have.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
+            EntitlementError: If the dataset's subscription is not in
+                `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
+                delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1292,7 +1339,8 @@ class HistoryQuery(QueryBase):
         from REST, so the call fails only when no source can serve it
         (README.md#history-sources). The table's description names the source and why. A
         symbol table is read once, now. A bar with an unexpected stamp is served, with a
-        WARNING, never refused.
+        WARNING, never refused. History is past data, so `MassiveConfig.delayed_subscriptions`
+        does not affect it (README.md#real-time-or-delayed).
 
         Args:
             start: The first day, or the first instant included (`DateLike`).

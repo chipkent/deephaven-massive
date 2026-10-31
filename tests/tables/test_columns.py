@@ -24,7 +24,7 @@ from deephaven.table_factory import ring_table
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
-from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._enums import AssetClass, NotBars, Recency
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
@@ -34,6 +34,8 @@ from deephaven_massive._tables.columns import (
     dataset_table,
     describe,
     dh_type,
+    recency_note,
+    rest_recency_note,
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
@@ -519,3 +521,24 @@ def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
     # Like `to_table`'s own result, its row keys are the positions 0 to n - 1.
     rows = pa.table({"Date": pa.array(["2025-03-03", None]), "Size": pa.array([1, 2])})
     assert dataset_table(rows, ("Date",)).j_table.isFlat()
+
+
+def test_the_recency_note_of_an_unknown_host_never_claims_real_time() -> None:
+    note = recency_note(Recency.UNKNOWN, host="x.example.com")
+    assert (
+        note
+        == "Live data from x.example.com, a pinned host whose recency the library does not know."
+    )
+
+
+@pytest.mark.parametrize(
+    ("listed", "note"),
+    [
+        (True, "Data as the plan serves it, real-time or delayed"),
+        (False, "Checked for delayed data: a response Massive labels DELAYED fails the table"),
+    ],
+)
+def test_the_rest_recency_note_never_claims_real_time(listed: bool, note: str) -> None:
+    text = rest_recency_note(listed=listed)
+    assert text.startswith(note)
+    assert "Real-time data" not in text

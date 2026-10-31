@@ -38,6 +38,7 @@ from deephaven_massive._tables.liveness import (
     new_scope,
     release_scope,
 )
+from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -416,7 +417,7 @@ def test_a_failed_build_drops_its_hold(
     core = massive_session._core
     q = query(massive_session)
 
-    def broken(_blink: Table) -> Table:
+    def broken(_handle: StreamHandle) -> Table:
         raise RuntimeError("cannot shape")
 
     with pytest.raises(RuntimeError, match="cannot shape"):
@@ -433,7 +434,7 @@ def test_an_interrupted_build_drops_its_hold(
     core = massive_session._core
     q = query(massive_session)
 
-    def interrupted(_blink: Table) -> Table:
+    def interrupted(_handle: StreamHandle) -> Table:
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):

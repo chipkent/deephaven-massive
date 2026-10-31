@@ -194,7 +194,6 @@ class SessionClients:
             candidate = WsConnections(
                 core,
                 resolve_host=self._resolve_host,
-                record_verdict=self._record_verdict,
                 fetch_rows=self._fetch_rows,
                 crypto_pair=self._crypto_pair,
             )
@@ -231,21 +230,6 @@ class SessionClients:
             `(base, quote)`, cached for the session by the REST transport.
         """
         return self.rest().crypto_pair(symbol)
-
-    def _record_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        """Record the server's real-time verdict as the session's host decision of a pair.
-
-        The REST transport keeps the one cache of host decisions and the pair's REST row of
-        `m.connections()`; this replaces both, so later streams of the pair use the delayed host.
-
-        Args:
-            asset_class: The class.
-            family: The family.
-            decision: The decision the verdict implies (`DELAYED`, evidence `server verdict: ...`).
-        """
-        self.rest().record_verdict(asset_class, family, decision)
 
     def _fetch_rows(
         self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel

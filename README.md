@@ -537,9 +537,9 @@ What a plan changes, in the library's terms:
   with S3 keys.
 - **Pace.** A Basic subscription allows five REST requests a minute; the library spaces its
   requests to fit, so a large download on Basic is slow but completes.
-- **Freshness.** Massive's stock, option, and index plans range from end-of-day data on Basic,
-  through 15 minutes late, to real time; a delayed stream shows `Recency` `DELAYED` in
-  `m.connections()` and works exactly like a real-time one.
+- **Freshness.** Massive's stock, option, index, and futures plans range from end-of-day data
+  on Basic, through 15 minutes late (10 for futures), to real time. You choose which feed each
+  subscription streams from: see [real-time or delayed](#real-time-or-delayed).
 - **Kinds of data and history.** Higher plans add more kinds of data, such as streamed trades and
   quotes, and reach further back: Stocks Basic keeps two years of history, while Indices Basic
   keeps all of it. Each dataset's page in the [reference](docs/datasets/README.md) has Massive's
@@ -565,6 +565,43 @@ except dm.EntitlementError as error:
 A mistake in the call itself, such as a misspelled symbol or text where an enum belongs, raises
 `ValueError` or `TypeError` before anything is sent.
 
+<a id="real-time-or-delayed"></a>
+
+### Real-time or delayed
+
+Massive streams stocks, options, indices, and futures from two feeds: a real-time one, and a
+delayed one that runs 15 minutes behind (10 for futures). Starter and Developer plans are
+delayed; Advanced and Business plans are real-time. You choose the feed for each subscription
+with `MassiveConfig(delayed_subscriptions=...)`, and the library never chooses for you: a
+stream never moves from one feed to the other.
+
+- **Not listed, the default: real-time.** When Massive shows that your plan's data is delayed,
+  the stream verb raises `dm.EntitlementError` with what Massive reported and the exact line
+  to add. A `fetch()` or `poll()` of current data (snapshots, last trades and quotes, movers,
+  and every other dataset of the subscription) fails the same way when Massive labels its
+  answer `DELAYED`, so you never get delayed data you did not ask for. In
+  [`m.snapshots()`](docs/datasets/snapshots.md), which mixes classes, each row is held to its
+  own class's subscription.
+- **Listed: delayed.** The subscription's streams read the delayed feed, even when your plan is
+  real-time; one WARNING says so then. REST cannot ask for delayed data, so `fetch()` and
+  `poll()` return whatever your plan serves, and the table's description says so.
+- Forex and crypto are real-time on every plan, so `dm.Subscription.CURRENCIES` cannot be
+  listed; fair-market-value streams (Business plans) are real-time only.
+- `history()` reads past data, so this setting does not affect it.
+- `m.streams()` shows each live table's `Recency`, and each live table's description, shown in
+  the web UI, says what it knows of it. Nothing is shown as real-time without proof: a stream
+  is real-time by its feed, and a `poll()` table only once Massive labels its data real-time;
+  until then it shows `UNKNOWN`.
+
+```python
+# The default: every subscription real-time. On a delayed plan, a stream stops with an error
+# that names the setting to add.
+real_time = dm.MassiveSession()
+
+# Stocks in real time; options from Massive's delayed feed, 15 minutes behind.
+mixed = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS}))
+```
+
 <a id="diagnostics"></a>
 
 ### Diagnostics
@@ -577,7 +614,9 @@ wrong.
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
   warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
   for room, a connection that is down or has gone quiet), all of them at once, joined with
-  `;`. `Query` shows the call that opened it, `RowsPublished` counts rows delivered, and
+  `;`. `Query` shows the call that opened it, `Recency` whether its data is real-time
+  (`REALTIME`), delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`),
+  `RowsPublished` counts rows delivered, and
   `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), or
   sent with a value that does not fit, which reads as null (`REST:exchange?`). A row whose
   symbol or time cannot be read is dropped, and the log says so in one WARNING.
@@ -814,7 +853,9 @@ this section) and look at what the library did.
 | `timespan must be dm.Timespan` | Arguments that pick from a set take an enum member: `dm.Timespan.DAY`, not `"day"`. |
 | `ValueError` naming a symbol | Not Massive's spelling. See [`symbols`](#symbols) for the converters. |
 | `AttributeError` naming a verb | The dataset cannot serve that verb; the message names the one that can. |
-| `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the class, or read the class over REST only. Stream bars instead of trades, or read `history()` or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. |
+| `... would be delayed (Massive reports ...)` | Your plan's data for that subscription is delayed, and the library serves real-time data unless you ask for delayed. Add the line the message shows, or upgrade the plan. See [real-time or delayed](#real-time-or-delayed). |
+| `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the class, or read the class over REST only. Stream bars instead of trades, or read `history()` or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. When the message suggests `delayed_subscriptions`, your plan may be delayed: see [real-time or delayed](#real-time-or-delayed). |
+| `delayed_subscriptions cannot hold dm.Subscription.CURRENCIES` | Forex and crypto have no delayed feed. Remove it from the set. |
 | `AuthenticationError` on a live table, ending `can also mean the ... plan includes no WebSocket streams` | Massive's live connection gives one answer for a wrong key and, possibly, for a plan without streams of that asset class. If `fetch()` or `history()` works with the same key, the key is right: read the data with `history()` or `poll()`, or check which streams your plan includes on its [reference page](docs/datasets/README.md). |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |
@@ -832,7 +873,7 @@ this section) and look at what the library did.
 | `...; last good cycle at <time>` in a `poll()` table's `Error` | Its latest cycle failed with the error before it; the next cycle runs as scheduled and clears it on success. |
 | `poll(): last good cycle at <time>; every cycle since <time> has failed ... longer than MassiveConfig.max_outage` | Its cycles kept failing for `max_outage` seconds, so the table stopped rather than show stale data. Fix the error it names, then call the verb again. |
 | `no data since <time> during ... trading hours` in `m.streams()` | The connection is up but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
-| a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; your plan is 15 minutes delayed; or the stream failed (`m.streams()`). |
+| a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; the table reads Massive's delayed feed (`Recency` `DELAYED` in `m.streams()`), which starts 15 minutes behind; or the stream failed (`m.streams()`). |
 | a download is slow | Basic plans allow five requests a minute (`m.rate_limits()` shows the pace). Use flat files for many symbols, and `wait=False` for long reads. |
 | memory keeps growing | `append_only()` keeps every row. Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |
 | a table keeps running after `del` | Call `m.release(table)`. |

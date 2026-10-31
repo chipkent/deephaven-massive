@@ -109,7 +109,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import PollMode
+from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
@@ -263,6 +263,7 @@ class CycleReader(Protocol):
         *,
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
     ) -> tuple[pa.Table, int, float]:
@@ -271,6 +272,8 @@ class CycleReader(Protocol):
         Args:
             symbols: The cycle's static symbols: a sorted tuple, `ALL`, or None.
             record: Receives each page's drift, for the table's `SchemaDrift`.
+            on_recency: Receives what a page's recency labels show (`REALTIME` or `DELAYED`),
+                from any of the cycle's threads, for the table's `Recency`.
             executor: The poller's pool for fan-out requests.
             cancel: The poller's stop token: once set, the cycle's requests stop waiting for
                 the rate governor.
@@ -342,6 +345,42 @@ class Pollers:
             self._live.clear()
         for poller in live:
             poller.stop()
+
+
+class _RecencySeen:
+    """What one `poll()` cycle's pages showed about their recency, from any of its threads.
+
+    Thread-safe: the cycle's fan-out threads add to it under its leaf lock.
+    """
+
+    __slots__ = ("_lock", "_seen")
+
+    def __init__(self) -> None:
+        """Start with nothing seen."""
+        self._lock = threading.Lock()
+        self._seen: set[Recency] = set()
+
+    def add(self, recency: Recency) -> None:
+        """Record what one page showed.
+
+        Args:
+            recency: `REALTIME` or `DELAYED`.
+        """
+        with self._lock:
+            self._seen.add(recency)
+
+    def shown(self) -> Recency | None:
+        """Return the cycle's recency for the table's row.
+
+        Returns:
+            `DELAYED` when any page was labelled delayed, else `REALTIME` when a page was
+            labelled real-time, else None: no label, so the row keeps what it shows.
+        """
+        with self._lock:
+            seen = set(self._seen)
+        if Recency.DELAYED in seen:
+            return Recency.DELAYED
+        return Recency.REALTIME if seen else None
 
 
 class Poller:
@@ -661,8 +700,9 @@ class Poller:
         began_at = self._clock.time()
         symbols, skipped = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
+        seen = _RecencySeen()
         table, requests, patience = self._read(
-            symbols=symbols, record=record, executor=pool, cancel=self._stop
+            symbols=symbols, record=record, on_recency=seen.add, executor=pool, cancel=self._stop
         )
         if self._stop.is_set():
             return False
@@ -687,6 +727,7 @@ class Poller:
             notes={NotePart.POLL_CYCLE: None},
             skipped=skipped_rows_text(skipped) if skipped else None,
             clear_skipped=not skipped,
+            recency=seen.shown(),
         )
         core.update_streams({self._stream_id: update})
         self._good_at, self._succeeded, self._failing_since = began_at, True, None
@@ -1179,6 +1220,7 @@ def _build(
     mode: PollMode,
     stream_id: int,
     stop: threading.Event,
+    note: str | None,
 ) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
@@ -1188,6 +1230,7 @@ def _build(
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
         stop: The poller's stop token, set when the blink table shuts down.
+        note: The sentence the table description adds about its recency, or None.
 
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
@@ -1210,7 +1253,7 @@ def _build(
             release_later=core.release_later,
         )
         built.append(publisher)
-        return describe(table, spec, schema)
+        return describe(table, spec, schema, note=note)
 
     result, scope = make_result(core.exec_ctx, shape)
     return (result, built[0]), scope
@@ -1228,8 +1271,10 @@ def open_poll(
     pollers: Pollers,
     host: str | None,
     path: str | None,
+    recency: Recency | None,
     clock: PollClock,
     stop: threading.Event,
+    note: str | None = None,
 ) -> Table:
     """Create a `poll()` table and start its poller.
 
@@ -1258,9 +1303,14 @@ def open_poll(
         pollers: The session's live pollers.
         host: The REST host, for the row's `Host`.
         path: The fetch path, for the row's `Path`.
+        recency: The row's first `Recency`: `UNKNOWN` for current data, which a cycle whose
+            pages Massive labels real-time or delayed turns into `REALTIME` or `DELAYED`; None
+            for data no label describes (reference, economy, and partner data).
         clock: The time source of the waits between cycles.
         stop: The poller's stop token, which the caller creates and every cycle's requests
             listen to; the table's shutdown and the session's close set it.
+        note: The sentence the table's description adds about its recency
+            (`columns.rest_recency_note`), or None.
 
     Returns:
         The live table.
@@ -1273,7 +1323,14 @@ def open_poll(
     """
     stream_id = core.next_stream_id()
     with entered(core.exec_ctx):
-        (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
+        (result, publisher), scope = _build(
+            core,
+            spec,
+            mode=mode,
+            stream_id=stream_id,
+            stop=stop,
+            note=note,
+        )
     poller: Poller | None = None
     registered = False
     try:
@@ -1304,6 +1361,7 @@ def open_poll(
                 transport=Transport.REST,
                 host=host,
                 path=path,
+                recency=recency,
                 created_at=time.time_ns(),
             ),
             fail=poller.fail,

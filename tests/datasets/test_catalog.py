@@ -23,7 +23,14 @@ from deephaven_massive._datasets.catalog import (
 )
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars, PollMode, Timespan
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    NotBars,
+    PollMode,
+    Subscription,
+    Timespan,
+)
 from deephaven_massive._massive import RestPath, Source, Transport, sources
 from deephaven_massive._session import CATALOG
 
@@ -1510,3 +1517,26 @@ def test_the_naming_gate_catches_a_vendor_timestamp_outside_a_key() -> None:
         f"library names: futures.schedules: REST {path}: the vendor field 'Timestamp' has the "
         "name of a library time column but is no declared key"
     ) in Catalog((change(schedules, keys={}),)).problems()
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "path", "subscription"),
+    [
+        (AssetClass.OPTIONS, "/v3/snapshot/options/{u}", Subscription.OPTIONS),
+        (AssetClass.CRYPTO, "/v1/last/crypto/{from}/{to}", Subscription.CURRENCIES),
+        (AssetClass.OPTIONS, "/v3/reference/options/contracts", None),
+        (ClassFromPrefix.ANY, "/v3/snapshot", None),
+        (AssetClass.STOCKS, None, None),
+    ],
+)
+def test_the_current_subscription_is_the_classes_unless_reference_or_cross_class(
+    asset_class: AssetClass | ClassFromPrefix, path: str | None, subscription: Subscription | None
+) -> None:
+    spec = DatasetSpec(
+        name="x.y",
+        summary="A test dataset.",
+        asset_class=asset_class,
+        fetch_path=path,
+        history_path=None if path else "/v3/trades/{t}",
+    )
+    assert spec.current_subscription is subscription

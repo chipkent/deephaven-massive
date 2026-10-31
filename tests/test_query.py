@@ -1454,6 +1454,7 @@ class EmptyTransport(Recorder):
             pollers=self.pollers,
             host="api.massive.com",
             path=spec.fetch_path or "",
+            recency=None,
             clock=self._clock,
             stop=threading.Event(),
         )

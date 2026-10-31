@@ -19,7 +19,7 @@ Everything here is a protocol or an immutable value: no I/O, no threads, and no 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -56,8 +56,8 @@ class HostDecision:
 
     Attributes:
         host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data, or `UNKNOWN` when the
-            evidence did not say (only then may a server verdict re-route the connection).
+        recency: Whether the host serves real-time or delayed data (`host_decision.recency_of`),
+            or `UNKNOWN` for a pinned host the library does not know.
         evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
     """
 
@@ -88,6 +88,8 @@ class StreamHandle:
         path: The cluster path, such as `/stocks`.
         evidence: Why the stream's host was chosen (`HostDecision.evidence`), for the log line
             of the open.
+        recency: Whether the host serves real-time or delayed data (`HostDecision.recency`),
+            for the stream's `m.streams()` row and its tables' descriptions.
         fail: Fails the stream's table with the error and records the failure, once; returns
             False when the stream had already failed. Takes the stream's publish lock and
             makes a Deephaven call, so never call it under `registry_lock` or on an
@@ -104,6 +106,7 @@ class StreamHandle:
     evidence: str
     fail: Callable[[MassiveError], bool]
     stop_watch: Callable[[], None] | None = None
+    recency: Recency = field(kw_only=True)
 
 
 class RestTransport(Protocol):
@@ -158,24 +161,6 @@ class RestTransport(Protocol):
 
         A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
         ticker.
-        """
-        ...
-
-    def record_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        """Replace the cached host decision of a (class, family) with a server's verdict.
-
-        Called by the WebSocket transport when the explicit-verdict rule re-routes a
-        connection (for example to the delayed host, with `Recency.DELAYED` and evidence
-        `"server verdict: <message>"`). Every later `resolve_host` for the pair returns this
-        decision, and the pair's `Transport=REST` row of `m.connections()` is rewritten with
-        it. No request is made and nothing blocks.
-
-        Args:
-            asset_class: The asset class of the connection.
-            family: The channel family.
-            decision: The new decision.
         """
         ...
 
@@ -346,9 +331,12 @@ class StreamTransport(Protocol):
 
         Raises:
             ValueError: If explicit options contracts would put more than 1,000 topics on the
-                session's `/options` connection.
+                session's `/options` connection, or the stream is a fair-market-value stream
+                of a subscription in `MassiveConfig.delayed_subscriptions`.
             AuthenticationError: If Massive rejects the API key on the request that decides the
                 WebSocket host.
+            EntitlementError: If the subscription is not in
+                `MassiveConfig.delayed_subscriptions` and Massive labels its snapshot delayed.
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
         """

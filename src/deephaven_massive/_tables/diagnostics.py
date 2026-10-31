@@ -278,6 +278,7 @@ STREAMS: Final = Schema(
             ("Transport", _S),
             ("Host", _S),
             ("Path", _S),
+            ("Recency", _S),
             ("RowsPublished", _L),
             ("RequestsPerCycle", _I),
             ("State", _S),
@@ -393,6 +394,13 @@ class StreamRow:
             the table shows its label, `WebSocket`, `REST`, or `flat files`.
         host: The serving host; null for a background read.
         path: The cluster path; null for a background read.
+        recency: Whether the table's data is real-time or delayed: a stream's host's
+            (`REALTIME` or `DELAYED`; `UNKNOWN` on a pinned host the library does not know);
+            for a `poll()` table of current data, what Massive's labels on its latest cycle
+            showed (`REALTIME`, or `DELAYED` for a subscription in
+            `MassiveConfig.delayed_subscriptions`; a delayed label on any other fails the
+            table), and `UNKNOWN` until a label shows either; null for reference, economy,
+            and partner data and for a background read. `UNKNOWN` is never real-time.
         rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
@@ -422,6 +430,7 @@ class StreamRow:
     transport: Transport
     host: str | None = None
     path: str | None = None
+    recency: Recency | None = None
     rows_published: int = 0
     requests_per_cycle: int | None = None
     state: StreamState = StreamState.RUNNING
@@ -452,8 +461,7 @@ class StreamUpdate:
             stream reads one channel).
         symbol_count: How many symbols the stream now covers.
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
-        host: The serving host.
-        path: The cluster path.
+        recency: What the latest `poll()` cycle's labels showed (`StreamRow.recency`).
         notes: The warning parts this update sets (to a text) or clears (to None); the parts
             it leaves out keep their text.
         skipped: The skipped symbol-table values' text (`StreamRow.skipped`).
@@ -468,8 +476,7 @@ class StreamUpdate:
     deferred: int | None = None
     symbol_count: int | None = None
     symbols: str | None = None
-    host: str | None = None
-    path: str | None = None
+    recency: Recency | None = None
     notes: Mapping[NotePart, str | None] | None = None
     skipped: str | None = None
     clear_skipped: bool = False
@@ -497,8 +504,7 @@ class StreamUpdate:
             deferred=row.deferred if self.deferred is None else self.deferred,
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
             symbols=row.symbols if self.symbols is None else self.symbols,
-            host=row.host if self.host is None else self.host,
-            path=row.path if self.path is None else self.path,
+            recency=row.recency if self.recency is None else self.recency,
             notes=self._notes(row),
             skipped=None
             if self.clear_skipped

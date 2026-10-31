@@ -30,6 +30,7 @@ from tests._live.live_run import children, commands, group_child, machine_checks
 from tests._live.live_run.context import RunContext, RunRefusedError
 from tests._live.live_run.run_probe import Credentials, ProbeResult, probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
+from tests._live.live_run.stream_units import DELAYED, RECENCY
 from tests._live.live_run.upgrade_check import SUBSCRIPTIONS
 
 if TYPE_CHECKING:
@@ -209,10 +210,14 @@ def run_group_child(
     memory = machine_checks.memory_total() or SMALL_HEAP * 2
     streams = group in {"stream-day", "throughput"}
     start_server(min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP, out / attempt)
-    basic = frozenset(dm.Subscription(n) for n, t in request["tiers"].items() if t == "basic")
+    tiers = request["tiers"].items()
+    basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
+    # The library serves delayed data only when asked: a delayed plan's streams ask for it.
+    delayed = frozenset(dm.Subscription(n) for n, t in tiers if RECENCY.get((n, t)) == DELAYED)
 
     def open_session() -> MassiveSession:
-        return dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=basic))
+        config = dm.MassiveConfig(rest_basic_subscriptions=basic, delayed_subscriptions=delayed)
+        return dm.MassiveSession(config)
 
     def tier_of(subscription: str) -> str | None:
         probe: ProbeResult = probe_key(credentials(environ), now=datetime.now(UTC))

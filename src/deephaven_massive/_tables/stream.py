@@ -127,7 +127,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType, Schema
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
-    from deephaven_massive._enums import AssetClass
+    from deephaven_massive._enums import AssetClass, Recency
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -644,8 +644,8 @@ class StreamSink:
     table by the transport; removed when the stream's blink table has shut down, or when its
     session closes. It refers to its session's core weakly (`core()`): a flush thread shared by
     several sessions needs to know which one each stream reports to, but a sink can outlive its
-    stream's record in a container that is cleaned up later (the routes of a connection a
-    verdict moved the stream off, until its flush thread ends), and a strong reference there
+    stream's record in a container that is cleaned up later (the routes of a connection, until
+    its flush thread ends), and a strong reference there
     would keep a finished session alive. While the stream is registered its record keeps the
     session in the live set, so the core is there whenever the stream still matters; once it is
     gone, the sink skips what it would have reported to it. Two locks keep it consistent
@@ -654,8 +654,7 @@ class StreamSink:
     - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
       when a reactive symbol table changes;
     - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
-      flush thread takes it, but a stream can briefly be reached from two flush threads (when
-      the server's verdict moves its connection), and is failed from the caller thread when
+      flush thread takes it, but a stream is failed from the caller thread when
       its connection failed while it was opening, from the closing thread at `m.close()`, and
       from the reaper when its watchlist failed. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
@@ -892,7 +891,7 @@ class StreamSink:
         watchlist itself, on an update-graph thread, where failing a table (a Deephaven call
         that takes the publish lock) is not allowed, so the failure is only queued here; it
         never blocks. The reaper, unlike a connection's flush thread, runs as long as the
-        session, also after the server's real-time verdict moved the stream.
+        session.
 
         Args:
             message: Why the stream cannot follow its watchlist, naming the fix.
@@ -1255,8 +1254,7 @@ class Flusher:
         of the library, every routed stream is failed with a `MassiveError` naming the thread
         (`ErrorCause.LIBRARY_DEFECT`, logged once), and it is re-raised.
         However the thread ends, it clears the routes last: nothing reads them any more, and a
-        stream left there (one a verdict moved to another connection, which this thread kept
-        routed for its final flush) would be held by a connection that is gone.
+        stream left there would be held by a connection that is gone.
         """
         try:
             while not self._stop.wait(self._interval):
@@ -1773,6 +1771,7 @@ def open_stream_tables(
     host: str,
     path: str,
     evidence: str,
+    recency: Recency,
     on_shutdown: Callable[[], None],
     on_symbols: Callable[[frozenset[str], frozenset[str]], None],
 ) -> OpenedStream:
@@ -1799,6 +1798,7 @@ def open_stream_tables(
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
         evidence: Why the host was chosen (`HostDecision.evidence`), carried by the handle.
+        recency: Whether the host serves real-time or delayed data, carried by the handle.
         on_shutdown: The blink table's `on_shutdown_callback`.
         on_symbols: Receives the watch's changes of a reactive symbol table.
 
@@ -1849,6 +1849,7 @@ def open_stream_tables(
             evidence,
             sink.fail,
             stop_watch=None if watch is None else watch.stop,
+            recency=recency,
         )
         return OpenedStream(handle, sink, watch)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak

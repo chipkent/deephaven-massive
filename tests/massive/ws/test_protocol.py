@@ -218,18 +218,6 @@ def test_a_status_without_a_message_has_empty_text(decoder: FrameDecoder) -> Non
     ]
 
 
-@pytest.mark.parametrize(
-    ("kind", "message", "verdict"),
-    [
-        (StatusKind.REFUSED, "Your plan lacks REAL-TIME access", True),
-        (StatusKind.REFUSED, "not authorized", False),
-        (StatusKind.OTHER, "real-time", False),
-    ],
-)
-def test_the_realtime_verdict(kind: StatusKind, message: str, verdict: bool) -> None:
-    assert Status(kind=kind, message=message).realtime_verdict is verdict
-
-
 # --- data ---------------------------------------------------------------------------------------
 
 

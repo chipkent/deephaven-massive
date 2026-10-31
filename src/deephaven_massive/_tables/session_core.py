@@ -665,7 +665,7 @@ class SessionCore:
         channel: str,
         query: str,
         verb: str,
-        build: Callable[[Table], Table],
+        build: Callable[[StreamHandle], Table],
     ) -> Table:
         """Create one live result over the stream of `(spec, channel, symbols)`.
 
@@ -705,7 +705,8 @@ class SessionCore:
             query: The `repr` of the query whose verb asks, for the `Query` column of
                 `m.streams()`; a reused stream keeps the text of the query that opened it.
             verb: The verb that asks, such as `"last"`, for the log line of the open.
-            build: Turns the stream's blink table into the result. It must create a new
+            build: Turns the stream (its handle's blink table, host, and recency) into the
+                result. It must create a new
                 table, never return the blink table itself, so the result scope manages the
                 result and each call returns a distinct table.
 
@@ -719,12 +720,11 @@ class SessionCore:
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
         handle = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
-        blink = handle.blink
         scope: LivenessScope | None = None
         try:
             self._require_unfailed(spec, handle.stream_id)
             with entered(self.exec_ctx):
-                result, scope = make_result(self.exec_ctx, lambda: build(blink))
+                result, scope = make_result(self.exec_ctx, lambda: build(handle))
             self.results.track(
                 result,
                 scope,
@@ -1000,10 +1000,8 @@ class SessionCore:
         recorded on the record, and the stream is returned as is: `stream_result` then raises
         the `MassiveError` naming the failure instead of building a result. A reactive stream
         that shut down during the open has its watchlist listener stopped on the reaper here,
-        since the shutdown had no handle to stop it through. The row takes the host and path
-        the stream opened on, unless the transport already reported a later host while the
-        open was finishing (a real-time verdict moved the stream to another host before the
-        open returned): that report is newer, so the row keeps it.
+        since the shutdown had no handle to stop it through. The row takes the host, path,
+        and recency the stream opened on.
 
         Args:
             spec: The dataset.
@@ -1027,9 +1025,7 @@ class SessionCore:
                 )
             with self.registry_lock:
                 state = self._streams[stream_id]
-                row = state.row
-                if row.host is None:  # not moved while opening: it serves from where it opened
-                    row = replace(row, host=opened.host, path=opened.path)
+                row = replace(state.row, host=opened.host, path=opened.path, recency=opened.recency)
                 self._streams[stream_id] = replace(state, handle=opened, row=row)
                 stored = True  # from here on, releasing the opener's hold releases the stream
                 self.diagnostics.write(row)

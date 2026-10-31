@@ -18,6 +18,7 @@ import types
 import weakref
 from typing import TYPE_CHECKING, Any
 
+from deephaven_massive._enums import Recency
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -87,7 +88,16 @@ class FakeStreamTransport:
             self.opened.append((spec.name, channel))
             self.publishers[stream_id] = publisher
         fail = functools.partial(self._fail, stream_id)
-        return StreamHandle(stream_id, blink, scope, "socket.test", "/stocks", "test host", fail)
+        return StreamHandle(
+            stream_id,
+            blink,
+            scope,
+            "socket.test",
+            "/stocks",
+            "test host",
+            fail,
+            recency=Recency.REALTIME,
+        )
 
 
 def transport_of(open_stream: Callable[..., StreamHandle]) -> Callable[[], Any]:

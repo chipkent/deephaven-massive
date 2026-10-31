@@ -103,6 +103,7 @@ def test_column_sets() -> None:
         "Transport",
         "Host",
         "Path",
+        "Recency",
         "RowsPublished",
         "RequestsPerCycle",
         "State",
@@ -149,11 +150,11 @@ def test_column_sets() -> None:
 def test_stream_updates_set_only_the_given_fields() -> None:
     row = _stream(host="socket.massive.com", rows_published=3)
     assert StreamUpdate().apply(row) == row
-    updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5, path="/stocks").apply(row)
+    updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5).apply(row)
     assert (updated.rows_published, updated.deferred, updated.symbol_count) == (10, 2, 5)
-    assert (updated.host, updated.path) == ("socket.massive.com", "/stocks")
-    slow = StreamUpdate(host="delayed.massive.com", notes={NotePart.QUIET: "slow"}).apply(row)
-    assert (slow.host, as_row(slow)["Error"]) == ("delayed.massive.com", "slow")
+    assert updated.host == "socket.massive.com"
+    slow = StreamUpdate(notes={NotePart.QUIET: "slow"}).apply(row)
+    assert as_row(slow)["Error"] == "slow"
 
 
 def test_warnings_of_several_sources_coexist_and_clear_alone() -> None:

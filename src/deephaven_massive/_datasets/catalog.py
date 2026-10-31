@@ -51,7 +51,9 @@ from deephaven_massive._enums import (
     ClassFromPrefix,
     NotBars,
     PollMode,
+    Subscription,
     Timespan,
+    subscription_of,
 )
 from deephaven_massive._massive import ParamKind, Transport, WireType, sources
 
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath, Source
 
 __all__ = [
+    "REFERENCE_PATH",
     "Catalog",
     "DatasetSpec",
     "KeySpec",
@@ -70,6 +73,11 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+REFERENCE_PATH: Final = re.compile(r"/v\w+/reference/")
+"""The start of every reference endpoint's path (`/v3/reference/...`, `/vX/reference/...`).
+
+Massive counts reference requests in a rate-limit bucket of their own, whatever their class."""
 
 _FROM_REQUEST_ROLES: Final = frozenset({"symbol", "fanout"})
 """The key roles a source may leave out of its rows, filled from the request instead."""
@@ -596,6 +604,21 @@ class DatasetSpec:
     def has_fetch(self) -> bool:
         """True when the dataset has a REST fetch path (`fetch()` works)."""
         return self.fetch_path is not None
+
+    @property
+    def current_subscription(self) -> Subscription | None:
+        """The subscription whose current data `fetch()` and `poll()` of the dataset read.
+
+        That is the dataset's class's subscription, unless the fetch path is a reference
+        endpoint (`REFERENCE_PATH`), which Massive counts on its own, or the dataset has no
+        single class (economy, partner data, the cross-class snapshot). It names the
+        `MassiveConfig.delayed_subscriptions` member that governs the table's recency.
+        """
+        if not isinstance(self.asset_class, AssetClass) or self.fetch_path is None:
+            return None
+        if REFERENCE_PATH.match(self.fetch_path):
+            return None
+        return subscription_of(self.asset_class)
 
     @property
     def has_rest_history(self) -> bool:

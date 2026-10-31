@@ -131,22 +131,13 @@ class Status:
 
             from deephaven_massive._massive import Status, StatusKind
 
-            status = Status(kind=StatusKind.REFUSED, message="Real-time data requires a plan")
-            assert status.realtime_verdict
+            status = Status(kind=StatusKind.REFUSED, message="not authorized")
+            assert not status.topics  # refuses the whole request it answers
     """
 
     kind: StatusKind
     topics: tuple[str, ...] = ()
     message: str = ""
-
-    @property
-    def realtime_verdict(self) -> bool:
-        """Whether this is a refusal whose message mentions "real-time" (in any case).
-
-        The library reads it as the server's verdict that the account lacks real-time access
-        on this host, and may move the stream to the delayed host.
-        """
-        return self.kind is StatusKind.REFUSED and "real-time" in self.message.lower()
 
 
 @dataclass(frozen=True, kw_only=True)

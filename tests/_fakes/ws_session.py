@@ -145,7 +145,6 @@ class WsSession:
         self._decide = decide or (lambda *_: REALTIME)
         self.cond = threading.Condition(threading.RLock())
         self._decisions: list[tuple[AssetClass, ChannelFamily]] = []
-        self._verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
         self._journal: list[tuple[object, ...]] = []
         self._urls: list[str] = []
         self._items = 0
@@ -163,7 +162,6 @@ class WsSession:
         self.connections = ws.WsConnections(
             self.session._core,
             resolve_host=self._resolve,
-            record_verdict=self._record_verdict,
             fetch_rows=self._fetch_rows,
             crypto_pair=self._crypto_pair,
             client_factory=self.factory,
@@ -176,15 +174,6 @@ class WsSession:
         """Each `(asset_class, family)` the transport asked a host decision for, in order."""
         with self.cond:
             return list(self._decisions)
-
-    @property
-    def verdicts(self) -> list[tuple[AssetClass, ChannelFamily, HostDecision]]:
-        """Each real-time verdict recorded, as `(asset_class, family, decision)`, in order.
-
-        A recorded verdict answers the later decisions of its pair.
-        """
-        with self.cond:
-            return list(self._verdicts)
 
     @property
     def journal(self) -> list[tuple[object, ...]]:
@@ -262,27 +251,14 @@ class WsSession:
         return answer
 
     def _resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        """Decide a host as the REST transport's cache does: a recorded verdict wins.
+        """Decide a host with the test's `decide`, recording the request.
 
         Returns:
             The decision.
         """
         with self.cond:
             self._decisions.append((asset_class, family))
-            recorded = [
-                decision
-                for verdict_class, verdict_family, decision in self._verdicts
-                if (verdict_class, verdict_family) == (asset_class, family)
-            ]
-        return recorded[0] if recorded else self._decide(asset_class, family)
-
-    def _record_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        """Record a real-time verdict, which answers the pair's later decisions."""
-        with self.cond:
-            self._verdicts.append((asset_class, family, decision))
-            self.cond.notify_all()
+        return self._decide(asset_class, family)
 
     def factory(
         self,

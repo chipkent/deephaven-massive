@@ -239,7 +239,7 @@ def test_the_group_child_starts_a_server_sized_to_its_group(
     assert (servers, ran, watched) == ([(heap, tmp_path / "a")], ["a"], ["watching"])
 
 
-def test_the_group_childs_sessions_declare_the_basic_subscriptions(
+def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "a").mkdir()
@@ -274,6 +274,7 @@ def test_the_group_childs_sessions_declare_the_basic_subscriptions(
     open_session = seen["open_session"]
     with open_session() as session:
         assert {str(s) for s in session._core.config.rest_basic_subscriptions} == {"stocks"}
+        assert {str(s) for s in session._core.config.delayed_subscriptions} == {"options"}
     assert seen["tier_of"]("stocks") == "starter"
     assert seen["tier_of"]("stocks") is None
 

@@ -833,6 +833,7 @@ class _Statuses:
         *,
         symbols: object,
         record: Callable[[object], None],
+        on_recency: Callable[[object], None],
         executor: ThreadPoolExecutor,
         cancel: object,
     ) -> tuple[pa.Table, int, float]:
@@ -870,6 +871,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         pollers=pollers,
         host="api.massive.com",
         path="/v1/marketstatus/now",
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum, StrEnum
-from typing import TypeVar
+from typing import TypeVar, overload
 
 __all__ = [
     "AssetClass",
@@ -72,7 +72,9 @@ class AssetClass(StrEnum):
 
             import deephaven_massive as dm
 
-            cfg = dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "delayed.massive.com"})
+            cfg = dm.MassiveConfig(
+                ws_hosts={dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}
+            )
     """
 
     STOCKS = "stocks"
@@ -528,6 +530,10 @@ _SUBSCRIPTIONS: dict[AssetClass, Subscription] = {
 }
 
 
+@overload
+def subscription_of(asset_class: AssetClass) -> Subscription: ...
+@overload
+def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription | None: ...
 def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription | None:
     """Return the subscription that covers an asset class's data.
 
@@ -544,10 +550,12 @@ def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription |
 
 
 class Recency(StrEnum):
-    """How fresh the data of a WebSocket host is, as the host decision found it (internal).
+    """How fresh the data of a WebSocket host or a live table is (internal).
 
-    `UNKNOWN` means the evidence did not say (a pinned host, or a futures snapshot without
-    timeframe fields); only then may an explicit server verdict re-route the connection.
+    `REALTIME` for Massive's real-time and Business hosts, `DELAYED` for its delayed feed, and
+    `UNKNOWN` for a pinned host the library does not know, or a REST table of a subscription
+    listed in `MassiveConfig.delayed_subscriptions` (REST serves what the plan serves).
+    `UNKNOWN` is never shown as real-time.
     """
 
     REALTIME = "REALTIME"
