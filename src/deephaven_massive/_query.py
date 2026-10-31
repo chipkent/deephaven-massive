@@ -102,6 +102,7 @@ from deephaven_massive._errors import (
     failure_text,
     raises_through,
 )
+from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -1589,7 +1590,8 @@ class HistoryQuery(QueryBase):
             merged = merge([read.empty, *(part for _, part in read.parts), *rest])
             table = merged.sort(time_column(spec.times))
         days = ", ".join(day.isoformat() for day in read.unread)
-        self._warn_rest_served(f"the flat files for {days} are missing")
+        missing = bounded_list(day.isoformat() for day in read.unread)
+        self._warn_rest_served(f"the flat files are missing for these days: {missing}")
         flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
         served = f"Read from {flat}, and from REST for {days}, whose files are missing."
         return table, served if doubt is None else f"{served} {doubt}"
@@ -1686,8 +1688,8 @@ class HistoryQuery(QueryBase):
         them. Logged on every such call: the days differ from call to call.
 
         Args:
-            why: Why REST served the read, such as `"the flat files for 2025-03-04 are
-                missing"`.
+            why: Why REST served the read, such as `"the flat files are missing for these days:
+                1 [2025-03-04]"`.
         """
         spec = self._spec
         catalog = self._core.catalog

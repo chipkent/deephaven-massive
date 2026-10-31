@@ -205,9 +205,26 @@ class FlatFile:
             with client.open("us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz") as file:
                 for batch, drift in file.batches(plan):
                     ...
+
+    Attributes:
+        rows_read: The rows `batches()` has read from the file so far, every symbol's.
+        rows_of_symbols: Of those, the rows of the plan's symbols (all of them when the plan
+            names none).
+        rows_kept: Of those, the rows `batches()` yielded: a readable key, inside the plan's
+            window. The three tell a caller which step emptied a file; they are written by
+            the reader thread as it iterates and are final once `batches()` ends.
     """
 
-    __slots__ = ("_body", "_dropped", "_host", "_key", "_location")
+    __slots__ = (
+        "_body",
+        "_dropped",
+        "_host",
+        "_key",
+        "_location",
+        "rows_kept",
+        "rows_of_symbols",
+        "rows_read",
+    )
 
     def __init__(self, body: _Stream, key: str, *, location: str, host: str | None) -> None:
         """Wrap an object's body; nothing is read yet.
@@ -223,6 +240,9 @@ class FlatFile:
         self._location = location
         self._host = host
         self._dropped = threading.Event()
+        self.rows_read = 0
+        self.rows_of_symbols = 0
+        self.rows_kept = 0
 
     @property
     def dropped(self) -> bool:
@@ -348,6 +368,9 @@ class FlatFile:
             reason = ""
             for block in reader:
                 rows, drift, considered = self._apply(block, plan)
+                self.rows_read += block.num_rows
+                self.rows_of_symbols += considered
+                self.rows_kept += rows.num_rows
                 held += considered
                 dropped += drift.dropped_rows
                 reason = reason or drift.dropped_reason
