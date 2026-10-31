@@ -29,7 +29,13 @@ if TYPE_CHECKING:
 
     from deephaven_massive._enums import Subscription
 
-__all__ = ["TIMEFRAME_FIELDS", "RecencyLabels", "delayed_refusal", "read_labels"]
+__all__ = [
+    "TIMEFRAME_FIELDS",
+    "RecencyLabels",
+    "delayed_refusal",
+    "read_labels",
+    "shows_real_time",
+]
 
 DELAYED: Final = "DELAYED"
 """The label of delayed data, in the envelope `status` and in a `timeframe` field."""
@@ -109,6 +115,23 @@ def read_labels(status: str, rows: Sequence[Mapping[str, object]]) -> RecencyLab
             else:
                 unknown = unknown or (field, value)
     return RecencyLabels(delayed, real_time, unknown)
+
+
+def shows_real_time(evidence: str) -> bool:
+    """Return whether a host decision's evidence is a snapshot label that says real-time.
+
+    The host decision keeps `RecencyLabels.real_time` as its evidence when the snapshot labels
+    the class's data real-time, which proves the key's plan is real-time. Any other evidence
+    (no label, an undocumented label, a pinned host, the configuration) proves nothing, so a
+    refusal's message keeps suggesting the delayed feed for it.
+
+    Args:
+        evidence: The decision's evidence, such as `"last_trade.timeframe=REAL-TIME"`.
+
+    Returns:
+        True when the evidence is one of `TIMEFRAME_FIELDS` labelled `REAL-TIME`.
+    """
+    return any(evidence == f"{field}={REAL_TIME}" for field in TIMEFRAME_FIELDS)
 
 
 def delayed_refusal(

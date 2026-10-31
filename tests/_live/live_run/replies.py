@@ -72,8 +72,16 @@ def hold_for(seconds: float) -> Callable[[MassiveSession], None]:
     return hold
 
 
-_REFUSAL_MARKS: Final = ("HTTP 403", "NOT_AUTHORIZED", "not entitled", "plan may not include")
-"""Text that marks a failed stream's error as a refusal by Massive."""
+_REFUSAL_MARKS: Final = (
+    "HTTP 403",
+    "NOT_AUTHORIZED",
+    "not entitled",
+    "may not include this data",
+    "needs a Business plan",
+)
+"""Text that marks a failed stream's error as a refusal by Massive: an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and the library's wording of a refused topic, including a
+fair-market-value (FMV) topic, which only a Business plan serves."""
 
 
 @dataclass(frozen=True)

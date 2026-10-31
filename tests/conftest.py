@@ -2055,8 +2055,16 @@ _PLANS: Final = {
 """The plan a live test module's data needs, named in a skip when the key lacks it."""
 
 
-_ENTITLEMENT_MARKS: Final = ("HTTP 403", "NOT_AUTHORIZED", "not entitled", "plan may not include")
-"""Text that marks a stream's or a poll's error as a missing entitlement."""
+_ENTITLEMENT_MARKS: Final = (
+    "HTTP 403",
+    "NOT_AUTHORIZED",
+    "not entitled",
+    "may not include this data",
+    "needs a Business plan",
+)
+"""Text that marks a stream's or a poll's error as a missing entitlement: an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and the library's wording of a refused topic, including a
+fair-market-value (FMV) topic, which only a Business plan serves."""
 
 
 def not_entitled_reason(plan: str, error: object) -> str:
@@ -2079,8 +2087,7 @@ def is_entitlement_text(text: object) -> bool:
         text: The error text, or None.
 
     Returns:
-        True when it holds an HTTP 403, a `NOT_AUTHORIZED` envelope, or the library's wording
-        of a refused topic.
+        True when it holds one of `_ENTITLEMENT_MARKS`.
     """
     return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
 
