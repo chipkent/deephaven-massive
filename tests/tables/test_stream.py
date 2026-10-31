@@ -28,7 +28,7 @@ from deephaven_massive._datasets import wire_symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, NotBars, OnError
+from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
@@ -279,6 +279,7 @@ def make_sink(
         stream_id=stream_id,
         host="socket.test",
         evidence="test host",
+        recency=Recency.REALTIME,
         path="/stocks",
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
@@ -517,6 +518,7 @@ def test_open_stream_tables_releases_its_scope_on_failure(
             stream_id=1,
             host="socket.test",
             evidence="test host",
+            recency=Recency.REALTIME,
             path="/stocks",
             on_shutdown=shut_down.set,
             on_symbols=lambda *_: None,
@@ -544,6 +546,7 @@ def test_open_stream_tables_releases_its_scope_when_interrupted_at_the_end(
             stream_id=1,
             host="socket.test",
             evidence="test host",
+            recency=Recency.REALTIME,
             path="/stocks",
             on_shutdown=shut_down.set,
             on_symbols=lambda *_: None,
@@ -570,6 +573,7 @@ def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSe
         stream_id=1,
         host="socket.test",
         evidence="test host",
+        recency=Recency.REALTIME,
         path="/stocks",
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
@@ -809,6 +813,7 @@ def test_a_session_miss_leaves_the_streams_error_alone_and_publishes_its_rows(
             stream_id=stream_id,
             host="socket.test",
             evidence="test host",
+            recency=Recency.REALTIME,
             path="/futures",
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
@@ -1135,6 +1140,7 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
             stream_id=stream_id,
             host="socket.test",
             evidence="test host",
+            recency=Recency.REALTIME,
             path="/stocks",
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
@@ -1280,6 +1286,7 @@ def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
         host="socket.test",
         path="/forex",
         evidence="test host",
+        recency=Recency.REALTIME,
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
     )
@@ -1669,6 +1676,7 @@ def test_streamed_rows_of_one_day_share_one_stored_date(
         stream_id=1,
         host="socket.test",
         evidence="test host",
+        recency=Recency.REALTIME,
         path="/stocks",
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,

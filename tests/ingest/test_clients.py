@@ -110,18 +110,13 @@ def test_the_connections_close_with_the_session(fake_s3: FakeS3) -> None:
 
 
 class _HostCache:
-    # The two host-decision calls the WebSocket side makes of the REST transport.
+    # The host-decision call the WebSocket side makes of the REST transport.
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
     def resolve_host(self, asset_class: dm.AssetClass, family: ChannelFamily) -> HostDecision:
         self.calls.append(("resolve", asset_class, family))
         return HostDecision("socket.massive.com", Recency.REALTIME, "test")
-
-    def record_verdict(
-        self, asset_class: dm.AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        self.calls.append(("record", asset_class, family, decision))
 
 
 def test_host_decisions_go_through_the_rest_transport(
@@ -131,13 +126,8 @@ def test_host_decisions_go_through_the_rest_transport(
     monkeypatch.setattr(SessionClients, "rest", lambda _: cache)
     clients = clients_of(session)
     decision = clients._resolve_host(dm.AssetClass.STOCKS, ChannelFamily.TICK)
-    verdict = HostDecision("delayed.massive.com", Recency.DELAYED, "server verdict: x")
-    clients._record_verdict(dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict)
     assert decision.host == "socket.massive.com"
-    assert cache.calls == [
-        ("resolve", dm.AssetClass.STOCKS, ChannelFamily.TICK),
-        ("record", dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict),
-    ]
+    assert cache.calls == [("resolve", dm.AssetClass.STOCKS, ChannelFamily.TICK)]
 
 
 def test_the_futures_calendar_reads_through_the_rest_transport(
@@ -243,14 +233,12 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
         core: SessionCore,
         *,
         resolve_host: Callable[..., HostDecision],
-        record_verdict: Callable[..., None],
         fetch_rows: Callable[..., list[dict[str, object]]],
         crypto_pair: Callable[[str], tuple[str, str]],
     ) -> ws.WsConnections:
         connections = real(
             core,
             resolve_host=resolve_host,
-            record_verdict=record_verdict,
             fetch_rows=fetch_rows,
             crypto_pair=crypto_pair,
         )

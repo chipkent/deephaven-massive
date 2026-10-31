@@ -822,6 +822,10 @@ curve_chart = Figure().plot_xy(series_name="10y - 2y", t=curve, x="Day", y="Spre
 # updated live. You should see a new table, latest_bars, with one row per stock while the
 # market is open. On a free key the table opens, and a few seconds later Massive's live
 # connection refuses it: the streams panel shows its row FAILED, with Massive's answer.
+# Stocks Starter and Developer stream 15-minute delayed data, which the library serves only
+# when asked: on those plans the call stops with an error that names the setting. Then open
+# the session with it, and run this again:
+#     m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
 latest_bars = m.stocks.bars(
     ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"], dm.Timespan.MINUTE
 ).last_by()
@@ -832,7 +836,9 @@ latest_bars = m.stocks.bars(
 ```python
 # Needs a paid Stocks plan (Starter or higher). Joins today's minute bars from history with
 # the live ones that follow, into one table that keeps growing. You should see a new table,
-# aapl_today, with a row per minute since the open, and a new row each minute.
+# aapl_today, with a row per minute since the open, and a new row each minute. On Stocks
+# Starter or Developer, use the session example 18 opens with delayed_subscriptions: the live
+# bars then run 15 minutes behind, and history is not affected by the setting.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 

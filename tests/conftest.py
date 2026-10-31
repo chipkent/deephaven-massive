@@ -76,6 +76,7 @@ from tests._live import (
     ticker_lists,
     week_windows,
 )
+from tests._live.live_run import stream_units
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
@@ -1793,6 +1794,26 @@ def _basic_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
     )
 
 
+def _delayed_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
+    """Return the subscriptions on a delayed plan, for the live sessions.
+
+    The library serves delayed data only for the subscriptions a session lists, so the live
+    sessions list those whose plan streams delayed data (`stream_units.RECENCY`).
+
+    Args:
+        run_plans: The run's plans.
+
+    Returns:
+        Each class on a delayed plan, as a `dm.Subscription`.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    return frozenset(
+        dm.Subscription(name)
+        for name, tier in run_plans.tiers.items()
+        if stream_units.RECENCY.get((name, tier)) == stream_units.DELAYED
+    )
+
+
 _FLAT_FILE_BLOCK = 1 << 20
 """Bytes of decompressed CSV per block when a live test reads a flat file."""
 
@@ -2526,7 +2547,8 @@ def live_config(live_plans: plans.LivePlans) -> MassiveConfig:
     """Return a `MassiveConfig` with `MASSIVE_API_KEY`, and the S3 credentials when set.
 
     The classes on Basic are its `rest_basic_subscriptions`, so the library paces their
-    requests at 5 a minute from the first one.
+    requests at 5 a minute from the first one, and the classes on a delayed plan its
+    `delayed_subscriptions`, so their streams use Massive's delayed feed.
 
     Args:
         live_plans: The run's plans.
@@ -2538,7 +2560,7 @@ def live_config(live_plans: plans.LivePlans) -> MassiveConfig:
 
 
 def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
-    """Build the live configuration: `MASSIVE_API_KEY`, the S3 credentials, the Basic classes.
+    """Build the live configuration: the key, the S3 credentials, the Basic and delayed classes.
 
     Args:
         run_plans: The run's plans; its classes on Basic are paced from the first request.
@@ -2550,6 +2572,7 @@ def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
     config: MassiveConfig = dm.MassiveConfig(
         api_key=_required_env("MASSIVE_API_KEY"),
         rest_basic_subscriptions=_basic_subscriptions(run_plans),
+        delayed_subscriptions=_delayed_subscriptions(run_plans),
     )
     return config
 

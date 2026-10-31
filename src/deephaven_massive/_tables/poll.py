@@ -102,7 +102,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import PollMode
+from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
@@ -116,7 +116,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables.columns import col_defs, dataset_table, describe
+from deephaven_massive._tables.columns import col_defs, dataset_table, describe, recency_note
 from deephaven_massive._tables.diagnostics import (
     StreamKind,
     StreamRow,
@@ -1093,6 +1093,7 @@ def _build(
     mode: PollMode,
     stream_id: int,
     stop: threading.Event,
+    note: str | None,
 ) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
@@ -1102,6 +1103,7 @@ def _build(
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
         stop: The poller's stop token, set when the blink table shuts down.
+        note: The sentence the table description adds about its recency, or None.
 
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
@@ -1124,7 +1126,7 @@ def _build(
             release_later=core.release_later,
         )
         built.append(publisher)
-        return describe(table, spec, schema)
+        return describe(table, spec, schema, note=note)
 
     result, scope = make_result(core.exec_ctx, shape)
     return (result, built[0]), scope
@@ -1142,6 +1144,7 @@ def open_poll(
     pollers: Pollers,
     host: str | None,
     path: str | None,
+    recency: Recency | None,
     clock: PollClock,
     stop: threading.Event,
 ) -> Table:
@@ -1172,6 +1175,10 @@ def open_poll(
         pollers: The session's live pollers.
         host: The REST host, for the row's `Host`.
         path: The fetch path, for the row's `Path`.
+        recency: The table's recency, for the row's `Recency` and the table's description
+            (`columns.recency_note`): `REALTIME` when its subscription is not in
+            `MassiveConfig.delayed_subscriptions`, `UNKNOWN` when it is, None for data of no
+            single subscription.
         clock: The time source of the waits between cycles.
         stop: The poller's stop token, which the caller creates and every cycle's requests
             listen to; the table's shutdown and the session's close set it.
@@ -1187,7 +1194,14 @@ def open_poll(
     """
     stream_id = core.next_stream_id()
     with entered(core.exec_ctx):
-        (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
+        (result, publisher), scope = _build(
+            core,
+            spec,
+            mode=mode,
+            stream_id=stream_id,
+            stop=stop,
+            note=None if recency is None else recency_note(recency, host=None),
+        )
     poller: Poller | None = None
     registered = False
     try:
@@ -1218,6 +1232,7 @@ def open_poll(
                 transport=Transport.REST,
                 host=host,
                 path=path,
+                recency=recency,
                 created_at=time.time_ns(),
             ),
             fail=poller.fail,

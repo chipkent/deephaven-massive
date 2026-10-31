@@ -404,8 +404,11 @@ _ingest/                 the only holder of wire clients
                          fetch_paths(), the history calls
   rest_rows.py           page rows to dataset batches, renamed and converted; error rows; the
                          history window's keep
-  host_decision.py       host resolution from REST evidence (section 13.2): the host rule, its
-                         probes and constants, HostDecisionCache (single-flight)
+  host_decision.py       host resolution from configuration and REST evidence (section 13.2):
+                         the host rule, its probes, HostDecisionCache (single-flight)
+  recency_labels.py      the DELAYED and REAL-TIME labels of a REST response (envelope status,
+                         timeframe fields) and the refusal of delayed data not asked for
+                         (sections 13.2 and 13.4)
   rate_limits.py         the process's REST governors per (API key digest, REST origin),
                          session leases, the first-429 INFO notice, rate_limits() rows, the INFO
                          download notice, the poll() pace WARNING (section 13.4)
@@ -416,7 +419,7 @@ _ingest/                 the only holder of wire clients
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
                          watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
   ws.py                  WsConnections and WsTransport: the session's connections over
-                         WsClient, leases, the verdict rule, rejects and drift routing, the
+                         WsClient, leases, refusals, rejects and drift routing, the
                          options cap's verb check (section 13.3)
   ws_connection.py       Connection and its client factories; ConnectionGroup, which shares
                          connections between sessions
@@ -484,6 +487,7 @@ with `_`. Examples, from the target layout of [section 4.1](#41-source-modules):
 | `_datasets/catalog.py` | `tests/datasets/test_catalog.py` | |
 | `_tables/session_core.py` | `tests/tables/test_session_core.py` | |
 | `_ingest/host_decision.py` | `tests/ingest/test_host_decision.py` | `tests/ingest/test_host_decision_integration.py` |
+| `_ingest/recency_labels.py` | `tests/ingest/test_recency_labels.py` | |
 | `_ingest/flatfiles.py` | `tests/ingest/test_flatfiles.py` | `tests/ingest/test_flatfiles_integration.py` |
 | `_datasets/column_reference.py` | `tests/datasets/test_column_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
@@ -647,6 +651,7 @@ defined in exactly one place: the field defaults of this class.
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
+| `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: `delayed.massive.com` for a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. |
@@ -933,8 +938,8 @@ return result
   The set is what keeps a session with a running stream or poll alive after the user dropped
   every reference to it: nothing else in the library holds a core strongly (connections,
   flushers, stream sinks, pollers, and the clients hold it weakly). A sink can outlive its
-  stream's record in a container cleaned up later (the routes of a connection a verdict moved
-  the stream off, which its flush thread clears when it ends), so a strong reference there
+  stream's record in a container cleaned up later (the routes of a connection, which its
+  flush thread clears when it ends), so a strong reference there
   would keep a finished session alive; a sink whose core is gone reports nothing. A core that leaves the set is handed
   to the reaper as a job argument, so its last reference is not dropped under the lock. The
   thread that took it out still holds it while it returns, so the final release may also land
@@ -3147,17 +3152,12 @@ and its line says so.
    - A refusal or a fatal failure acts on the connection, not on a session: a refused topic
      fails every stream that wants it, in every session, and a rejected key or a fatal
      handshake error fails every stream on the connection, in every session.
-   - The server's real-time verdict moves the connection with every session's streams, and is
-     recorded in each such session's host decisions. The group keeps it by (class, family), so
-     a session of the group that never leased the moved connection takes the delayed host for
-     its first stream of the class too, records the verdict then, and never asks the
-     real-time host again.
    Diagnostics stay per session: each session's `m.connections()` shows the rows of the
    connections its streams use, and its `m.streams()` only its own streams.
 2. The host of a (class, family) is decided before its first connection, from configuration or
-   REST evidence, and cached. The single exception is the explicit-verdict rule of
-   [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
-   never on silence.
+   REST evidence, and cached. A connection never moves to another host: the feed is the user's
+   choice (`MassiveConfig.delayed_subscriptions`), and a refusal from Massive fails the refused
+   streams.
 3. No connection is ever opened to test anything.
 4. Connects are single-flight. Every retry, whether after a connection that opened has closed
    (cleanly or not, including a `max_connections` refusal) or after a failed attempt (TCP or TLS
@@ -3181,72 +3181,77 @@ created under the transport's own leaf lock (never `registry_lock`); the first c
 the REST call and completes the future, and later callers wait on it outside every lock, each
 within its own patience (section 13.4, Giving up). A failed resolution completes the future
 with the error and removes it, so nothing is cached; every waiting caller raises a copy of it.
-Each new decision writes the pair's `Transport=REST` row of `m.connections()`. The cache is
-the one place a decision lives: the explicit-verdict rule of
-[section 13.3](#133-connection-and-subscription-protocol) records its re-routed decision there
-through `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the cached
-decision under the same leaf lock (a caller already waiting on the earlier decision still gets
-that one) and rewrites the pair's row with the new host, `Recency=DELAYED`, and evidence
-`"server verdict: <message>"`.
+Each new decision writes the pair's `Transport=REST` row of `m.connections()`. A decision that
+raises (a delayed plan for a subscription not listed in
+`MassiveConfig.delayed_subscriptions`) is not cached, so the next verb decides again and sees a
+plan upgraded meanwhile.
+
+Recency follows the host: `socket.massive.com` and `business.massive.com` serve real-time data
+(`REALTIME`), `delayed.massive.com` serves delayed data (`DELAYED`), and any other pinned host is
+`UNKNOWN`, which is never shown as real-time.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
 
-FMV family (any class):  business.massive.com, REALTIME,
-                         evidence="FMV is Business-only; fixed host (docs)"
+FMV family (any class):
+  subscription listed in MassiveConfig.delayed_subscriptions
+       -> ValueError: FMV is real-time only; Massive has no delayed FMV feed
+  otherwise
+       -> business.massive.com, REALTIME, evidence="FMV is Business-only; fixed host (docs)"
 
 TICK family:
-  1. ws_hosts[asset_class] present
-       -> that host, UNKNOWN, evidence="ws_hosts"
-  2. FOREX, CRYPTO
+  1. ws_hosts[asset_class] present (checked against MassiveConfig.delayed_subscriptions at
+     construction)
+       -> that host, the host's recency, evidence="ws_hosts"
+  2. subscription listed in MassiveConfig.delayed_subscriptions
+       -> delayed.massive.com, DELAYED, evidence="MassiveConfig.delayed_subscriptions", after
+          the snapshot of step 4 (a refused one is ignored): when it shows REAL-TIME (rule 5d), one WARNING
+          says the plan streams the class real-time and that removing the subscription from
+          MassiveConfig.delayed_subscriptions gets real-time data
+  3. FOREX, CRYPTO
        -> socket.massive.com, REALTIME,
           evidence="single documented host; Starter is real-time"      (no REST call)
-  3. One REST call through the library's REST client (section 19.1), the raw JSON rows:
+  4. One REST call through the library's REST client (section 19.1), its envelope status and
+     raw JSON rows:
        STOCKS  : GET /v3/snapshot?ticker.any_of=SPY,AAPL
        OPTIONS : GET /v3/snapshot/options/SPY?limit=1
        INDICES : GET /v3/snapshot/indices?ticker.any_of=I:SPX
        FUTURES : GET /futures/v1/snapshot?product_code=ES&limit=1
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
-  4. Classify:
+  5. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
           -> socket.massive.com, REALTIME,
              evidence="the host check's snapshot (<path>) was refused: <Massive's text>";
              WARNING naming the evidence. A refused REST snapshot says nothing certain about
-             the WebSocket plan, so the class streams the real-time host's data, labelled as
-             such. The connection is never moved to the delayed host (its recency is not
-             UNKNOWN): a refusal from Massive fails the refused streams with Massive's text
-             (a Basic plan's streams fail that way)
-     b. Read the class's ordered timeframe fields, excluding underlying_asset:
+             the WebSocket plan; a refusal from Massive fails the refused streams with
+             Massive's text (a Basic plan's streams fail that way)
+     b. Envelope status DELAYED, or a timeframe field DELAYED, read in this order, excluding
+        underlying_asset:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
           FUTURES:         last_trade.timeframe, last_quote.timeframe, last_minute.timeframe
                            (in the OpenAPI spec; absent from the documentation page)
-        If any value is DELAYED  -> delayed.massive.com, DELAYED, evidence="<field>=DELAYED"
-                                    (DELAYED wins conflicts; the field used is logged)
-        elif any other value     -> socket.massive.com, REALTIME,
-                                    evidence="<field>='<value>', neither DELAYED nor
-                                    REAL-TIME, in the snapshot"; WARNING naming the field,
-                                    the value, and MassiveConfig.ws_hosts; never moved, as
-                                    in 4a
-        elif any is REAL-TIME    -> socket.massive.com,  REALTIME, evidence="<field>=REAL-TIME"
-     c. No timeframe found:
+          -> EntitlementError naming the evidence and the fix:
+             "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED),
+             and dm.Subscription.OPTIONS is not in MassiveConfig.delayed_subscriptions. To use Massive's
+             delayed options feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})".
+             Not cached.
+     c. A timeframe value other than DELAYED or REAL-TIME
+          -> socket.massive.com, REALTIME, evidence="<field>='<value>', neither DELAYED nor
+             REAL-TIME, in the snapshot"; WARNING naming the field and the value
+     d. A REAL-TIME timeframe -> socket.massive.com, REALTIME, evidence="<field>=REAL-TIME"
+     e. No timeframe found:
           STOCKS, OPTIONS with a top-level "fmv" field (Business key without a trades/quotes
           expansion)
               -> business.massive.com, REALTIME,
                  evidence="Business key without trades/quotes; base plan streams FMV-based
                  aggregates (UNVERIFIED host)"; WARNING once
-          STOCKS, OPTIONS otherwise
-              -> delayed.massive.com, DELAYED,
-                 evidence="no trades/quotes in snapshot => below Developer (plan tables)"; INFO
-          INDICES
-              -> delayed.massive.com, UNKNOWN; WARNING (the field is documented; its absence
-                 is anomalous)
-          FUTURES
-              -> socket.massive.com, UNKNOWN, evidence="no timeframe in futures snapshot";
-                 the explicit-verdict rule of 13.3 applies
-     d. Transport error or rejected key -> MassiveError or AuthenticationError; nothing
+          every other class
+              -> socket.massive.com, REALTIME, evidence="no timeframe in the <class>
+                 snapshot"; INFO (WARNING for indices, whose field is documented)
+     f. Transport error or rejected key -> MassiveError or AuthenticationError; nothing
         cached; the verb raises it
-  5. Record the decision in m.connections().
+  6. Record the decision in m.connections().
 ```
 
 Why these rules hold (verified plan tables): the unified snapshot is not included on Stocks
@@ -3254,17 +3259,21 @@ Basic, is delayed on Starter and Developer, and is real-time on Advanced and Bus
 `last_trade` and `last_quote` are "only returned if your plan includes trades/quotes". Stocks and
 Options trades over WebSocket are Developer and above (delayed) and Business plus expansion
 (real-time), on `socket.` and `delayed.`. Options `AM` is Starter and above (delayed). Options
-Basic has no chain snapshot (403, rule 4a) and no WebSocket. The option-chain sample shows
+Basic has no chain snapshot (403, rule 5a) and no WebSocket. The option-chain sample shows
 `underlying_asset.timeframe: "DELAYED"` beside `last_trade.timeframe: "REAL-TIME"`, which is why
 `underlying_asset` is excluded. The forex and crypto WebSocket pages list only
 `socket.massive.com`, with Starter real-time, so no REST call is made. The futures snapshot
-documentation lists no `timeframe` (only the OpenAPI spec has it), so absence proves nothing, and a
-real-time customer must never be routed to delayed data by inference. For the same reason, a
-`timeframe` value other than the documented `DELAYED` and `REAL-TIME`, and a refused snapshot,
-are not guessed at: the class connects to the real-time host with `REALTIME` recency, the
-host's own, and is never moved to delayed data; a refusal from Massive fails the refused
-streams with its text. Raising instead would refuse every stream of the class on a guess about
-the vendor's behavior, though the WebSocket server may serve it.
+documentation lists no `timeframe` (only the OpenAPI spec has it), so its envelope status is
+the evidence there (**UNVERIFIED**; a live check records it).
+
+The feed is the user's choice, never the library's: a subscription not listed in
+`MassiveConfig.delayed_subscriptions` always streams from the real-time feed, and when the snapshot shows
+that the plan's data is delayed, the verb raises at once rather than open a connection Massive
+would refuse. Nothing else is guessed from the snapshot: a refused snapshot, an undocumented
+`timeframe` value, or no timeframe at all connects to the real-time feed, and a refusal from
+Massive then fails the refused streams with its text and the same fix. A listed subscription
+always streams from the delayed feed, even on a real-time plan; whether Massive accepts a
+real-time key there is **UNVERIFIED** (a live check records it), and a refusal says so.
 
 **Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
@@ -3295,7 +3304,7 @@ The client reports to `_ingest/ws_connection.py` through four callbacks, each ca
 - `on_open(generation)`: Massive accepted the key (`auth_success`) on a new socket. A
   **generation** is one authenticated socket; the number increases by one per `on_open`.
 - `on_status(generation, status)`: one decoded status object (`Status`: `kind` `ACK`,
-  `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`; `realtime_verdict`).
+  `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`).
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
   decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
   them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
@@ -3365,7 +3374,7 @@ Responsibilities:
 | Read raw wire symbols as canonical symbols (`WireSymbols` in `_datasets/wire_symbols.py`) when routing rows; fail or keep an unreadable one (`unreadable_symbols`) | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
-| Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
+| Per-topic acknowledgement bookkeeping, watchdogs, the refusals | library, from `Status` events |
 | Routing rows to streams; Deephaven publishing | library |
 
 **Reconcile loop.** It runs on the connection's loop thread and is entered through
@@ -3403,7 +3412,7 @@ Status(REFUSED, topic)
    -> that topic's streams fail with EntitlementError (publish_failure); the topic leaves D
 Status(REFUSED, no topic)
    -> applies to every topic of the in-flight step (exact attribution, because one step is in
-      flight). See the explicit-verdict rule below.
+      flight). See "Refusals name the feed" below.
 Status(MAX_CONNECTIONS) after authentication
    -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
@@ -3454,8 +3463,7 @@ would otherwise form. A connection's loop-confined state is never touched from a
 the client's terminal state (`CLOSED` or `FAILED`), its last callback on the loop, clears the
 connection's streams, and a call posted after it is dropped or ignored, so a post that lands
 just before the loop closes cannot leave a stream behind. The flush thread clears the routes
-when it ends, after its final flush, which also lets go of the streams a verdict moved off the
-connection.
+when it ends, after its final flush.
 
 **Waiting for a slot.** While a connection is `WAITING_SLOT`, every stream on it shows in its
 `Error`: "waiting for a WebSocket slot on <host><path>: another connection with this API key,
@@ -3464,32 +3472,16 @@ in one process share connections, so the other holder is another process, or a s
 connection settings differ. The text is cleared, and an options-cap warning shown again, once
 the connection authenticates.
 
-**Explicit-verdict rule.** When a `Status(REFUSED)` with no topic arrives on a `socket.` TICK
-connection with `realtime_verdict` set (its message contains "real-time", case-insensitive; the exact text is
-**UNVERIFIED**, the knowledge base quotes only "not authorized"), the library re-resolves the
-host only if all four hold:
-
-1. the connection's cached `Recency` is `UNKNOWN` (the futures default when its snapshot
-   carries no timeframe; never a class whose snapshot was refused or held an undocumented
-   `timeframe`, which is `REALTIME`);
-2. every topic of the in-flight step was refused;
-3. the host is not pinned by `ws_hosts`;
-4. the connection has never had a topic acknowledged, in any generation: a host that served
-   this key is not moved, so a working real-time stream never jumps to 15-minute-old data.
-
-Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` through
-`RestTransport.record_verdict(asset_class, family, decision)`, which replaces the one cached
-decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
-streams to the delayed host's connection, which starts after the backoff; close the old one;
-and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
-then resolves to `DELAYED`, this happens at most once per (class, family) per session. A step can
-be refused more than once: a step of more than 1,000 topics goes out in several subscribe frames,
-and each frame may be refused. A later verdict for a step whose connection is already moving is
-part of that move: it neither starts another move nor fails the streams. In every other case the
-verdict is an `EntitlementError` for that step's streams.
+**Refusals name the feed.** A refusal never moves a connection. It fails the refused streams
+with `EntitlementError`, whose message quotes Massive and names the fix for the connection's
+feed: on the real-time feed of an unpinned class, how to use Massive's delayed feed
+(`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`), since a delayed plan's subscription is
+refused there; on the delayed feed, that the subscription is listed in `MassiveConfig.delayed_subscriptions`
+and that removing it uses the real-time feed (whether Massive serves a real-time key on the
+delayed feed is **UNVERIFIED**); on a pinned host, `MassiveConfig.ws_hosts`.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
-`error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
+`error` for the stream's topic, or for `poll()` REST 403 or a `DELAYED` label on a subscription not in `MassiveConfig.delayed_subscriptions`), a fatal WebSocket handshake error
 (`MassiveError` with the HTTP status and host), and the data failures of
 [section 19.5](#195-runtime-drift) (a run of `DROPPED_RUN_LIMIT` dropped rows, a symbol
 spelling the library cannot read under `RAISE`). `max_connections`, closes, and `NO_ACK` are
@@ -3506,6 +3498,19 @@ sees:
 - **HTTP 401** raises `AuthenticationError`. **HTTP 403**, and a 200 response whose envelope
   `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
   the table from `poll()`.
+- **Delayed data on a real-time subscription.** `fetch()` and `poll()` read current data. When
+  a request is charged to a subscription (its rate-limit bucket names one) that is not listed
+  in `MassiveConfig.delayed_subscriptions`, a page whose envelope `status` is `DELAYED`, or a row whose
+  `timeframe`, `last_trade.timeframe`, `last_quote.timeframe`, or `last_minute.timeframe` is
+  `DELAYED`, raises `EntitlementError` from `fetch()` and fails the table from `poll()`,
+  naming the evidence and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
+  `underlying_asset.timeframe` is never read: Massive's option-chain sample shows the
+  underlying delayed beside a real-time contract. Requests in the `other` bucket (reference,
+  economy, and partner data) are never checked. For a listed subscription nothing is checked:
+  REST cannot ask for delayed data, so it returns what the plan serves, and the table's
+  description says so. `history()` reads past data and is never checked. Futures snapshots
+  document no `timeframe`, so their envelope status is the evidence (**UNVERIFIED**, item 69
+  of [section 23](#23-open-verification-items)).
 - **HTTP 429** pauses the request's subscription and resumes it, as the rate limits below
   specify; only when a pause is longer than the read's patience still covers (10 minutes of
   pauses, or 90 s while the read holds the update graph's lock) does the client raise
@@ -4153,6 +4158,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
 | `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream, `REST` for a `poll()`, and for a read the source it reads, `REST` or `flat files`; a read's `Host` and `Path` are null |
+| `Recency` | `REALTIME` or `DELAYED`: the feed a stream reads (`UNKNOWN` on a pinned host of no known feed, never shown as real-time); for a `poll()` table of a subscription's current data, `REALTIME` when the subscription is not listed in `MassiveConfig.delayed_subscriptions` (its `DELAYED` labels fail the table) and `UNKNOWN` when it is (REST serves what the plan serves); null for a `poll()` of data of no single subscription (reference, economy, partner data, the cross-class snapshot) and for a background read |
 | `RowsPublished` | count; a read's is set once, when its rows land |
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
@@ -4432,7 +4438,6 @@ without the GIL.
 | caller (console, script, user thread); a console command holds the UG's exclusive lock throughout | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every library lock and only when it does not hold the UG lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every library lock) | hold the registry lock while calling Deephaven or waiting; while holding the UG lock, wait for an update cycle or on a thread that may need the lock (the diagnostics writer, a poller, another caller's stream open), or join a closing connection |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (the first TLS context of a certificate setting loads from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open, charged to the `futures` bucket, each lookup in a lane of its own that the calendar's close ends; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
@@ -5102,8 +5107,7 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     (`topics` parsed from "subscribed to: <p1>[,<p2>...]", cluster-agnostic, a comma list
     tolerated; empty when the message cannot be parsed), `REFUSED` (`topics` holds the topic the
     message names, or is empty when it names none), `MAX_CONNECTIONS`, or `OTHER`. `message` is
-    the server's text verbatim, and `realtime_verdict` is true when a refusal's message contains
-    "real-time" (case-insensitive).
+    the server's text verbatim.
   - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in
     the frame. Rows are keyed by **long-form** column (the library renames them) and hold
     every column of the channel's source, null when absent or when the value does not fit;
@@ -5942,7 +5946,7 @@ that declares no key has none.
 | **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |
-| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/host_decision.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/recency_labels.py` | | | Never read as delayed: the host decision streams from the real-time feed with a WARNING naming the field and the value ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `unreadable_symbols=LOG`, the default, the row is kept with a null `Symbol` and the text in `RawSymbol`, ERROR once per spelling with the library-bug text (at most 100); under `IGNORE` the same at DEBUG; under `RAISE`, a loud failure whose message names the setting and the bug report. |
 
 **When every row is dropped.** One dropped row is drift; a payload in which no row can be
@@ -6258,10 +6262,10 @@ a test in `tests/test_docs.py` ([section 4.2](#42-test-layout)).
 ```python
 import deephaven_massive as dm
 
-m = dm.MassiveSession()                                     # MASSIVE_API_KEY from the environment
+cfg = dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})   # Starter is delayed
+m = dm.MassiveSession(cfg)                                  # MASSIVE_API_KEY from the environment
 syms = ["AAPL", "MSFT", "NVDA"]
-bars = m.stocks.bars(syms, dm.Timespan.MINUTE).append_only()   # snapshot has no trades/quotes
-                                                               # -> delayed.massive.com/stocks
+bars = m.stocks.bars(syms, dm.Timespan.MINUTE).append_only()   # -> delayed.massive.com/stocks
 snap = m.stocks.snapshots(syms).poll(30)                    # REST; current state on every tier
 daily = m.stocks.bars(syms, dm.Timespan.DAY).history("2025-01-01", "2025-06-30")   # 3 symbols -> REST
 prev = m.stocks.previous_day_bar(syms).fetch()              # previous completed session (/prev)
@@ -6523,8 +6527,7 @@ document already reflects them.
     ([section 12](#12-timestamp-units-and-day-boundaries)).
 37. **No stream is moved to delayed data by inference.** An unknown `timeframe` value, like a
     refused snapshot, connects the class to the real-time host with `REALTIME` recency and a
-    WARNING, and is never moved; a connection that has had a topic acknowledged is never moved
-    either ([section 13.2](#132-host-decision), [section 13.3](#133-connection-and-subscription-protocol)).
+    WARNING, and no connection ever moves to another host (decision 79) ([section 13.2](#132-host-decision), [section 13.3](#133-connection-and-subscription-protocol)).
 38. **A never-acknowledged topic** never reconnects its connection: after one re-send it counts
     as `NO_ACK`, shows in its streams' `Error`, and is re-sent alone every 60 s until it is
     acknowledged ([section 13.3](#133-connection-and-subscription-protocol)).
@@ -7083,7 +7086,24 @@ document already reflects them.
     message that says the publication time is approximate and what to do. Mixing sources in
     one call can leave null, on REST's rows, a column only flat files fill; returning the data
     outweighs that ([section 16](#16-historysourceauto)).
-
+79. **The user chooses real-time or delayed data, per subscription** (2026-10-31, owner).
+    `MassiveConfig.delayed_subscriptions` lists the subscriptions whose streams use Massive's delayed feed,
+    even on a real-time plan; every other subscription uses the real-time feed and fails loudly
+    when the plan cannot serve it: the stream verb raises `EntitlementError` when the snapshot
+    shows delayed data, and a refusal from Massive fails the refused streams, each naming the
+    evidence and the exact fix. The choice is deterministic: the library never moves a stream
+    between feeds, and the server-verdict move to the delayed feed is gone. A listed
+    subscription whose snapshot shows real-time data logs one WARNING saying so. `CURRENCIES`
+    cannot be listed (Massive has no delayed forex or crypto feed), FMV cannot stream on a
+    listed subscription (it is real-time only), and a `ws_hosts` pin that contradicts the list
+    is refused at construction. `fetch()` and `poll()` of a subscription's current data fail
+    when Massive labels a response or a row `DELAYED` and the subscription is not listed
+    (`underlying_asset.timeframe` is never read; reference, economy, and partner data are never
+    checked); REST cannot ask for delayed data, so a listed subscription's REST reads return
+    what the plan serves. `history()` is past data, not a way to get current data, and is not
+    affected. `m.streams()` shows each stream's `Recency`, and each live table's description
+    names it ([section 5](#5-massiveconfig), [section 13.2](#132-host-decision),
+    [section 13.4](#134-rest)).
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
@@ -7102,8 +7122,8 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_host_decision.py`: both replies | `tests/ingest/test_host_decision_integration.py`: subscribe `V.I:SPX` on the resolved host |
 | 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_host_decision.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_host_decision_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
-| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_host_decision.py`: with and without the fields | `tests/ingest/test_host_decision_integration.py`: record which fields the live payload carries |
-| 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
+| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.`; the envelope status `DELAYED` (item 69) is the futures evidence of a delayed plan | `tests/ingest/test_host_decision.py`: with and without the fields | `tests/ingest/test_host_decision_integration.py`: record which fields the live payload carries |
+| 8 | What Massive says when a delayed plan subscribes on the real-time feed `socket.massive.com` | Read as any refusal: the refused streams fail with Massive's text and the `MassiveConfig.delayed_subscriptions` fix; nothing parses the text | `tests/ingest/test_ws_connection.py`: a refusal on the real-time feed names the fix | `docs/live-tests.md` (delayed key, the subscription not listed): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
 | 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
 | 11 | Options cap counted in contracts or topics | Topics (the stricter count) until the live check shows contracts | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 1,000 contracts on `T` and `Q` (2,000 topics) |
@@ -7164,3 +7184,5 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 66 | Whether reference data and the other datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count in a bucket of their own, as Massive's knowledge base says ("What is the request limit for Massive's RESTful APIs?": reference and cross-asset endpoints are "counted in their own bucket"), rather than against a subscription's limit, and whether that bucket has the Basic limit of 5 per minute | They go to the `other` bucket, every reference endpoint included (options contracts, IPOs, and reference reads filtered by market); `other` cannot be declared and is paced once a 429 names the per-minute limit | `tests/ingest/test_rest.py`: such a request, filtered by market or not, is charged to `other`; `tests/ingest/test_rate_limits.py`: a Basic-worded refusal paces `other` | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
 | 67 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window. The live check of 2026-10-30 settled the window: after 5 answered requests and refusals every 5 s, the first answer came at 47.3 s, as the clock minute turned, so Massive counts by the clock minute. No clock minute holds more starts than a 61 s window, so the hold stays: never refused for pacing, at worst a minute slower; waiting for the next minute instead would trust the local clock to the second. Whether a refusal counts is moot within a clock minute | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/massive/rest/test_client_integration.py` (a class on Basic): requests until the first 429, then one every 5 s; record when the first is answered again |
 | 68 | Whether every row of Benzinga's consensus ratings (`/benzinga/v1/consensus-ratings/{ticker}`) carries `ticker`, which the vendor's schema marks optional | Each row's `ticker` is its `Symbol` and its `poll()` key, so a row without one fails the call rather than keeping a null `Symbol` | `tests/namespaces/test_partners.py`: a consensus row without its ticker fails | `tests/namespaces/test_partners_integration.py` (the Benzinga add-on, $99 a month; skipped without it): three stocks' consensus ratings read raw; every row names the requested ticker |
+| 69 | Whether a delayed futures plan's REST snapshot (`/futures/v1/snapshot`) carries the envelope status `DELAYED` | The envelope status is the futures evidence of a delayed plan, for the stream host decision and for `fetch()` and `poll()`; without it a delayed futures plan is caught only by Massive's refusal on the real-time feed | `tests/ingest/test_host_decision.py`, `tests/ingest/test_rest.py`: a `DELAYED` envelope | `docs/live-tests.md` (a delayed futures key): read the snapshot raw and record its envelope status and timeframe fields |
+| 70 | Whether Massive accepts a real-time key on the delayed feed `delayed.massive.com` | A listed subscription always streams from the delayed feed; a refusal there fails the streams with Massive's text and says that removing the subscription from `MassiveConfig.delayed_subscriptions` uses the real-time feed | `tests/ingest/test_ws_connection.py`: a refusal on the delayed feed names the fix | `docs/live-tests.md` (a real-time key, the subscription listed): subscribe on `delayed.` and record the answer |

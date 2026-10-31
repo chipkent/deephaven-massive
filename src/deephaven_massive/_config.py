@@ -39,9 +39,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = [
+    "BUSINESS_HOST",
+    "DELAYED_HOST",
     "MIN_RECONNECT_BACKOFF",
+    "REALTIME_HOST",
     "HostMap",
     "MassiveConfig",
+    "delayed_fix",
     "environment_text",
     "require_positive_int",
     "require_positive_number",
@@ -53,6 +57,15 @@ MIN_RECONNECT_BACKOFF: Final = 15.0
 Massive releases a dropped connection only after roughly 10 to 30 seconds; a client that
 retries sooner can be refused for holding the allowance it just lost.
 """
+
+REALTIME_HOST: Final = "socket.massive.com"
+"""Massive's real-time WebSocket feed, and the one documented host of forex and crypto."""
+
+DELAYED_HOST: Final = "delayed.massive.com"
+"""Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures."""
+
+BUSINESS_HOST: Final = "business.massive.com"
+"""The WebSocket host of the Business plans' fair-market-value (FMV) channels, real-time only."""
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
@@ -168,8 +181,10 @@ class MassiveConfig:
             import deephaven_massive as dm
 
             cfg = dm.MassiveConfig()  # MASSIVE_API_KEY from the environment
+            # Real-time stocks; options from Massive's delayed feed.
+            mixed = dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})
             pinned = dm.MassiveConfig(
-                ws_hosts={dm.AssetClass.STOCKS: "delayed.massive.com"},
+                ws_hosts={dm.AssetClass.STOCKS: "fullmarket-business.massive.com"},
                 max_concurrency=4,
             )
             m = dm.MassiveSession(pinned)
@@ -183,9 +198,10 @@ class MassiveConfig:
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
         ws_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
-            for example `{dm.AssetClass.STOCKS: "delayed.massive.com"}`, instead of letting
-            the library decide from REST evidence. Hostnames only: no scheme, port, or path.
-            The FMV family is never pinned; it is always `business.massive.com`. Defaults to
+            for example `{dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}`, instead of
+            letting the library decide from REST evidence. A pin must agree with
+            `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
+            FMV family is never pinned; it is always `business.massive.com`. Defaults to
             an empty mapping: the library decides every host.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
             once. Defaults to 5 seconds.
@@ -219,6 +235,24 @@ class MassiveConfig:
             Basic and paces it from then on. Forex and crypto are one subscription,
             `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
             Defaults to an empty set: every subscription is unpaced until a refusal.
+        delayed_subscriptions: The Massive subscriptions whose live data you want from
+            Massive's delayed feed, such as `{dm.Subscription.OPTIONS}`: their streams always
+            use `delayed.massive.com` (15 minutes behind, 10 for futures), even when the plan
+            is real-time, and one WARNING says so when Massive shows the plan is real-time.
+            Every subscription not listed always uses the real-time feed and fails loudly
+            when the plan cannot serve it: a stream verb raises `EntitlementError` when
+            Massive's snapshot shows the plan's data is delayed, Massive's refusal fails the
+            refused streams, and `fetch()` or `poll()` of current data (snapshots, last trade
+            and quote, movers, and every dataset charged to the subscription) fails when
+            Massive labels a response or row `DELAYED`; each message names the evidence and
+            the setting to add. REST cannot ask for delayed data, so a listed subscription's
+            `fetch()` and `poll()` return whatever the plan serves, unchecked. Reference,
+            economy, and partner data are never checked, and `history()`, which reads past
+            data, is not affected. No stream ever moves between the feeds. Forex and crypto
+            (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
+            them. Fair-market-value (FMV) streams are real-time only, so an FMV stream of a
+            listed subscription raises `ValueError`. Defaults to an empty set: every
+            subscription is real-time. See README.md#real-time-or-delayed.
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
             Defaults to 0.05 seconds (50 ms).
         rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
@@ -260,6 +294,7 @@ class MassiveConfig:
     flat_file_symbol_threshold: int = 50
     max_concurrency: int = 8
     rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
+    delayed_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
@@ -268,12 +303,13 @@ class MassiveConfig:
     unreadable_symbols: OnError = field(default_factory=_env_unreadable_symbols)
 
     def __post_init__(self) -> None:
-        """Validate every field; freeze `ws_hosts` and `rest_basic_subscriptions` into copies.
+        """Validate every field; freeze `ws_hosts` and the two subscription sets into copies.
 
         A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
         `ws_hosts` key that is not a
-        `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` that is not a
-        set of `dm.Subscription`, or a numeric field of a non-numeric type also raises
+        `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` or
+        `delayed_subscriptions` that is not a set of `dm.Subscription`, or a numeric field of a
+        non-numeric type also raises
         `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
         `require_positive_int`).
 
@@ -286,7 +322,9 @@ class MassiveConfig:
                 credentials is set, `api_key` or an S3 credential has leading or trailing
                 whitespace (or an S3 credential is blank), a `ws_hosts` value is not a bare
                 lower-case hostname, or an environment variable read for a default has
-                leading or trailing whitespace (`environment_text`).
+                leading or trailing whitespace (`environment_text`); and
+                `_check_delayed_subscriptions` raises it for `dm.Subscription.CURRENCIES` in
+                `delayed_subscriptions` or a `ws_hosts` pin that contradicts it.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
@@ -321,8 +359,11 @@ class MassiveConfig:
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
-        basic = _validate_basic_subscriptions(self.rest_basic_subscriptions)
+        basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
         object.__setattr__(self, "rest_basic_subscriptions", basic)
+        delayed = _validate_subscriptions(self.delayed_subscriptions, "delayed_subscriptions")
+        _check_delayed_subscriptions(delayed, self.ws_hosts)
+        object.__setattr__(self, "delayed_subscriptions", delayed)
 
 
 def require_positive_int(name: str, value: object, *, maximum: int | None = None) -> int:
@@ -389,11 +430,12 @@ _CURRENCY_CLASSES: Final = frozenset(
 """The asset classes that share one subscription, `Subscription.CURRENCIES` (`forex`, `crypto`)."""
 
 
-def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
-    """Validate `rest_basic_subscriptions` and return it as a frozen set.
+def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]:
+    """Validate a set of subscriptions (`rest_basic_subscriptions`, `delayed_subscriptions`).
 
     Args:
-        value: The value passed as `MassiveConfig.rest_basic_subscriptions`.
+        value: The value passed for the field.
+        name: The field's name, for messages.
 
     Returns:
         The subscriptions, as a `frozenset`.
@@ -407,7 +449,7 @@ def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
     """
     if not isinstance(value, AbstractSet):
         raise TypeError(
-            "rest_basic_subscriptions must be a set of dm.Subscription, such as "
+            f"{name} must be a set of dm.Subscription, such as "
             f"{{dm.Subscription.STOCKS}}, not {type(value).__name__}"
         )
     for item in value:
@@ -417,11 +459,62 @@ def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
             and item.casefold() in _CURRENCY_CLASSES
         ):
             raise TypeError(
-                "rest_basic_subscriptions must hold dm.Subscription members; forex and crypto "
+                f"{name} must hold dm.Subscription members; forex and crypto "
                 "are one subscription, dm.Subscription.CURRENCIES"
             )
-        _require_enum(item, Subscription, "each rest_basic_subscriptions member")
+        _require_enum(item, Subscription, f"each {name} member")
     return frozenset(value)
+
+
+def _check_delayed_subscriptions(
+    delayed: frozenset[Subscription], ws_hosts: Mapping[AssetClass, str]
+) -> None:
+    """Refuse a `delayed_subscriptions` Massive cannot serve, or one a `ws_hosts` pin contradicts.
+
+    Args:
+        delayed: The validated `delayed_subscriptions`.
+        ws_hosts: The validated `ws_hosts`.
+
+    Raises:
+        ValueError: If `delayed` holds `dm.Subscription.CURRENCIES` (Massive has no delayed
+            forex or crypto feed), `ws_hosts` pins `delayed.massive.com` for a class whose
+            subscription is not listed, or pins any other host for one that is. Each message
+            names both settings and what to change.
+    """
+    if Subscription.CURRENCIES in delayed:
+        raise ValueError(
+            "delayed_subscriptions cannot hold dm.Subscription.CURRENCIES: Massive has no "
+            "delayed forex or crypto feed, so their streams are always real-time"
+        )
+    for asset_class, host in ws_hosts.items():
+        subscription = subscription_of(asset_class)
+        listed = subscription in delayed
+        if host == DELAYED_HOST and not listed:
+            raise ValueError(
+                f"ws_hosts pins {asset_class} to Massive's delayed feed {DELAYED_HOST}, but "
+                f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
+                f"to use the delayed feed write {delayed_fix(subscription)} and drop the pin"
+            )
+        if listed and host != DELAYED_HOST:
+            raise ValueError(
+                f"delayed_subscriptions lists dm.Subscription.{subscription.name}, "
+                f"whose streams use Massive's delayed feed {DELAYED_HOST}, but ws_hosts pins "
+                f"{asset_class} to {host}; remove one of the two"
+            )
+
+
+def delayed_fix(subscription: Subscription) -> str:
+    """Return the configuration that asks for a subscription's delayed data, for messages.
+
+    The one place the setting's spelling appears in the library's messages.
+
+    Args:
+        subscription: The subscription.
+
+    Returns:
+        For example `dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})`.
+    """
+    return f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{subscription.name}}})"
 
 
 def _check_s3_credential(name: str, value: str | None) -> None:

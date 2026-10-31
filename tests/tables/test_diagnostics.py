@@ -102,6 +102,7 @@ def test_column_sets() -> None:
         "Transport",
         "Host",
         "Path",
+        "Recency",
         "RowsPublished",
         "RequestsPerCycle",
         "State",
@@ -148,10 +149,10 @@ def test_column_sets() -> None:
 def test_stream_updates_set_only_the_given_fields() -> None:
     row = _stream(host="socket.massive.com", rows_published=3, error="old")
     assert StreamUpdate().apply(row) == row
-    updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5, path="/stocks").apply(row)
+    updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5).apply(row)
     assert (updated.rows_published, updated.deferred, updated.symbol_count) == (10, 2, 5)
-    assert (updated.host, updated.path, updated.error) == ("socket.massive.com", "/stocks", "old")
-    assert StreamUpdate(host="delayed.massive.com", error="slow").apply(row).error == "slow"
+    assert (updated.host, updated.error) == ("socket.massive.com", "old")
+    assert StreamUpdate(error="slow").apply(row).error == "slow"
 
 
 def test_stream_updates_can_clear_a_warning() -> None:

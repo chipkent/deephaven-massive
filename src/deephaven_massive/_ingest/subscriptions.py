@@ -179,10 +179,8 @@ class Subscriptions:
     nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
-    callbacks: `on_refused(topics, message)` for topics the server refused,
-    `on_step_refused(status)` for a refusal naming no topic of a step none of whose topics was
-    resolved (returning True when the connection handles it as the server's real-time
-    verdict), and `on_change()` after every change the connection's diagnostics row shows.
+    callbacks: `on_refused(topics, message)` for topics the server refused, and `on_change()`
+    after every change the connection's diagnostics row shows.
 
     Example:
         ::
@@ -193,7 +191,6 @@ class Subscriptions:
                 ack_timeout=5.0,
                 cap=None,
                 on_refused=lambda topics, message: None,
-                on_step_refused=lambda status: False,
                 on_change=lambda: None,
             )
             subscriptions.add(["T.AAPL"])
@@ -208,7 +205,6 @@ class Subscriptions:
         ack_timeout: float,
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
-        on_step_refused: Callable[[Status], bool],
         on_change: Callable[[], None],
     ) -> None:
         """Start with no topic wanted and no generation open.
@@ -220,7 +216,6 @@ class Subscriptions:
             ack_timeout: Seconds to wait for each acknowledgement (`MassiveConfig.ack_timeout`).
             cap: The most explicit topics on the wire (1,000 for `/options`), or None.
             on_refused: Called with refused topics and the server's message.
-            on_step_refused: Called for a refusal of a whole step that names no topic.
             on_change: Called after every change of the counts or the deferred topics.
         """
         self._sender = sender
@@ -228,7 +223,6 @@ class Subscriptions:
         self._ack_timeout = ack_timeout
         self._cap = cap
         self._on_refused = on_refused
-        self._on_step_refused = on_step_refused
         self._on_change = on_change
         self.generation: int | None = None
         self._refs: Counter[str] = Counter()
@@ -241,7 +235,6 @@ class Subscriptions:
         self._acked: set[str] = set()
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
-        self._step: frozenset[str] = frozenset()
         self._pending: set[str] = set()
         self._watchdogs: dict[str, Timer] = {}
         self._warned_unparsed = False
@@ -353,7 +346,6 @@ class Subscriptions:
         self._noack.clear()
         self._unreported.clear()
         self._pending.clear()
-        self._step = frozenset()
 
     # --- the reconcile loop --------------------------------------------------------------------
 
@@ -404,7 +396,6 @@ class Subscriptions:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
-            self._step = frozenset(adds)
             self._pending = set(adds)
             for topic in ordered:
                 self._arm(topic, generation, attempt=1)
@@ -429,8 +420,8 @@ class Subscriptions:
         """
         if status.kind is StatusKind.ACK:
             self._acknowledge(status.topics)
-        elif status.kind is StatusKind.REFUSED and not self._refuse_status(status):
-            return
+        elif status.kind is StatusKind.REFUSED:
+            self._refuse_status(status)
         self.reconcile()
 
     def _acknowledge(self, topics: tuple[str, ...]) -> None:
@@ -455,29 +446,21 @@ class Subscriptions:
                 self._pending.discard(topic)
                 self._cancel(topic)
 
-    def _refuse_status(self, status: Status) -> bool:
-        """Apply a refusal.
+    def _refuse_status(self, status: Status) -> None:
+        """Apply a refusal: of the topics it names, or else of every unresolved topic in flight.
 
         Args:
             status: A `REFUSED` status.
-
-        Returns:
-            False when the connection took the refusal as the server's real-time verdict and is
-            moving to another host, so nothing more happens here; True otherwise.
         """
         if status.topics:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
-            return True
+            return
         if not self._pending:
             logger.info(
                 "a refusal named no topic and no subscription was in flight: %s", status.message
             )
-            return True
-        whole = self._pending == self._step
-        if whole and self._on_step_refused(status):
-            return False
+            return
         self._refuse(tuple(sorted(self._pending)), status.message)
-        return True
 
     def _refuse(self, topics: tuple[str, ...], message: str) -> None:
         """Take refused topics out of D and report them.

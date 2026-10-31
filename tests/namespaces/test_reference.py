@@ -870,6 +870,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         pollers=pollers,
         host="api.massive.com",
         path="/v1/marketstatus/now",
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )

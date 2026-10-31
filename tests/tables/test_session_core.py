@@ -550,34 +550,6 @@ def test_an_update_made_during_the_open_is_kept(
     massive_session.release(result)
 
 
-def test_a_move_made_during_the_open_keeps_the_new_host(
-    massive_session: dm.MassiveSession,
-    fake_streams: FakeStreamTransport,
-    *,
-    monkeypatch: pytest.MonkeyPatch,
-    stream_rows: Callable[[], list[dict[str, Any]]],
-) -> None:
-    # The server's real-time verdict moves the stream to another host after the transport
-    # started it but before its open returns: the row shows the host it moved to, not the
-    # host it opened on.
-    core = massive_session._core
-
-    def open_stream(
-        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-    ) -> StreamHandle:
-        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-        core.update_streams({stream_id: StreamUpdate(host="delayed.test", path="/moved")})
-        return handle
-
-    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
-    result = stream_query(massive_session).append_only()
-    columns = ("StreamId", "Host", "Path", "State")
-    assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
-        (1, "delayed.test", "/moved", "RUNNING")
-    ]
-    massive_session.release(result)
-
-
 def test_stream_ids_come_from_one_allocator(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
@@ -1361,13 +1333,13 @@ def test_update_streams_reaches_every_stream_still_registered(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     core.update_streams(
         {
-            1: StreamUpdate(rows_published=5, host="socket.other", error="slow consumer"),
+            1: StreamUpdate(rows_published=5, error="slow consumer"),
             99: StreamUpdate(rows_published=1),  # left the registry: ignored
         }
     )
     columns = ("StreamId", "State", "RowsPublished", "Host", "Error")
     assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
-        (1, "RUNNING", 5, "socket.other", "slow consumer")  # an update never fails a stream
+        (1, "RUNNING", 5, "socket.test", "slow consumer")  # an update never fails a stream
     ]
     massive_session.release(result)
     drain()
@@ -1454,7 +1426,8 @@ def test_a_failure_while_the_shape_is_derived_is_named(
     core = massive_session._core
     q = stream_query(massive_session)
 
-    def failing_then_shaping(blink: Table) -> Table:
+    def failing_then_shaping(handle: StreamHandle) -> Table:
+        blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
         core.fail_stream(1, "entitlement")
@@ -1481,7 +1454,8 @@ def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
     core = massive_session._core
     q = stream_query(massive_session)
 
-    def closing_then_shaping(blink: Table) -> Table:
+    def closing_then_shaping(handle: StreamHandle) -> Table:
+        blink = handle.blink
         core.close()
         assert fake_streams.shutdown[1].wait(TIMEOUT)
         return blink_to_append_only(blink)
@@ -1509,7 +1483,7 @@ def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
     q = stream_query(massive_session)
     monkeypatch.setattr(core, "_failure", lambda _: None)
 
-    def closing_then_describing(blink: Table) -> Table:
+    def closing_then_describing(handle: StreamHandle) -> Table:
         core.close()
         raise RuntimeError(
             "java.lang.UnsupportedOperationException: Cannot mutate attributes after they have "
@@ -1538,7 +1512,8 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
     q = stream_query(massive_session)
     schema = core.catalog.dataset_schema(SPEC)
 
-    def failing_then_describing(blink: Table) -> Table:
+    def failing_then_describing(handle: StreamHandle) -> Table:
+        blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
         core.fail_stream(1, "entitlement")
@@ -1563,7 +1538,8 @@ def test_a_deephaven_error_of_a_live_stream_is_not_wrapped(
 ) -> None:
     q = stream_query(massive_session)
 
-    def broken(blink: Table) -> Table:
+    def broken(handle: StreamHandle) -> Table:
+        blink = handle.blink
         # A shape Deephaven refuses for a reason of its own: ring() of a negative capacity.
         return ring_table(blink, -1)
 
@@ -1836,7 +1812,8 @@ def test_a_verb_that_races_close_never_returns_its_table(
     core = massive_session._core
     spec = SPEC
 
-    def build_and_close(blink: Table) -> Table:
+    def build_and_close(handle: StreamHandle) -> Table:
+        blink = handle.blink
         shaped = blink_to_append_only(blink)
         massive_session.close()
         return shaped

@@ -119,6 +119,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.flat_file_symbol_threshold == 50
     assert base.max_concurrency == 8
     assert base.rest_basic_subscriptions == frozenset()
+    assert base.delayed_subscriptions == frozenset()
     assert base.flush_interval == 0.05
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
@@ -281,6 +282,72 @@ def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -
             _replace(base, rest_basic_subscriptions={currency})
 
 
+def test_delayed_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
+    listed = {Subscription.OPTIONS, Subscription.FUTURES}
+    cfg = _replace(base, delayed_subscriptions=listed)
+    listed.add(Subscription.STOCKS)  # the configuration keeps its own copy
+    assert cfg.delayed_subscriptions == frozenset({Subscription.OPTIONS, Subscription.FUTURES})
+    assert isinstance(cfg.delayed_subscriptions, frozenset)
+    same = _replace(base, delayed_subscriptions=frozenset(cfg.delayed_subscriptions))
+    assert cfg == same
+    assert hash(cfg) == hash(same)
+    assert cfg != base
+
+
+def test_delayed_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> None:
+    with pytest.raises(
+        TypeError, match=r"^delayed_subscriptions must be a set of dm\.Subscription, such as "
+    ):
+        _replace(base, delayed_subscriptions=[Subscription.STOCKS])
+    with pytest.raises(TypeError, match=r"^each delayed_subscriptions member must be"):
+        _replace(base, delayed_subscriptions={"options"})
+    with pytest.raises(TypeError, match=r"forex and crypto are one subscription"):
+        _replace(base, delayed_subscriptions={"forex"})
+
+
+def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^delayed_subscriptions cannot hold dm\.Subscription\.CURRENCIES: Massive has no "
+        r"delayed forex or crypto feed",
+    ):
+        _replace(base, delayed_subscriptions={Subscription.CURRENCIES})
+
+
+def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^ws_hosts pins options to Massive's delayed feed delayed\.massive\.com, but "
+        r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
+        r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\) "
+        r"and drop the pin$",
+    ):
+        _replace(base, ws_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
+
+
+def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^delayed_subscriptions lists dm\.Subscription\.STOCKS, whose streams use "
+        r"Massive's delayed feed delayed\.massive\.com, but ws_hosts pins stocks to "
+        r"socket\.massive\.com; remove one of the two$",
+    ):
+        _replace(
+            base,
+            delayed_subscriptions={Subscription.STOCKS},
+            ws_hosts={AssetClass.STOCKS: "socket.massive.com"},
+        )
+
+
+def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
+    cfg = _replace(
+        base,
+        delayed_subscriptions={Subscription.STOCKS},
+        ws_hosts={AssetClass.STOCKS: "delayed.massive.com", AssetClass.OPTIONS: "o.example.com"},
+    )
+    assert cfg.ws_hosts[AssetClass.STOCKS] == "delayed.massive.com"
+
+
 _SYMBOL_SETTINGS = [
     ("noncanonical_symbols", "DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS"),
     ("unreadable_symbols", "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS"),
@@ -335,7 +402,7 @@ def test_api_key_must_be_a_string() -> None:
 
 
 def test_configs_are_hashable_and_compare_by_value() -> None:
-    hosts = {AssetClass.STOCKS: "delayed.massive.com"}
+    hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     a = MassiveConfig(api_key="k", ws_hosts=hosts)
     b = MassiveConfig(api_key="k", ws_hosts=dict(hosts))
     assert a == b

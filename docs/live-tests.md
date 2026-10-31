@@ -47,7 +47,10 @@ Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a t
 the plan lacks is refused. The answer is kept in `.live-plans.json` in the repository root (git-ignored; it names the key and
 the S3 access key id only by a digest) until the New York day ends, so later runs that day do
 not probe again. Delete the file to probe again at once, after an upgrade. The plans head the
-evidence (under "live plans") and the summary at the end of the run.
+evidence (under "live plans") and the summary at the end of the run. The live sessions list
+every class on a delayed plan (Stocks, Options, and Futures Starter and Developer; Indices
+Starter) in `MassiveConfig.delayed_subscriptions`, since the library refuses delayed data for
+any other: their streams use Massive's delayed feed, and their REST reads are not checked.
 
 To skip the probe, declare the plans in `MASSIVE_LIVE_PLANS`, comma-separated:
 `<class>=<plan>` for each paid class (`starter`, `developer`, `advanced`, `business`, or, for
@@ -163,11 +166,11 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; the futures spread ticker forms of every venue, the crypto ticker list's currencies; plus the 429 text, the rate buckets, whether a market-filtered ticker lookup is charged to its class, how a spent minute frees its requests, and whether a learned limit outlives the key's sessions |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
-| Stocks Starter | $29 | adds the delayed-key refusal text and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
+| Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
-| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
+| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's snapshot says `DELAYED`, the only futures evidence of a delayed plan the library reads; **UNVERIFIED**), its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
-| Stocks Advanced; Options Advanced | $199 each | the LULD unit; the options topic cap |
+| Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
 The bar-stamp checks read the most recent half day whose week has ended and the full trading
@@ -191,7 +194,7 @@ documentation page names its plan in its "Plan Access" table ([S15]).
 | Variable | Needed by | Without it |
 |---|---|---|
 | `MASSIVE_API_KEY` | every test | every test skips |
-| `MASSIVE_DELAYED_API_KEY` | the delayed-key refusal text, when Stocks is not on Starter or Developer (then the main key serves) | it skips |
+| `MASSIVE_DELAYED_API_KEY` | what Massive says when a delayed key subscribes on the real-time feed, when Stocks is not on Starter or Developer (then the main key serves) | it skips |
 
 ## Safety
 

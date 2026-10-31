@@ -1,4 +1,4 @@
-"""Live checks of the session's WebSocket handling: the delayed-key verdict and the slot limit.
+"""Live checks of the session's WebSocket handling: the feeds a plan may use, and the slot limit.
 
 Each test records the session's diagnostics and Massive's messages (`evidence`). Streams
 subscribe to one symbol and are released at once. The slot test opens a second connection to a
@@ -9,6 +9,7 @@ and should run alone and last, with no other client of the key. How to run these
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -55,30 +56,19 @@ def _wait_for_state(
         pause.wait(0.5)
 
 
-@pytest.mark.needs("stocks:starter")
-@pytest.mark.verifies("8")
-@pytest.mark.timeout(110)
-def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
-    delayed_key: str,
+def _subscribe_minute_bars(
+    config: dm.MassiveConfig,
     *,
     wait_rows: WaitRows,
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
-) -> None:
-    """Whether the refusal a delayed key gets on the real-time host says "real-time".
+) -> list[str]:
+    """Stream `AM.AAPL` in a session of its own, record what happened, and return the errors.
 
-    The library reads a refusal mentioning "real-time" as the server's verdict that the key lacks
-    real-time data. Pins stocks to `socket.massive.com` with a delayed key
-    (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks is on Starter or Developer), subscribes
-    `AM.AAPL`, minute bars, which every plan from Starter includes, so the host is the only reason
-    left for a refusal, and records the stream's error and the connection's last error. The refusal
-    does not depend on the market being open. Passes when either error contains "real-time" (in any
-    case); a failure quotes the text the match must look for instead.
+    Returns:
+        The stream's `Error` and the connection's `LastError`, where set.
     """
-    config = dm.MassiveConfig(
-        api_key=delayed_key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
-    )
     session = dm.MassiveSession(config)
     try:
         table = session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
@@ -88,10 +78,74 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
         errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
         errors += [str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]]
         session.release(table)
-        evidence(f"AM.AAPL rows received on socket.massive.com with a delayed key: {len(rows)}")
+        evidence(f"AM.AAPL rows received: {len(rows)}; errors: {errors or 'none'}")
     finally:
         session.close()
-    assert any("real-time" in error.lower() for error in errors), f"the errors: {errors}"
+    return errors
+
+
+@pytest.mark.needs("stocks:starter")
+@pytest.mark.settles("8")
+@pytest.mark.timeout(110)
+def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
+    delayed_key: str,
+    *,
+    wait_rows: WaitRows,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """What Massive answers when a delayed plan subscribes on the real-time feed.
+
+    A subscription not listed in `MassiveConfig.delayed_subscriptions` always streams from
+    `socket.massive.com`, and a delayed plan is refused there. Pins stocks to that host with a
+    delayed key (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks is on Starter or
+    Developer), so the snapshot check does not refuse the verb first, subscribes `AM.AAPL`,
+    minute bars, which every plan from Starter includes, and records the stream's error and the
+    connection's last error. The refusal does not depend on the market being open. Passes when
+    Massive refused the stream; the evidence quotes its text, which the error message shows.
+    """
+    config = dm.MassiveConfig(
+        api_key=delayed_key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
+    )
+    errors = _subscribe_minute_bars(
+        config,
+        wait_rows=wait_rows,
+        table_rows=table_rows,
+        stream_report=stream_report,
+        evidence=evidence,
+    )
+    assert errors, "Massive served a delayed key on the real-time feed"
+
+
+@pytest.mark.needs("stocks:advanced")
+@pytest.mark.settles("70")
+@pytest.mark.timeout(110)
+def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
+    live_config: dm.MassiveConfig,
+    *,
+    wait_rows: WaitRows,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """Whether Massive serves a real-time key on its delayed feed, `delayed.massive.com`.
+
+    A subscription listed in `MassiveConfig.delayed_subscriptions` always streams from the
+    delayed feed, even on a real-time plan. With a real-time Stocks plan, lists stocks as
+    delayed, subscribes `AM.AAPL`, and records the stream's host, acknowledgement, rows, and any
+    error. Reading it: an acknowledgement means a real-time key may choose delayed data; a
+    refusal means the setting needs a delayed plan, and its message must say so.
+    """
+    config = dataclasses.replace(live_config, delayed_subscriptions={dm.Subscription.STOCKS})
+    errors = _subscribe_minute_bars(
+        config,
+        wait_rows=wait_rows,
+        table_rows=table_rows,
+        stream_report=stream_report,
+        evidence=evidence,
+    )
+    evidence(f"refused on the delayed feed: {bool(errors)}")
 
 
 @pytest.mark.needs("currencies:starter")

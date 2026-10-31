@@ -86,30 +86,22 @@ class Loop:
     sender: FakeSender
     timers: FakeTimers
     refused: list[tuple[tuple[str, ...], str]]
-    verdicts: list[Status]
     changes: list[tuple[int, int, int, int]]
 
 
-def make_loop(*, cap: int | None = None, verdict: bool = False) -> Loop:
+def make_loop(*, cap: int | None = None) -> Loop:
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
-    verdicts: list[Status] = []
     changes: list[tuple[int, int, int, int]] = []
-
-    def step_refused(status: Status) -> bool:
-        verdicts.append(status)
-        return verdict
-
     subs = Subscriptions(
         sender,
         call_later=timers.call_later,
         ack_timeout=5.0,
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
-        on_step_refused=step_refused,
         on_change=lambda: changes.append(subs.counts()),
     )
-    return Loop(subs, sender, timers, refused, verdicts, changes)
+    return Loop(subs, sender, timers, refused, changes)
 
 
 def ack(*topics: str) -> Status:
@@ -433,27 +425,15 @@ def test_a_refusal_naming_no_topic_refuses_the_step_in_flight() -> None:
     loop.subs.reconcile()
     loop.subs.status(refusal())
     assert loop.refused == [(("Q.AAPL", "Q.MSFT"), "not authorized")]
-    assert len(loop.verdicts) == 1  # the whole step was unresolved: the verdict was asked
 
 
-def test_a_partly_resolved_step_is_never_a_verdict() -> None:
-    loop = make_loop(verdict=True)
+def test_a_refusal_naming_no_topic_skips_the_resolved_topics() -> None:
+    loop = make_loop()
     loop.subs.add(["T.AAPL", "T.MSFT"])
     loop.subs.opened(1)
     loop.subs.status(ack("T.AAPL"))
     loop.subs.status(refusal(message="real-time data needs a plan"))
-    assert loop.verdicts == []
     assert loop.refused == [(("T.MSFT",), "real-time data needs a plan")]
-
-
-def test_a_verdict_the_connection_takes_changes_nothing_here() -> None:
-    loop = make_loop(verdict=True)
-    loop.subs.add(["T.ESZ5"])
-    loop.subs.opened(1)
-    loop.sender.take()
-    loop.subs.status(refusal(message="real-time data needs a plan"))
-    assert loop.refused == []
-    assert loop.sender.take() == []
 
 
 def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptureFixture) -> None:

@@ -41,6 +41,7 @@ from deephaven_massive._enums import (
     Order,
     PollMode,
     Recency,
+    Subscription,
     Timespan,
 )
 from deephaven_massive._errors import LIBRARY_BUG, RowDataError
@@ -1325,7 +1326,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
 ) -> None:
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
-    snapshot = Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
+    snapshot = Reply(load_fixture("ingest/host_decision", "stocks_real_time.json"))
     fake_rest.reply("/v3/snapshot", PAUSE, PAUSE, snapshot)
 
     def decide() -> object:
@@ -1344,7 +1345,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     finally:
         m.close()
     assert isinstance(decision, HostDecision)
-    assert decision.host == "delayed.massive.com"
+    assert decision.host == "socket.massive.com"
     assert len(fake_rest.get_queries()) == 3
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
     # The caller that gave up raises; its expected failure logs nothing above DEBUG.
@@ -1438,7 +1439,7 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
         assert result == ("DOT", "USD")
     else:
         assert isinstance(result, HostDecision)
-        assert result.host == "delayed.massive.com"
+        assert result.host == "socket.massive.com"
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
@@ -1482,7 +1483,7 @@ def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
         assert result == ("DOT", "USD")
     else:
         assert isinstance(result, HostDecision)
-        assert result.host == "delayed.massive.com"
+        assert result.host == "socket.massive.com"
 
 
 def test_an_interrupt_as_the_crypto_read_starts_leaves_nothing_claimed(
@@ -2355,7 +2356,7 @@ def snapshots(
     fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes]
 ) -> FakeRestServer:
     fake_rest.reply(
-        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
+        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_real_time.json"))
     )
     return fake_rest
 
@@ -2372,21 +2373,59 @@ def test_a_decision_is_cached_and_recorded(
     decision = transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     again = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     assert decision is again
-    assert (decision.host, decision.recency) == ("delayed.massive.com", Recency.DELAYED)
+    assert (decision.host, decision.recency) == ("socket.massive.com", Recency.REALTIME)
     assert len(snapshots.requests) == 1
     (row,) = connection_rows(session, dh_to_pylist)
     assert (row["Transport"], row["AssetClass"], row["Family"], row["Host"], row["Path"]) == (
         "REST",
         "stocks",
         "TICK",
-        "delayed.massive.com",
+        "socket.massive.com",
         "/stocks",
     )
     assert (row["Recency"], row["State"], row["Evidence"]) == (
-        "DELAYED",
+        "REALTIME",
         "CONNECTED",
-        "last_trade.timeframe=DELAYED",
+        "last_trade.timeframe=REAL-TIME",
     )
+
+
+def test_a_delayed_plan_refuses_the_verb_and_a_later_upgrade_is_seen(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # The refusal is not cached: the next verb asks again, and sees a plan upgraded meanwhile.
+    fake_rest.reply(
+        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
+    )
+    transport = session._core.rest_transport()
+    with pytest.raises(dm.EntitlementError, match=r"^stocks streams would be delayed"):
+        transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    fake_rest.reply_first(
+        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_real_time.json"))
+    )
+    assert transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK).recency is Recency.REALTIME
+    assert len(fake_rest.requests) == 2
+
+
+def test_a_listed_subscription_decides_the_delayed_feed(
+    *,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.STOCKS)
+    try:
+        fake_rest.reply(
+            "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
+        )
+        decision = m._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+        assert (decision.host, decision.recency) == ("delayed.massive.com", Recency.DELAYED)
+    finally:
+        m.close()
 
 
 def test_a_failed_decision_is_not_cached(
@@ -2704,7 +2743,7 @@ def test_a_decision_is_shared_even_if_recording_it_fails(
     monkeypatch.undo()
     # The decision was completed before the row: a later caller gets it, never blocks.
     later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
-    assert later.recency is Recency.DELAYED
+    assert later.recency is Recency.REALTIME
     assert len(snapshots.requests) == 1
 
 
@@ -2767,30 +2806,6 @@ def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
             query="<Query test>",
         )
     assert fake_rest.requests == []
-
-
-def test_a_server_verdict_replaces_the_cached_decision(
-    *, session: dm.MassiveSession, snapshots: FakeRestServer, dh_to_pylist: ToPylist
-) -> None:
-    transport = session._core.rest_transport()
-    first = transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
-    verdict = HostDecision("delayed.massive.com", Recency.DELAYED, "server verdict: real-time")
-    transport.record_verdict(AssetClass.STOCKS, ChannelFamily.TICK, verdict)
-    later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
-    assert later is verdict
-    assert later is not first
-    assert len(snapshots.requests) == 1  # the verdict needed no request
-    (row,) = connection_rows(session, dh_to_pylist)
-    assert (row["Host"], row["Recency"], row["Evidence"], row["State"]) == (
-        "delayed.massive.com",
-        "DELAYED",
-        "server verdict: real-time",
-        "CONNECTED",
-    )
-    # A pair never decided before takes the verdict too, with no request.
-    fmv = HostDecision("business.massive.com", Recency.DELAYED, "server verdict: x")
-    transport.record_verdict(AssetClass.OPTIONS, ChannelFamily.FMV, fmv)
-    assert transport.resolve_host(AssetClass.OPTIONS, ChannelFamily.FMV) is fmv
 
 
 # --- Whole bar windows, open and empty ranges, and 1-day stamps --------------------------------
@@ -3794,3 +3809,142 @@ def test_a_set_stop_token_ends_a_read_before_its_first_request(
     with pytest.raises(dm.MassiveError):
         rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
     assert fake_rest.requests == []
+
+
+# --- Delayed data on a real-time subscription -------------------------------------------------
+
+
+def _delayed_session(fake_rest: FakeRestServer, *listed: Subscription) -> dm.MassiveSession:
+    return dm.MassiveSession(
+        dm.MassiveConfig(
+            api_key="test-key", rest_base_url=fake_rest.url, delayed_subscriptions=set(listed)
+        )
+    )
+
+
+def test_a_delayed_row_fails_a_real_time_fetch(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}]))
+    )
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert str(info.value) == (
+        "indices.snapshots data would be delayed (Massive reports timeframe=DELAYED), and "
+        "dm.Subscription.INDICES is not in MassiveConfig.delayed_subscriptions, so the library "
+        "serves only real-time indices data. To accept delayed indices data (its streams then "
+        "use Massive's delayed feed too): "
+        "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})"
+    )
+
+
+def test_a_delayed_envelope_fails_a_real_time_fetch(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    gainers = "/v2/snapshot/locale/us/markets/stocks/gainers"
+    fake_rest.reply(gainers, Reply(envelope(status="DELAYED", tickers=[{"ticker": "NVDA"}])))
+    with pytest.raises(dm.EntitlementError, match=r"Massive reports status=DELAYED"):
+        fetch(session, MOVERS, params={"direction": Direction.GAINERS})
+
+
+def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.INDICES)
+    try:
+        fake_rest.reply(
+            INDEX_SNAPSHOT_PATH,
+            Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}], status="DELAYED")),
+        )
+        q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+        assert isinstance(q, Query)
+        table = q.fetch()
+        assert [r["Symbol"] for r in rows(table)] == ["I:SPX"]
+        description = table.attributes()["TableDescription"]
+        assert description.endswith(
+            "Data as the plan serves it, real-time or delayed: MassiveConfig.delayed_subscriptions "
+            "lists its subscription, so Massive's DELAYED labels are not checked."
+        )
+    finally:
+        m.close()
+
+
+def test_a_real_time_fetch_says_nothing_of_recency(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX"}])))
+    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert isinstance(q, Query)
+    assert q.fetch().attributes()["TableDescription"] == (
+        "indices.snapshots: A dataset for the tests."
+    )
+
+
+def test_reference_data_is_never_checked(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    contract = {"ticker": "O:SPY251219C00600000"}
+    fake_rest.reply(CONTRACTS_PATH, Reply(envelope([contract], status="DELAYED")))
+    assert [r["Symbol"] for r in fetch(session, CONTRACTS)] == ["O:SPY251219C00600000"]
+
+
+def test_history_is_never_checked(*, session: dm.MassiveSession, fake_rest: FakeRestServer) -> None:
+    # History is past data: a DELAYED label says nothing about it, and nothing is refused.
+    start = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+    trade = {"sip_timestamp": start + 1, "price": 1.0, "size": 10, "timeframe": "DELAYED"}
+    fake_rest.reply(
+        TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope([trade], status="DELAYED"))
+    )
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [r["Symbol"] for r in out] == ["AAPL"]
+
+
+def test_a_delayed_label_fails_a_real_time_poll_table(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, rows_when: RowsWhen
+) -> None:
+    fake_rest.reply(
+        INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}]))
+    )
+    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    assert table.attributes()["TableDescription"].endswith(
+        "Real-time data: a response Massive labels DELAYED fails the table."
+    )
+    (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
+    assert (row["State"], row["Recency"]) == ("FAILED", "REALTIME")
+    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})" in row["Error"]
+    session.release(table)
+
+
+@pytest.mark.parametrize(
+    ("spec", "listed", "recency"),
+    [
+        (INDEX_SNAPSHOTS, (Subscription.INDICES,), "UNKNOWN"),
+        (INDEX_SNAPSHOTS, (), "REALTIME"),
+        (CONTRACTS, (), None),
+        (CONSTITUENTS, (), None),
+    ],
+)
+def test_a_poll_tables_recency_follows_its_subscription(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    rows_when: RowsWhen,
+    spec: DatasetSpec,
+    listed: tuple[Subscription, ...],
+    recency: str | None,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, *listed)
+    try:
+        q = query(m, spec)
+        assert isinstance(q, Query)
+        table = q.poll(60)
+        (row,) = rows_when(m.streams(), bool)
+        assert row["Recency"] == recency
+        m.release(table)
+    finally:
+        m.close()

@@ -158,6 +158,7 @@ def start(
         pollers=pollers,
         host="api.massive.com",
         path=PATH,
+        recency=None,
         clock=clock,
         stop=threading.Event() if stop is None else stop,
     )
@@ -1121,6 +1122,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
         pollers=pollers,
         host=None,
         path=PATH,
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )
@@ -1164,6 +1166,7 @@ def test_an_error_after_a_stop_is_not_reported(
         pollers=pollers,
         host=None,
         path=PATH,
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )
@@ -1737,6 +1740,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         pollers=pollers,
         host="api.massive.com",
         path=PATH,
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )
@@ -1854,6 +1858,7 @@ def start_holdings(
         pollers=pollers,
         host="api.massive.com",
         path=HOLDINGS_PATH,
+        recency=None,
         clock=clock,
         stop=threading.Event(),
     )

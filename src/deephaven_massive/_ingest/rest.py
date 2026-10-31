@@ -40,6 +40,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   page's `adjusted` echo (`Page.adjusted`) that differs from the request raises
   `MassiveError`, and a page without one logs a WARNING once per path and session, so one
   call never silently mixes adjusted and unadjusted prices.
+- **Recency.** A `fetch()` or `poll()` reads current data, so each of its pages charged to a
+  subscription not in `MassiveConfig.delayed_subscriptions` fails when Massive labels it
+  `DELAYED` (`recency_labels`): the envelope status or a row's `timeframe`. Reference,
+  economy, and partner data (the `other` bucket), a listed subscription's pages, and
+  `history()`, which reads past data, are not checked.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
   on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
@@ -100,7 +105,6 @@ from __future__ import annotations
 import functools
 import logging
 import math
-import re
 import threading
 import time
 from collections import Counter
@@ -113,11 +117,12 @@ from urllib.parse import urlsplit
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
-from deephaven_massive._enums import AssetClass, OnError, subscription_of
+from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorCause,
@@ -139,6 +144,7 @@ from deephaven_massive._ingest.rate_limits import (
     bucket_of,
     read_patience,
 )
+from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_requests import (
     Call,
     CryptoSplit,
@@ -166,6 +172,7 @@ from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from datetime import timedelta
 
     from deephaven.execution_context import ExecutionContext
@@ -177,7 +184,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import Patience, RestClient, RestPath
+    from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import HostDecision
@@ -452,6 +459,9 @@ class RestReader:
         max_concurrency: The most requests of one fan-out at a time.
         unreadable_symbols: The session's setting for a symbol spelling the library cannot
             read (`MassiveConfig.unreadable_symbols`).
+        delayed_subscriptions: The subscriptions whose delayed data the session accepts
+            (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
+            a `DELAYED` label (`_check_recency`).
         threads: The name prefix of the threads of a fan-out pool this reader makes, such as
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
@@ -465,6 +475,7 @@ class RestReader:
     drift: DriftRegistry
     max_concurrency: int
     unreadable_symbols: OnError
+    delayed_subscriptions: AbstractSet[Subscription]
     threads: str
     exec_ctx: ExecutionContext
     warnings: BoundedLog
@@ -758,6 +769,7 @@ class RestReader:
         request: Request,
         limit: int | None,
         window: HistoryWindow | None = None,
+        current: bool = False,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
@@ -786,6 +798,9 @@ class RestReader:
                 move to 00:00 of their day in the class day zone, and a stamp Massive is not
                 known to use logs one WARNING per dataset and timespan per session
                 (`row_times.stamp_rule`).
+            current: True for a read of current data (`fetch()` and `poll()`), whose pages
+                are checked for a `DELAYED` label (`_check_recency`); False, the default, for
+                `history()`, which reads past data.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -800,8 +815,9 @@ class RestReader:
 
         Errors: the public error of each `WireError` (`_public`), `RowDataError` for a page
         whose every row was dropped, and the `MassiveError` of `_call` for a page on another
-        adjustment basis or a symbol whose data was cut short. A closed
-        session raises `MassiveError("... is closed")`.
+        adjustment basis or a symbol whose data was cut short, and the `EntitlementError` of
+        `_check_recency` for delayed data. A closed session raises
+        `MassiveError("... is closed")`.
         """
         converter = RowConverter.build(
             self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
@@ -813,6 +829,7 @@ class RestReader:
                 request=request,
                 limit=limit,
                 window=window,
+                current=current,
                 record=record,
                 spec=spec,
                 stop=stop,
@@ -878,13 +895,15 @@ class RestReader:
         request: Request,
         limit: int | None,
         window: HistoryWindow | None,
+        current: bool,
         record: Callable[[DriftReport], None] | None,
         stop: Cancel,
         patience: Patience,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
 
-        Each page is checked against the requested adjustment basis (`_check_adjusted`), its
+        Each page of current data is checked for a `DELAYED` label (`_check_recency`), each
+        page against the requested adjustment basis (`_check_adjusted`), its
         bars of a day or longer are stamped (`stamped`; a stamp Massive is not known to use is
         served and logs one WARNING per dataset and timespan per session), its rows outside the
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
@@ -898,6 +917,7 @@ class RestReader:
             request: The normalized arguments.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
+            current: Whether the read is of current data (`read`).
             record: Also given each page's drift, or None.
             stop: The read's token, which ends the call's waits.
             patience: The patience of the call's read, which its pause waits are charged to.
@@ -915,8 +935,9 @@ class RestReader:
         A failed request otherwise raises the public error of its `WireError` (`_public`), and
         once the session is closed every failed request does, a 404 included: the call raises
         `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
-        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, and a page on
-        another adjustment basis the `MassiveError` of `_check_adjusted`.
+        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, a page on
+        another adjustment basis the `MassiveError` of `_check_adjusted`, and delayed data the
+        `EntitlementError` of `_check_recency`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -939,6 +960,8 @@ class RestReader:
                 received = time.time_ns()
                 requests += 1
                 self.drift.report_statuses(template, page.drift.statuses)
+                if current:
+                    self._check_recency(spec, page, bucket=bucket)
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
                 self.drift.report(
@@ -998,6 +1021,34 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1)
             raise self._public(error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _check_recency(self, spec: DatasetSpec, page: Page, *, bucket: str) -> None:
+        """Refuse a page of current data that Massive labels delayed, unless delayed is asked for.
+
+        A page charged to a subscription (its rate-limit bucket names one) that is not in
+        `MassiveConfig.delayed_subscriptions` fails when its envelope `status` is `DELAYED` or
+        a row's `timeframe` field says `DELAYED` (`recency_labels.read_labels`, which never
+        reads `underlying_asset.timeframe`). Pages of the `other` bucket (reference, economy,
+        and partner data) and of a listed subscription are not checked: REST cannot ask for
+        delayed data, so a listed subscription's reads return what the plan serves.
+
+        Args:
+            spec: The dataset, for the message.
+            page: The page.
+            bucket: The page's rate-limit bucket.
+
+        Raises:
+            EntitlementError: If the page is labelled delayed (`recency_labels.delayed_refusal`).
+        """
+        if bucket == OTHER:
+            return
+        subscription = Subscription(bucket)
+        if subscription in self.delayed_subscriptions:
+            return
+        evidence = read_labels(page.status, page.rows).delayed
+        if evidence is not None:
+            refusal = delayed_refusal(subscription, f"{spec.name} data", evidence, streams=False)
+            raise refusal
 
     def _check_adjusted(
         self, spec: DatasetSpec, request: Request, *, template: str, echoed: bool | None
@@ -1131,8 +1182,8 @@ class RestReader:
 
     def probe(
         self, probe: host_decision.SnapshotProbe, *, asset_class: AssetClass, patience: Patience
-    ) -> list[dict[str, object]]:
-        """Make a host-decision request and return its raw JSON rows.
+    ) -> host_decision.SnapshotAnswer:
+        """Make a host-decision request and return its envelope status and raw JSON rows.
 
         Args:
             probe: The request.
@@ -1142,7 +1193,7 @@ class RestReader:
                 before it waited on another caller's decision, if it did).
 
         Returns:
-            The rows, every key kept.
+            The envelope status and the rows, every key kept.
 
         A failed request raises the public error of its `WireError` (`_public`):
         `AuthenticationError`, `EntitlementError`, or `MassiveError`.
@@ -1157,7 +1208,7 @@ class RestReader:
             )
         except WireError as error:
             raise self._public(error) from error
-        return page.rows
+        return host_decision.SnapshotAnswer(page.status, page.rows)
 
     def read_cycle(
         self,
@@ -1406,6 +1457,7 @@ class RestReader:
                 calls,
                 request=request,
                 limit=request.limit,
+                current=True,
                 record=record,
                 executor=executor,
                 cancel=cancel,
@@ -1486,6 +1538,7 @@ class RestEndpoints:
             core.drift,
             core.config.max_concurrency,
             core.config.unreadable_symbols,
+            core.config.delayed_subscriptions,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
             core.warnings,
@@ -1552,6 +1605,7 @@ class RestEndpoints:
                 asset_class,
                 family,
                 ws_hosts=self._core.config.ws_hosts,
+                delayed_subscriptions=self._core.config.delayed_subscriptions,
                 fetch=functools.partial(reader.probe, asset_class=asset_class, patience=patience),
             )
         except BaseException as error:
@@ -1625,33 +1679,6 @@ class RestEndpoints:
         A failed or empty lookup raises the `MassiveError` of `RestReader.crypto_pair`.
         """
         return self._reader("crypto pairs").crypto_pair(symbol)
-
-    def record_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        """Replace the cached host decision of a (class, family) with a server's verdict.
-
-        The WebSocket transport calls it when the explicit-verdict rule re-routes a
-        connection. Every later `resolve_host` for the pair returns `decision` without a
-        request, and the pair's `Transport=REST` row of `m.connections()` is rewritten with
-        its host, recency, and evidence. Thread-safe: the cache changes under its leaf lock,
-        and the row is only queued for the diagnostics writer; nothing blocks.
-
-        Args:
-            asset_class: The asset class of the connection.
-            family: The channel family.
-            decision: The new decision, such as the delayed host with `Recency.DELAYED` and
-                evidence `"server verdict: <message>"`.
-        """
-        self._state.hosts.replace_host((asset_class, family), decision)
-        logger.info(
-            "%s %s WebSocket host is now %s (%s)",
-            asset_class.value,
-            family.value,
-            decision.host,
-            decision.evidence,
-        )
-        self._write_decision(asset_class, family, decision)
 
     def _write_decision(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -1886,13 +1913,30 @@ class RestEndpoints:
             pollers=self._state.pollers,
             host=host,
             path=paths,
+            recency=_rest_recency(spec, self._core.config.delayed_subscriptions),
             clock=poll.CLOCK,
             stop=Cancel(),
         )
 
 
-_REFERENCE_PATH: Final = re.compile(r"/v\w+/reference/")
-"""The start of every reference endpoint's path (`/v3/reference/...`, `/vX/reference/...`)."""
+def _rest_recency(
+    spec: DatasetSpec, delayed_subscriptions: AbstractSet[Subscription]
+) -> Recency | None:
+    """Return a `poll()` table's recency, for its `m.streams()` row and its description.
+
+    Args:
+        spec: The dataset.
+        delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
+
+    Returns:
+        None for data of no single subscription (`DatasetSpec.current_subscription`);
+        `UNKNOWN` when its subscription is listed (REST serves what the plan serves, unchecked);
+        `REALTIME` otherwise (a page Massive labels `DELAYED` fails the table).
+    """
+    subscription = spec.current_subscription
+    if subscription is None:
+        return None
+    return Recency.UNKNOWN if subscription in delayed_subscriptions else Recency.REALTIME
 
 
 def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
@@ -1961,7 +2005,7 @@ def _charge(spec: DatasetSpec, template: str, call: Call) -> tuple[str, str]:
         The bucket's name and the reason, `"a reference endpoint"` or `"its data's class"`,
         which `_request_bucket` logs once per request.
     """
-    if _REFERENCE_PATH.match(template):
+    if REFERENCE_PATH.match(template):
         return OTHER, "a reference endpoint"
     classes = map(symbol_class, own_symbols(spec, call.symbol, call.query))
     return bucket_of(subscription_of(day_class(spec, classes))), "its data's class"

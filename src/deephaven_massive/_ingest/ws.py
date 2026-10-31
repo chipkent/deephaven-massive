@@ -13,12 +13,8 @@ one connection, and the group that shares connections between sessions, to
 everything else belongs here:
 
 - **Refusals.** A refused topic fails exactly the streams that want it, with
-  `EntitlementError`; nothing tears down the connection. A refusal that names no topic
-  applies to the whole step in flight, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown and that has never had a topic acknowledged:
-  then the decision is recorded with the REST
-  transport (`RestTransport.record_verdict`), the connection's streams move to the `delayed.`
-  host, and they keep running.
+  `EntitlementError`; nothing tears down the connection, and no connection moves to another
+  host. A refusal that names no topic applies to the whole step in flight.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
   them. A row whose key cannot be read is dropped and counted, and fails no stream; a value
   that does not fit is null. A connection logs one WARNING per outage, and one when it goes
@@ -35,14 +31,13 @@ everything else belongs here:
   and two sessions with connections of their own would knock each other off. A connection is
   leased per stream, and remembers which sessions use it, so each session's `m.connections()`
   shows it, each stream reports to its own session, and a session's close takes only its own
-  streams away. The options cap, refusals, fatal failures, and the real-time verdict are the
+  streams away. The options cap, refusals, and fatal failures are the
   connection's, so they act on every session's streams on it.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself
   and leaves the registry. A fatal failure (a rejected key, a handshake error retrying cannot
   fix) fails every stream on it, a stream opening at that moment included. `m.close()` removes
   the session's streams from their connections, closes every connection no other session
-  leases, and waits a bounded time for its threads; a connection the real-time verdict is
-  moving closes itself once it has handed its streams over. While a connection waits for a slot
+  leases, and waits a bounded time for its threads. While a connection waits for a slot
   (`WAITING_SLOT`), each of its streams says so in its `Error`.
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
@@ -234,9 +229,7 @@ class WsConnections:
     Example:
         ::
 
-            connections = WsConnections(
-                core, resolve_host=rest.resolve_host, record_verdict=rest.record_verdict
-            )
+            connections = WsConnections(core, resolve_host=rest.resolve_host)
             handle = connections.open_stream(core, spec, request, channel="T", stream_id=7)
     """
 
@@ -245,7 +238,6 @@ class WsConnections:
         core: SessionCore,
         *,
         resolve_host: Callable[[AssetClass, ChannelFamily], HostDecision],
-        record_verdict: Callable[[AssetClass, ChannelFamily, HostDecision], None],
         fetch_rows: RowFetch,
         crypto_pair: Callable[[str], tuple[str, str]],
         client_factory: ClientFactory | None = None,
@@ -256,8 +248,6 @@ class WsConnections:
             core: The session's core, held weakly.
             resolve_host: Decides the host of a (class, family), once per session; the REST
                 transport's `resolve_host`, which may make one REST request.
-            record_verdict: Replaces the cached decision of a (class, family) with the one the
-                server's real-time verdict implies; the REST transport's `record_verdict`.
             fetch_rows: Returns every row of a REST path for a query; the REST transport's
                 `fetch_rows`, through which the group's futures schedule calendar reads while
                 the session is open.
@@ -272,7 +262,6 @@ class WsConnections:
         self._label = core.label
         self._exec_ctx = core.exec_ctx  # for the closing thread's lock check
         self._resolve = resolve_host
-        self.record_verdict = record_verdict
         self.fetch_rows = fetch_rows
         self._crypto_pair = crypto_pair
         # The futures schedule calendar reads the paths of the futures reference datasets.
@@ -289,8 +278,6 @@ class WsConnections:
         self._mine: set[int] = set()
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
-        # The group's verdicts this session has recorded with its REST transport.
-        self.verdicts_recorded: set[tuple[AssetClass, ChannelFamily]] = set()
         # One worker, started on the first crypto watchlist change: a pair is looked up off
         # the update-graph thread, and no change of a stream overtakes another.
         self._lookups: Final = ThreadPoolExecutor(1, f"{core.thread_prefix} crypto pairs")
@@ -356,15 +343,9 @@ class WsConnections:
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
-        decision = self._decide(asset_class, spec.family)
-        connection, created, decision = self._lease(
-            core, spec, decision, stream_id=stream_id, topics=topics
-        )
+        decision = self._resolve(asset_class, spec.family)
+        connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
-            with self._lock:
-                verdict = self.group.verdicts.get((asset_class, spec.family))
-            if verdict is decision:  # the group's verdict decided the host
-                self._take_verdict(asset_class, spec.family, verdict)
             if asset_class is AssetClass.FUTURES and wanted:
                 self._load_schedules(wanted, stream_id=stream_id)
             if created:
@@ -377,6 +358,7 @@ class WsConnections:
                 stream_id=stream_id,
                 host=decision.host,
                 evidence=decision.evidence,
+                recency=decision.recency,
                 path=connection.path,
                 # Held from Java until the JVM collects the publisher or the listener: weakly,
                 # so a finished session is freed without waiting for a JVM collection.
@@ -429,50 +411,6 @@ class WsConnections:
                 bounded_list(sorted(contracts)),
             )
 
-    def _decide(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        """Return the host of a (class, family): the group's verdict, or the session's decision.
-
-        A real-time verdict any session of the group received settles the host for all of
-        them, without a request: the session records it with its REST transport the first
-        time it leases a connection by it (`_take_verdict`), so its later decisions agree.
-        Otherwise the session's own decision stands (`resolve_host`, which may make one REST
-        request).
-
-        Args:
-            asset_class: The class.
-            family: The channel family.
-
-        Returns:
-            The host decision.
-        """
-        with self._lock:
-            verdict = self.group.verdicts.get((asset_class, family))
-        if verdict is None:
-            return self._resolve(asset_class, family)
-        return verdict
-
-    def _take_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, verdict: HostDecision
-    ) -> None:
-        """Record a group's verdict with the session's REST transport, the first time only.
-
-        It counts as recorded only once `record_verdict` has returned, so one that raised is
-        tried again by the next stream of the class.
-
-        Args:
-            asset_class: The class.
-            family: The channel family.
-            verdict: The group's verdict.
-        """
-        key = (asset_class, family)
-        with self._lock:
-            done = key in self.verdicts_recorded
-        if done:
-            return
-        self.record_verdict(asset_class, family, verdict)
-        with self._lock:
-            self.verdicts_recorded.add(key)
-
     def _plan(self, core: SessionCore, spec: DatasetSpec, channel: str) -> ChannelPlan:
         """Return the cached plan of a (dataset, channel), building it on first use.
 
@@ -502,16 +440,14 @@ class WsConnections:
         *,
         stream_id: int,
         topics: frozenset[str],
-    ) -> tuple[Connection, bool, HostDecision]:
+    ) -> tuple[Connection, bool]:
         """Find or create the group's connection of a stream and lease it for the stream.
 
         A new connection is created outside the lock (its client loads TLS settings) and
         registered under it. The registry is read again under the lock, and as often as it
         takes: a connection found before may have been retired meanwhile, and one registered by
         another thread (of this session or another) meanwhile wins, the new one then closing
-        unused. The group's verdicts are read again there too: a verdict that arrived after
-        the host was decided replaces the decision, so the stream never leases the connection
-        the verdict moved away from. The session becomes one of the connection's users and
+        unused. The session becomes one of the connection's users and
         shows its row.
 
         Args:
@@ -523,9 +459,7 @@ class WsConnections:
             topics: Its static topics, for the options cap.
 
         Returns:
-            `(connection, created, decision)`: created is True when the caller must start it,
-            and the decision is the one the connection serves (the group's verdict, if one
-            arrived meanwhile).
+            `(connection, created)`: created is True when the caller must start it.
 
         Static topics that would cross the options cap raise the `ValueError` of `_check_cap`,
         and a closed session the `MassiveError` of `_check_open`.
@@ -534,16 +468,10 @@ class WsConnections:
         asset_class = cast("AssetClass", spec.asset_class)
         url = f"wss://{decision.host}/{asset_class.value}"
         candidate: Connection | None = None
-        stale: Connection | None = None
         try:
             while True:
                 with self._lock:
                     self._check_open()
-                    verdict = group.verdicts.get((asset_class, spec.family))
-                    if verdict is not None and verdict is not decision:
-                        decision = verdict
-                        url = f"wss://{decision.host}/{asset_class.value}"
-                        stale, candidate = candidate, None  # built for the old host
                     connection = group.connections.get(url)
                     self._check_cap(spec, connection, topics)
                     created = connection is None and candidate is not None
@@ -560,9 +488,6 @@ class WsConnections:
                         group.owners[stream_id] = self
                         self._mine.add(stream_id)
                         break
-                if stale is not None:
-                    stale.close()
-                    stale = None
                 futures = asset_class is AssetClass.FUTURES
                 candidate = Connection(
                     group,
@@ -574,10 +499,9 @@ class WsConnections:
                     sessions=self.futures_calendar() if futures else None,
                 )
         finally:
-            for unused in (candidate, stale):  # lost the race, refused, or outdated
-                if unused is not None:
-                    unused.close()
-        return connection, created, decision
+            if candidate is not None:  # lost the race, or refused
+                candidate.close()
+        return connection, created
 
     def _check_open(self) -> None:
         """Refuse a stream once the session's side is closed; the group's lock is held.
@@ -627,10 +551,10 @@ class WsConnections:
     def _attach(self, stream: ConnectionStream) -> None:
         """Route a new stream's rows and hand the stream to its connection's loop thread.
 
-        The stream goes to the connection that holds its lease now (the verdict may have moved
-        it). Routing and the check for the connection's failure happen in one section of the
-        group's lock, the one the connection's `_failed` takes, so a connection that failed
-        meanwhile never leaves the stream running: the stream fails here, on the caller thread.
+        The stream goes to the connection that holds its lease. Routing and the check for the
+        connection's failure happen in one section of the group's lock, the one the connection's
+        `_failed` takes, so a connection that failed meanwhile never leaves the stream running:
+        the stream fails here, on the caller thread.
         A stream whose lease is gone (the session closed) is left as it is.
 
         Args:
@@ -648,29 +572,22 @@ class WsConnections:
     def _abandon(self, connection: Connection, stream_id: int) -> None:
         """Return the lease of a stream whose open failed, and let its connection go idle.
 
-        Idempotent: the shutdown callback may already have returned the lease. The lease is
-        returned wherever it is now: the verdict may have moved it to a successor while the
-        stream opened.
+        Idempotent: the shutdown callback may already have returned the lease.
 
         Args:
             connection: The connection the stream leased.
             stream_id: The stream.
         """
         with self._lock:
-            current = self._forget(stream_id)
-        touched = {connection} if current is None else {connection, current}
-        for each in touched:
-            each.flusher.routes.remove(stream_id)
-            each.post(each.check_idle)
+            self._forget(stream_id)
+        connection.flusher.routes.remove(stream_id)
+        connection.post(connection.check_idle)
 
     def _forget(self, stream_id: int) -> Connection | None:
         """Drop a stream's lease from the group; the group's lock is held. Idempotent.
 
-        The connection that held the lease also stops awaiting the stream and stops counting
-        its topics against the options cap, since a stream with no lease is never adopted.
-        This is what clears a successor when a verdict moved the stream and the old connection
-        failed before its hand-over ran: the failure fails the stream, the stream's shutdown
-        returns its lease here, and the hand-over then finds no stream to move.
+        The connection that held the lease also stops counting the stream's topics against the
+        options cap while it was still opening.
 
         Args:
             stream_id: The stream; stream ids are unique in the process.
@@ -685,7 +602,7 @@ class WsConnections:
         del group.streams[stream_id]
         del group.owners[stream_id]
         self._mine.discard(stream_id)
-        current.stop_awaiting((stream_id,))
+        current.cap_pending.pop(stream_id, None)
         current.give(self)
         return current
 
@@ -870,18 +787,6 @@ class WsConnections:
         """
         return self._row_owners.get((connection.asset_class, family)) is connection
 
-    def show_row(
-        self, asset_class: AssetClass, family: ChannelFamily, connection: Connection
-    ) -> None:
-        """Make a connection the one whose row the session shows for a key; lock held.
-
-        Args:
-            asset_class: The class.
-            family: The family.
-            connection: The connection, such as the successor of a moved one.
-        """
-        self._row_owners[asset_class, family] = connection
-
     # --- closing -------------------------------------------------------------------------------
 
     def close(self) -> None:
@@ -898,9 +803,6 @@ class WsConnections:
         unused connections are closed (which interrupts a backoff wait at once) and each is
         joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
         A connection whose loop has ended keeps no stream (`Connection._on_state`).
-        A connection the server's real-time verdict is moving, between the move and its
-        hand-over, is neither closed nor joined here: it is out of the registry and its leases
-        are on its successor, and its hand-over closes it (`Connection.hand_over`).
         Last, the session leaves the group.
 
         A closing thread that holds the update graph's lock (a console command) joins nothing,
@@ -958,5 +860,4 @@ class WsConnections:
             closing.append(connection)
             if group.connections.get(connection.url) is connection:
                 del group.connections[connection.url]
-            connection.retired = True
         return mine, closing

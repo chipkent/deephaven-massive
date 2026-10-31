@@ -5,12 +5,11 @@ authentication, frame decoding, reconnecting with backoff), its `Subscriptions` 
 subscription protocol), its flush thread (`Flusher`), and the streams it carries
 (`ConnectionStream`). It owns everything that happens on one connection:
 
-- **Refusals and failures.** A refused topic fails exactly the streams that want it; a
-  refusal of a whole step fails the step, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown and that has never had a topic
-  acknowledged, which moves the connection's streams to the `delayed.` host
-  (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
-  rejected key, a handshake error retrying cannot fix) fails every stream on it.
+- **Refusals and failures.** A refused topic fails exactly the streams that want it, and a
+  refusal of a whole step fails the step's streams, with an `EntitlementError` that quotes
+  Massive and names the fix for the connection's feed (`_refused`); a connection never moves
+  to another host. A fatal failure (a rejected key, a handshake error retrying cannot fix)
+  fails every stream on it.
 - **Rows, drift, and its row.** Rows go to the flush thread; drift, and the rows the client
   dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
   handed to the flush thread, which logs them and counts the drops; a dropped row fails no
@@ -54,11 +53,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
+from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
+from deephaven_massive._enums import AssetClass, ChannelFamily, subscription_of
 from deephaven_massive._errors import (
-    LIBRARY_BUG,
     AuthenticationError,
     EntitlementError,
     MassiveError,
@@ -77,7 +76,6 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
-    StatusKind,
     Transport,
     WireAuthError,
     WsState,
@@ -90,11 +88,10 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
 )
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
-from deephaven_massive._tables.transports import HostDecision
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Collection, Hashable, Iterable, Sequence
+    from collections.abc import Callable, Collection, Hashable, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -103,6 +100,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Reject, Source, Status, WireError
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
+    from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
     "CONNECTION_SETTINGS",
@@ -313,13 +311,12 @@ class Connection:
     """A connection to one `wss://<host>/<cluster>`, its flush thread, and its streams.
 
     Created by a `WsConnections` for its `ConnectionGroup` (outside every lock: creating the
-    client loads TLS settings) and registered under the group's lock; started by its creator,
-    or after a delay when it replaces a connection the server's real-time verdict moved. The
-    sessions of the group share it: `users` counts each session's leases, and each stream
+    client loads TLS settings) and registered under the group's lock; started by its creator.
+    The sessions of the group share it: `users` counts each session's leases, and each stream
     carries its own session. Its loop-thread state (the `Subscriptions`, the streams, the
     diagnostics row) is touched only by the client's loop thread, which runs the callbacks below
-    and the work other threads `post`. `families`, `leases`, `users`, `retired`, `failure`,
-    `awaiting`, and the options-cap fields are guarded by the group's lock. `close()` and
+    and the work other threads `post`. `families`, `leases`, `users`, `failure`, and the
+    options-cap fields are guarded by the group's lock. `close()` and
     `join()` may be called from any thread.
 
     It writes its diagnostics row (and one per further family it serves) into the
@@ -344,7 +341,7 @@ class Connection:
         """Create the connection, its client, and its flush thread; nothing starts yet.
 
         Args:
-            group: The group that owns it (its settings, registry, and the verdict).
+            group: The group that owns it (its settings and registry).
             exec_ctx: The execution context of the session creating it, which its flush
                 thread enters; the group's sessions share one update graph.
             url: The endpoint, `wss://<host>/<cluster>`.
@@ -366,9 +363,7 @@ class Connection:
         self.families: set[ChannelFamily] = {family}
         self.leases = 0
         self.users: dict[WsConnections, int] = {}
-        self.retired = False
         self.failure: MassiveError | None = None
-        self.awaiting: set[int] = set()
         self.cap_admitted: frozenset[str] = frozenset()
         self.cap_pending: dict[int, frozenset[str]] = {}
         # The row last written for each family, for `show_closed`.
@@ -377,8 +372,6 @@ class Connection:
         self._start_lock = threading.Lock()
         self._started = False
         self._closing = False
-        self._timer: threading.Timer | None = None
-        self._start_name = f"{group.label} start {decision.host}{self.path}"
         self.sessions: Final = sessions
         self.flusher: Final = Flusher(
             exec_ctx,
@@ -405,15 +398,12 @@ class Connection:
             ack_timeout=group.ack_timeout,
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
-            on_step_refused=self._step_refused,
             on_change=self._changed,
         )
         # Loop-confined from here on.
         self._streams: dict[int, ConnectionStream] = {}
-        self._early: dict[int, list[tuple[Callable[..., None], tuple[object, ...]]]] = {}
         self._required: dict[str, frozenset[str]] = {}
         self._idle: Timer | None = None
-        self._successor: Connection | None = None
         # Each stream's notes as its `Error` shows them: its deferred options topics and its
         # topics Massive has not acknowledged; a stream with neither has no entry.
         self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
@@ -427,10 +417,7 @@ class Connection:
         self._summary: Timer | None = None
         self._traffic = _Traffic()
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
-        self._stalled = self._ended = self._moving = False
-        # Set by the first acknowledgement, in any generation: the host serves this key, so a
-        # later real-time refusal never moves the connection to delayed data.
-        self._served = False
+        self._stalled = self._ended = False
         self._episodes = _Episodes()
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
@@ -471,38 +458,14 @@ class Connection:
 
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
-    def start(self, delay: float = 0.0) -> None:
-        """Start the flush thread and the client, now or after `delay` seconds.
-
-        Does nothing once `close()` was called, or once started. The delayed start runs on a
-        daemon timer thread, which `close()` cancels.
-
-        Args:
-            delay: Seconds to wait first; the backoff when the connection replaces one the
-                server's real-time verdict moved.
-        """
+    def start(self) -> None:
+        """Start the flush thread and the client. Does nothing once closed or started."""
         with self._start_lock:
-            if self._closing or self._started or self._timer is not None:
+            if self._closing or self._started:
                 return
-            if delay <= 0:
-                self._start_locked()
-                return
-            self._timer = threading.Timer(delay, self._start_later)
-            self._timer.name = self._start_name
-            self._timer.daemon = True
-            self._timer.start()
-
-    def _start_later(self) -> None:
-        """The delayed start, on the timer thread."""
-        with self._start_lock:
-            if not self._closing and not self._started:
-                self._start_locked()
-
-    def _start_locked(self) -> None:
-        """Start both threads; the start lock is held."""
-        self._started = True
-        self.flusher.start()
-        self._client.start()
+            self._started = True
+            self.flusher.start()
+            self._client.start()
 
     def close(self, *, final_flush: bool = False) -> None:
         """Close the client and stop the flush thread. Any thread; never waits; idempotent.
@@ -517,13 +480,10 @@ class Connection:
         """
         with self._start_lock:
             self._closing = True
-            timer, self._timer = self._timer, None
             self._client.close()
             if not self._started:
                 self._started = True
                 self._client.start()
-        if timer is not None:
-            timer.cancel()
         self.flusher.stop(final=final_flush)
 
     def show_closed(self, owner: WsConnections) -> None:
@@ -634,7 +594,7 @@ class Connection:
             self._idle = None
 
     def release_stream(self, stream_id: int) -> None:
-        """Release a shut-down stream's topics and routing; forward it if the stream moved.
+        """Release a shut-down stream's topics and routing.
 
         Args:
             stream_id: The stream whose blink table shut down.
@@ -689,74 +649,35 @@ class Connection:
         self._after_change()
 
     def _unknown(
-        self, stream_id: int, callback: Callable[..., None], args: tuple[object, ...]
+        self, stream_id: int, callback: Callable[..., None], _args: tuple[object, ...]
     ) -> None:
-        """Handle a call for a stream this connection does not hold.
+        """Drop a call for a stream this connection does not hold, and maybe go idle.
 
-        A stream that moved away is forwarded to the connection that took it; one that is
-        moving here but not adopted yet keeps the call until `adopt` applies it. Any other (a
-        stream whose open failed before it was attached, or one that was moving here when it
-        shut down) is dropped, with the calls kept for it, and the connection may go idle.
+        Such a stream's open failed before it was attached, so it may have been the last
+        lease.
 
         Args:
             stream_id: The stream.
-            callback: The call that found no stream, a loop-thread method of this connection.
-            args: Its arguments after the stream id.
+            callback: The call that found no stream, for the log.
+            _args: Its arguments after the stream id, unused.
         """
-        if self._successor is not None:
-            name = getattr(callback, "__name__", "")
-            self._successor.post(getattr(self._successor, name), stream_id, *args)
-            return
-        with self._lock:
-            awaited = stream_id in self.awaiting
-        if awaited:
-            self._early.setdefault(stream_id, []).append((callback, args))
-        else:
-            # A stream that never arrived may have been the last lease, and calls kept for it
-            # while it was still awaited are no longer needed.
-            logger.debug(
-                "%s: stream %d is neither held nor awaited here; %s is dropped",
-                self.url,
-                stream_id,
-                getattr(callback, "__name__", callback),
-            )
-            self.check_idle()
-
-    def stop_awaiting(self, stream_ids: Iterable[int]) -> None:
-        """Stop awaiting streams and stop counting them against the options cap; lock held.
-
-        Called with the group's lock held, for streams that will never be adopted here: their
-        lease was returned, or the old connection's loop ended before it could hand them over.
-        The caller posts `check_idle` (or a release follows) so the calls kept for them go too.
-
-        Args:
-            stream_ids: The streams.
-        """
-        for stream_id in stream_ids:
-            self.awaiting.discard(stream_id)
-            self.cap_pending.pop(stream_id, None)
+        logger.debug(
+            "%s: stream %d is not held here; %s is dropped",
+            self.url,
+            stream_id,
+            getattr(callback, "__name__", callback),
+        )
+        self.check_idle()
 
     def check_idle(self) -> None:
-        """Arm the idle close if the connection has no stream left.
-
-        Also forgets the calls kept for streams it no longer awaits (a move whose hand-over
-        never came).
-        """
-        self._drop_unawaited()
+        """Arm the idle close if the connection has no stream left."""
         self._after_change()
-
-    def _drop_unawaited(self) -> None:
-        """Forget the calls kept for streams this connection no longer awaits."""
-        with self._lock:
-            awaited = set(self.awaiting)
-        for stream_id in [s for s in self._early if s not in awaited]:
-            del self._early[stream_id]
 
     def _after_change(self, *, opened: Collection[int] = ()) -> None:
         """After a change of streams or topics: reconcile, publish the cap, maybe go idle.
 
         Args:
-            opened: The streams just added (or adopted), whose topics now count against the
+            opened: The streams just added, whose topics now count against the
                 options cap through the admitted set instead of as pending.
         """
         if self._ended:  # the client has ended: nothing to reconcile or to close
@@ -773,91 +694,6 @@ class Connection:
             return
         logger.info("closing %s: no stream for %.0f s", self.url, IDLE_GRACE)
         self.close()
-
-    def hand_over(self, successor: Connection) -> None:
-        """Move every stream to `successor` and close. Loop thread.
-
-        Called when the server's real-time verdict moves the connection to another host. Under
-        the group's lock, the streams are routed on `successor` too (or, if it has already
-        failed, they fail here); their topics reach its loop with `adopt`; a release or symbol
-        change that still arrives here is forwarded. The streams stay routed on this
-        connection as well, until its flush thread ends: its last flush applies the failures it
-        has queued and publishes the rows it has buffered (a stream's publish lock keeps the two
-        flush threads from interleaving on one stream), and then the thread clears its routes,
-        so this connection holds none of the moved streams once it has ended.
-
-        Only the streams that still hold a lease go there (the move pointed each lease at
-        `successor`). A stream whose lease is gone (its blink table shut down, or its session
-        closed, after or before the move) stays behind: it stops being routed here, and its
-        topics are never subscribed on `successor`, which stopped awaiting it when the lease
-        was returned (`WsConnections._forget`), so a closed session's stream cannot keep the
-        successor open. A lease returned after this choice is caught by `adopt`. The
-        connection closes even if the hand-over raises, since a connection out of the registry
-        has no other close.
-
-        Args:
-            successor: The connection that takes over.
-        """
-        try:
-            streams = list(self._streams.values())
-            self._streams.clear()
-            self._successor = successor
-            with self._lock:
-                leased = self._group.streams
-                moving = [s for s in streams if s.stream_id in leased]
-                gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
-                failure = successor.failure
-                if failure is None:
-                    for stream in moving:
-                        successor.flusher.routes.add(stream.channel, stream.sink)
-            for stream_id in gone:
-                self.flusher.routes.remove(stream_id)
-            if failure is not None:
-                self.flusher.fail([s.stream_id for s in moving], failure)
-            else:
-                successor.post(successor.adopt, moving)
-            self.subscriptions.ended()
-        finally:  # the connection ends even if the hand-over raised: nothing else closes it
-            self.close(final_flush=True)
-
-    def adopt(self, streams: list[ConnectionStream]) -> None:
-        """Take over the streams of a connection the verdict moved, and the calls they missed.
-
-        Only the streams whose lease this connection still holds are taken. A stream whose
-        lease was returned after the hand-over chose it (its blink table shut down) is left
-        out and its route removed: its release may have reached this loop first and been
-        dropped, so registering it would keep its topics subscribed with nothing to release
-        them.
-
-        Args:
-            streams: The streams, with their topics.
-        """
-        with self._lock:
-            self.awaiting.difference_update(s.stream_id for s in streams)
-            leased = self._group.streams
-            gone = [s.stream_id for s in streams if leased.get(s.stream_id) is not self]
-        if gone:
-            logger.debug(
-                "%s: streams %s shut down during their hand-over; they are not adopted",
-                self.url,
-                gone,
-            )
-            for stream_id in gone:
-                self.flusher.routes.remove(stream_id)
-            streams = [s for s in streams if s.stream_id not in gone]
-        if self._ended:  # it failed or closed first; its failure already failed the routes
-            return
-        for stream in streams:
-            self._register_stream(stream)
-            # Its rows so far came through the old connection: the next summary counts from here.
-            self._traffic.published[stream.stream_id] = stream.sink.rows_published
-        update = StreamUpdate(host=self.decision.host, path=self.path)
-        self._update_streams({s.stream_id: update for s in streams})
-        for stream in streams:
-            for callback, args in self._early.pop(stream.stream_id, ()):
-                callback(stream.stream_id, *args)
-        self._drop_unawaited()
-        self._after_change(opened=[s.stream_id for s in streams])
 
     # --- loop thread: client callbacks ---------------------------------------------------------
 
@@ -898,8 +734,6 @@ class Connection:
         """
         self._episodes.last_frame_at = time.time_ns()
         if generation == self.subscriptions.generation:
-            if status.kind is StatusKind.ACK:
-                self._served = True
             self.subscriptions.status(status)
 
     def _on_data(
@@ -1076,7 +910,6 @@ class Connection:
             # it lets them go now. A call posted later is dropped, or ignored (`_ended`).
             self._ended = True
             self._streams.clear()
-            self._early.clear()
             self._notes_shown.clear()
 
     def _failed(self, error: WireError) -> None:
@@ -1120,67 +953,62 @@ class Connection:
     # --- loop thread: failures and drift -------------------------------------------------------
 
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
-        """Fail the streams of refused topics with `EntitlementError`.
+        """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
         Args:
             topics: The refused topics.
             message: The server's message, verbatim.
         """
         refused = set(topics)
-        hint = f"MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] chooses the host"
-        if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
-            hint += " (index values may need business.massive.com)"
         error = EntitlementError(
             f"the WebSocket server {self.decision.host}{self.path} refused the subscription to "
-            f"{', '.join(sorted(refused))}; Massive said: {message}; the "
-            f"{subscription_of(self.asset_class)} subscription's plan may not include this data "
-            f"on this host; {hint}"
+            f"{', '.join(sorted(refused))}; Massive said: {message}; "
+            f"{self._refusal_hint(refused)}"
         )
         self._last_error = str(error)
         ids = [s.stream_id for s in self._streams.values() if s.topics & refused]
         self.flusher.fail(ids, error)
 
-    def _step_refused(self, status: Status) -> bool:
-        """Decide whether a refusal of a whole step is the server's real-time verdict.
-
-        The verdict can arrive more than once for one step: a step of more than 1,000 topics
-        goes out in several subscribe frames, and the server refuses each of them. The first
-        verdict starts the move; each later one finds the connection already moving and is
-        handled by that move too, so it never fails the streams being moved.
+    def _refusal_hint(self, refused: set[str]) -> str:
+        """Return what a refusal's message says to do, by the connection's feed.
 
         Args:
-            status: A refusal naming no topic, of a step none of whose topics was resolved.
-
-        A connection that has ever had a topic acknowledged is never moved: the real-time host
-        serves this key, so a later real-time refusal is an `EntitlementError` for that step's
-        streams only, and no working stream jumps to 15-minute-old data.
+            refused: The refused topics.
 
         Returns:
-            True when the connection is moving to the `delayed.` host (the streams keep
-            running); False when the refusal fails the step's streams.
+            On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed,
+            that the subscription is listed in `delayed_subscriptions` and that removing it
+            uses the real-time feed; on the real-time feed, how to use Massive's delayed feed
+            instead; and for index values, that they may need `business.massive.com`.
         """
-        if self._moving:
-            return True
-        decision = self.decision
-        with self._lock:
-            tick = ChannelFamily.TICK in self.families
-        if (
-            not status.realtime_verdict
-            or decision.recency is not Recency.UNKNOWN
-            or not tick
-            or not decision.host.startswith("socket.")
-        ):
-            return False
-        if self._served:
-            logger.info(
-                "%s: a real-time refusal after acknowledgements on this host (%s); failing the "
-                "step's streams rather than moving the connection to delayed data",
-                self.url,
-                status.message,
+        subscription = subscription_of(self.asset_class)
+        if self.decision.evidence == "ws_hosts":
+            hint = (
+                f"MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] pins this host; "
+                "the plan may not include this data here"
             )
-            return False
-        self._moving = self._group.reroute(self, status.message)
-        return self._moving
+        elif self.decision.host == DELAYED_HOST:
+            hint = (
+                f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}, "
+                f"so its streams use Massive's delayed feed; whether Massive serves it to "
+                f"every plan is unverified; to use the real-time feed, remove "
+                f"dm.Subscription.{subscription.name} from delayed_subscriptions"
+            )
+        elif self.decision.host == REALTIME_HOST:
+            hint = (
+                f"the {subscription} subscription's plan may not include this data in real "
+                f"time; if its data is delayed, use Massive's delayed {subscription} feed: "
+                f"{delayed_fix(subscription)}"
+            )
+        else:
+            hint = (
+                f"the {subscription} subscription's plan may not include this data on this "
+                f"host; MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] chooses the "
+                "host"
+            )
+        if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
+            hint += " (index values may need business.massive.com)"
+        return hint
 
     def _record_drift(
         self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
@@ -1552,9 +1380,7 @@ class ConnectionGroup:
     stream (`attach`) and detaches when the session closes or is freed (`detach`); the group
     leaves the process's registry with its last session. The group owns what belongs to the
     connections rather than to a session: the connections by URL, the connection and the
-    session of each stream, the crypto pairs its sessions looked up, and the server's real-time
-    verdict (`reroute`), which moves a connection with every session's streams and is kept by
-    (class, family) for every session's later streams.
+    session of each stream, and the crypto pairs its sessions looked up.
     It holds no session core. Its lock, a leaf lock (`lock`), guards all of it and each
     connection's leases, users, failure, and options-cap bookkeeping; no Deephaven call,
     network call, or wait happens under it, and a session's `registry_lock` is never taken
@@ -1577,21 +1403,17 @@ class ConnectionGroup:
         factory: ClientFactory,
         ack_timeout: float,
         flush_interval: float,
-        reconnect_backoff: float,
-        pinned: frozenset[AssetClass],
     ) -> None:
         """Create an empty group; `attach` creates them.
 
         Args:
             key: Its key in the process's registry: the sharing key of `attach`.
             label: Its label, `"massive group #<n>"`, which starts the name of every thread its
-                connections run (their clients, flush threads, delayed starts, and moves), since
+                connections run (their clients and flush threads), since
                 they serve several sessions.
             factory: Creates each connection's client.
             ack_timeout: `MassiveConfig.ack_timeout` of its sessions.
             flush_interval: `MassiveConfig.flush_interval` of its sessions.
-            reconnect_backoff: `MassiveConfig.reconnect_backoff` of its sessions.
-            pinned: The classes whose host its sessions pin with `MassiveConfig.ws_hosts`.
         """
         self.key: Final = key
         self.label: Final = label
@@ -1599,8 +1421,6 @@ class ConnectionGroup:
         self.factory: Final = factory
         self.ack_timeout: Final = ack_timeout
         self.flush_interval: Final = flush_interval
-        self.reconnect_backoff = reconnect_backoff
-        self._pinned = pinned
         # Guarded by lock.
         self.connections: dict[str, Connection] = {}
         self.streams: dict[int, Connection] = {}
@@ -1610,10 +1430,6 @@ class ConnectionGroup:
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
         self.pairs: dict[str, tuple[str, str]] = {}
-        # The server's real-time verdicts by (class, family): the key's entitlement, which every
-        # session of the group shares, so a session that never leased the moved connection
-        # uses the delayed host too (`WsConnections._decide`).
-        self.verdicts: dict[tuple[AssetClass, ChannelFamily], HostDecision] = {}
 
     @classmethod
     def attach(
@@ -1657,8 +1473,6 @@ class ConnectionGroup:
                     factory=factory,
                     ack_timeout=config.ack_timeout,
                     flush_interval=config.flush_interval,
-                    reconnect_backoff=config.reconnect_backoff,
-                    pinned=frozenset(config.ws_hosts),
                 )
             with group.lock:
                 group.sessions.add(owner)
@@ -1767,168 +1581,4 @@ class ConnectionGroup:
                 return False
             if self.connections.get(connection.url) is connection:
                 del self.connections[connection.url]
-            connection.retired = True
         return True
-
-    def reroute(self, connection: Connection, message: str) -> bool:
-        """Accept the server's real-time verdict on a connection: move it to the `delayed.` host.
-
-        Called on the connection's loop thread. Never for a host pinned by
-        `MassiveConfig.ws_hosts`, never for a connection that is closing, and once per
-        connection; the decision is recorded with the REST transport of every session on the
-        connection, so their later streams of the class and family resolve to the delayed host
-        and a verdict cannot repeat for them. The move itself runs on a short-lived thread,
-        because creating the new connection's client loads TLS settings, which the loop thread
-        must not wait for (`_move`).
-
-        Args:
-            connection: The connection the verdict arrived on.
-            message: The server's message.
-
-        Returns:
-            True when the connection is moving; False when the verdict fails the step's
-            streams instead.
-        """
-        if connection.asset_class in self._pinned:
-            return False
-        with self.lock:
-            if connection.closing or connection.retired:
-                return False
-            connection.retired = True  # one verdict per connection
-        decision = HostDecision(
-            "delayed." + connection.decision.host.removeprefix("socket."),
-            Recency.DELAYED,
-            f"server verdict: {message}",
-        )
-        logger.warning(
-            "%s refused real-time data (%s); moving its streams to %s in %.0f s",
-            connection.url,
-            message,
-            decision.host,
-            self.reconnect_backoff,
-        )
-        mover = threading.Thread(
-            target=self._move,
-            args=(connection, decision),
-            name=f"{self.label} move {connection.decision.host}{connection.path}",
-            daemon=True,
-        )
-        mover.start()
-        return True
-
-    def _move(self, connection: Connection, decision: HostDecision) -> None:
-        """Record the verdict and move a connection's streams to the delayed host's connection.
-
-        Runs on the thread `reroute` starts. Every session on the connection records the
-        verdict, also one that leased the connection while the verdict was being recorded or
-        the successor built (both happen outside the lock): it is recorded once the leases
-        have moved. The successor is the delayed host's connection, created here unless one
-        exists; under the lock, the old connection leaves the registry, every lease moves with
-        its session, each session shows the successor's row, and the successor awaits the
-        moved streams, so a release or watchlist change that reaches it before `adopt` waits
-        there. The successor starts after `reconnect_backoff`; the old connection's loop then
-        hands the streams over.
-
-        Args:
-            connection: The connection the verdict arrived on.
-            decision: The delayed host's decision.
-        """
-        asset_class = connection.asset_class
-        with self.lock:
-            self.verdicts[asset_class, ChannelFamily.TICK] = decision
-            users = self._open_users(connection)
-        self._record_verdict(connection, users, decision)
-        url = f"wss://{decision.host}{connection.path}"
-        candidate = Connection(
-            self,
-            exec_ctx=connection.exec_ctx,
-            url=url,
-            asset_class=asset_class,
-            family=ChannelFamily.TICK,
-            decision=decision,
-            sessions=connection.sessions,
-        )
-        successor: Connection | None = None
-        moved: list[int] = []
-        late: list[WsConnections] = []
-        with self.lock:
-            # Not if the connection is closing or failed, or left the registry meanwhile: its
-            # last session closed, or it failed (its streams fail with it).
-            if (
-                not connection.closing
-                and connection.failure is None
-                and self.connections.get(connection.url) is connection
-            ):
-                # A stream of the class may already have opened the delayed host's connection.
-                successor = self.connections.setdefault(url, candidate)
-                successor.families.add(ChannelFamily.TICK)
-                del self.connections[connection.url]
-                for owner in connection.users:
-                    successor.users.setdefault(owner, 0)
-                    owner.show_row(asset_class, ChannelFamily.TICK, successor)
-                for stream_id, current in list(self.streams.items()):
-                    if current is connection:
-                        owner = self.owners[stream_id]
-                        self.streams[stream_id] = successor
-                        successor.awaiting.add(stream_id)
-                        if asset_class is AssetClass.OPTIONS:
-                            # Counted against the successor's cap until it adopts the stream:
-                            # the old connection's admitted topics include the stream's.
-                            successor.cap_pending[stream_id] = connection.cap_pending.pop(
-                                stream_id, connection.cap_admitted
-                            )
-                        successor.take(owner)
-                        connection.give(owner)
-                        moved.append(stream_id)
-                late = [owner for owner in self._open_users(connection) if owner not in users]
-        self._record_verdict(connection, late, decision)
-        if successor is not candidate:
-            candidate.close()
-        if successor is None:  # the connection closed or failed meanwhile
-            connection.close()
-            return
-        successor.start(delay=self.reconnect_backoff)  # does nothing if it already started
-        if not connection.post(connection.hand_over, successor):
-            # The old loop ended first: its streams were failed there and never arrive.
-            with self.lock:
-                successor.stop_awaiting(moved)
-            successor.post(successor.check_idle)
-
-    @staticmethod
-    def _open_users(connection: Connection) -> list[WsConnections]:
-        """Return the sessions on a connection that are neither closed nor freed; lock held.
-
-        Args:
-            connection: The connection.
-
-        Returns:
-            Those sessions.
-        """
-        return [
-            owner
-            for owner in connection.users
-            if not owner.closed and owner.core() is not None  # a freed one is closing
-        ]
-
-    @staticmethod
-    def _record_verdict(
-        connection: Connection, owners: list[WsConnections], decision: HostDecision
-    ) -> None:
-        """Record the verdict with each of some sessions' REST transports; no lock held.
-
-        Args:
-            connection: The connection the verdict arrived on.
-            owners: The sessions.
-            decision: The delayed host's decision.
-        """
-        key = (connection.asset_class, ChannelFamily.TICK)
-        for owner in owners:
-            try:
-                owner.record_verdict(*key, decision)
-            except Exception:  # the session's next stream of the class records it again
-                logger.exception(
-                    "could not record the real-time verdict for %s. %s", connection.url, LIBRARY_BUG
-                )
-                continue
-            with owner.group.lock:
-                owner.verdicts_recorded.add(key)

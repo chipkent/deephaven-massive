@@ -124,22 +124,27 @@ def test_minute_bars_on_the_host_resolved_for_a_business_key(
 
 
 @pytest.mark.needs("futures:starter")
-@pytest.mark.settles("7")
-def test_which_timeframe_fields_the_futures_snapshot_carries(
+@pytest.mark.settles("7", "69")
+def test_which_recency_labels_the_futures_snapshot_carries(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
-    """Which `timeframe` fields the futures snapshot carries, which the host decision reads.
+    """Which recency labels the futures snapshot carries: its envelope status and timeframes.
 
-    They are in the OpenAPI specification and absent from the documentation page. Records every
-    `timeframe` field of three ES rows. Reading it: present fields can drive the futures host
-    decision; absent ones confirm the library's fallback (`socket.`, recency unknown).
+    The `timeframe` fields are in the OpenAPI specification and absent from the documentation
+    page, so a delayed futures plan is told by the envelope status alone (`DELAYED`). Records
+    the envelope status and every `timeframe` field of three ES rows. Reading it: on a delayed
+    plan (Futures Starter or Developer), a `DELAYED` status confirms that the stream verb and
+    `fetch()` refuse delayed futures data unless futures are listed in
+    `MassiveConfig.delayed_subscriptions`; `OK` means only Massive's refusal on the real-time
+    feed catches a delayed plan.
     """
-    rows = live_rest.get(
+    page = live_rest.get(
         source(Transport.REST, "/futures/v1/snapshot"),
         {},
         {"product_code": "ES", "limit": 3},
         bucket="futures",
-    ).rows
-    for row in rows:
+    )
+    evidence(f"futures snapshot envelope status: {page.status!r}")
+    for row in page.rows:
         evidence(f"futures snapshot {row.get('ticker')}: {_timeframe_fields(row) or 'none'}")
-    assert rows
+    assert page.rows

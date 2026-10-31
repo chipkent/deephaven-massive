@@ -311,6 +311,9 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.rest_basic_subscriptions": (
         "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
     ),
+    "MassiveConfig.__init__.delayed_subscriptions": (
+        "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
+    ),
     "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,

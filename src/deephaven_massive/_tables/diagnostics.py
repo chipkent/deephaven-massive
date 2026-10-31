@@ -247,6 +247,7 @@ STREAMS: Final = Schema(
             ("Transport", _S),
             ("Host", _S),
             ("Path", _S),
+            ("Recency", _S),
             ("RowsPublished", _L),
             ("RequestsPerCycle", _I),
             ("State", _S),
@@ -362,6 +363,12 @@ class StreamRow:
             the table shows its label, `WebSocket`, `REST`, or `flat files`.
         host: The serving host; null for a background read.
         path: The cluster path; null for a background read.
+        recency: Whether the table's data is real-time or delayed: a stream's host's
+            (`REALTIME` or `DELAYED`; `UNKNOWN` on a pinned host the library does not know);
+            for a `poll()` table of a subscription's data, `REALTIME` when the subscription is
+            not in `MassiveConfig.delayed_subscriptions` (a `DELAYED` label fails the table)
+            and `UNKNOWN` when it is (REST serves what the plan serves); null for a `poll()`
+            of data of no single subscription and for a background read.
         rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
@@ -389,6 +396,7 @@ class StreamRow:
     transport: Transport
     host: str | None = None
     path: str | None = None
+    recency: Recency | None = None
     rows_published: int = 0
     requests_per_cycle: int | None = None
     state: StreamState = StreamState.RUNNING
@@ -415,8 +423,6 @@ class StreamUpdate:
             stream reads one channel).
         symbol_count: How many symbols the stream now covers.
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
-        host: The serving host.
-        path: The cluster path.
         error: The transport's warning text (`StreamRow.error`).
         clear_error: True to set the transport's warning back to null; takes precedence over
             `error`.
@@ -432,8 +438,6 @@ class StreamUpdate:
     deferred: int | None = None
     symbol_count: int | None = None
     symbols: str | None = None
-    host: str | None = None
-    path: str | None = None
     error: str | None = None
     clear_error: bool = False
     skipped: str | None = None
@@ -463,8 +467,6 @@ class StreamUpdate:
             deferred=row.deferred if self.deferred is None else self.deferred,
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
             symbols=row.symbols if self.symbols is None else self.symbols,
-            host=row.host if self.host is None else self.host,
-            path=row.path if self.path is None else self.path,
             error=self._error(row),
             skipped=None
             if self.clear_skipped
