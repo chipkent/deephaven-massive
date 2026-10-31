@@ -99,7 +99,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
-"""The day zone of stocks, options, and indices, and the zone of the flat-file cutoff."""
+"""The day zone of stocks, options, and indices."""
 
 DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,

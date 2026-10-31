@@ -221,11 +221,12 @@ class Recorder:
 
 
 class FlatFiles:
-    # Stands in for the flat-file transport: a recorder's table, and the first day whose file
-    # is not published yet (None: every file was read).
-    def __init__(self, recorder: Recorder, unpublished: date | None = None) -> None:
+    # Stands in for the flat-file transport: a recorder's table as one part, and the days the
+    # files could not serve (none: every file was read).
+    def __init__(self, recorder: Recorder, unread: tuple[date, ...] = ()) -> None:
         self.recorder = recorder
-        self.unpublished = unpublished
+        self.unread = unread
+        self.inferred: list[bool] = []
 
     def history(
         self,
@@ -235,10 +236,12 @@ class FlatFiles:
         *,
         dates: Sequence[date],
         call: int,
+        infer_holidays: bool,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
+        self.inferred.append(infer_holidays)
         table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
-        return FlatFileRead(table, self.unpublished)
+        return FlatFileRead(((date.min, table),), table, self.unread)
 
 
 @pytest.fixture
@@ -1573,7 +1576,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     # returns the whole range; FLAT_FILES raises; so does AUTO where REST cannot serve.
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    files = FlatFiles(flat, date(2025, 3, 4))
+    files = FlatFiles(flat, (date(2025, 3, 4),))
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: files)
     many = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(many, HistoryQuery)
@@ -1582,10 +1585,11 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     [(verb, _, request, extra)] = rest.calls
     assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
     assert extra["window"].span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
-    assert (
-        "stocks.trades history: the flat file for 2025-03-04 is not published yet; reading "
-        "2025-03-04 on from REST"
-    ) in caplog.messages
+    assert caplog.messages[-1] == (
+        "stocks.trades history: AUTO read REST because the flat files for 2025-03-04 are missing"
+    )
+    # Holidays are inferred only where no other source can serve the read.
+    assert files.inferred == [False]
     note = (
         "stocks.trades: the flat file for 2025-03-04 is not published yet. Massive usually "
         "publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
@@ -1599,6 +1603,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert isinstance(values, HistoryQuery)
     with pytest.raises(dm.MassiveError) as unserved:
         values.history("2025-03-03", "2025-03-04")
+    assert files.inferred == [False, True, True]
     assert str(unserved.value) == note.replace("stocks.trades", "indices.values") + (
         "Retry later; REST cannot serve this read: indices.values has no REST history"
     )
@@ -1759,10 +1764,25 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
         q.history("2025-03-03", "2025-03-03")
     assert [c[0] for c in rest.calls] == ["history"]
     assert caplog.messages[-1] == (
-        "stocks.trades history: the plan does not include the flat files this read needs (the "
-        "plan does not include these flat files); reading REST instead"
+        "stocks.trades history: AUTO read REST because S3 refused the flat files (the plan does "
+        "not include these flat files)"
+    )
+
+    def rejected(*_: object, **__: object) -> Table:
+        raise dm.AuthenticationError("S3 rejected the flat-file credentials", status=403)
+
+    # A rejection of the S3 credentials is served from REST the same way, and raised as it
+    # came under FLAT_FILES.
+    monkeypatch.setattr(flat, "history", rejected)
+    with pytest.raises(dm.AuthenticationError, match=r"^S3 rejected the flat-file credentials$"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    described = q.history("2025-03-03", "2025-03-03")
+    assert [c[0] for c in rest.calls] == ["history", "history"]
+    assert described.attributes()["TableDescription"].endswith(
+        "Read from REST: AUTO chose flat files, which S3 refused."
     )
     # Where REST cannot serve the read, the refusal is raised as it came.
+    monkeypatch.setattr(flat, "history", refused)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with pytest.raises(dm.EntitlementError, match=r"^the plan does not include these flat files$"):

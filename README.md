@@ -343,17 +343,19 @@ files do not); when `AUTO`'s choice leaves columns empty that the other source f
 library logs a WARNING naming them and the `source=` that fills them. Each result's description,
 shown in the web UI, names its source and why.
 
-With `AUTO`, a day whose flat file is not out yet is read from REST, with every day after it,
-so you get the whole range; those rows may leave empty a column only the files fill. If your
-plan lacks the flat files a read needs, `AUTO` reads REST instead and logs a WARNING. Only when
-REST cannot serve the read either (for example, trades of `dm.ALL`) does the call fail. With
+With `AUTO`, when REST can serve the read, any weekday whose flat file is missing (not out yet,
+or missed) is read from REST, one day at a time, so you get the whole range; those rows may
+leave empty a column only the files fill, and a WARNING and the table's description name the
+days. If your plan lacks the flat files a read needs, or S3 rejects your S3 keys, `AUTO` reads
+REST instead and logs a WARNING. When REST cannot serve the read (for example, trades of
+`dm.ALL`), a missing weekday with a later day's file is taken for a holiday, and one with no
+later file makes the call fail. With
 `source=dm.HistorySource.FLAT_FILES`, a file not out yet or refused is always an error.
 Split-adjusted bars come only from REST, one symbol at a time (every symbol at once only for
 1-day bars), so split-adjusted minute bars of `dm.ALL` have no source: pass `adjusted=False`
 for the as-traded files, or name the symbols.
 
-Flat-file reads skip a missing weekend file silently, and a missing weekday file with a later
-day's file after it (a holiday) with a WARNING. A history read pages through everything in its
+Flat-file reads skip a missing weekend file silently. A history read pages through everything in its
 range, so it takes no `limit`.
 
 <a id="split-adjustment"></a>

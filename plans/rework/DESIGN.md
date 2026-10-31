@@ -3071,15 +3071,17 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     or is empty, fails loudly). Dates read one file per session date and never roll forward:
     a date names its own session exactly. Datetimes read the sessions from that of `start` to
     that of `end - 1 µs`, so an intraday window reads one file and an evening window only the
-    next session's file. When the run of missing files that ends such a range (per venue)
-    holds a weekday (a holiday, alone or followed by a weekend, such as Good Friday and the
-    Saturday after it), the next existing session file within 7 days of the run's first day is
-    read too, because the holiday's hours lie in it; its rows are filtered on `Timestamp` like
-    the others. A run of weekend days after an existing Friday file reads nothing more. When no
-    later session file exists yet (before the current session, within 7 days), the run's first
-    missing weekday may not be published yet, and [section 16](#16-historysourceauto) reads it
-    from REST under `AUTO` or raises: the range's last hours may lie there, so the call never
-    returns a silently short table.
+    next session's file. Under `AUTO` with REST able to serve the request, a missing weekday
+    session is read from REST, whose instants hold a holiday's hours
+    ([section 16](#16-historysourceauto)). Otherwise, when the run of missing files that ends
+    such a range (per venue) holds a weekday (a holiday, alone or followed by a weekend, such
+    as Good Friday and the Saturday after it), the next existing session file within 7 days of
+    the run's first day is read too, because the holiday's hours lie in it; its rows are
+    filtered on `Timestamp` like the others. A run of weekend days after an existing Friday
+    file reads nothing more. When no later session file exists yet (before the current
+    session, within 7 days), the run's first missing weekday may not be published yet, and the
+    call raises: the range's last hours may lie there, so it never returns a silently short
+    table.
 
 **Long downloads.** Grouped daily (`dm.ALL` 1-day bars over REST) makes one request per day,
 skipping the days without trading (`dates.is_trading_day`): Saturdays and Sundays for stocks,
@@ -3872,33 +3874,44 @@ REST possible iff the dataset has a REST history endpoint
 none possible -> ValueError listing, per source, the violated constraint
 one possible  -> use it
 both          -> S3 if symbols is ALL or len(symbols) >= flat_file_symbol_threshold, else REST
-AUTO on S3, then:
-  S3 refuses the files (403) and REST possible -> the whole call from REST, one WARNING
-  a day's file not published yet and REST possible -> that day and later ones from REST
-  either, and REST not possible -> raise
+AUTO on S3, then, when REST is possible:
+  S3 refuses the files (403) or the S3 credentials -> the whole call from REST, one WARNING
+  each trading day whose file is missing -> that day from REST, clipped to the range, one WARNING
+FLAT_FILES, or AUTO with REST not possible:
+  a refusal -> raise
+  a missing trading day with a later day's file -> a day without trading, skipped with a WARNING
+  a missing trading day with no later file -> raise ("not published yet")
 ```
 
 **AUTO serves from whichever source can; it errors only when none can** (decision 78).
 Massive says a day's files land "by approximately 11:00 AM ET the following day", and the time
 varies: weekday files landed at about 00:45 New York time in the live check of 2026-10-30, but
 Friday's on Saturday at 10:27 and 11:17. So the library never guesses publication from the
-clock, and has no publish cutoff setting. The flat-file read finds out from what exists:
+clock, and has no publish cutoff setting. When REST can serve the request under `AUTO`,
+nothing is guessed at all: every trading day whose flat file is missing is read from REST, one
+day at a time, as a one-day read clipped to the call's range (for datetimes, the day's
+instants within the range; for futures, its session's hours), and its rows are merged in date
+order with the files' rows. No row of that day is kept from the files (for futures, of any
+venue), so no day comes from both sources. A day REST returns no rows for was a day without
+trading. Sending everything after a gap to REST instead would turn one holiday into a REST read
+of the rest of a long range. A missing weekday with files on both sides is therefore never
+skipped silently: if Massive missed it, REST serves it. One WARNING per call names the days REST
+served and the columns REST leaves null that flat files fill, and a blocking read's table
+description names REST and those days (`Read from flat files, and from REST for 2025-03-04,
+whose files are missing.`); a background read's description is written before the read, so it
+says that a day the flat files cannot serve is read from REST, and the WARNING names the days.
+Only under `FLAT_FILES`, or when REST cannot serve the request, does the flat-file read infer:
 Massive writes a day's file after the day ends, in date order, so a missing trading day's file
 with a later day's file after it (in the range, or looked for after it, trading days only, up
 to 7 days past the first missing one and never as far as the current day, whose file cannot
-exist) is a day without trading, and one with no later file may simply not be published yet.
-From that first unpublished day on, the flat-file read keeps no row, and under `AUTO`, when
-REST can serve the request, the query reads that day and every later one from REST, with the
-same request from the day's start (for datetimes, the later of the range's start and the day's
-first instant; for futures, its session's open), and returns the whole range: the rows REST
-adds may leave null a column only flat files fill. Under `FLAT_FILES`, or when REST cannot
-serve the request, the call raises `MassiveError("<dataset>: the flat file for <date> is not
+exist) is a day without trading, skipped with a WARNING, and one with no later file may simply
+not be published yet: the call raises `MassiveError("<dataset>: the flat file for <date> is not
 published yet. Massive usually publishes a day's flat files by about 11:00 ET the next day,
 but the time varies. Retry later, or read REST with source=dm.HistorySource.REST")` (or, when
-REST cannot serve it, `Retry later; REST cannot serve this read: <reason>`). A REST day that
-returns no rows is a day without data. Likewise, when S3 refuses the flat files a read needs
-(HTTP 403: the plan lacks them) under `AUTO` and REST can serve the request, the whole call is
-read from REST, with one WARNING naming the refusal; under `FLAT_FILES`, or when REST cannot
+REST cannot serve it, `Retry later; REST cannot serve this read: <reason>`). Likewise, when S3
+refuses the flat files a read needs (HTTP 403: the plan lacks them) or rejects the S3
+credentials under `AUTO` and REST can serve the request, the whole call is read from REST,
+with one WARNING naming the refusal; under `FLAT_FILES`, or when REST cannot
 serve the request, the refusal is raised. When neither source can serve the request, the
 `ValueError` lists every violated constraint per source; for split-adjusted bars of `dm.ALL`
 other than 1-day bars, it says exactly why (only REST serves adjusted bars, and REST reads
@@ -3908,8 +3921,8 @@ session date, and their day ends at the next midnight in America/Chicago, where 
 standardizes futures data. `indices.values` is flat-file only.
 `indices.bars`, `forex.bars`, and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
-The choice covers the whole range, except for the days a flat-file read finds not published
-yet, which `AUTO` reads from REST as above. The partition dates are those of the rows the call keeps
+The choice covers the whole range, except for the days whose flat files are missing, which
+`AUTO` reads from REST as above. The partition dates are those of the rows the call keeps
 ([section 12](#12-timestamp-units-and-day-boundaries)): for bars, the days of the bars whose
 whole window fits, so the unfinished current day never needs a file. Bars of a day or longer
 follow the same rule as every other dataset: the two sources may serve one call or the next by
@@ -3958,13 +3971,15 @@ unpublished_from=<date>` (`none` for either when nothing was missing or unpublis
 transport `source=REST requests=<n>`.
 Missing keys on non-trading dates are skipped. A trading date is a weekday, a forex Sunday, or
 any crypto day, by the one test `dates.is_trading_day` that
-the REST transport's weekend skipping uses too. A missing key on a trading date with a later
-day's file after it is a day without trading (a holiday; there is no holiday calendar): it logs
-a WARNING and the rest of the range is returned. One with no later file is not published yet,
-as above. A futures range named by datetimes that ends on a holiday reads the next session's
-file, as [section 12](#12-timestamp-units-and-day-boundaries) describes. A range in which no
-file exists and none follows raises under `FLAT_FILES` (or reads REST under `AUTO`) rather than
-return an empty table, and also logs the WARNING that the bucket, prefix, or venue may be wrong.
+the REST transport's weekend skipping uses too. A missing key on a trading date is read from
+REST under `AUTO` when REST can serve the request, and otherwise judged as above (there is no
+holiday calendar). A futures range named by datetimes that ends on a holiday reads the next
+session's file in the inferring case, as [section 12](#12-timestamp-units-and-day-boundaries)
+describes, and REST's hours of the holiday otherwise. A range in which no file exists and none
+follows raises under `FLAT_FILES` (or reads REST under `AUTO`) rather than return an empty
+table, and also logs the WARNING that the bucket, prefix, or venue may be wrong. A futures
+venue whose file of a day is missing sends that day of every venue to REST; a partial series
+of venues is not handled separately.
 A missing file is a 404 whose body is S3's XML error with the code `NoSuchKey`. Any other
 404 (another S3 code, no code, or a body that is not S3's, such as the HTML "Massive 404 Not
 Found" page Massive's front end serves for a path it does not route, which is what a wrong
@@ -6941,10 +6956,11 @@ document already reflects them.
     owner). `history()` must return the data whenever any source can, and Massive's publish
     times are approximate and change, so nothing is guessed from the clock: the
     `flat_file_publish_cutoff` setting, the publication time, and its one-day grace are gone.
-    A flat-file read finds a day not published yet by what exists (a missing trading day's
-    file with no later day's file); under `AUTO` that day and later ones are read from REST
-    when REST can serve the request, and a flat-file refusal (HTTP 403) reads the whole call
-    from REST with one WARNING. `FLAT_FILES`, or a request REST cannot serve, raises, with a
+    Under `AUTO`, when REST can serve the request, each trading day whose flat file is
+    missing is read from REST as a one-day read merged in date order (no holiday is
+    inferred, so a day Massive missed is never dropped), and a flat-file refusal (HTTP 403,
+    or rejected S3 credentials) reads the whole call from REST, each with one WARNING; the
+    table description names REST and its days. `FLAT_FILES`, or a request REST cannot serve, raises, with a
     message that says the publication time is approximate and what to do. Mixing sources in
     one call can leave null, on REST's rows, a column only flat files fill; returning the data
     outweighs that ([section 16](#16-historysourceauto)).

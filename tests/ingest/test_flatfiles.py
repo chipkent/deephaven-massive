@@ -811,7 +811,7 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
             "Vwap null, which the other source, REST, fills: pass "
             "source=dm.HistorySource.REST to get them (logged once per session)"
         ),
-        "stocks.bars history: source=S3 files=1 skipped=none unpublished_from=none",
+        "stocks.bars history: source=S3 files=1 skipped=none unread=none",
     ]
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=LOGGER):
@@ -891,7 +891,7 @@ def holiday_warning(spec: str, key: str, day: str) -> str:
 
 
 def s3_line(spec: str, files: int, skipped: str) -> str:
-    return f"{spec} history: source=S3 files={files} skipped={skipped} unpublished_from=none"
+    return f"{spec} history: source=S3 files={files} skipped={skipped} unread=none"
 
 
 def not_published(spec: str, day: str, remedy: str) -> str:
@@ -1080,10 +1080,39 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert (req.start, req.end) == (date(2025, 3, 4), date(2025, 3, 4))
     assert req.symbols == tuple(sorted(MANY))
     assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
-    assert (
-        "stocks.trades history: the flat file for 2025-03-04 is not published yet; reading "
-        "2025-03-04 on from REST"
-    ) in caplog.messages
+    assert caplog.messages[-1].startswith(
+        "stocks.trades history: AUTO read REST because the flat files for 2025-03-04 are missing"
+    )
+    assert t.attributes()["TableDescription"].endswith(
+        "Read from flat files, and from REST for 2025-03-04, whose files are missing."
+    )
+
+
+def test_auto_reads_a_missing_weekday_mid_range_from_rest_in_date_order(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    fake_s3: FakeS3,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # REST can serve the read, so a missing 03-04 between two files is never taken for a
+    # holiday: REST reads that one day, and its rows land between the two files' rows.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
+    q = query(session, STOCK_TRADES, symbols=MANY)
+    t = q.history("2025-03-03", "2025-03-05")
+    assert pick(t, "Symbol", "Id") == [
+        ("AAPL", "1"),
+        ("AAPL", "3"),
+        ("from REST", None),
+        ("AAPL", "9"),
+    ]
+    ((_, req, _),) = rest.calls
+    assert (req.start, req.end) == (date(2025, 3, 4), date(2025, 3, 4))
+    # Nothing was looked for after the range: no holiday is inferred.
+    assert sorted(fake_s3.keys()) == [TRADES_0303, TRADES_0304, TRADES_0305]
 
 
 def test_auto_reads_rest_from_the_unpublished_days_start_within_instants(
@@ -1388,7 +1417,7 @@ def test_a_stopped_read_stops_its_roll_forward(
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
-            FUTURES_TRADES, q._request, window, dates=dates, call=1, stop=stop
+            FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
         )
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
@@ -1477,7 +1506,7 @@ def test_a_futures_holiday_whose_next_session_is_not_out_reads_rest_under_auto(
     assert pick(t, "Symbol") == [("from REST",)]
     ((_, req, _),) = rest.calls
     assert (req.start, req.end) == (start, end)
-    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", date(2025, 1, d)) for d in (20, 21)]
+    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
 def test_a_holiday_before_a_weekend_end_rolls_forward(
@@ -2951,5 +2980,5 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     stop.set()
     with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
-            STOCK_TRADES, request, window, dates=[day], call=1, stop=stop
+            STOCK_TRADES, request, window, dates=[day], call=1, infer_holidays=True, stop=stop
         )

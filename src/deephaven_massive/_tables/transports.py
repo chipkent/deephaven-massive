@@ -351,22 +351,24 @@ class StreamTransport(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class FlatFileRead:
-    """What a flat-file `history` read returns: its rows, and the first day it could not read.
+    """What a flat-file `history` read returns: its rows by day, and the days it could not read.
 
-    Returned by `FlatFileTransport.history`; immutable.
+    Returned by `FlatFileTransport.history`; immutable. The query merges `empty` and the parts,
+    with any rows it reads elsewhere for the unread days, in date order.
 
     Attributes:
-        table: A static table in the dataset's schema: the rows of every day before
-            `unpublished` (of every day when it is None).
-        unpublished: The first partition date whose file is not published yet: a trading
-            day's file is missing and no later day's file exists, so the day may simply not be
-            out yet. The table holds no row of that date or a later one; the query reads them
-            from REST, or raises. None when every needed file was read or is a day without
-            trading.
+        parts: Each kept file's static tables with the file's day (for futures, its session),
+            in date order and, within a day, venue and file order.
+        empty: A static table with every column of the dataset and no row, which the merge
+            starts from so a read without rows keeps every column.
+        unread: The trading days whose rows the parts leave out, oldest first: every day
+            whose file is missing, or, when the read inferred holidays, the first day whose
+            file is missing with no later file, the parts then holding no later day either.
     """
 
-    table: Table
-    unpublished: date | None
+    parts: tuple[tuple[date, Table], ...]
+    empty: Table
+    unread: tuple[date, ...]
 
 
 class FlatFileTransport(Protocol):
@@ -384,6 +386,7 @@ class FlatFileTransport(Protocol):
         *,
         dates: Sequence[date],
         call: int,
+        infer_holidays: bool,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
@@ -397,14 +400,16 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            infer_holidays: True when no other source can serve the call: a missing trading
+                day's file with a later day's file is a day without trading. False to return
+                every missing trading day as unread.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
 
         Returns:
-            The read: a static table with the dataset's columns, the files' rows in date
-            order (an empty table with every column for a range without rows or files), and
-            the first day whose file is not published yet, if any.
+            The read (`FlatFileRead`): the files' tables by day, an empty table with every
+            column, and the days the files could not serve.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
