@@ -329,6 +329,18 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             ),
         ),
         (
+            # A snapshot without a label (a base Business key's) proves nothing about the
+            # plan: its data may be served on another host, which ws_hosts pins.
+            on_host(REALTIME_HOST, "no timeframe in the futures snapshot"),
+            (
+                "the futures snapshot carried no recency label, as a Business plan's without "
+                "the trades and quotes expansion does, so the plan may serve this data on "
+                "another host: pin it with MassiveConfig(ws_hosts={dm.AssetClass.FUTURES: "
+                "\"<host>\"}); if the plan's data is delayed instead, use Massive's delayed "
+                "futures feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
+            ),
+        ),
+        (
             # A key whose snapshot proved real-time data gains nothing from the delayed feed.
             on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
             (
@@ -747,8 +759,8 @@ def test_closing_a_session_keeps_the_connection_it_shares(ws_session: WsSession)
 
 
 def _group_of(session: dm.MassiveSession) -> ws_connection.ConnectionGroup:
-    transport = cast("ws.WsTransport", session._core.stream_transport())
-    return transport._connections.group
+    transport = cast("ws.WsConnections", session._core.stream_transport())
+    return transport.group
 
 
 def test_sessions_with_equal_settings_share_one_group() -> None:

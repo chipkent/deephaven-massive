@@ -65,9 +65,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar, cast
 
 import numpy as np
-import pyarrow as pa
 from deephaven import arrow as dh_arrow
-from deephaven import merge
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
@@ -75,17 +73,15 @@ from deephaven_massive._config import require_positive_int, require_positive_num
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._datasets.dates import DaySpan, bounds, day_start, parse_date_like
+from deephaven_massive._datasets.dates import bounds, parse_date_like
 from deephaven_massive._datasets.history_source import (
-    PUBLICATION_NOTE,
-    Alternative,
-    SourceChoice,
+    HISTORY_TRANSPORTS,
     choose_source,
     history_window,
     partition_dates,
     rest_history_problem,
+    warn_unfilled,
 )
-from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
@@ -95,14 +91,11 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._errors import (
-    AuthenticationError,
-    EntitlementError,
     ErrorCause,
     MassiveError,
     failure_text,
     raises_through,
 )
-from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -149,16 +142,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_ONE_DAY: Final = timedelta(days=1)
-
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
-
-_HISTORY_TRANSPORTS: Final = {
-    HistorySource.REST: Transport.REST,
-    HistorySource.FLAT_FILES: Transport.FLAT_FILES,
-}
-"""The transport behind each source `history()` can read."""
 
 _FROM_REQUEST: Final = frozenset(
     {"symbols", "timespan", "multiplier", "adjusted", "start", "end", "limit"}
@@ -846,15 +831,12 @@ class Query(QueryBase):
         rest = self._core.rest_transport()
         if not wait:  # a parameter error raises now, as it would before the first request
             rest.check_fetch(spec, request)
-        subscription = spec.current_subscription
-        listed = subscription in self._core.config.delayed_subscriptions
         return self._result(
             call,
             request,
             wait=wait,
             transport=Transport.REST,
-            # A listed subscription's REST data is unchecked: the description says so.
-            note=rest_recency_note(listed=True) if listed else None,
+            note=rest_recency_note(spec, self._core.config.delayed_subscriptions),
             run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
         )
 
@@ -1430,7 +1412,7 @@ class HistoryQuery(QueryBase):
             return self._rest_history(call, request, window, wait=wait, note=note)
         dates = partition_dates(spec, window)
         choice = choose_source(spec, request, requested=chosen, config=self._core.config)
-        label = TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]]
+        label = TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]]
         if chosen is HistorySource.AUTO:
             logger.info(
                 "%s history: AUTO chose %s (%s)", spec.name, choice.source.name, choice.reason
@@ -1439,7 +1421,7 @@ class HistoryQuery(QueryBase):
         else:
             note = f"Read from {label}: requested with source=dm.HistorySource.FLAT_FILES."
         if chosen is HistorySource.AUTO and not window.empty:
-            self._warn_unfilled(choice)
+            warn_unfilled(spec, choice, catalog=self._core.catalog, warnings=self._core.warnings)
         if choice.source is HistorySource.REST:
             return self._rest_history(call, request, window, wait=wait, note=note)
         forced = chosen is HistorySource.FLAT_FILES
@@ -1461,9 +1443,9 @@ class HistoryQuery(QueryBase):
         """Run a `history()` call that reads the flat files, now or in the background.
 
         A blocking read's description names the source that served it, REST included, after
-        the read (`_read_flat_files`). A background read's is written when the read starts,
-        so under `AUTO`, when REST can serve the request, it says a day the flat files cannot
-        serve is read from REST, and the WARNING of `_warn_rest_served` names the days.
+        the read (`FlatFileTransport.read_history`). A background read's is written when the
+        read starts, so under `AUTO`, when REST can serve the request, it says a day the flat
+        files cannot serve is read from REST, and the read's WARNING names the days.
 
         Args:
             call: The call id.
@@ -1489,8 +1471,8 @@ class HistoryQuery(QueryBase):
                 run=lambda _stop: self._empty_rows(),
             )
         if wait:
-            table, served = self._read_flat_files(
-                files, request, window, dates=dates, call=call, stop=None, forced=forced
+            table, served = files.read_history(
+                spec, request, window, dates=dates, call=call, forced=forced
             )
             return self._described(table, note=note if served is None else served)
         if not forced and rest_history_problem(spec, request) is None:
@@ -1502,246 +1484,9 @@ class HistoryQuery(QueryBase):
             wait=wait,
             transport=Transport.FLAT_FILES,
             note=note,
-            run=lambda stop: self._read_flat_files(
-                files, request, window, dates=dates, call=call, stop=stop, forced=forced
+            run=lambda stop: files.read_history(
+                spec, request, window, dates=dates, call=call, forced=forced, stop=stop
             )[0],
-        )
-
-    def _read_flat_files(
-        self,
-        files: FlatFileTransport,
-        request: Request,
-        window: HistoryWindow,
-        *,
-        dates: Sequence[date],
-        call: int,
-        stop: threading.Event | None,
-        forced: bool,
-    ) -> tuple[Table, str | None]:
-        """Read `history()` from the flat files, and from REST what they cannot serve.
-
-        `AUTO` serves from whichever source can and fails only when none can. When REST can
-        serve the request under `AUTO`, the flat-file read infers nothing: it returns every
-        trading day whose file is missing (`FlatFileRead.unread`), and each is read from REST
-        as a one-day read clipped to the range, merged in date order; a day REST returns no
-        rows for was a day without trading. When S3 refuses the flat files (HTTP 403, or the
-        S3 credentials) under `AUTO` and REST can serve the request, the whole call is read
-        from REST. Either way one WARNING names the days REST served (or the refusal) and the
-        columns REST leaves null that flat files fill. Under `FLAT_FILES`, or when REST cannot
-        serve the request, the flat-file read infers holidays (a missing trading day with a
-        later file), and a day whose file is not out yet raises instead.
-
-        Args:
-            files: The flat-file transport.
-            request: The request with static symbols and the parsed bounds.
-            window: The call's window, which holds rows.
-            dates: The partition dates of the files the window needs.
-            call: The call id.
-            stop: A background read's stop token, or None for a blocking read.
-            forced: True for `source=FLAT_FILES`, which never reads REST.
-
-        Returns:
-            The static table, and the description's source sentence when REST served any of
-            it (None when only the flat files did).
-
-        Raises:
-            AuthenticationError: When S3 rejects the S3 credentials under `FLAT_FILES` or when
-                REST cannot serve the request.
-            EntitlementError: The refusal of `_refused_flat_files`, from the transport's own,
-                under `FLAT_FILES` or when REST cannot serve the request.
-            MassiveError: If a day's file is not published yet and the call may not or cannot
-                read it from REST: `"<dataset>: the flat file for <date> is not published
-                yet. Massive usually publishes ..., but the time varies. Retry later, ..."`;
-                or if the days at the range's end have no file and none follows them, a
-                week or more before today (`FlatFileRead.absent`): `"<dataset>: no flat file
-                exists for <dates>, ..."`.
-        """
-        spec = self._spec
-        problem = rest_history_problem(spec, request)
-        infer = forced or problem is not None
-        try:
-            read = files.history(
-                spec, request, window, dates=dates, call=call, infer_holidays=infer, stop=stop
-            )
-        except (EntitlementError, AuthenticationError) as error:
-            if infer:
-                if isinstance(error, EntitlementError):
-                    raise self._refused_flat_files(error, request) from error
-                raise
-            self._warn_rest_served(f"S3 refused the flat files ({error})")
-            rows = self._core.rest_transport().history(spec, request, window, call=call, stop=stop)
-            return rows, "Read from REST: AUTO chose flat files, which S3 refused."
-        if read.absent:
-            days = ", ".join(day.isoformat() for day in read.absent)
-            remedy = (
-                "read REST with source=dm.HistorySource.REST, or end the range before them"
-                if problem is None
-                else f"end the range before them; REST cannot serve this read: {problem}"
-            )
-            raise MassiveError(
-                f"{spec.name}: no flat file exists for {days}, nor for any later day up to "
-                f"a week after the range; Massive publishes a day's file the next day, so "
-                f"these files will not appear. To read them, {remedy}"
-            )
-        if read.unread and infer:
-            first = read.unread[0].isoformat()
-            remedy = (
-                "Retry later, or read REST with source=dm.HistorySource.REST"
-                if problem is None
-                else f"Retry later; REST cannot serve this read: {problem}"
-            )
-            raise MassiveError(
-                f"{spec.name}: the flat file for {first} is not published yet. "
-                f"{PUBLICATION_NOTE}. {remedy}"
-            )
-        doubt = self._uncertain_sessions(read.uncertain)
-        if not read.unread:
-            with entered(self._core.exec_ctx):
-                return merge([read.empty, *(part for _, part in read.parts)]), doubt
-        rest = self._rest_days(request, window, read.unread, call=call, stop=stop)
-        with entered(self._core.exec_ctx):
-            # The files' days and REST's tile (the files are trimmed to their own days), so
-            # sorting by the time column puts every row in time order across the sources.
-            merged = merge([read.empty, *(part for _, part in read.parts), *rest])
-            table = merged.sort(time_column(spec.times))
-        days = ", ".join(day.isoformat() for day in read.unread)
-        missing = bounded_list(day.isoformat() for day in read.unread)
-        self._warn_rest_served(f"the flat files are missing for these days: {missing}")
-        flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
-        served = f"Read from {flat}, and from REST for {days}, whose files are missing."
-        return table, served if doubt is None else f"{served} {doubt}"
-
-    def _uncertain_sessions(self, sessions: Sequence[date]) -> str | None:
-        """Warn that a futures read by dates may lack rows of some requested sessions.
-
-        A futures flat file held rows of a session other than its own day's, so rows of the
-        range's first or last session may sit in the file before or after the range, which a
-        read by dates does not open (`FlatFileRead.uncertain`). The read never mislabels a
-        row; it may only miss some, and says so on the table and in the log, on every such
-        call.
-
-        Args:
-            sessions: The sessions that may be incomplete, oldest first; empty for none.
-
-        Returns:
-            The table description's sentence naming them, or None when there are none.
-        """
-        if not sessions:
-            return None
-        named = ", ".join(day.isoformat() for day in sessions)
-        logger.warning(
-            "%s history: the flat files hold rows of sessions other than their own day's, so "
-            "rows of session(s) %s may sit in a file outside the range and be missing; read a "
-            "wider range of dates, or by datetimes, to include them",
-            self._spec.name,
-            named,
-        )
-        return (
-            f"Session(s) {named} may be incomplete: Massive's flat files held rows of other "
-            "sessions, so some of their rows may sit in a file outside the range."
-        )
-
-    def _rest_days(
-        self,
-        request: Request,
-        window: HistoryWindow,
-        days: Sequence[date],
-        *,
-        call: int,
-        stop: threading.Event | None,
-    ) -> list[Table]:
-        """Read the days the flat files could not serve from REST, each within the call's range.
-
-        Bars of a day or longer are read with the call's own request and window, which keep a
-        bar only when its whole window fits the range, and then only the days asked for are
-        kept, by their `Date` (for futures, the session label): an index day bar ends at 01:00
-        New York the next day and a futures session bar starts before its session opens, so a
-        window of the day's own instants would drop them. Every other dataset is read one day
-        at a time, clipped to the range: a range of days reads the whole day, and a range of
-        instants the day's instants inside it (for futures, its session's hours), which tile
-        with the files' days.
-
-        Args:
-            request: The request with static symbols and the parsed bounds.
-            window: The call's window: whole days, or a range of instants.
-            days: The days (for futures, sessions), oldest first.
-            call: The call id.
-            stop: A background read's stop token, or None for a blocking read.
-
-        Returns:
-            The days' rows inside the range; none for a day without trading.
-        """
-        spec = self._spec
-        rest = self._core.rest_transport()
-        timespan = request.timespan
-        if spec.is_bars and timespan is not None and not intraday(timespan):
-            # The window keeps whole bars; `days` limits an all-symbol read to one grouped-daily
-            # request per missing day instead of one per day of the range.
-            rows = rest.history(spec, request, window, call=call, stop=stop, days=days)
-            # A static key table, not a formula: a formula's query scope would capture this
-            # frame, and with it the session.
-            labels = pa.table({"Date": [day.isoformat() for day in days]})
-            with entered(self._core.exec_ctx):
-                return [rows.where_in(dh_arrow.to_table(labels), "Date")]
-        tables = []
-        for day in days:
-            start: date | datetime = day
-            end: date | datetime | None = day
-            if not isinstance(window.span, DaySpan):
-                opens = day_start(spec.asset_class, day)
-                closes = day_start(spec.asset_class, day + _ONE_DAY)
-                start = max(cast("datetime", request.start), opens)
-                end = closes if request.end is None else min(cast("datetime", request.end), closes)
-            one = replace(request, start=start, end=end)
-            one_window = history_window(spec, one, start=start, end=end)
-            tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
-        return tables
-
-    def _warn_rest_served(self, why: str) -> None:
-        """Warn that REST served part or all of an `AUTO` read meant for the flat files.
-
-        Names why and the columns REST leaves null that the flat files fill, from the
-        generated schemas (`Catalog.history_columns`), so a reader knows which rows may lack
-        them. Logged on every such call: the days differ from call to call.
-
-        Args:
-            why: Why REST served the read, such as `"the flat files are missing for these days:
-                1 [2025-03-04]"`.
-        """
-        spec = self._spec
-        catalog = self._core.catalog
-        lost = catalog.history_columns(spec, Transport.FLAT_FILES) - catalog.history_columns(
-            spec, Transport.REST
-        )
-        columns = (
-            f"; those rows leave {', '.join(sorted(lost))} null, which the flat files fill"
-            if lost
-            else ""
-        )
-        logger.warning("%s history: AUTO read REST because %s%s", spec.name, why, columns)
-
-    def _refused_flat_files(self, error: EntitlementError, request: Request) -> EntitlementError:
-        """Name REST as the other transport when the plan refuses the flat files a read needs.
-
-        Used under `FLAT_FILES`, and under `AUTO` when REST cannot serve the read either (then
-        the refusal is returned as it is); `AUTO` otherwise reads REST instead.
-
-        Args:
-            error: The flat-file refusal, which names the files and Massive's text.
-            request: The request, with its symbols read.
-
-        Returns:
-            The same error when REST cannot serve the request either; otherwise a new
-            `EntitlementError` with the same status and request id whose message ends by
-            naming `source=dm.HistorySource.REST`.
-        """
-        if rest_history_problem(self._spec, request) is not None:
-            return error
-        return EntitlementError(
-            f"{error}; REST serves this read too: pass source=dm.HistorySource.REST to "
-            "history() (it can fill other columns; columns() shows which)",
-            status=error.status,
-            request_id=error.request_id,
         )
 
     def _rest_history(
@@ -1774,48 +1519,6 @@ class HistoryQuery(QueryBase):
                 if window.empty
                 else rest.history(spec, request, window, call=call, stop=stop)
             ),
-        )
-
-    def _warn_unfilled(self, choice: SourceChoice) -> None:
-        """Warn when `AUTO` chose a source that leaves columns null which the other one fills.
-
-        Under `AUTO` the source changes with the symbol count, so the same query could fill a
-        column for many symbols and leave it null for few. The columns each source fills come
-        from the generated schemas (`Catalog.history_columns`). The WARNING names the columns
-        the chosen source leaves null, the choice and its reason, and what fills them: the
-        `source=` of the other source (`Alternative.AVAILABLE`). It is logged once per session,
-        dataset, and set of columns. When the other source can never serve the call
-        (`Alternative.UNAVAILABLE`), the result cannot change and nothing is logged: the table
-        description says which source it was. The caller skips it for a range no row can lie
-        in, which reads nothing.
-
-        Args:
-            choice: The `AUTO` choice.
-        """
-        if choice.alternative is Alternative.UNAVAILABLE:
-            return  # the result cannot change, and the caller cannot pick the other source
-        spec = self._spec
-        other = (
-            HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
-        )
-        catalog = self._core.catalog
-        missing = catalog.history_columns(spec, _HISTORY_TRANSPORTS[other]) - (
-            catalog.history_columns(spec, _HISTORY_TRANSPORTS[choice.source])
-        )
-        if not missing:
-            return
-        columns = ", ".join(sorted(missing))
-        remedy = f"pass source=dm.HistorySource.{other.name} to get them"
-        self._core.warnings.log(
-            f"history source {spec.name} {choice.source.name}: {columns}",
-            "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "
-            "%s, fills: %s (logged once per session)",
-            spec.name,
-            TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]],
-            choice.reason,
-            columns,
-            TRANSPORT_LABELS[_HISTORY_TRANSPORTS[other]],
-            remedy,
         )
 
     def _empty_rows(self) -> Table:

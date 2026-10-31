@@ -311,6 +311,38 @@ def _stale_text(stale: Mapping[str, str]) -> str:
     )
 
 
+_K = TypeVar("_K")
+"""The key of a run of dropped rows: a channel plan, or a symbol."""
+
+
+def _extend_run(
+    runs: dict[_K, tuple[int, str]], key: _K, *, dropped: int, reason: str
+) -> tuple[int, str] | None:
+    """Add dropped rows to a run of rows dropped in a row; end the run at `DROPPED_RUN_LIMIT`.
+
+    A dataset's run on a channel and each symbol's run are counted the same way: the rows
+    dropped with none published, and the first one's reason, which the failure names.
+
+    Args:
+        runs: The runs, by key; the caller removes a run when a row of its key is published.
+        key: The run's key.
+        dropped: The rows dropped now.
+        reason: Why the first of them was dropped.
+
+    Returns:
+        The run's length and first reason once it reaches `DROPPED_RUN_LIMIT`, when it is
+        removed so that the next one starts over; None while it is shorter.
+    """
+    count, first = runs.get(key, (0, ""))
+    count += dropped
+    first = first or reason
+    if count < DROPPED_RUN_LIMIT:
+        runs[key] = (count, first)
+        return None
+    runs.pop(key, None)
+    return count, first
+
+
 def _counted_symbols(symbols: pa.Array, rows: pa.Array | None) -> dict[str, int]:
     """Count the rows of each symbol a mask selects.
 
@@ -759,19 +791,6 @@ class StreamSink:
         with self._lock:
             self._symbols = symbols
             self._version += 1
-
-    def receives(self, symbol: str | None) -> bool:
-        """Tell whether the stream would receive a row of `symbol`.
-
-        Args:
-            symbol: A canonical symbol, or None for a row without a valid one.
-
-        Returns:
-            True for a `dm.ALL` stream, and for a symbol stream that holds `symbol`.
-        """
-        with self._lock:
-            symbols = self._symbols
-        return symbols is None or (symbol is not None and symbol in symbols)
 
     def publish(self, batch: SharedBatch) -> int:
         """Add the part of a channel's batch this stream receives.
@@ -1600,13 +1619,11 @@ class Flusher:
         dropped = converted.drift.dropped_rows + lost.dropped_rows
         if not dropped:
             return False
-        count, reason = self._runs.get(plan, (0, ""))
-        count += dropped
-        reason = reason or lost.dropped_reason or converted.drift.dropped_reason
-        if count < DROPPED_RUN_LIMIT:
-            self._runs[plan] = (count, reason)
+        reason = lost.dropped_reason or converted.drift.dropped_reason
+        ended = _extend_run(self._runs, plan, dropped=dropped, reason=reason)
+        if ended is None:
             return False
-        self._runs.pop(plan, None)
+        count, reason = ended
         failure = MassiveError(
             library_bug(
                 f"{plan.dataset}: the last {count} rows of channel {plan.channel} were dropped "
@@ -1658,13 +1675,10 @@ class Flusher:
         for symbol, rows in dropped.items():
             if symbol in converted.symbols:
                 continue
-            count, first = runs.get(symbol, (0, ""))
-            count += rows
-            first = first or reason
-            if count < DROPPED_RUN_LIMIT:
-                runs[symbol] = (count, first)
+            ended = _extend_run(runs, symbol, dropped=rows, reason=reason)
+            if ended is None:
                 continue
-            runs.pop(symbol, None)
+            count, first = ended
             failure = MassiveError(
                 library_bug(
                     f"{plan.dataset}: the last {count} rows of {symbol} on channel "

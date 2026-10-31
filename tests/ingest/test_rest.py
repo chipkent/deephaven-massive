@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 from zoneinfo import ZoneInfo
 
@@ -45,8 +46,8 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._errors import LIBRARY_BUG, RowDataError
-from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests
-from deephaven_massive._ingest.host_decision import HostDecisionCache
+from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests, shared_lookup
+from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
@@ -67,6 +68,7 @@ from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
 R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
+SHARED_LOGGER = "deephaven_massive._ingest.shared_lookup"
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 NS = 10**9
@@ -134,6 +136,7 @@ SMA = DatasetSpec(
             symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
         ),
     },
+    latest_is_current=True,
 )
 CONVERSION_PATH = "/v1/conversion/{from}/{to}"
 CONVERSION = DatasetSpec(
@@ -509,7 +512,7 @@ def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # The indicators have no asset class: each request follows its symbol's class.
-    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": []})))
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
     by_path = dict(fake_rest.get_queries())
@@ -563,7 +566,7 @@ def test_a_read_of_several_paths_shares_one_patience(
 ) -> None:
     # The stock and crypto indicator paths are one fetch: its patience is taken once, so the
     # second path never gets a fresh ten minutes after the first spent its own.
-    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": []})))
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     patiences = _Patiences(monkeypatch)
     fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
@@ -877,7 +880,7 @@ def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
     # A pair Massive lists after the session read the list is found without a restart; a
     # ticker the list never holds costs no more than one read an hour.
     clock = [1000.0]
-    monkeypatch.setattr(rest, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(shared_lookup, "_monotonic", lambda: clock[0])
     fake_rest.reply(
         "/v3/reference/tickers",
         Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
@@ -898,7 +901,7 @@ def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
         reader.crypto_pair("X:ABCUSD")  # the new list is recent: no read
     assert len(fake_rest.get_queries()) == 4
     # A caller holding a list another caller has since replaced reads the current one.
-    assert reader.state.retire_crypto({}) is True
+    assert reader.state.crypto.retire(rest._CRYPTO_KEY, {}, rest._TICKERS_REREAD) is True
 
 
 def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
@@ -928,7 +931,7 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
     claimed: list[Future[Any]] = []
 
     def pages(*_: object, **__: object) -> Iterator[Any]:
-        future, created = reader.state.crypto_future()  # what a waiter would get meanwhile
+        future, created = reader.state.crypto._claim(rest._CRYPTO_KEY)  # what a waiter gets
         assert not created
         claimed.append(future)
         raise RuntimeError("the reader broke")
@@ -948,7 +951,7 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
         future.result()  # the waiters get a MassiveError
     assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
     assert str(waited.value).endswith(LIBRARY_BUG)
-    assert reader.state.crypto_future()[1]  # and the failure is forgotten
+    assert reader.state.crypto._claim(rest._CRYPTO_KEY)[1]  # and the failure is forgotten
 
 
 def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
@@ -988,7 +991,8 @@ def _wait_for_pair(
 ) -> tuple[list[object], threading.Thread]:
     # Call crypto_pair on another thread while `future` is the list being read: the thread
     # waits on it, and puts what the call returned or raised in the list once it completes.
-    reader.state._crypto = future  # the read another thread has claimed
+    reader.state.crypto._futures[rest._CRYPTO_KEY] = future  # another thread claimed it
+    reader.state.crypto._claimed[rest._CRYPTO_KEY] = 0.0
     results: list[object] = []
 
     def wait() -> None:
@@ -1146,6 +1150,7 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
     fake_rest.reply(LIST_TARGET, PAUSE, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     caplog.set_level(logging.DEBUG, LOGGER)
+    caplog.set_level(logging.DEBUG, SHARED_LOGGER)
     try:
         maker = _Caller(m, _split_dot(m), console=console == "maker")
         clock.wait_for_deadlines([60.0])  # the maker waits out Massive's first pause
@@ -1200,6 +1205,7 @@ def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
 
     monkeypatch.setattr(client, "pages", interrupted)
     caplog.set_level(logging.INFO, LOGGER)
+    caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
         maker = _Caller(m, _split_dot(m), console=False)
         assert claimed.wait(TIMEOUT)
@@ -1229,6 +1235,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     stop = Cancel()
     reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
     caplog.set_level(logging.INFO, LOGGER)
+    caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
         maker = _Caller(
             m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
@@ -1412,15 +1419,15 @@ def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
     # Claim the shared lookup of `kind`, as a caller does before making or joining it.
     state = cast("rest.RestEndpoints", m._core.rest_transport())._state
     if kind == "crypto":
-        return state.crypto_future()
-    return state.hosts.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+        return state.crypto._claim(rest._CRYPTO_KEY)
+    return state.hosts._claim((AssetClass.STOCKS, ChannelFamily.TICK))
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
 @pytest.mark.parametrize(
     "failure",
     [
-        rest._AbandonedError("rate limited: the maker gave up"),
+        shared_lookup._AbandonedError("rate limited: the maker gave up"),
         dm.MassiveError("the read failed: boom", status=500),
     ],
     ids=["abandoned", "failed"],
@@ -1437,16 +1444,16 @@ def test_a_failed_lookup_is_never_returned_as_known(
     future.set_exception(failure)  # failed, and not yet forgotten: what the late reader sees
     state = cast("rest.RestEndpoints", session._core.rest_transport())._state
     if kind == "crypto":
-        assert state.known_crypto() is None
+        assert state.crypto.known(rest._CRYPTO_KEY) is None
     else:
-        assert state.hosts.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
+        assert state.hosts.known((AssetClass.STOCKS, ChannelFamily.TICK)) is None
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
 @pytest.mark.parametrize(
     "failure",
     [
-        rest._AbandonedError("rate limited: the maker gave up"),
+        shared_lookup._AbandonedError("rate limited: the maker gave up"),
         dm.MassiveError("the read failed: boom", status=500),
     ],
     ids=["abandoned", "failed"],
@@ -1467,19 +1474,19 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
     key = (AssetClass.STOCKS, ChannelFamily.TICK)
     claimed, created = _claim(session, kind)
     assert created
-    succeeded = host_decision.succeeded_result
+    succeeded = shared_lookup._succeeded_result
+    lookup = cast("SharedLookup[Any, Any]", state.crypto if kind == "crypto" else state.hosts)
+    claimed_key: Any = rest._CRYPTO_KEY if kind == "crypto" else key
 
     def maker_fails_meanwhile(future: Future[Any] | None) -> object:
         if future is claimed and not claimed.done():
-            if kind == "crypto":
-                state.forget_crypto()
-            else:
-                state.hosts.forget_host(key, claimed)
+            with lookup._lock:  # forgotten, then failed, as the maker's `fail` does
+                del lookup._futures[claimed_key]
+                del lookup._claimed[claimed_key]
             claimed.set_exception(failure)
         return succeeded(future)
 
-    monkeypatch.setattr(rest, "succeeded_result", maker_fails_meanwhile)
-    monkeypatch.setattr(host_decision, "succeeded_result", maker_fails_meanwhile)
+    monkeypatch.setattr(shared_lookup, "_succeeded_result", maker_fails_meanwhile)
     result = _lookup(session, kind)()
     assert claimed.done()  # the race really ran
     if kind == "crypto":
@@ -1514,17 +1521,15 @@ def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
     # this one first looks at it: it must try again, not raise the abandonment.
     snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
-    name = "crypto_future" if kind == "crypto" else "host_future"
-    owner = rest.RestState if kind == "crypto" else HostDecisionCache
-    claim = getattr(owner, name)
+    claim = SharedLookup._claim
     abandoned: Future[Any] = Future()
-    abandoned.set_exception(rest._AbandonedError("rate limited: the maker gave up"))
+    abandoned.set_exception(shared_lookup._AbandonedError("rate limited: the maker gave up"))
     claims = iter([(abandoned, False)])
 
-    def claiming(state: object, *args: object) -> tuple[Future[Any], bool]:
-        return next(claims, None) or claim(state, *args)
+    def claiming(state: SharedLookup[Any, Any], key: object) -> tuple[Future[Any], bool]:
+        return next(claims, None) or claim(state, key)
 
-    monkeypatch.setattr(owner, name, claiming)
+    monkeypatch.setattr(SharedLookup, "_claim", claiming)
     result = _lookup(session, kind)()
     if kind == "crypto":
         assert result == ("DOT", "USD")
@@ -1560,19 +1565,17 @@ def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
         {"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403 if kind == "crypto" else 401
     )
     fake_rest.reply(LIST_TARGET if kind == "crypto" else "/v3/snapshot", refused)
-    name = "crypto_future" if kind == "crypto" else "host_future"
-    owner = rest.RestState if kind == "crypto" else HostDecisionCache
-    claim = getattr(owner, name)
+    claim = SharedLookup._claim
     fresh_when_failed: list[bool] = []
 
-    def claiming(state: object, *args: object) -> tuple[Future[Any], bool]:
-        future, created = claim(state, *args)
+    def claiming(state: SharedLookup[Any, Any], key: object) -> tuple[Future[Any], bool]:
+        future, created = claim(state, key)
         if created and not fresh_when_failed:
             # When the failure reaches the future, a new claim must already be fresh.
-            future.add_done_callback(lambda _: fresh_when_failed.append(claim(state, *args)[1]))
+            future.add_done_callback(lambda _: fresh_when_failed.append(claim(state, key)[1]))
         return future, created
 
-    monkeypatch.setattr(owner, name, claiming)
+    monkeypatch.setattr(SharedLookup, "_claim", claiming)
     with pytest.raises(dm.MassiveError):
         _lookup(session, kind)()
     assert fresh_when_failed == [True]
@@ -2598,7 +2601,7 @@ def test_a_defect_while_deciding_caches_nothing(
     transport = cast("rest.RestEndpoints", session._core.rest_transport())
     with pytest.raises(KeyError):
         transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
-    _, owner = transport._state.hosts.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+    _, owner = transport._state.hosts._claim((AssetClass.STOCKS, ChannelFamily.TICK))
     assert owner  # nothing was cached
 
 
@@ -2630,16 +2633,6 @@ def test_sixteen_threads_share_one_decision(
     assert len(results) == 16
     assert all(result is results[0] for result in results)
     assert len(snapshots.requests) == 1
-
-
-def test_waiters_get_a_copy_of_the_deciders_error(session: dm.MassiveSession) -> None:
-    future: Future[Any] = Future()
-    error = dm.EntitlementError("no", status=403, request_id="r1")
-    future.set_exception(error)
-    with pytest.raises(dm.EntitlementError, match=r"^no$") as info:
-        rest._outcome(future)
-    assert info.value is not error
-    assert (info.value.status, info.value.request_id) == (403, "r1")
 
 
 def test_the_transport_is_bound_to_its_core(session: dm.MassiveSession) -> None:
@@ -4018,15 +4011,86 @@ def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
         m.close()
 
 
-def test_a_real_time_fetch_says_nothing_of_recency(
+def test_an_unlisted_fetch_says_it_was_checked_like_its_poll(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX"}])))
+    fake_rest.reply(
+        INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "REAL-TIME"}]))
+    )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert isinstance(q, Query)
-    assert q.fetch().attributes()["TableDescription"] == (
-        "indices.snapshots: A dataset for the tests."
+    table = q.fetch()
+    assert table.attributes()["TableDescription"].endswith(
+        "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
+        "MassiveConfig.delayed_subscriptions lists its subscription."
     )
+
+
+_SMA_VALUE = {"timestamp": 1741010400000, "value": 1.0}
+"""One indicator value, of 2025-03-03."""
+
+
+@pytest.mark.parametrize(
+    ("bounds", "checked"),
+    [
+        ({}, True),  # the latest values
+        ({"start": "2025-03-03"}, True),  # through now
+        ({"end": date(2999, 1, 1)}, True),
+        ({"end": datetime(2999, 1, 1, tzinfo=UTC)}, True),
+        ({"start": "2025-03-03", "end": "2025-03-04"}, False),  # a past range: final values
+        ({"end": datetime(2025, 3, 4, tzinfo=UTC)}, False),
+    ],
+)
+def test_an_indicator_fetch_is_checked_when_its_window_reaches_now(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, bounds: dict[str, Any], checked: bool
+) -> None:
+    fake_rest.reply(
+        "/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
+    )
+    if checked:
+        with pytest.raises(dm.EntitlementError, match=r"Massive reports status=DELAYED"):
+            fetch(session, SMA, symbols=["AAPL"], **bounds)
+    else:
+        assert [r["Symbol"] for r in fetch(session, SMA, symbols=["AAPL"], **bounds)] == ["AAPL"]
+
+
+def test_a_crypto_indicator_reaching_now_is_never_refused(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive has no delayed currencies feed, so its label names no remedy.
+    fake_rest.reply(
+        "/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
+    )
+    assert [r["Symbol"] for r in fetch(session, SMA, symbols=["X:BTCUSD"])] == ["X:BTCUSD"]
+
+
+def test_a_delayed_label_fails_an_indicator_poll(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, rows_when: RowsWhen
+) -> None:
+    fake_rest.reply(
+        "/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
+    )
+    q = query(session, SMA, symbols=["AAPL"], start="2025-03-03", end="2025-03-04")
+    assert isinstance(q, Query)
+    table = q.poll(60)  # polled, so current whatever its window
+    (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
+    assert row["State"] == "FAILED"
+    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})" in row["Error"]
+    session.release(table)
+
+
+def test_a_listed_subscriptions_indicator_is_served_delayed(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.STOCKS)
+    try:
+        fake_rest.reply(
+            "/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
+        )
+        assert [r["Symbol"] for r in fetch(m, SMA, symbols=["AAPL"])] == ["AAPL"]
+    finally:
+        m.close()
 
 
 def test_reference_data_is_never_checked(
@@ -4333,7 +4397,9 @@ def test_the_facts_a_session_warned_about_are_bounded(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(rest, "_FACTS_LIMIT", 2)
-    state = rest.RestState(cast("_massive.RestClient", object()), "MassiveSession #9")
+    state = rest.RestState(
+        cast("_massive.RestClient", SimpleNamespace(governor=None)), "MassiveSession #9"
+    )
     with caplog.at_level(logging.DEBUG, LOGGER):
         assert [state.first("x", "a"), state.first("x", "b"), state.first("x", "a")] == [
             True,

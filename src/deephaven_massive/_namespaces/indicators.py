@@ -96,6 +96,8 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
         row_times=RowTimes.BAR,
         # Its underlying bars are not rows of the table, so the library never asks for them.
         fixed_params={"expand_underlying": False},
+        # The latest value is computed from the latest bars, delayed on a delayed plan.
+        latest_is_current=True,
     )
 
 

@@ -1853,3 +1853,24 @@ def test_an_endpoint_s_user_and_password_never_reach_a_message(
     assert "https://***@files.massive.com/flatfiles/" in message
     with pytest.raises(WireError, match=r"^the flat-file client for https://\*\*\*@files"):
         flat_files.open(KEY)
+
+
+class _UnclosableRaw(io.BytesIO):
+    # A raw stream whose first close fails, as a connection's teardown can.
+    failed = False
+
+    @override
+    def close(self) -> None:
+        if not self.failed:
+            self.failed = True
+            raise OSError("the connection broke while closing")
+        super().close()
+
+
+def test_a_body_whose_close_raises_still_gives_its_slot_back() -> None:
+    slots = ConnectionSlots(1)
+    assert slots.acquire(Cancel())
+    body = client_module._Body(StreamingBody(_UnclosableRaw(b"data"), 4), slots)
+    with pytest.raises(OSError, match="broke while closing"):
+        body.close()
+    assert slots._free == 1  # given back

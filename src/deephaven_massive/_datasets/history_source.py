@@ -1,8 +1,10 @@
 """Where `history()` reads from: the window it keeps, its partition dates, and the source.
 
 `HistoryQuery.history()` asks this module what a call reads and which transport serves it,
-then calls that transport; the transports themselves only do I/O. The module is pure (the
-current time comes from `_now`, which tests replace) and makes no network or Deephaven call.
+then calls that transport, which does the I/O (the flat-file transport also reads from REST
+what the files cannot serve, `_ingest/history_reads.py`). The module is pure (the
+current time comes from `_now`, which tests replace) and makes no network or Deephaven call;
+only `warn_unfilled` logs.
 
 - `history_window` turns a call's bounds into a `HistoryWindow`: the bounds by kind (whole
   days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, or a
@@ -23,12 +25,15 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   the dataset has an `adjusted` parameter). When both sources can, many symbols
   (`MassiveConfig.flat_file_symbol_threshold` or more, or `dm.ALL`) read flat files and fewer
   use REST. Whether a day's file is published yet is never guessed from the clock: the
-  flat-file transport finds out by reading, and under `AUTO` the query reads the days whose
+  flat-file transport finds out by reading, and under `AUTO` it reads the days whose
   files are not there yet from REST, with the same unadjusted request, so one call never
   mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
   day or longer are stamped alike by every source (`row_times.stamp_rule`), so the choice never
   changes which day a bar is labelled with; a stamp of a form Massive is not known to use is
   served too, labelled the same way, and logs a WARNING.
+
+- `warn_unfilled` warns, once per session, when an `AUTO` choice leaves columns null that the
+  other source would fill.
 
 Massive says a day's files land "by approximately 11:00 AM ET the following day", and the
 time varies (Friday's files have landed late on Saturday morning), so every message about a
@@ -41,6 +46,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from deephaven_massive._datasets.bar_periods import (
@@ -50,6 +56,7 @@ from deephaven_massive._datasets.bar_periods import (
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
@@ -71,14 +78,16 @@ from deephaven_massive._massive import ParamKind, Transport, source
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._types import DateLike
 
 __all__ = [
+    "HISTORY_TRANSPORTS",
     "PUBLICATION_NOTE",
     "Alternative",
     "HistoryWindow",
@@ -90,6 +99,7 @@ __all__ = [
     "partition_dates",
     "rest_history_problem",
     "session_date_param",
+    "warn_unfilled",
 ]
 
 logger = logging.getLogger(__name__)
@@ -101,6 +111,11 @@ PUBLICATION_NOTE: Final = (
 """What every message about a flat file not published yet says about when it will be."""
 
 _ONE_DAY: Final = timedelta(days=1)
+
+HISTORY_TRANSPORTS: Final[Mapping[HistorySource, Transport]] = MappingProxyType(
+    {HistorySource.REST: Transport.REST, HistorySource.FLAT_FILES: Transport.FLAT_FILES}
+)
+"""The transport behind each source `history()` can read."""
 
 
 def _now() -> datetime:
@@ -451,7 +466,7 @@ def choose_source(
     datasets without instruments) or for at least `config.flat_file_symbol_threshold` symbols,
     and REST wins for fewer. Whether each day's file is published is not part of the choice:
     the flat-file read finds the days whose files are not there yet, and the query reads those
-    from REST under `AUTO` (`HistoryQuery.history()`). Pure: no I/O.
+    from REST under `AUTO` (`_ingest/history_reads.py`). Pure: no I/O.
 
     Args:
         spec: The dataset.
@@ -514,4 +529,47 @@ def choose_source(
         HistorySource.REST,
         f"{count} symbols < flat_file_symbol_threshold {threshold}",
         Alternative.AVAILABLE,
+    )
+
+
+def warn_unfilled(
+    spec: DatasetSpec, choice: SourceChoice, *, catalog: Catalog, warnings: BoundedLog
+) -> None:
+    """Warn when `AUTO` chose a source that leaves columns null which the other one fills.
+
+    Under `AUTO` the source changes with the symbol count, so the same query could fill a
+    column for many symbols and leave it null for few. The columns each source fills come from
+    the generated schemas (`Catalog.history_columns`). The WARNING names the columns the chosen
+    source leaves null, the choice and its reason, and what fills them: the `source=` of the
+    other source (`Alternative.AVAILABLE`). It is logged once per session, dataset, and set of
+    columns. When the other source can never serve the call (`Alternative.UNAVAILABLE`), the
+    result cannot change and nothing is logged: the table description says which source it
+    was. `history()` skips it for a range no row can lie in, which reads nothing.
+
+    Args:
+        spec: The dataset.
+        choice: The `AUTO` choice.
+        catalog: The session's catalog, which knows the columns each source fills.
+        warnings: The session's once-per-session warnings (`SessionCore.warnings`).
+    """
+    if choice.alternative is Alternative.UNAVAILABLE:
+        return  # the result cannot change, and the caller cannot pick the other source
+    other = HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
+    missing = catalog.history_columns(spec, HISTORY_TRANSPORTS[other]) - (
+        catalog.history_columns(spec, HISTORY_TRANSPORTS[choice.source])
+    )
+    if not missing:
+        return
+    columns = ", ".join(sorted(missing))
+    remedy = f"pass source=dm.HistorySource.{other.name} to get them"
+    warnings.log(
+        f"history source {spec.name} {choice.source.name}: {columns}",
+        "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "
+        "%s, fills: %s (logged once per session)",
+        spec.name,
+        TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]],
+        choice.reason,
+        columns,
+        TRANSPORT_LABELS[HISTORY_TRANSPORTS[other]],
+        remedy,
     )

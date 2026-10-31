@@ -205,7 +205,7 @@ class FuturesCalendar:
                 label="MassiveSession #1",
             )
             sessions.watch(["ESZ5"])  # looks up ESZ5's product and its schedule
-            sessions.wait_idle(5.0)  # in a test: the lookups are done
+            sessions.wait_loaded(["ESZ5"], 5.0)  # before the stream subscribes
             dates = sessions.correct(symbols, instants, rule_dates)
             sessions.close()
     """
@@ -239,7 +239,7 @@ class FuturesCalendar:
         self._clock = clock
         self._lock = threading.Lock()
         # Notified, under the lock, each time the worker has served what it took off the queue.
-        self._idle = threading.Condition(self._lock)
+        self._served = threading.Condition(self._lock)
         # Guarded by the lock; each map is immutable and replaced whole.
         self._products: Mapping[str, str | None] = MappingProxyType({})
         self._sessions: Mapping[str, tuple[ScheduledSession, ...]] = MappingProxyType({})
@@ -247,8 +247,6 @@ class FuturesCalendar:
         self._asked: dict[str, float] = {}  # contract or product -> when last queued
         self._failed: dict[str, str] = {}  # contract or product -> why its load failed
         self._reported: set[tuple[str, date]] = set()
-        self._queued = 0  # requests put on the queue
-        self._served = 0  # requests the worker has finished
         self._closed = False
         # Set by `close`: every lookup's token follows it, so none waits on after the close.
         self._stop = Cancel()
@@ -305,25 +303,8 @@ class FuturesCalendar:
                     return False
             return True
 
-        with self._idle:
-            return self._idle.wait_for(settled, timeout)
-
-    def wait_idle(self, timeout: float) -> bool:
-        """Wait until the worker has served every lookup queued so far, or the calendar closed.
-
-        For tests and diagnostics, which need the lookups `watch` and `correct` asked for to
-        be done; never call it on a flush or update-graph thread, which must not wait.
-
-        Args:
-            timeout: The most seconds to wait.
-
-        Returns:
-            True once idle or closed; False when `timeout` passed first.
-        """
-        with self._idle:
-            return self._idle.wait_for(
-                lambda: self._closed or self._served >= self._queued, timeout
-            )
+        with self._served:
+            return self._served.wait_for(settled, timeout)
 
     def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
         """Return streamed futures rows' session dates, corrected by the schedules.
@@ -387,11 +368,11 @@ class FuturesCalendar:
                 return at once, as a thread that holds the update graph's lock must. The
                 worker is a daemon that never needs that lock, so it ends on its own.
         """
-        with self._idle:
+        with self._served:
             if self._closed:
                 return
             self._closed = True
-            self._idle.notify_all()  # `wait_idle` returns once closed
+            self._served.notify_all()  # `wait_loaded` returns once closed
         self._stop.set()
         self._queue.put(_STOP)
         if wait:
@@ -531,13 +512,11 @@ class FuturesCalendar:
             self._put(("schedules", frozenset(wanted)))
 
     def _put(self, item: tuple[str, frozenset[str]]) -> None:
-        """Queue a lookup for the worker, counting it for `wait_idle`.
+        """Queue a lookup for the worker.
 
         Args:
             item: The kind (`"contracts"` or `"schedules"`) and its keys.
         """
-        with self._lock:
-            self._queued += 1
         self._queue.put(item)
 
     def _due(self, keys: set[str], known: Mapping[str, object]) -> set[str]:
@@ -596,9 +575,8 @@ class FuturesCalendar:
                 with self._lock:
                     unknown = {c: None for c in contracts if c not in self._products}
                     self._products = MappingProxyType({**self._products, **unknown})
-            with self._idle:
-                self._served += len(items)
-                self._idle.notify_all()
+            with self._served:
+                self._served.notify_all()
 
     def _load_contracts(self, contracts: set[str]) -> set[str]:
         """Look up the products of contracts and publish them.

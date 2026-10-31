@@ -1,6 +1,6 @@
 """The WebSocket transport: a session's registry of streams on shared connections.
 
-`WsTransport` is the session's `StreamTransport`, over the session's one `WsConnections`. A
+`WsConnections` is the session's `StreamTransport`, one per session. A
 stream verb (`blink()`, `append_only()`, `ring()`, `last_by()`) that finds no live stream for
 its `(dataset, channel, symbols)` asks it to open one: the transport decides the host of the
 class and family (`RestTransport.resolve_host`, once per session), finds or creates the
@@ -98,7 +98,6 @@ __all__ = [
     "SCHEDULE_WAIT",
     "SCHEDULE_WAIT_HOLDING_LOCK",
     "WsConnections",
-    "WsTransport",
 ]
 
 logger = logging.getLogger(__name__)
@@ -165,52 +164,6 @@ def _wanted(
     return frozenset(symbols), stream_topics(asset_class, channel, symbols, pairs=pairs)
 
 
-class WsTransport:
-    """The `StreamTransport` a verb receives: the session's core and its `WsConnections`.
-
-    `SessionClients.streams()` returns a new one for each call, holding the core itself for the
-    length of the verb that uses it, and the session's one `WsConnections`, which holds the
-    core only weakly because it lives as long as the session. Thread-safe: it has no state of
-    its own.
-
-    Example:
-        ::
-
-            transport = WsTransport(core, connections)
-            handle = transport.open_stream(spec, request, "T", stream_id=7)
-    """
-
-    __slots__ = ("_connections", "_core")
-
-    def __init__(self, core: SessionCore, connections: WsConnections) -> None:
-        """Bind the session's core to its connections.
-
-        Args:
-            core: The session's core.
-            connections: The session's connections.
-        """
-        self._core = core
-        self._connections = connections
-
-    def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-    ) -> StreamHandle:
-        """Open a stream on the session's connections (`WsConnections.open_stream`).
-
-        Args:
-            spec: A WebSocket dataset.
-            request: The normalized arguments.
-            channel: The channel.
-            stream_id: The id the session minted.
-
-        Returns:
-            The stream's handle.
-        """
-        return self._connections.open_stream(
-            self._core, spec, request, channel=channel, stream_id=stream_id
-        )
-
-
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is
 # taken before a group's lock, never under it.
 
@@ -219,11 +172,12 @@ class WsConnections:
     """One session's side of its `ConnectionGroup`: its streams, its rows, and its close.
 
     Created once per session by `SessionClients.streams()`, which registers `close` with the
-    session and hands it to each `WsTransport` it returns. It joins the group of the session's
+    session and returns it as the session's `StreamTransport`. It joins the group of the session's
     key and settings at once (`ConnectionGroup.attach`) and leaves it in `close`. It lives as
     long as the session's clients, so it holds the session core only weakly: the core holds it
     (through its `SessionClients`), and its `close` is a session closer, which must not keep the
-    core alive. `open_stream` runs on the caller thread, which passes the core; the blink
+    core alive. `open_stream` runs on the caller thread, inside a verb of the core, which
+    keeps the core alive meanwhile; the blink
     tables' shutdown callbacks and the symbol watches call in from any thread. Its state (the
     session's streams, the connection whose row it shows for each class and family, the
     closed flag, and the channel plans) is guarded by the group's lock.
@@ -237,7 +191,7 @@ class WsConnections:
         ::
 
             connections = WsConnections(core, resolve_host=rest.resolve_host)
-            handle = connections.open_stream(core, spec, request, channel="T", stream_id=7)
+            handle = connections.open_stream(spec, request, "T", stream_id=7)
     """
 
     def __init__(
@@ -306,13 +260,7 @@ class WsConnections:
     # --- opening -------------------------------------------------------------------------------
 
     def open_stream(
-        self,
-        core: SessionCore,
-        spec: DatasetSpec,
-        request: Request,
-        *,
-        channel: str,
-        stream_id: int,
+        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         """Open a stream: decide its host, lease its connection, create its tables, subscribe.
 
@@ -324,7 +272,6 @@ class WsConnections:
         released and its lease and topics returned.
 
         Args:
-            core: The session's core, which the calling verb holds.
             spec: A WebSocket dataset.
             request: The normalized arguments; its symbols are the stream's.
             channel: The channel.
@@ -340,6 +287,8 @@ class WsConnections:
         crypto ticker Massive's crypto ticker list does not split raises the `MassiveError` of
         `resolve_pairs`.
         """
+        # The calling verb runs on the core, which is alive while the verb runs.
+        core = cast("SessionCore", self._core())
         asset_class = cast("AssetClass", spec.asset_class)
         plan = self._plan(core, spec, channel)
         symbols = request.symbol_key()

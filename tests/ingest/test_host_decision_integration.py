@@ -95,7 +95,7 @@ def test_index_values_stream_on_the_resolved_host(
 @pytest.mark.needs("stocks:business")
 @pytest.mark.verifies("6")
 @pytest.mark.timeout(100)
-def test_minute_bars_on_the_host_resolved_for_a_business_key(
+def test_minute_bars_of_a_business_key_on_the_real_time_host(
     live_session: dm.MassiveSession,
     *,
     wait_acked: WaitAcked,
@@ -103,13 +103,14 @@ def test_minute_bars_on_the_host_resolved_for_a_business_key(
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
-    """Whether a Business key's minute bars (`AM.AAPL`) stream from `business.massive.com`.
+    """Whether a Business key's minute bars (`AM.AAPL`) stream from `socket.massive.com`.
 
-    The library resolves `business.massive.com` for a Business key's snapshot shape and warns.
-    With Stocks Business held, streams `AM.AAPL` and records the session's host, state, and
-    acknowledgement. Passes when the stocks connection is on `business.massive.com` and Massive
-    acknowledged the topic there, which it does whether or not the market is open; a refusal
-    there means the base Business tick host is another one.
+    A base Business key's snapshot carries no `timeframe`, so the library streams its TICK
+    channels from the real-time host, guessing no other. With Stocks Business held, streams
+    `AM.AAPL` and records the session's host, state, and acknowledgement. Passes when the
+    stocks connection is on `socket.massive.com` and Massive acknowledged the topic there,
+    which it does whether or not the market is open; a refusal there means the base Business
+    TICK host is another one, which the user pins with `MassiveConfig.ws_hosts`.
     """
     table = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
@@ -119,8 +120,8 @@ def test_minute_bars_on_the_host_resolved_for_a_business_key(
     live_session.release(table)
     evidence(f"AM.AAPL hosts {sorted(hosts)}; acknowledged topics {acked}")
     assert hosts, "the session opened no connection"
-    assert all("business.massive.com" in host for host in hosts), f"connected to {sorted(hosts)}"
-    assert acked, "Massive acknowledged no AM.AAPL topic on business.massive.com"
+    assert all("socket.massive.com" in host for host in hosts), f"connected to {sorted(hosts)}"
+    assert acked, "Massive acknowledged no AM.AAPL topic on socket.massive.com"
 
 
 @pytest.mark.needs("futures:starter")

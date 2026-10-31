@@ -28,6 +28,7 @@ from deephaven_massive._datasets.dates import (
     is_trading_day,
     midnight,
     parse_date_like,
+    reaches_now,
 )
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
@@ -637,3 +638,24 @@ def test_a_numpy_value_that_is_no_time_a_datetime_holds_is_refused(
 def test_another_java_value_is_the_wrong_type() -> None:
     with pytest.raises(TypeError, match=r"^start must be a str, date, datetime, Java Instant"):
         parse_date_like(_present(to_j_local_time("09:30")), "start")
+
+
+@pytest.mark.parametrize(
+    ("end", "reaches"),
+    [
+        (None, True),
+        (date(2025, 6, 18), True),  # today in New York
+        (date(2025, 6, 17), False),
+        (datetime(2025, 6, 18, 15, 0, 1, tzinfo=UTC), True),
+        (NOW, False),  # an excluded end at now reads nothing current
+    ],
+)
+def test_a_window_reaches_now_through_its_end(end: date | datetime | None, reaches: bool) -> None:
+    assert reaches_now(end, ClassFromPrefix.ANY, now=NOW) is reaches
+
+
+def test_a_day_reaches_now_in_its_class_zone() -> None:
+    # 01:00 UTC on 06-19 is still 06-18 in New York.
+    late = datetime(2025, 6, 19, 1, tzinfo=UTC)
+    assert reaches_now(date(2025, 6, 18), AssetClass.STOCKS, now=late)
+    assert not reaches_now(date(2025, 6, 18), AssetClass.CRYPTO, now=late)

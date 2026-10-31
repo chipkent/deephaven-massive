@@ -160,6 +160,7 @@ from deephaven_massive._errors import (
     MassiveError,
     from_wire,
 )
+from deephaven_massive._ingest.history_reads import read_history
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -860,6 +861,50 @@ class FlatFileHistory:
             tile=cast("AssetClass", spec.asset_class) if tiled else None,
             threads=threads,
             stop=cast("Cancel | None", stop),
+        )
+
+    def read_history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> tuple[Table, str | None]:
+        """Return a `history()` call's rows from the flat files, and from REST what they lack.
+
+        The flat-file read of a call `history()` sent to the flat files
+        (`history_reads.read_history`): under `AUTO`, the days and files the flat files cannot
+        serve are read from REST when REST can serve the request.
+
+        Args:
+            spec: The dataset.
+            request: The request with static symbols and the parsed bounds.
+            window: The call's window, which holds rows.
+            dates: The partition dates of the files the window needs.
+            call: The call's id.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
+            stop: A background read's stop token; None for a blocking read.
+
+        Returns:
+            The static table, and the description's source sentence when REST served any of
+            it or a session may be incomplete; None when only the flat files did, in full.
+
+        Errors are those of `history_reads.read_history`.
+        """
+        return read_history(
+            spec,
+            request,
+            window,
+            core=self._core,
+            files=self,
+            dates=dates,
+            call=call,
+            stop=stop,
+            forced=forced,
         )
 
     def _read(

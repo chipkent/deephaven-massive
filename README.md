@@ -690,14 +690,16 @@ stream never moves from one feed to the other.
   [`m.snapshots()`](docs/datasets/snapshots.md), which mixes classes, each row is held to its
   own class's subscription.
 - **Listed: delayed.** The subscription's streams read the delayed feed, even when your plan is
-  real-time; one WARNING says so then. REST cannot ask for delayed data, so `fetch()` and
+  real-time. REST cannot ask for delayed data, so `fetch()` and
   `poll()` return whatever your plan serves, and the table's description says so.
 - Forex and crypto are real-time on every plan, so `dm.Subscription.CURRENCIES` cannot be
   listed; fair-market-value streams (Business plans) are real-time only.
 - Past data is never checked, so this setting does not affect it: `history()`, and the
-  `fetch()` and `poll()` of the previous day's bar, a day's open and close, the indicators,
-  dividends, splits, and the other datasets that are not the market's current state. Massive
-  labels some of them `DELAYED` on Basic and Starter plans, but their rows are final.
+  `fetch()` and `poll()` of the previous day's bar, a day's open and close, dividends, splits,
+  and the other datasets that are not the market's current state. Massive labels some of them
+  `DELAYED` on Basic and Starter plans, but their rows are final. An indicator is past data
+  over a past range, but its latest value comes from the latest bars: its `poll()`, and a
+  `fetch()` with no `end` or an `end` of today or later, are checked like current data.
 - `m.streams()` shows each live table's `Recency`, and each live table's description, shown in
   the web UI, says what it knows of it. Nothing is shown as real-time without proof: a stream
   is real-time by its feed, and a `poll()` table only once Massive labels its data real-time;
