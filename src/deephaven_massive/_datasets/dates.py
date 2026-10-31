@@ -197,6 +197,8 @@ def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date 
     Raises:
         TypeError: If `value` is none of the accepted types.
         TimeTextError: If a string is not ISO-8601.
+        ValueError: If a string has surrounding whitespace, which is never trimmed; the
+            message names the trimmed text.
 
     Other values raise a `ValueError`: a naive `datetime` or `pandas.Timestamp`, or a string with
     a time but no offset (the message names the parameter, the value, and the fix;
@@ -211,7 +213,9 @@ def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date 
     elif isinstance(value, date):
         return value
     elif isinstance(value, str):
-        text = value.strip()
+        text = value
+        if text != text.strip():
+            raise ValueError(f"{name}={value!r} has surrounding whitespace; write {text.strip()!r}")
         if _ISO_DATE.match(text):  # a calendar date: `2025-03-03`, `20250303`, `2025-W10-1`
             with contextlib.suppress(ValueError):
                 return date.fromisoformat(text)

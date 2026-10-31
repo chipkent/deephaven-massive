@@ -259,7 +259,7 @@ def test_a_spread_is_never_looked_up_and_has_no_date(
 def test_a_long_watchlist_is_looked_up_in_chunks(
     calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
-    tickers = [f"C{n:03d}" for n in range(101)]
+    tickers = [f"C{n:03d}Z5" for n in range(101)]
     watched(calendar, *tickers)
     sent = [query["ticker.any_of"] for path, query in fetch.calls if path == CONTRACTS_PATH]
     assert [len(chunk) for chunk in sent if isinstance(chunk, tuple)] == [100, 1]
@@ -421,14 +421,14 @@ def test_a_row_before_the_loaded_sessions_is_a_miss(calendar: FuturesCalendar) -
 def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
     calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
 ) -> None:
-    watched(calendar, "NOPE5")
-    _, misses = correct(calendar, [("NOPE5", "2024-03-28T15:00:00", "2024-03-28")])
+    watched(calendar, "NOPZ5")
+    _, misses = correct(calendar, [("NOPZ5", "2024-03-28T15:00:00", "2024-03-28")])
     why = "Massive's futures contracts do not list it"
-    assert misses == [("NOPE5", null_date("NOPE5", why, "2024-03-28"))]
+    assert misses == [("NOPZ5", null_date("NOPZ5", why, "2024-03-28"))]
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH]  # asked within the spacing: no request
     clock.now += SPACING
-    correct(calendar, [("NOPE5", "2024-03-28T15:00:00", "2024-03-28")])
+    correct(calendar, [("NOPZ5", "2024-03-28T15:00:00", "2024-03-28")])
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH, CONTRACTS_PATH]
 

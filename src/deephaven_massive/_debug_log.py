@@ -260,6 +260,30 @@ def disable_debug_logging() -> None:
     handler.close()
 
 
+def _environment_value(name: str) -> str:
+    """Return a log variable's value exactly as set, or an empty string when unset or blank.
+
+    The same rule as `_config.environment_text`, which this module cannot import: loading the
+    configuration would load modules that need Deephaven, and the log must switch on without it.
+
+    Args:
+        name: The variable, `DEEPHAVEN_MASSIVE_LOG` or `DEEPHAVEN_MASSIVE_LOG_FILE`.
+
+    Returns:
+        The value, or `""` when the variable is unset or blank.
+
+    Raises:
+        ValueError: If the value has leading or trailing whitespace; the message names the
+            variable and the value.
+    """
+    value = os.environ.get(name, "")
+    if not value.strip():
+        return ""
+    if value != value.strip():
+        raise ValueError(f"{name}={value!r} has leading or trailing whitespace; set it without any")
+    return value
+
+
 def configure_from_environment() -> None:
     """Apply `DEEPHAVEN_MASSIVE_LOG` and `DEEPHAVEN_MASSIVE_LOG_FILE`, once per process.
 
@@ -270,8 +294,9 @@ def configure_from_environment() -> None:
     The variables count as read even when they raise, so a later session does not raise again.
 
     Raises:
-        ValueError: If `DEEPHAVEN_MASSIVE_LOG` is not a level name; the message names the
-            variable, its value, and the accepted names.
+        ValueError: If `DEEPHAVEN_MASSIVE_LOG` is not a level name (the message names the
+            variable, its value, and the accepted names), or either variable has leading or
+            trailing whitespace, which is never trimmed.
         OSError: If `DEEPHAVEN_MASSIVE_LOG_FILE` cannot be opened for appending; the message
             names the variable, its value, and the reason.
     """
@@ -279,8 +304,8 @@ def configure_from_environment() -> None:
         if _switch.environment_read:
             return
         _switch.environment_read = True
-    value = os.environ.get(LEVEL_VARIABLE, "").strip()
-    path = os.environ.get(FILE_VARIABLE, "").strip()
+    value = _environment_value(LEVEL_VARIABLE)
+    path = _environment_value(FILE_VARIABLE)
     if not value and not path:
         return
     level = _LEVELS.get(value.upper()) if value else logging.DEBUG

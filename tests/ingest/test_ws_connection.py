@@ -1621,11 +1621,11 @@ def test_a_verdict_on_every_frame_of_a_step_moves_the_streams_without_failing_th
         record(asset_class, family, decision)
 
     custom_session.connections.record_verdict = record_after_both
-    symbols = [f"S{i:04}" for i in range(1001)]
+    symbols = [f"S{i:04}Z5" for i in range(1001)]
     result = custom_session.query(FUTURES, symbols).blink()
     custom_session.wait(lambda s: s.opens == 2)
     assert custom_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
-    custom_session.subscribed("T.S0000", "T.S1000")
+    custom_session.subscribed("T.S0000Z5", "T.S1000Z5")
     # The old connection's last flush applies whatever failure it had queued.
     wait_for(
         lambda: (

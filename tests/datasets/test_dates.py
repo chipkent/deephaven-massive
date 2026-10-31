@@ -48,7 +48,6 @@ NOW = datetime(2025, 6, 18, 15, tzinfo=UTC)
     ("value", "expected"),
     [
         ("2025-03-03", date(2025, 3, 3)),
-        (" 2025-03-03 ", date(2025, 3, 3)),
         (date(2025, 3, 3), date(2025, 3, 3)),
         ("2025-03-03T09:30:00-05:00", datetime(2025, 3, 3, 14, 30, tzinfo=UTC)),
         ("2025-03-03T14:30:00Z", datetime(2025, 3, 3, 14, 30, tzinfo=UTC)),
@@ -365,9 +364,17 @@ def test_iso_text_with_only_zeros_below_the_microsecond_is_exact(
     assert caplog.messages == []
 
 
-@pytest.mark.parametrize("text", ["20250303", "2025-W10-1", " 2025-03-03 "])
+@pytest.mark.parametrize("text", ["20250303", "2025-W10-1"])
 def test_every_iso_date_form_is_a_date(text: str) -> None:
     assert parse_date_like(text, "start") == date(2025, 3, 3)
+
+
+@pytest.mark.parametrize("text", [" 2025-03-03", "2025-03-03 ", "\t2025-03-03T09:30:00Z"])
+def test_date_text_with_surrounding_whitespace_is_refused(text: str) -> None:
+    # Text is taken exactly as written; the message names the trimmed text to pass instead.
+    expected = f"start={text!r} has surrounding whitespace; write {text.strip()!r}"
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
+        parse_date_like(text, "start")
 
 
 def test_each_class_has_its_day_zone_and_day_start() -> None:

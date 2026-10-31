@@ -21,7 +21,6 @@ import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import numpy as np
 import pyarrow as pa
@@ -669,29 +668,12 @@ def test_fixtures_decode_with_their_declared_keys_and_no_drift(
 # --- End to end: REST ----------------------------------------------------------------------------
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
 def serve(
     fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes], **paths: str
 ) -> None:
     # Each keyword is a fixture name (without `.json`), each value the path that serves it.
     for name, path in paths.items():
         fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, f"{name}.json"))))
-
-
-def sent(fake_rest: FakeRestServer) -> list[tuple[str, dict[str, str]]]:
-    # Every GET the server received: its path and its query, one value per parameter.
-    out = []
-    for received in fake_rest.requests:
-        parts = urlsplit(received.target)
-        query = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
-        out.append((unquote(parts.path), query))
-    return out
 
 
 def table_rows(table: Table) -> list[dict[str, Any]]:
@@ -763,7 +745,7 @@ def test_last_trade_fetch_reads_each_symbols_last_trade(
 ) -> None:
     serve(fake_rest, load_fixture, last_trade="/v2/last/trade/AAPL")
     out = table_rows(rest_session.stocks.last_trade("AAPL").fetch())
-    assert sent(fake_rest) == [("/v2/last/trade/AAPL", {})]
+    assert fake_rest.get_queries(one_value=True) == [("/v2/last/trade/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Size"]) for r in out] == [
         ("AAPL", 1617901342969834000, 129.8473, 25.0)
     ]
@@ -775,7 +757,7 @@ def test_last_quote_fetch_reads_each_symbols_last_nbbo(
 ) -> None:
     serve(fake_rest, load_fixture, last_quote="/v2/last/nbbo/AAPL")
     out = table_rows(rest_session.stocks.last_quote(["AAPL"]).fetch())
-    assert sent(fake_rest) == [("/v2/last/nbbo/AAPL", {})]
+    assert fake_rest.get_queries(one_value=True) == [("/v2/last/nbbo/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["BidPrice"], r["AskPrice"]) for r in out] == [
         ("AAPL", 1617827221349730300, 127.96, 127.98)
     ]
@@ -800,7 +782,7 @@ def test_tick_history_over_rest_bounds_new_york_days(
     serve(fake_rest, load_fixture, **{name: path})
     query = cast("StreamHistoryQuery", factory(rest_session, name)("AAPL"))
     out = table_rows(query.history("2018-02-02", "2018-02-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries(one_value=True) == [
         (
             path,
             {
@@ -821,7 +803,9 @@ def test_previous_day_bar_fetches_the_previous_session(
 ) -> None:
     serve(fake_rest, load_fixture, bars_prev="/v2/aggs/ticker/AAPL/prev")
     out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch())
-    assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})]
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})
+    ]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it, and its `Date` that day.
     assert [
@@ -846,7 +830,9 @@ def test_previous_day_bar_sends_adjusted_false_when_asked(
     body = json.loads(load_fixture(FIXTURES, "bars_prev.json"))
     fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "adjusted": False}))
     out = table_rows(rest_session.stocks.previous_day_bar("AAPL", adjusted=False).fetch())
-    assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "false"})]
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/v2/aggs/ticker/AAPL/prev", {"adjusted": "false"})
+    ]
     assert [r["Symbol"] for r in out] == ["AAPL"]
 
 
@@ -929,7 +915,9 @@ def test_bars_history_over_rest_fills_the_range_path(
     fake_rest.reply(RANGE_PATH, Reply(body={**body, "adjusted": False}))
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
     out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(RANGE_PATH, {"adjusted": "false", "sort": "asc", "limit": "50000"})]
+    assert fake_rest.get_queries(one_value=True) == [
+        (RANGE_PATH, {"adjusted": "false", "sort": "asc", "limit": "50000"})
+    ]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Close"]) for r in out] == [
         ("AAPL", "2020-01-02", 1577941200000 * 10**6, 75.0875),
         ("AAPL", "2020-01-03", 1578027600000 * 10**6, 74.3575),
@@ -982,7 +970,7 @@ def test_all_daily_bars_read_the_grouped_daily_path(
     serve(fake_rest, load_fixture, bars_grouped_daily=path)
     query = rest_session.stocks.bars(dm.ALL, dm.Timespan.DAY)
     out = table_rows(query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"adjusted": "true"})]
+    assert fake_rest.get_queries(one_value=True) == [(path, {"adjusted": "true"})]
     # Grouped daily stamps its bars at the 16:00 close (1602705600000), moved to the day's start.
     assert {(r["Date"], r["TimestampStart"]) for r in out} == {
         ("2020-10-14", new_york_midnight_ns(date(2020, 10, 14)))
@@ -1006,7 +994,7 @@ def test_snapshots_split_a_long_watchlist_into_requests_of_250(
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
     symbols = [f"T{n:03d}" for n in range(251)]
     rest_session.stocks.snapshots(symbols).fetch()
-    sizes = sorted(len(q["tickers"].split(",")) for _, q in sent(fake_rest))
+    sizes = sorted(len(q["tickers"].split(",")) for _, q in fake_rest.get_queries(one_value=True))
     assert sizes == [1, 250]
 
 
@@ -1015,7 +1003,9 @@ def test_snapshots_send_the_tickers_and_the_otc_flag(
 ) -> None:
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
     out = table_rows(rest_session.stocks.snapshots(["MSFT", "AAPL"]).fetch())
-    assert sent(fake_rest) == [(SNAPSHOTS_PATH, {"tickers": "AAPL,MSFT", "include_otc": "false"})]
+    assert fake_rest.get_queries(one_value=True) == [
+        (SNAPSHOTS_PATH, {"tickers": "AAPL,MSFT", "include_otc": "false"})
+    ]
     # The documented example answers with its own tickers; its times mix ns and ms.
     assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
         "Symbol": "BCAT",
@@ -1027,7 +1017,7 @@ def test_snapshots_send_the_tickers_and_the_otc_flag(
     }
     assert "Timestamp" not in out[0]
     full = table_rows(rest_session.stocks.snapshots(dm.ALL, include_otc=True).fetch())
-    assert sent(fake_rest)[1] == (SNAPSHOTS_PATH, {"include_otc": "true"})
+    assert fake_rest.get_queries(one_value=True)[1] == (SNAPSHOTS_PATH, {"include_otc": "true"})
     assert len(full) == len(out)
 
 
@@ -1037,7 +1027,7 @@ def test_movers_fill_the_direction(
     path = "/v2/snapshot/locale/us/markets/stocks/losers"
     serve(fake_rest, load_fixture, movers=path)
     out = table_rows(rest_session.stocks.movers(dm.Direction.LOSERS).fetch())
-    assert sent(fake_rest) == [(path, {"include_otc": "false"})]
+    assert fake_rest.get_queries(one_value=True) == [(path, {"include_otc": "false"})]
     assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
         "Symbol": "PDS",
         "Updated": 1605195848258266000,
@@ -1054,7 +1044,9 @@ def test_daily_open_close_requests_each_symbol_on_its_day(
     serve(fake_rest, load_fixture, daily_open_close="/v1/open-close/AAPL/2023-01-09")
     query = rest_session.stocks.daily_open_close("AAPL", date(2023, 1, 9), adjusted=False)
     out = table_rows(query.fetch())
-    assert sent(fake_rest) == [("/v1/open-close/AAPL/2023-01-09", {"adjusted": "false"})]
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/v1/open-close/AAPL/2023-01-09", {"adjusted": "false"})
+    ]
     assert [(r["Symbol"], r["Date"], r["Close"], r["PreMarket"]) for r in out] == [
         ("AAPL", "2023-01-09", 325.12, 324.5)
     ]
@@ -1281,7 +1273,7 @@ def test_list_datasets_send_their_exact_request(
     fixture, _ = SOURCES[path]
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, fixture))))
     out = table_rows(cast("Query", factory(rest_session, name)(**kwargs)).fetch())
-    assert sent(fake_rest) == [(path, query)]
+    assert fake_rest.get_queries(one_value=True) == [(path, query)]
     assert out[0][column] == value
     assert ("Symbol" in out[0]) == CATALOG.takes_symbols(spec_of(name))
 
@@ -1293,7 +1285,7 @@ def test_limit_caps_the_rows_and_never_raises_the_page_size(
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "filings_index.json"))))
     out = table_rows(rest_session.stocks.filings.index(limit=1).fetch())
     # A cap below the page size asks for no more rows than it keeps.
-    assert sent(fake_rest) == [(path, {"limit": "1"})]
+    assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "1"})]
     assert [r["Symbol"] for r in out] == ["AAPL"]
 
 
@@ -1303,7 +1295,7 @@ def test_ipos_fan_out_one_request_per_ticker(
     path = "/vX/reference/ipos"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
     table_rows(rest_session.stocks.ipos(["RAPP", "ACME"]).fetch())
-    assert sorted(q["ticker"] for _, q in sent(fake_rest)) == ["ACME", "RAPP"]
+    assert sorted(q["ticker"] for _, q in fake_rest.get_queries(one_value=True)) == ["ACME", "RAPP"]
 
 
 @pytest.mark.parametrize(
@@ -1322,7 +1314,7 @@ def test_ipos_send_their_own_order_without_sort(
     path = "/vX/reference/ipos"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
     rest_session.stocks.ipos(order=dm.Order.ASC).fetch()
-    assert sent(fake_rest) == [(path, {"order": "asc", "limit": "1000"})]
+    assert fake_rest.get_queries(one_value=True) == [(path, {"order": "asc", "limit": "1000"})]
 
 
 # --- End to end: WebSocket -----------------------------------------------------------------------

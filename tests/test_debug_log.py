@@ -152,7 +152,7 @@ def test_a_file_that_cannot_be_opened_keeps_the_previous_handler(tmp_path: Path)
 
 @pytest.mark.parametrize(
     ("value", "level"),
-    [("DEBUG", logging.DEBUG), ("debug", logging.DEBUG), (" Info ", logging.INFO)],
+    [("DEBUG", logging.DEBUG), ("debug", logging.DEBUG), ("Info", logging.INFO)],
 )
 def test_the_environment_variable_turns_the_log_on(
     *, value: str, level: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -209,6 +209,16 @@ def test_the_file_variable_alone_logs_at_debug(
         "(from the environment; DEEPHAVEN_MASSIVE_LOG unset, so DEBUG)"
     ) in text
     assert _lines(text)[-1][3] == "a DEBUG line"
+
+
+@pytest.mark.parametrize("variable", ["DEEPHAVEN_MASSIVE_LOG", "DEEPHAVEN_MASSIVE_LOG_FILE"])
+def test_a_variable_with_surrounding_whitespace_is_refused(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.setenv(variable, " INFO ")
+    message = f"{variable}=' INFO ' has leading or trailing whitespace; set it without any"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        _debug_log.configure_from_environment()
 
 
 def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
