@@ -184,8 +184,9 @@ class WsClient:
       1. Subscriptions made before it are gone: the library sends its whole set again.
     - `on_status(generation, status)`: one decoded status object.
     - `on_data(generation, channel, rows, rejects, drift)`: one channel's objects of one frame.
-      `rows` map every column of the channel's source (long-form names) to its value, `None`
-      when absent or when the value does not fit; symbols are as the wire spells them.
+      Each row is a tuple of the values of the channel's source's fields, in the order of
+      `Source.fields`, `None` when absent or when the value does not fit; symbols are as the
+      wire spells them.
       `rejects` are the rows dropped because a required key is absent, null, or does not fit;
       `drift` is the `DriftReport` of the channel's objects in the frame.
     - `on_state(state, detail)`: the detail is the next attempt's time in seconds since the
@@ -222,7 +223,7 @@ class WsClient:
         sources: Iterable[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_backoff: float,
         max_reconnect_backoff: float,

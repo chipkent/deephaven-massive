@@ -168,6 +168,10 @@ class _Probe:
         cluster_sources = [
             s for k, s in sources(Transport.WS).items() if k.startswith(f"{cluster}/")
         ]
+        # A decoded row holds its values in the order of its source's fields.
+        self._columns = {
+            s.key.partition("/")[2]: [f.column for f in s.fields] for s in cluster_sources
+        }
         self.client = WsClient(
             f"wss://{_HOST}/{cluster}",
             api_key=api_key,
@@ -191,12 +195,13 @@ class _Probe:
         with self._lock:
             self._statuses.append((time.monotonic(), status))
 
-    def _on_data(self, channel: str, rows: list[dict[str, object]]) -> None:
+    def _on_data(self, channel: str, rows: list[tuple[object, ...]]) -> None:
         if not self._keep_rows:
             return
         now = time.monotonic()
+        columns = self._columns[channel]
         with self._lock:
-            self._rows.extend((now, channel, row) for row in rows)
+            self._rows.extend((now, channel, dict(zip(columns, row, strict=True))) for row in rows)
 
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         with self._lock:

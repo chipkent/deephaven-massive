@@ -9,6 +9,7 @@ import logging
 import math
 import ssl
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -38,6 +39,7 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Iterator
+    from concurrent.futures import Future
 
     from deephaven_massive._massive.rest.response import Page
 
@@ -1570,3 +1572,53 @@ def test_an_interrupt_just_after_the_grant_leaves_no_permit_held(
     state = governor.snapshot()[0]
     assert (state.attempts, state.in_flight) == (1, 0)
     rest.close()
+
+
+def test_overlapping_fan_outs_share_the_pool_without_discarding_connections(
+    fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two fan-outs of two requests each, on a client of two connections: two requests reach
+    # Massive at once while the others wait for a connection, so urllib3 never opens an extra
+    # connection only to discard it ("Connection pool is full").
+    rest = _client(fake_rest, max_concurrency=2)
+    fake_rest.reply_default(_ok())
+    ready = threading.Condition()
+    hold = threading.Event()
+    in_flight = most = 0
+
+    def held(_received: object) -> None:
+        nonlocal in_flight, most
+        with ready:
+            in_flight += 1
+            most = max(most, in_flight)
+            ready.notify_all()
+        hold.wait(10)
+        with ready:
+            in_flight -= 1
+
+    fake_rest.on_request(held)
+    waiting = threading.Event()
+    wait = rest._slots._ready.wait
+
+    def noted(timeout: float | None = None) -> bool:
+        waiting.set()
+        return wait(timeout)
+
+    rest._slots._ready.wait = noted  # type: ignore[method-assign]  # the point: see the wait
+    caplog.set_level(logging.WARNING, logger="urllib3")
+
+    def fan_out(pool: ThreadPoolExecutor, first: int) -> list[Future[Page]]:
+        tickers = [{"stockTicker": f"T{i}"} for i in (first, first + 1)]
+        return [pool.submit(rest.get, _TRADES, ticker, {}, bucket="stocks") for ticker in tickers]
+
+    with ThreadPoolExecutor(2) as one, ThreadPoolExecutor(2) as other:
+        calls = fan_out(one, 0) + fan_out(other, 2)
+        with ready:
+            assert ready.wait_for(lambda: in_flight == 2, 10)
+        assert waiting.wait(10)  # a third request waits for a connection
+        hold.set()
+        pages = [call.result(10) for call in calls]
+    rest.close()
+    assert [page.rows for page in pages] == [[{"i": 1}]] * 4
+    assert most == 2
+    assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []

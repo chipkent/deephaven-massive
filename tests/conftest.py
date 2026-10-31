@@ -2721,6 +2721,8 @@ def _raw_plan(prefix: str, tickers: list[str] | None) -> ReadPlan:
         window_ns=None,
         to_ns=lambda values: (values, ""),
         block_size=_FLAT_FILE_BLOCK,
+        chunk_size=16 * _FLAT_FILE_BLOCK,
+        parse_threads=3,
         required=frozenset(),
     )
 

@@ -450,15 +450,14 @@ def test_the_drift_of_both_readings_names_dotted_keys_and_first_samples() -> Non
     assert drift.samples["extra"] == DriftSample(None, '{"deep": true}')
 
 
-def test_an_integer_a_double_cannot_hold_exactly_is_read_row_by_row(
+def test_an_integer_a_double_cannot_hold_exactly_is_rounded_by_the_converter(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Arrow refuses an integer it would round; the converter rounds it, as a JSON number is.
+    # Arrow refuses an integer it would round; the column goes through the converter, which
+    # rounds it as a JSON number is, so the page is still read column by column.
     big = 2**60 + 1
     with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
         path = _path(_field("v", WireType.DOUBLE))
         batch, _ = to_batch([{"v": big}, {"v": 2}], path, required=())
     assert batch.column(0).to_pylist() == [float(big), 2.0]
-    assert caplog.messages == [
-        "/v3/x: reading 2 rows one by one: the column V holds a value that needs its own check"
-    ]
+    assert caplog.messages == []

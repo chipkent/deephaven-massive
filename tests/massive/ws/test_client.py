@@ -723,8 +723,8 @@ def test_a_wildcard_and_an_explicit_topic_stay_independent(
     )
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 2)
     assert [(d[1], d[2]) for d in h.recorder.of("data")] == [
-        ("A", [{"Ticker": "X", "Close": 1.5}]),
-        ("AM", [{"Ticker": "X", "Close": 2.5}]),
+        ("A", [("X", 1.5)]),
+        ("AM", [("X", 2.5)]),
     ]
 
 
@@ -740,7 +740,7 @@ def test_an_odd_value_reads_as_null_alone_with_the_raw_symbol(
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
     [(generation, channel, rows, rejects, drift)] = h.recorder.of("data")
     assert (generation, channel, rejects) == (1, "T", [])
-    assert [(r["Ticker"], r["Price"]) for r in rows] == [
+    assert [(r[0], r[1]) for r in rows] == [  # the source's Ticker and Price
         ("AAPL", 114.125),
         ("BRK.A", None),
         ("MSFT", 101.5),

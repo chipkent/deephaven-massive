@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from datetime import date
 
 import pytest
@@ -7,9 +8,11 @@ import pytest
 from deephaven_massive._massive.spec import convert as convert_module
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
+    column_converter,
     convert,
     convert_field,
     excerpt,
+    field_converter,
     missing_key_message,
     row_excerpt,
 )
@@ -326,3 +329,98 @@ def test_a_row_excerpt_is_the_compact_json_text_cut_to_2000_characters() -> None
 def test_the_missing_key_clause_names_the_column_and_wire_key() -> None:
     field = Field(wire_key="t", column="SipTimestamp", wire_type=WireType.EPOCH, unit=WireUnit.MS)
     assert missing_key_message(field) == "no SipTimestamp (wire key 't'), which the dataset needs"
+
+
+# --- column reading -----------------------------------------------------------------------------
+
+# Values of every kind a decoder meets, odd ones included: each column below draws from them.
+_POOL: tuple[object, ...] = (
+    None,
+    0,
+    7,
+    -3,
+    2**53 + 1,  # a double rounds it
+    2**63 - 1,
+    2**63,  # beyond a long
+    -(2**63) - 1,
+    10**400,  # beyond a double
+    1.5,
+    -0.0,
+    True,
+    False,
+    "",
+    "AAPL",
+    "48",
+    "4.8",
+    "12,37",
+    "2025-03-03",
+    "2025-02-30",
+    "2025-03-03T14:30:00Z",
+    "2025-03-03T00:00:00+00:00",
+    [],
+    [12, 37],
+    [12, None],
+    [2**63],
+    [True],
+    ["a", None],
+    ["a", 1],
+    {"deep": [1, 2]},
+)
+
+
+def _field(wire_type: WireType, conversion: Conversion | None = None) -> Field:
+    unit = WireUnit.MS if wire_type is WireType.EPOCH else None
+    return Field(wire_key="v", column="V", wire_type=wire_type, unit=unit, conversion=conversion)
+
+
+_FIELDS = [
+    *(_field(wire_type) for wire_type in WireType),
+    *(_field(conversion.wire_type, conversion) for conversion in Conversion),
+]
+
+
+def _typed(values: list[object] | None) -> object:
+    # Values with their exact types, so `1` and `1.0`, or `True` and `1`, never compare equal.
+    if values is None:
+        return None
+    return [(type(v), [(type(e), e) for e in v] if isinstance(v, list) else v) for v in values]
+
+
+@pytest.mark.parametrize("field", _FIELDS, ids=lambda f: str(f.conversion or f.wire_type))
+def test_a_column_reads_exactly_as_its_values_one_by_one(field: Field) -> None:
+    # Every column of 3 values from the pool: when the field's converter takes every value,
+    # the column holds exactly what it gives for each; when it refuses one, the column reader
+    # refuses the column, so the decoder reads the rows one by one.
+    read = column_converter(field)
+    one = field_converter(field)
+    for values in itertools.product(_POOL, repeat=3):
+        try:
+            expected: list[object] | None = [None if v is None else one(v) for v in values]
+        except UnconvertibleError:
+            expected = None
+        assert _typed(read(list(values))) == _typed(expected), values
+
+
+def test_a_column_of_plain_values_is_kept_without_a_copy() -> None:
+    values: list[object] = [1.5, None, 2.5]
+    price = Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE)
+    assert column_converter(price)(values) is values
+    # An integer becomes a float, as the converter makes it: a new list.
+    mixed: list[object] = [1.5, 2]
+    assert _typed(column_converter(price)(mixed)) == [(float, 1.5), (float, 2.0)]
+
+
+def test_a_column_left_to_arrow_keeps_its_numbers_unchecked() -> None:
+    # A caller that builds an Arrow array of the field's type gets integers back as sent: Arrow
+    # makes floats of a double column's integers, and refuses those out of range itself.
+    price = Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE)
+    mixed: list[object] = [1.5, 2, None]
+    assert column_converter(price, arrow_checks_numbers=True)(mixed) is mixed
+    size = Field(wire_key="s", column="Size", wire_type=WireType.LONG)
+    too_large: list[object] = [1, 2**63]
+    assert column_converter(size, arrow_checks_numbers=True)(too_large) is too_large
+    assert column_converter(size)(too_large) is None
+    codes = Field(wire_key="c", column="Codes", wire_type=WireType.LONG_ARRAY)
+    lists: list[object] = [[1, 2**63], None]
+    assert column_converter(codes, arrow_checks_numbers=True)(lists) is lists
+    assert column_converter(codes)(lists) is None

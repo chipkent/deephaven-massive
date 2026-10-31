@@ -15,6 +15,7 @@ import socket
 import ssl
 import struct
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -43,7 +44,9 @@ from urllib3.exceptions import SSLError as Urllib3SSLError
 from deephaven_massive._massive.flatfiles import client as client_module
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
+from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._massive.net.slots import ConnectionSlots
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
@@ -146,6 +149,13 @@ def network_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     return monkeypatch
 
 
+def _body(streaming: StreamingBody) -> client_module._Body:
+    # A response body as the client wraps it, holding one of its own connection slots.
+    slots = ConnectionSlots(1)
+    assert slots.acquire(Cancel())
+    return client_module._Body(streaming, slots)
+
+
 def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
     return ReadPlan(
         columns=(
@@ -158,6 +168,8 @@ def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
         window_ns=None,
         to_ns=lambda values: (values, ""),
         block_size=block_size,
+        chunk_size=16 * block_size,
+        parse_threads=3,
         required=frozenset({"ticker"}),
     )
 
@@ -948,7 +960,7 @@ def test_a_tls_failure_part_way_through_the_body_is_a_dropped_read(
 ) -> None:
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     raw = _TlsDrop(data[: len(data) // 2])
-    body = client_module._Body(StreamingBody(raw, len(data)))
+    body = _body(StreamingBody(raw, len(data)))
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         list(file.batches(stocks_plan()))
     assert info.value.message.startswith("cannot read here: ")
@@ -956,18 +968,12 @@ def test_a_tls_failure_part_way_through_the_body_is_a_dropped_read(
     assert file.dropped
 
 
-class _DropAfterABlock(io.BytesIO):
-    # A raw HTTP stream that serves its bytes, then, once the reader has handed on a block,
-    # fails as a dropped connection does.
-    def __init__(self, data: bytes, delivered: threading.Event) -> None:
-        super().__init__(data)
-        self.delivered = delivered
-
+class _DropAtTheEnd(io.BytesIO):
+    # A raw HTTP stream that serves its bytes, then fails as a dropped connection does.
     @override
     def read(self, size: int | None = -1, /) -> bytes:
         chunk = super().read(size)
         if not chunk:
-            assert self.delivered.wait(TIMEOUT)
             raise ProtocolError("Connection broken: IncompleteRead")
         return chunk
 
@@ -975,20 +981,17 @@ class _DropAfterABlock(io.BytesIO):
 def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
     make_csv_gz: Callable[[str], bytes],
 ) -> None:
-    # The blocks handed on before the drop stand; the read then fails instead of starting over,
-    # so no row arrives twice.
+    # The blocks read before the drop are handed on first, in order; the read then fails
+    # instead of starting over, so no row arrives twice.
     total = 20_000
     rows = "".join(f"AAPL,{n},{1_741_012_200_000_000_000 + n}\n" for n in range(total))
     data = make_csv_gz("ticker,sequence_number,sip_timestamp\n" + rows)[:-40_000]
-    delivered = threading.Event()
-    raw = _DropAfterABlock(data, delivered)
-    body = client_module._Body(StreamingBody(raw, len(data) + 1))
+    body = _body(StreamingBody(_DropAtTheEnd(data), len(data) + 1))
     seen: list[int] = []
 
     def read(file: FlatFile) -> None:
         for batch, _ in file.batches(stocks_plan(block_size=16 << 10)):
             seen.extend(batch["SequenceNumber"].to_pylist())
-            delivered.set()
 
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         read(file)
@@ -1058,7 +1061,7 @@ class _BrokenRaw(io.BytesIO):
 
 def test_a_failed_body_read_is_an_os_error() -> None:
     # botocore turns the dropped connection into its own error; the reader sees an OSError.
-    body = client_module._Body(StreamingBody(_BrokenRaw(), 10))
+    body = _body(StreamingBody(_BrokenRaw(), 10))
     with pytest.raises(OSError, match="IncompleteRead") as info:
         body.read(4)
     assert isinstance(info.value.__cause__, BotoCoreError)
@@ -1683,6 +1686,145 @@ def test_closing_the_client_ends_a_listing_retry_wait(fake_s3: FakeS3) -> None:
     (error,) = raised
     assert error.message == "the flat-file client for https://files.massive.com is closed"
     assert fake_s3.listings == [None]
+
+
+# --- connection slots ---------------------------------------------------------------------------
+
+
+def _waits_seen(client: FlatFileClient) -> threading.Event:
+    # Set as soon as a request waits for a connection, so a test sees it blocked without a sleep.
+    waiting = threading.Event()
+    wait = client._slots._ready.wait
+
+    def noted(timeout: float | None = None) -> bool:
+        waiting.set()
+        return wait(timeout)
+
+    client._slots._ready.wait = noted  # type: ignore[method-assign]  # the point: see the wait
+    return waiting
+
+
+def test_an_open_file_keeps_its_connection_until_it_is_closed(
+    fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    fake_s3.put(KEY, make_csv_gz("ticker,sip_timestamp\nAAPL,1\n"))
+    fake_s3.put(FUTURES_KEY, make_csv_gz("ticker,sip_timestamp\nAAPL,1\n"))
+    client = make_client(max_pool=1)
+    waiting = _waits_seen(client)
+    first = client.open(KEY)
+    assert first is not None
+    opened: list[FlatFile | None] = []
+    second = threading.Thread(target=lambda: opened.append(client.open(FUTURES_KEY)))
+    second.start()
+    assert waiting.wait(TIMEOUT)  # the second object waits for the first to be closed
+    assert [key for _, key in fake_s3.requests] == [KEY]
+    first.close()
+    first.close()  # idempotent: the connection is given back once
+    second.join(TIMEOUT)
+    [later] = opened
+    assert later is not None
+    later.close()
+    client.close()
+
+
+def test_a_cancel_ends_the_wait_for_a_connection_without_a_request(
+    fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    fake_s3.put(KEY, make_csv_gz("ticker,sip_timestamp\nAAPL,1\n"))
+    client = make_client(max_pool=1)
+    waiting = _waits_seen(client)
+    held = client.open(KEY)
+    assert held is not None
+    cancel = Cancel()
+    opened: list[FlatFile | None] = []
+    waiter = threading.Thread(target=lambda: opened.append(client.open(KEY, cancel=cancel)))
+    waiter.start()
+    assert waiting.wait(TIMEOUT)
+    cancel.set()
+    waiter.join(TIMEOUT)
+    assert opened == [None]
+    assert len(fake_s3.requests) == 1  # only the held object was requested
+    held.close()
+    client.close()
+
+
+def test_a_close_ends_the_wait_for_a_connection_of_open_and_prefixes(
+    fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    fake_s3.put(KEY, make_csv_gz("ticker,sip_timestamp\nAAPL,1\n"))
+    client = make_client(max_pool=1)
+    waiting = _waits_seen(client)
+    held = client.open(KEY)
+    assert held is not None
+    errors: list[WireError] = []
+
+    def wait_for(call: Callable[[], object]) -> None:
+        try:
+            call()
+        except WireError as error:
+            errors.append(error)
+
+    waiters = [
+        threading.Thread(target=wait_for, args=(lambda: client.open(KEY),)),
+        threading.Thread(target=wait_for, args=(client.prefixes,)),
+    ]
+    for waiter in waiters:
+        waiter.start()
+    assert waiting.wait(TIMEOUT)
+    client.close()
+    for waiter in waiters:
+        waiter.join(TIMEOUT)
+    assert (
+        sorted(error.message for error in errors)
+        == ["the flat-file client for https://files.massive.com is closed"] * 2
+    )
+    held.close()
+
+
+def test_overlapping_reads_share_the_pool_without_discarding_connections(
+    *,
+    tls_server: FakeRestServer,
+    trusted: pytest.MonkeyPatch,
+    make_csv_gz: Callable[[str], bytes],
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Two reads of two files each, on a client of two connections: two objects are open at
+    # once while the others wait for one to be closed, so urllib3 never opens an extra
+    # connection only to discard it ("Connection pool is full").
+    data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
+    keys = [KEY.replace("03-03", f"03-0{day}") for day in range(3, 7)]
+    for key in keys:
+        tls_server.reply(f"/flatfiles/{key}", Reply(data))
+    ready = threading.Condition()
+    hold = threading.Event()
+    in_flight = 0
+
+    def held(_received: object) -> None:
+        nonlocal in_flight
+        with ready:
+            in_flight += 1
+            ready.notify_all()
+        hold.wait(TIMEOUT)
+
+    tls_server.on_request(held)
+    client = make_client(endpoint_url=tls_server.url, max_pool=2)
+    waiting = _waits_seen(client)
+    caplog.set_level(logging.WARNING, logger="urllib3")
+    with ThreadPoolExecutor(2) as one, ThreadPoolExecutor(2) as other:
+        reads = [
+            pool.submit(lambda key: _symbols(client.open(key)), key)
+            for pool, key in zip([one, one, other, other], keys, strict=True)
+        ]
+        with ready:
+            assert ready.wait_for(lambda: in_flight == 2, TIMEOUT)
+        assert waiting.wait(TIMEOUT)  # a third object waits for a connection
+        hold.set()
+        symbols = [read.result(TIMEOUT) for read in reads]
+    client.close()
+    assert symbols == [["AAPL", "MSFT", "AAPL", "SPY"]] * 4
+    assert in_flight == 4
+    assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []
 
 
 def test_an_endpoint_s_user_and_password_never_reach_a_message(

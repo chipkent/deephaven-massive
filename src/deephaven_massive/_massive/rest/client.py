@@ -12,7 +12,8 @@ shares the governor. Encoding lives in `rest.query`, decoding and error mapping 
 
 **Thread-safety.** One client serves a whole session: the caller thread, every poller, and
 every fan-out worker call it at once. Its shared mutable state is urllib3's pool, which locks
-internally, the governor, which locks its own state, and the closed `Cancel` token. Every
+internally, the governor, which locks its own state, the connection slots (`net.slots`), which
+bound the requests in flight to the pool's size, and the closed `Cancel` token. Every
 request listens to a token of its own, made from the client's and the caller's, so closing
 the client ends its waits and nobody else's. No call modifies its arguments.
 
@@ -62,6 +63,7 @@ from deephaven_massive._massive.net.retry import (
     retry_after_seconds,
     transient_wait,
 )
+from deephaven_massive._massive.net.slots import ConnectionSlots
 from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import (
@@ -307,9 +309,10 @@ class RestClient:
             base_url: The scheme and host of the REST API, with an optional port and no path,
                 such as `"https://api.massive.com"`. `http` is accepted only for a loopback
                 host (a local test server), so the key never travels in clear text.
-            max_concurrency: The most requests the caller sends at once (a fan-out's
-                workers). The pool keeps that many connections to the host, so none is
-                discarded and reopened under load. At least 1.
+            max_concurrency: The most requests the client has in flight at once, whatever
+                its callers send: the pool keeps that many connections to the host, and a
+                request waits for one to be free (`net.slots`), so none is discarded and
+                reopened under load however many fan-outs overlap. At least 1.
             governor: Admits every attempt and pauses a bucket Massive refused. It may be
                 shared with other clients of the same API key; its clock is the time source of
                 this client's retry waits too.
@@ -364,6 +367,9 @@ class RestClient:
                 ssl_context=context,
             )
         self._closed = Cancel()
+        # Every request of every caller takes one, so the session never has more requests in
+        # flight than the pool keeps connections, however many fan-outs overlap.
+        self._slots = ConnectionSlots(max_concurrency)
 
     def get(
         self,
@@ -379,8 +385,10 @@ class RestClient:
 
         Blocks the calling thread for the request and its waits: for the governor's permit
         (a paced bucket's slot, or a pause after a 429, unless `patience` cannot cover the
-        pause), and for up to three retries of a 5xx or connection failure, 0.5 to
-        2.4 s each. A 429 is not a retry: the attempt is made again once the governor allows.
+        pause), then for a free connection while the client's other requests use all
+        `max_concurrency` of them, and for up to three retries of a 5xx or connection
+        failure, 0.5 to 2.4 s each. A 429 is not a retry: the attempt is made again once the
+        governor allows.
 
         Errors: `WireError` when the request fails after its retries, its bucket is paused
         for longer than `patience` covers (status 429, saying when its next request goes), TLS
@@ -578,10 +586,15 @@ class RestClient:
         with self._governor.admission(job.bucket, lane=lane, patience=job.patience) as admission:
             queued = self._clock.monotonic()
             permit = self._permit(request, admission, stop)
-            if stop.is_set():  # cancelled just as it was admitted: it is never sent
+            # A connection of the pool next, taken only once admitted, so no request holds
+            # one through a pause; cancelled while waiting for either, it is never sent.
+            if not self._slots.acquire(stop):
                 self._governor.release(permit)
                 raise self._stopped(request)
-            return self._send(job, request, permit, waited=self._clock.monotonic() - queued)
+            try:
+                return self._send(job, request, permit, waited=self._clock.monotonic() - queued)
+            finally:
+                self._slots.release()
 
     def _send(
         self, job: _Job, request: RequestTarget, permit: Permit, *, waited: float

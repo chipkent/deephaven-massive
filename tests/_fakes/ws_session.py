@@ -269,7 +269,7 @@ class WsSession:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> SpyClient:

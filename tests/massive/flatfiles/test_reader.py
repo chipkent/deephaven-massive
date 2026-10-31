@@ -1,7 +1,11 @@
 import csv
+import gc
 import gzip
 import io
+import statistics
 import sys
+import threading
+import time
 import types
 from collections.abc import Callable
 from datetime import date
@@ -9,6 +13,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.csv as pacsv
 import pytest
 
 from deephaven_massive._massive.flatfiles import reader
@@ -54,6 +59,8 @@ def plan(
     window_ns: tuple[int, int] | None = None,
     to_ns: Callable[[pa.Array], tuple[pa.Array, str]] = identity,
     block_size: int = 1 << 20,
+    chunk_blocks: int = 16,
+    parse_threads: int = 3,
     required: frozenset[str] | None = None,
 ) -> ReadPlan:
     return ReadPlan(
@@ -64,6 +71,8 @@ def plan(
         window_ns=window_ns,
         to_ns=to_ns,
         block_size=block_size,
+        chunk_size=chunk_blocks * block_size,
+        parse_threads=parse_threads,
         required=frozenset({"ticker", time_header}) if required is None else required,
     )
 
@@ -257,6 +266,10 @@ def test_typed_values_with_surrounding_spaces_are_read(
 def python_lines(call: Callable[[], object]) -> int:
     """Count the Python lines a call runs: a loop over values runs lines per value.
 
+    The garbage collector is off while it counts: a collection that happened to run during the
+    call would run the finalizers of earlier tests' objects on this thread, and count their
+    lines too.
+
     Returns:
         The number of line events, in every frame the call enters.
     """
@@ -268,11 +281,14 @@ def python_lines(call: Callable[[], object]) -> int:
         return trace
 
     previous = sys.gettrace()  # coverage's tracer, which must survive the count
+    gc.collect()
+    gc.disable()
     sys.settrace(trace)
     try:
         call()
     finally:
         sys.settrace(previous)
+        gc.enable()
     return lines
 
 
@@ -466,6 +482,141 @@ def test_a_filtered_out_row_is_never_parsed(opened: Callable[[str, str | bytes],
     result = table(opened(KEY, TRADE_HEADER + rows), read)
     assert result["Id"].to_pylist() == ["3"]
     assert result["Conditions"].to_pylist() == [[12, 37]]
+
+
+# Reading in parallel chunks reads exactly as the streaming reader did.
+
+
+def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+    # The reading the chunked one replaced, as reference: Arrow's streaming reader over the
+    # whole decompressed file, one block at a time, each block through the same `_apply`.
+    file, _ = flat_file(KEY, data)
+    text = gzip.GzipFile(fileobj=io.BytesIO(data))
+    names = file._header(text, read)
+    read_types = {column.header: column.read_type for column in read.columns}
+    headers = DriftReport(
+        extra=frozenset(names).difference(read_types),
+        missing=frozenset(read_types).difference(names),
+    )
+    if not text.peek(1):
+        return pa.Table.from_batches([reader._empty(read)]), headers
+    blocks = pacsv.open_csv(
+        pa.PythonFile(text, mode="r"),
+        read_options=pacsv.ReadOptions(
+            column_names=names, block_size=read.block_size, use_threads=False
+        ),
+        convert_options=pacsv.ConvertOptions(
+            column_types=dict.fromkeys(read_types, pa.string()),
+            include_columns=list(read_types),
+            include_missing_columns=True,
+            null_values=[""],
+            strings_can_be_null=True,
+        ),
+    )
+    batches, drift, held = [], headers, 0
+    for block in blocks:
+        rows, found, considered = file._apply(block, read)
+        batches.append(rows)
+        drift = drift.merge(found)
+        held += considered
+    if held and drift.dropped_rows == held:
+        return f"every one of the {held} rows of the requested symbols was dropped"
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+
+
+def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+    file, _ = flat_file(KEY, data)
+    batches, drift = [], DriftReport()
+    try:
+        with file:
+            for rows, found in file.batches(read):
+                batches.append(rows)
+                drift = drift.merge(found)
+    except WireError as error:
+        return error.message
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+
+
+def _odd_trades(rows: int, *, line_end: str = "\n") -> str:
+    # Trades of ten symbols with odd rows mixed in: a key that is empty or does not parse
+    # (dropped), a value that does not parse (null), a list that does not parse, blank lines,
+    # and no line end after the last row.
+    lines = []
+    for n in range(rows):
+        symbol = "" if n % 97 == 5 else f"S{n % 10}"
+        time = "x" if n % 89 == 7 else str(1_741_012_200_000_000_000 + n)
+        price = "1.2.3" if n % 83 == 3 else str(100 + n % 50 / 4)
+        conditions = '"12,x"' if n % 79 == 2 else '"12,37"'
+        lines.append(f"{conditions},,4,{n},1,{price},{n},{time},100,3,{symbol},,{n}")
+        if n % 211 == 0:
+            lines.append("")
+    return TRADE_HEADER.replace("\n", line_end) + line_end.join(lines)
+
+
+@pytest.mark.parametrize("line_end", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    ("symbols", "window_ns"),
+    [
+        (None, None),
+        (pa.array(["S3", "S7"]), None),
+        (None, (1_741_012_200_000_000_500, 1_741_012_200_000_002_500)),
+    ],
+    ids=["every-row", "two-symbols", "a-window"],
+)
+def test_chunks_read_exactly_as_one_stream(
+    *,
+    make_csv_gz: Callable[[str], bytes],
+    line_end: str,
+    symbols: pa.Array | None,
+    window_ns: tuple[int, int] | None,
+) -> None:
+    # The same file, read in chunks of one block and up and parsed on one to three threads,
+    # gives the rows, in order, and the drift and dropped rows of the streaming reader.
+    data = make_csv_gz(_odd_trades(3_000, line_end=line_end))
+    expected = _streamed(data, plan(symbols=symbols, window_ns=window_ns, block_size=4096))
+    assert not isinstance(expected, str)
+    assert expected[0].num_rows > 0
+    for chunk_blocks in (1, 2, 5):
+        for threads in (1, 3):
+            read = plan(
+                symbols=symbols,
+                window_ns=window_ns,
+                block_size=4096,
+                chunk_blocks=chunk_blocks,
+                parse_threads=threads,
+            )
+            got = _chunked(data, read)
+            assert not isinstance(got, str)
+            assert got[0].equals(expected[0]), (chunk_blocks, threads)
+            assert got[1] == expected[1]
+            assert dict(got[1].samples) == dict(expected[1].samples)
+
+
+def test_a_file_whose_every_row_is_dropped_fails_alike_in_chunks(
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    rows = "".join(f"12,,4,{n},1,1.5,{n},x,100,3,AAPL,,\n" for n in range(2_000))
+    data = make_csv_gz(TRADE_HEADER + rows)
+    read = plan(block_size=4096, chunk_blocks=2)
+    expected = _streamed(data, read)
+    assert expected == "every one of the 2000 rows of the requested symbols was dropped"
+    failure = _chunked(data, read)
+    assert isinstance(failure, str)
+    assert failure.startswith(f"cannot read s3://flatfiles/{KEY} at https://{HOST}: {expected}")
+
+
+def test_a_read_ended_early_drops_the_chunks_not_yet_parsed(
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # A consumer that stops after the first block (a cancelled call) leaves no parse running.
+    data = make_csv_gz(_odd_trades(3_000))
+    file, _ = flat_file(KEY, data)
+    with file:
+        blocks = file.batches(plan(block_size=4096, chunk_blocks=1, parse_threads=2))
+        first, _ = next(blocks)
+        blocks.close()
+    assert first.num_rows > 0
+    assert not [t for t in threading.enumerate() if t.name.endswith(" parse_0")]
 
 
 # Matching by name, and drift.
@@ -692,3 +843,36 @@ def test_a_header_that_is_not_valid_csv_is_a_wire_error(
     with pytest.raises(WireError, match=r"^cannot read .*: new-line character seen") as info:
         table(opened(KEY, "ticker,a\rb,sip_timestamp\nAAPL,1,2\n"), plan())
     assert isinstance(info.value.__cause__, csv.Error)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("threads", [1, 2, 3, 4])
+@pytest.mark.parametrize("symbols", [None, 1], ids=["every-symbol", "one-symbol"])
+def test_benchmark_one_large_file(
+    capsys: pytest.CaptureFixture[str], symbols: int | None, threads: int
+) -> None:
+    # Records, never gates: how long one file of 1,000,000 trades (about 80 MB of text)
+    # takes to read, every symbol or one of 500, with `threads` parsing it.
+    rows = 1_000_000
+    lines = (
+        f"12,,4,{i},1700000000000000000,{100 + i % 1000 / 100},{i},{1700000000000000000 + i},"
+        f"100,3,S{i % 500},,\n"
+        for i in range(rows)
+    )
+    data = gzip.compress((TRADE_HEADER + "".join(lines)).encode(), compresslevel=1)
+    read = plan(symbols=None if symbols is None else pa.array(["S7"]), parse_threads=threads)
+    times = []
+    kept = 0
+    for _ in range(3):
+        file, _ = flat_file(KEY, data)
+        started = time.perf_counter()
+        with file:
+            kept = sum(batch.num_rows for batch, _ in file.batches(read))
+        times.append(time.perf_counter() - started)
+    seconds = statistics.median(times)
+    with capsys.disabled():
+        sys.stderr.write(
+            f"\none file of {rows:,} trades, {kept:,} kept, {threads} parse threads: "
+            f"{seconds:.2f} s, "
+            f"{rows / seconds:,.0f} rows/s\n"
+        )
