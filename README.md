@@ -621,11 +621,10 @@ In a live table, `last_by()` drops the row of a symbol that leaves the watchlist
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
 `m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
 fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`. One session's options
-connection carries at most 1,000 contracts, as Massive counts its limit; a contract's trades
-and its quotes count once. A list or static table of contracts over that cap raises
-`ValueError`; a live watchlist that grows past it defers the extra contracts, counted in
-`m.streams()`'s `Deferred` column, until room frees up. If Massive refuses a subscription
-anyway, only the refused streams fail, with Massive's message.
+connection carries at most 1,000 topics, and each stream of a contract is one (its trades and
+its quotes are two). A list or static table of contracts over that cap raises `ValueError`; a
+live watchlist that grows past it defers the extra contracts, counted in `m.streams()`'s
+`Deferred` column, until room frees up.
 
 A schedule is a watchlist too: a symbol table that is empty outside the hours you care about
 stops the stream, and makes a poll send no requests, outside them. This one is live only during

@@ -26,10 +26,9 @@ everything else belongs here:
   market's trading hours (`NO_FRAMES_WARNING`), each with its recovery at INFO. Drift is
   recorded on the connection's `SchemaDrift` here and handed to the flush thread for the
   streams' rows.
-- **The options cap.** An `/options` connection carries the topics of at most `OPTIONS_CAP`
-  contracts; a contract's trades and quotes count once, as Massive counts "option contracts".
+- **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
-  reactive table's excess contracts are deferred, in sorted order, and admitted as room frees.
+  reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
 - **Sharing.** Sessions in one process with the same API key and equal connection settings
   (`CONNECTION_SETTINGS`, and the same Deephaven update graph) share one `ConnectionGroup`, so
   their streams ride the same connections: individual plans allow one connection per cluster,
@@ -52,8 +51,8 @@ thread; other threads reach it only through `loop.call_soon_threadsafe` with pla
 each connection's leases, sessions, failure, and options-cap bookkeeping, and each session's
 registry state here are guarded by the group's lock, a leaf lock like the sessions'
 `registry_lock` (the two are never held together): no Deephaven call, network call, or wait
-happens under it (creating a client loads TLS settings, so it
-happens outside). The loop thread makes no Java call: every failure goes to a flush thread, or,
+happens under it (creating a client loads TLS settings, so it happens outside). The loop
+thread makes no Java call: every failure goes to a flush thread, or,
 for a stream whose connection failed while it opened, to the opening caller. A stream's
 blink-table shutdown callback takes the locks only to update the registries and then posts the
 release of the stream's topics to its connection's loop; it never sends and never calls Java.
@@ -73,12 +72,7 @@ from typing import TYPE_CHECKING, Final, cast
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
-from deephaven_massive._ingest.subscriptions import (
-    is_wildcard,
-    stream_topics,
-    symbol_of,
-    wildcard,
-)
+from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
     ClientFactory,
@@ -338,12 +332,11 @@ class WsConnections:
         Returns:
             The stream's handle.
 
-        Static options symbols that would put more than `OPTIONS_CAP` contracts on the
-        `/options` connection (counting every session's contracts on it) raise the
-        `ValueError` of `_check_cap`, and a closed session the `MassiveError` of
-        `_check_open`; host resolution raises the `AuthenticationError` or `MassiveError` of
-        `resolve_host`; a crypto
-        ticker Massive's crypto ticker list does not split raises the `MassiveError` of
+        Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
+        `/options` connection (counting every session's topics on it) raise the `ValueError`
+        of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
+        resolution raises the `AuthenticationError` or `MassiveError` of `resolve_host`; a
+        crypto ticker Massive's crypto ticker list does not split raises the `MassiveError` of
         `resolve_pairs`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
@@ -563,11 +556,13 @@ class WsConnections:
     def _check_cap(
         spec: DatasetSpec, connection: Connection | None, topics: frozenset[str]
     ) -> None:
-        """Refuse static options contracts that would cross the cap; the group's lock is held.
+        """Refuse static options topics that would cross the cap; the group's lock is held.
 
-        In use are the contracts of the topics the connection admitted and of streams still
-        opening, of every session on the connection. The cap counts contracts, as Massive
-        documents it, so `T.X` and `Q.X` count once together.
+        In use are the topics the connection admitted and those of streams still opening, of
+        every session on the connection. The cap counts topics, one per contract and channel,
+        so `T.X` and `Q.X` are two: Massive documents "1,000 option contracts", but whether its
+        server counts contracts or topics is not verified, and the stricter count never
+        crosses it.
 
         Args:
             spec: The stream's dataset.
@@ -575,7 +570,7 @@ class WsConnections:
             topics: Its static topics.
 
         Raises:
-            ValueError: If the new contracts and those in use exceed `OPTIONS_CAP`.
+            ValueError: If the new explicit topics and those in use exceed `OPTIONS_CAP`.
         """
         if spec.asset_class is not AssetClass.OPTIONS:
             return
@@ -584,14 +579,13 @@ class WsConnections:
             in_use.update(connection.cap_admitted)
             for pending in connection.cap_pending.values():
                 in_use.update(pending)
-        held = {symbol_of(t) for t in in_use if not is_wildcard(t)}
-        new = {symbol_of(t) for t in topics if not is_wildcard(t)} - held
-        if len(new) + len(held) > OPTIONS_CAP:
+        new = {t for t in topics if not is_wildcard(t)} - in_use
+        if len(new) + len(in_use) > OPTIONS_CAP:
             raise ValueError(
-                f"{spec.name}: {len(new)} new option contracts and {len(held)} in use exceed "
-                f"the {OPTIONS_CAP} contracts one /options connection carries; a contract's "
-                "trades and quotes count once, and the connection's contracts include those "
-                "of every session sharing it"
+                f"{spec.name}: {len(new)} new option topics and {len(in_use)} in use exceed "
+                f"the {OPTIONS_CAP} topics one /options connection carries; a topic is one "
+                "contract on one channel, so each channel of a contract counts once, and the "
+                "connection's topics include those of every session sharing it"
             )
 
     def _attach(self, stream: ConnectionStream) -> None:

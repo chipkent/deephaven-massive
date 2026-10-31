@@ -336,7 +336,7 @@ class StreamTransport(Protocol):
             The stream's handle, carrying `stream_id`, its blink table, and its scope.
 
         Raises:
-            ValueError: If explicit options contracts would put more than 1,000 contracts on the
+            ValueError: If explicit options contracts would put more than 1,000 topics on the
                 session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides the
                 WebSocket host.

@@ -425,15 +425,16 @@ def test_the_options_cap_counts_contracts_or_topics(
 ) -> None:
     """Whether Massive's options cap of 1,000 counts contracts or topics.
 
-    The library counts contracts, as Massive documents the cap ("1,000 option contracts"), so
-    it lets one connection carry the trades and the quotes of 1,000 contracts. This subscribes
-    exactly that: 1,000 far-dated SPY contracts (expiring a year or more out, so their quote
-    streams are quiet) on both `T` and `Q`, 2,000 topics, and records the acknowledgements and
-    refusals, stopping as soon as every topic is answered; rows are not kept. Reading it: all
-    2,000 acknowledged confirms contracts count; refusals past 1,000 topics mean topics count,
-    and then the refused topics' streams fail with Massive's message while the rest keep
-    running. Needs an options plan with real-time trades and quotes on the WebSocket: refused
-    ones (a Business plan without the expansion) skip, naming the plan.
+    Massive documents the cap as "1,000 option contracts"; the library counts topics, the
+    stricter reading, until this check shows otherwise. It subscribes 1,000 far-dated SPY
+    contracts (expiring a year or more out, so their quote streams are quiet) on both `T` and
+    `Q`, 2,000 topics, and records the acknowledgements, the refusals, and the client's states,
+    stopping as soon as every topic is answered; rows are not kept. Reading it: all 2,000
+    acknowledged means contracts count, and the library's cap could count contracts; refusals
+    past 1,000 topics, or a closed socket (a reconnect in the client states), mean topics count
+    and record how the server answers. Needs an options plan with real-time trades and quotes
+    on the WebSocket: refused ones (a Business plan without the expansion) skip, naming the
+    plan.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(

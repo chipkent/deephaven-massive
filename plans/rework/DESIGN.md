@@ -3101,9 +3101,9 @@ and its line says so.
    it: closing one session releases only that session's streams and never closes a connection
    another session leases. Three consequences are by design:
    - The options cap of [section 15](#15-options-contract-cap) is the connection's, so the
-     sessions on one `/options` connection share its 1,000 contracts, and a static symbol list
+     sessions on one `/options` connection share its 1,000 topics, and a static symbol list
      can raise `ValueError` because of another session's streams; the message counts the
-     contracts in use.
+     topics in use.
    - A refusal or a fatal failure acts on the connection, not on a session: a refused topic
      fails every stream that wants it, in every session, and a rejected key or a fatal
      handshake error fails every stream on the connection, in every session.
@@ -3366,10 +3366,15 @@ Status(MAX_CONNECTIONS) after authentication
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
-   -> topic state NO_ACK; WARNING logged; it counts in NoAckTopics of m.connections(). The
-      topic stays desired and subscribed (a late acknowledgement still clears it), streams
-      never fail on it, and the connection is never reconnected for it: a reconnect would cut
-      every other stream on the shared connection over one late answer
+   -> topic state NO_ACK; it counts in NoAckTopics of m.connections(), and each stream that
+      wants it shows "no acknowledgement from Massive for <topic>; its rows may be missing"
+      in its Error without failing (the options cap's text wins when both apply). One
+      WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
+      stays desired and subscribed, and its subscribe is re-sent alone every 60 s
+      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends. A
+      late acknowledgement or a new generation clears the state and the streams' Error.
+      Streams never fail on it, and the connection is never reconnected for it: a reconnect
+      would cut every other stream on the shared connection over one late answer
 watchdog fires but its topic left S or W, or its generation is no longer current
    -> cancelled without escalating
 socket closed or failed (not by close())
@@ -3839,11 +3844,12 @@ How a request is built from a `DatasetSpec` and a `Request`:
 ## 15. Options contract cap
 
 Massive allows "1,000 option contracts" per `/options` connection. The library counts
-**contracts** per connection, as Massive documents it: `T.X` and `Q.X` count once together.
-Whether the server counts the same way is **UNVERIFIED** (a live check records it), and the
-library does not guess otherwise: if the server refuses topics past its own count, only the
-refused topics' streams fail, with Massive's message, and the rest keep running. Wildcards
-count zero.
+**topics** per connection: `T.X` and `Q.X` count as two. Whether the server counts contracts or
+topics is **UNVERIFIED**, so the stricter count is used (fixture test) until the live check
+(`test_the_options_cap_counts_contracts_or_topics`, 1,000 contracts on `T` and `Q`) shows that
+Massive counts contracts. Counting contracts without that evidence could send a frame past
+the server's limit, and a server that answers by closing the socket would reconnect, and cut,
+every stream on the connection in a loop. Wildcards count zero.
 Every wanted explicit topic counts, also one covered by an acknowledged wildcard and so off the
 wire meanwhile ([section 13.3](#133-connection-and-subscription-protocol)): the wildcard may be
 removed at any time, and a static contract the verb accepted must never be deferred then.
@@ -3851,20 +3857,20 @@ removed at any time, and a static contract the verb accepted must never be defer
 Because the library knows the count before sending, a frame that would cross the cap is never
 sent:
 
-- **Static input.** `len(new contracts) + in use > 1000` raises `ValueError` at verb time,
+- **Static input.** `len(new topics) + in use > 1000` raises `ValueError` at verb time,
   synchronously.
 - **Reactive `Table` input.** Static topics are admitted first (their verb checked them);
   a reactive table's adds take the room left, in sorted order, and contracts admitted before
   keep their place, across reconnects too. The rest are deferred: not subscribed, not failed.
-  `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
-  `Error="over capacity: 1234/1000 contracts; 234 deferred"`, with a WARNING on each
-  transition. When
+  `m.streams()` shows `State=RUNNING`, `Deferred=<n>` (the stream's own deferred topics), and
+  `Error="over capacity: 1234/1000; 234 deferred"`, with a WARNING on each transition. When
   removals free capacity, deferred contracts subscribe in the same order. Rows for deferred
   contracts are absent, never stale, except while a wildcard on the connection delivers them
   anyway.
 
-If the server counts topics after all, it refuses the topics past its count one by one, so
-frame chunking has no interaction with the cap.
+Since a frame never crosses the cap, frame chunking has no interaction with it. How the
+server answers a subscription past its own count (refusing the topics past it one by one, or
+closing the socket) is **UNVERIFIED**.
 
 ## 16. `HistorySource.AUTO`
 
@@ -6387,8 +6393,9 @@ document already reflects them.
 37. **An undocumented `timeframe` is not guessed at.** An unknown value, like a refused
     snapshot, connects the class to the real-time host with `UNKNOWN` recency and a WARNING,
     and the server's explicit answer decides ([section 13.2](#132-host-decision)).
-38. **A never-acknowledged topic** never reconnects its connection: after one re-send it only
-    logs and counts as `NO_ACK` ([section 13.3](#133-connection-and-subscription-protocol)).
+38. **A never-acknowledged topic** never reconnects its connection: after one re-send it counts
+    as `NO_ACK`, shows in its streams' `Error`, and is re-sent alone every 60 s until it is
+    acknowledged ([section 13.3](#133-connection-and-subscription-protocol)).
 39. **S3 follows the shared network rules:** the `net` CA bundle and proxy, botocore retries off
     in favour of the shared schedule, TLS never retried ([section 19.3](#193-the-flat-file-client)).
 40. **REST rate limits and host resolution are shared.** One `RequestGovernor` per API key and
@@ -6955,7 +6962,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
 | 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
-| 11 | Options cap counted in contracts or topics | Contracts, as Massive documents it; a server refusal fails only the refused topics | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts once | `tests/massive/ws/test_client_integration.py` (Options Advanced): 1,000 contracts on `T` and `Q` |
+| 11 | Options cap counted in contracts or topics | Topics (the stricter count) until the live check shows contracts | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 1,000 contracts on `T` and `Q` (2,000 topics) |
 | 12 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |

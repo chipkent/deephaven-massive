@@ -888,9 +888,10 @@ class StreamQuery(QueryBase):
     key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
     verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
     and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
-    options contracts that would put more than 1,000 contracts on the session's `/options`
+    options contracts that would put more than 1,000 topics on the session's `/options`
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
-    instead (`Deferred` in `m.streams()`).
+    instead (`Deferred` in `m.streams()` counts the stream's own deferred topics, one per
+    contract, since a stream reads one channel).
 
     A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
     as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
@@ -1005,7 +1006,7 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 contracts on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
             MassiveError: If the session is closed; if the stream fails while the verb opens
@@ -1038,7 +1039,7 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 contracts on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
             MassiveError: If the session is closed; if the stream fails while the verb opens
@@ -1074,7 +1075,7 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 contracts on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection.
                 Also if `capacity` is outside 1 to 2**31 - 1.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
@@ -1159,7 +1160,7 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 contracts on the session's `/options` connection.
+                more than 1,000 topics on the session's `/options` connection.
                 Also if `by` is empty, repeats a column, or names a column the dataset does
                 not have.
             AuthenticationError: If Massive rejects the API key on the request that decides

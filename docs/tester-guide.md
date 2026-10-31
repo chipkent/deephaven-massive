@@ -93,6 +93,8 @@ to each item, note anything that surprised you.
 - [ ] 04 first queries    - [ ] 05 reference data   - [ ] 06 refreshing tables
 - [ ] 07 pacing           - [ ] 08 release          - [ ] 09 background download
 - [ ] 10 year analysis    - [ ] 11 plan refusals    - [ ] 12 symbols
+- [ ] 11: what Massive did with the free key's live minute bars (rejected the key, refused
+      the subscription, or closed the connection)
 - [ ] 13 debug log        - [ ] 14 to 17 try your own (free plan)
 - [ ] 18 to 20 try your own (paid plans only)       - [ ] 21 save diagnostics
 - [ ] 22 finish           - [ ] tester.py examples ran all of them at once
@@ -655,7 +657,10 @@ later. In the `streams` panel, the new `stocks.bars` row turns `FAILED`, and its
 quotes Massive's answer. On a paid plan, the first or third line may say "no error" instead,
 and the stream may keep running. **Record** whether each message, the `Error` in the streams panel included, told
 you what went wrong and what you could do, and whether any suggested your key was wrong when
-it was really your plan.
+it was really your plan. **Record** too what Massive did with the live minute bars, which
+nobody has seen on a free key yet: rejected the key (the `Error` says Massive rejected the API
+key), refused the subscription (the `Error` quotes a refusal of `AM.AAPL`), or closed the
+connection (the `connections` panel shows it reconnecting, again and again).
 
 ### 12. Convert symbols (`12_symbols.py`)
 
@@ -715,8 +720,10 @@ not send the log.**
 ## 2.2 Try your own
 
 These show what the library is for. Examples 14 to 17 work on the free plan; 18 to 20 need a
-paid plan's live data, and on a free key each ends with an `EntitlementError`, which is
-expected. Change the symbols and dates, and combine them with what you learned above.
+paid plan's live data. On a free key that is expected to fail: a live table opens, and a few
+seconds later Massive's live connection refuses it, so the streams panel shows its row
+`FAILED` with Massive's answer, as in step 11; a history read the plan does not include ends
+with an `EntitlementError`. Change the symbols and dates, and combine them with what you learned above.
 
 ### 14. A moving average (`14_moving_average.py`)
 
@@ -813,7 +820,8 @@ curve_chart = Figure().plot_xy(series_name="10y - 2y", t=curve, x="Day", y="Spre
 ```python
 # Needs a paid Stocks plan (Starter or higher). Keeps the latest minute bar of five stocks,
 # updated live. You should see a new table, latest_bars, with one row per stock while the
-# market is open; on a free key you see an EntitlementError instead.
+# market is open. On a free key the table opens, and a few seconds later Massive's live
+# connection refuses it: the streams panel shows its row FAILED, with Massive's answer.
 latest_bars = m.stocks.bars(
     ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"], dm.Timespan.MINUTE
 ).last_by()

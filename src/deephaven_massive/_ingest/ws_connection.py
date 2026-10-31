@@ -18,8 +18,7 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
-- **The options cap.** An `/options` connection carries the topics of at most `OPTIONS_CAP`
-  contracts.
+- **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
 `ConnectionGroup` is what sessions share: sessions in one process with the same API key and
@@ -72,7 +71,6 @@ from deephaven_massive._ingest.subscriptions import (
     Timer,
     channel_of,
     stream_topics,
-    symbol_of,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list, log_failure
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
@@ -117,10 +115,13 @@ IDLE_GRACE: Final = 30.0
 """Seconds a connection with no stream attached stays open before it closes itself."""
 
 OPTIONS_CAP: Final = 1000
-"""The most contracts one `/options` connection carries topics for. Massive documents "1,000
-option contracts" per connection, so the library counts contracts as written: `T.X` and `Q.X`
-count once together. Wildcards count zero. If the server counts otherwise and refuses topics,
-only the refused topics' streams fail, with Massive's message."""
+"""The most explicit topics one `/options` connection carries. Massive allows 1,000 option
+contracts per connection; whether it counts contracts or topics is not verified, so the
+library counts topics (`T.X` and `Q.X` are two), the stricter reading, until a live check
+shows otherwise. Wildcards count zero."""
+
+_NOTE_TOPICS: Final = 5
+"""The most unacknowledged topics a stream's `Error` names; it counts the rest."""
 
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
@@ -410,7 +411,9 @@ class Connection:
         self._required: dict[str, frozenset[str]] = {}
         self._idle: Timer | None = None
         self._successor: Connection | None = None
-        self._deferred_shown: dict[int, int] = {}
+        # Each stream's notes as its `Error` shows them: its deferred options topics and its
+        # topics Massive has not acknowledged; a stream with neither has no entry.
+        self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
         self._state = ConnectionState.CONNECTING
         self._reconnects = 0
         self._last_message_at: int | None = None
@@ -635,7 +638,7 @@ class Connection:
             self._unknown(stream_id, self.release_stream, ())
             return
         self.flusher.routes.remove(stream_id)
-        self._deferred_shown.pop(stream_id, None)
+        self._notes_shown.pop(stream_id, None)
         self.subscriptions.remove(stream.topics, static=stream.static)
         logger.debug(
             "stream %d shut down: its route is removed and %d topics released on %s",
@@ -753,7 +756,7 @@ class Connection:
         if self._ended:  # the client has ended: nothing to reconcile or to close
             return
         self.subscriptions.reconcile()
-        self._show_deferred(opened=opened)
+        self._show_notes(opened=opened)
         if not self._streams and self._idle is None:
             self._idle = self._client.loop.call_later(IDLE_GRACE, self._idle_close)
 
@@ -1061,7 +1064,7 @@ class Connection:
             self._ended = True
             self._streams.clear()
             self._early.clear()
-            self._deferred_shown.clear()
+            self._notes_shown.clear()
 
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
@@ -1220,14 +1223,37 @@ class Connection:
         )
 
     def _unstall(self) -> None:
-        """Clear the streams' wait for a slot, showing an options-cap warning again if any."""
+        """Clear the streams' wait for a slot, showing their notes again if any."""
         updates: dict[int, StreamUpdate] = {}
         for stream_id in self._streams:
-            if self._deferred_shown.get(stream_id, 0):
-                updates[stream_id] = StreamUpdate(error=self._cap_text())
-            else:
-                updates[stream_id] = StreamUpdate(clear_error=True)
+            text = self._note_text(self._notes_shown.get(stream_id))
+            updates[stream_id] = (
+                StreamUpdate(clear_error=True) if text is None else StreamUpdate(error=text)
+            )
         self._update_streams(updates)
+
+    def _note_text(self, note: tuple[int, frozenset[str]] | None) -> str | None:
+        """Return the `Error` a stream's notes give it: the options cap first, then no-acks.
+
+        Args:
+            note: The stream's deferred-topic count and unacknowledged topics, or None.
+
+        Returns:
+            The text, or None when the stream has no note.
+        """
+        if note is None:
+            return None
+        deferred, missing = note
+        if deferred:
+            return self._cap_text()
+        shown = sorted(missing)[:_NOTE_TOPICS]
+        more = len(missing) - len(shown)
+        return (
+            f"no acknowledgement from Massive for {', '.join(shown)}"
+            f"{f' and {more} more' if more else ''}; "
+            f"{'its' if len(missing) == 1 else 'their'} rows may be missing; the subscription "
+            "is re-sent until Massive acknowledges it"
+        )
 
     def _cap_text(self) -> str:
         """Return the `Error` of an options stream whose contracts the cap defers.
@@ -1235,11 +1261,8 @@ class Connection:
         Returns:
             The text, with the topics wanted and deferred now.
         """
-        deferred = len({symbol_of(t) for t in self.subscriptions.deferred})
-        return (
-            f"over capacity: {self.subscriptions.contracts}/{OPTIONS_CAP} contracts; "
-            f"{deferred} deferred"
-        )
+        deferred = len(self.subscriptions.deferred)
+        return f"over capacity: {self.subscriptions.explicit}/{OPTIONS_CAP}; {deferred} deferred"
 
     # --- loop thread: diagnostics --------------------------------------------------------------
 
@@ -1259,49 +1282,91 @@ class Connection:
         self._client.loop.call_soon(self._publish_change)
 
     def _publish_change(self) -> None:
-        """Publish the options-cap state and rewrite the row for the changes of a loop turn."""
+        """Publish the streams' notes and rewrite the row for the changes of a loop turn."""
         self._change_scheduled = False
-        self._show_deferred()
+        self._show_notes()
         self._write_row()
 
-    def _show_deferred(self, *, opened: Collection[int] = ()) -> None:
-        """Publish the admitted options contracts and show each stream's deferred count.
+    def _show_notes(self, *, opened: Collection[int] = ()) -> None:
+        """Publish the admitted options topics, and show each stream's notes in its `Error`.
 
-        The admitted set is published, and an opening stream's pending topics dropped, in one
+        A stream's notes are its options topics the cap defers (with `Deferred`, the stream's
+        own deferred topics, one per contract since a stream reads one channel) and its topics
+        Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; the
+        cap's text wins when both apply. A note is cleared once it no longer holds: room
+        frees, a late acknowledgement arrives, or a new generation starts. On `/options`, the
+        admitted set is published, and an opening stream's pending topics dropped, in one
         section of the group's lock, so a verb's cap check never sees the stream's topics in
         neither.
 
         Args:
             opened: The streams whose pending topics are now counted through the admitted set.
         """
-        if self.asset_class is not AssetClass.OPTIONS:
-            return
-        with self._lock:
-            self.cap_admitted = self.subscriptions.admitted
-            for stream_id in opened:
-                self.cap_pending.pop(stream_id, None)
+        options = self.asset_class is AssetClass.OPTIONS
+        if options:
+            with self._lock:
+                self.cap_admitted = self.subscriptions.admitted
+                for stream_id in opened:
+                    self.cap_pending.pop(stream_id, None)
         deferred = self.subscriptions.deferred
+        no_ack = self.subscriptions.no_ack
+        if not deferred and not no_ack and not self._notes_shown:
+            return
         updates: dict[int, StreamUpdate] = {}
         for stream in self._streams.values():
-            count = len(stream.topics & deferred)
-            if count == self._deferred_shown.get(stream.stream_id, 0):
+            count = len(stream.topics & deferred) if deferred else 0
+            missing = stream.topics & no_ack if no_ack else frozenset()
+            old = self._notes_shown.get(stream.stream_id)
+            old_count, old_missing = old or (0, frozenset())
+            if (count, missing) == (old_count, old_missing):
                 continue
-            self._deferred_shown[stream.stream_id] = count
-            if count:
-                text = self._cap_text()
-                logger.warning("%s stream %d: %s", stream.plan.dataset, stream.stream_id, text)
-                update = StreamUpdate(deferred=count, error=text)
+            note = (count, missing) if count or missing else None
+            if note is None:
+                del self._notes_shown[stream.stream_id]
             else:
-                logger.info(
-                    "%s stream %d: no contract is deferred any more",
-                    stream.plan.dataset,
-                    stream.stream_id,
-                )
-                update = StreamUpdate(deferred=0, clear_error=True)
+                self._notes_shown[stream.stream_id] = note
+            self._log_note(stream, count=count, old_count=old_count, missing=missing)
+            text = self._note_text(note)
+            update = StreamUpdate(clear_error=True) if text is None else StreamUpdate(error=text)
             # While the connection waits for a slot, that wait stays the stream's `Error`.
-            updates[stream.stream_id] = StreamUpdate(deferred=count) if self._stalled else update
+            if self._stalled:
+                update = StreamUpdate()
+            if options:
+                update = replace(update, deferred=count)
+            if update != StreamUpdate():
+                updates[stream.stream_id] = update
         if updates:
             self._update_streams(updates)
+
+    def _log_note(
+        self, stream: ConnectionStream, *, count: int, old_count: int, missing: frozenset[str]
+    ) -> None:
+        """Log a change of a stream's notes: the cap's at WARNING and INFO, no-acks at DEBUG.
+
+        The no-acks were logged at WARNING, once per step, when they happened.
+
+        Args:
+            stream: The stream.
+            count: Its deferred options topics now.
+            old_count: Its deferred options topics before.
+            missing: Its unacknowledged topics now.
+        """
+        if count and count != old_count:
+            logger.warning(
+                "%s stream %d: %s", stream.plan.dataset, stream.stream_id, self._cap_text()
+            )
+        elif old_count and not count:
+            logger.info(
+                "%s stream %d: no contract is deferred any more",
+                stream.plan.dataset,
+                stream.stream_id,
+            )
+        logger.debug(
+            "%s stream %d: unacknowledged topics %s",
+            stream.plan.dataset,
+            stream.stream_id,
+            bounded_list(sorted(missing)),
+        )
 
     def _update_streams(self, updates: dict[int, StreamUpdate]) -> None:
         """Apply changes to streams' `m.streams()` rows, each in its own session.

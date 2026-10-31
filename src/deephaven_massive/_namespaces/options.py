@@ -21,9 +21,8 @@ contract to as `Underlying`, exactly as Massive sends it: it names the linked in
 the deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100
 shares of it. Neither column is ever mapped to the other.
 
-One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count contracts
-against that cap (a contract's trades and quotes count once) and raise `ValueError` before
-subscribing a static list that would cross it.
+One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
+against that cap and raise `ValueError` before subscribing a static list that would cross it.
 """
 
 from __future__ import annotations
@@ -397,7 +396,7 @@ class _Options(Namespace):
 
         One row per trade: price, size, exchange, condition codes, and SIP timestamp. REST
         `history()` takes explicit contracts; `dm.ALL` streams every contract and reads a day's flat
-        file. One `/options` connection carries at most 1,000 contracts.
+        file. One `/options` connection carries at most 1,000 contract topics.
 
         Args:
             symbols: Contracts as Massive's tickers, `O:` and the OCC symbol
@@ -462,7 +461,7 @@ class _Options(Namespace):
         One row per quote: bid and ask prices, sizes, and exchanges, with the SIP timestamp. Massive
         has no last-quote endpoint for options: `snapshots(symbols)` gives each contract's latest
         quote. REST `history()` takes explicit contracts; `dm.ALL` streams every contract and reads
-        a day's flat file. One `/options` connection carries at most 1,000 contracts.
+        a day's flat file. One `/options` connection carries at most 1,000 contract topics.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
@@ -516,7 +515,7 @@ class _Options(Namespace):
         bars also stream from the WebSocket; every other length is history only. Bar windows,
         stamps, and which bars `history()` returns follow README.md#bars. REST `history()` takes
         explicit contracts; `dm.ALL` reads a day's flat file. One `/options` connection carries at
-        most 1,000 contracts.
+        most 1,000 contract topics.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
@@ -597,7 +596,7 @@ class _Options(Namespace):
 
         One row per update: the contract's fair market value and when it was computed. It streams
         only, from Massive's Business plans, so it has no history. One `/options` connection carries
-        at most 1,000 contracts.
+        at most 1,000 contract topics.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See

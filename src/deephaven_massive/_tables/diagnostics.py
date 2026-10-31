@@ -353,7 +353,8 @@ class StreamRow:
             tables until the transport fills it in.
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
-        deferred: Options contracts deferred by the contract cap.
+        deferred: The stream's own options topics the cap defers (one per contract, since a
+            stream reads one channel).
         transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`, and for a
             background read the source it reads, `Transport.REST` or `Transport.FLAT_FILES`;
             the table shows its label, `WebSocket`, `REST`, or `flat files`.
@@ -407,7 +408,8 @@ class StreamUpdate:
     Attributes:
         rows_published: The stream's total rows published so far.
         requests_per_cycle: The REST requests of the latest `poll()` cycle.
-        deferred: Options contracts deferred by the contract cap.
+        deferred: The stream's own options topics the cap defers (one per contract, since a
+            stream reads one channel).
         symbol_count: How many symbols the stream now covers.
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.

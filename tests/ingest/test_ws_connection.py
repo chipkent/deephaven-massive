@@ -27,7 +27,7 @@ from deephaven_massive._ingest import futures_calendar, ws, ws_connection
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics
 from deephaven_massive._tables.transports import HostDecision
-from tests._fakes.ws import FakeMassiveServer
+from tests._fakes.ws import FakeMassiveServer, status_frame
 from tests._fakes.ws_session import REALTIME, TIMEOUT, WsSession
 
 RowsWhen: TypeAlias = (
@@ -292,6 +292,24 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     [row] = connections_of(custom_session, dh_to_pylist)
     assert (row["State"], row["NoAckTopics"], row["AckedTopics"]) == ("CONNECTED", 1, 1)
     assert custom_session.opens == 1
+    # The quiet stream says why its rows may be missing, without failing; the other is clean.
+    errors = [(r["State"], r["Error"]) for r in streams_of(custom_session, dh_to_pylist)]
+    assert errors == [
+        (
+            "RUNNING",
+            (
+                "no acknowledgement from Massive for T.AAPL; its rows may be missing; the "
+                "subscription is re-sent until Massive acknowledges it"
+            ),
+        ),
+        ("RUNNING", None),
+    ]
+    # A late acknowledgement clears it.
+    fake_ws_server.send(status_frame("success", "subscribed to: T.AAPL"))
+    custom_session.wait(lambda s: len(s.statuses) == 2)
+    wait_for(lambda: streams_of(custom_session, dh_to_pylist)[0]["Error"] is None)
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert (row["NoAckTopics"], row["AckedTopics"]) == (0, 2)
     del quiet, healthy
 
 
@@ -1168,7 +1186,7 @@ def test_a_moved_options_stream_counts_against_the_cap_until_adopted(
     successor = ws_session.connection("wss://delayed.test/options")
     with group.lock:
         assert successor.cap_pending == {1: frozenset({f"T.{contract}"})}
-    with pytest.raises(ValueError, match="1 new option contracts and 1 in use exceed"):
+    with pytest.raises(ValueError, match="1 new option topics and 1 in use exceed"):
         ws_session.query(OPTIONS, ["O:SPY251219C00610000"]).blink()  # the cap still holds
     release.set()
     wait_for(lambda: not successor.awaiting)
