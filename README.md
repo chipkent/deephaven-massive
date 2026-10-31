@@ -467,6 +467,26 @@ A script that only reads static tables can let a `with` block close the session:
 `with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own,
 with an INFO line in the log.
 
+**A long feed outage fails live tables.** When the connection to Massive drops, the library
+reconnects on its own. While it is down, each of its live tables keeps its last rows, and
+`m.streams()` says so in `Error`: `connection down since 2026-10-30T14:03:05Z; no data` (the time
+is UTC). The note clears once the connection is back and Massive has confirmed its
+subscriptions again. If the outage lasts longer than `max_outage` (5 minutes by default), every
+live table on the connection **fails**, naming when the gap began: the trades or quotes sent
+since then are missing, and a table that kept running would look complete when it is not. Call
+the same verb again for a new live table; it streams once the connection is back. To fail at
+the first disconnect instead, set the limit to zero:
+
+```python
+from datetime import timedelta
+
+m = dm.MassiveSession(dm.MassiveConfig(max_outage=timedelta(0)))
+```
+
+A connected feed can also go quiet: when nothing arrives for 5 minutes during the market's
+regular hours, `Error` says `no data since <time> during stocks trading hours`, but the table
+keeps running, since a quiet symbol or a market holiday looks the same.
+
 **The console holds the lock live tables need.** Deephaven runs each console command while
 holding the lock every live table needs to update, so a `history()` or `fetch()` that downloads
 for ten minutes pauses every live table on the server for ten minutes; the library logs a
@@ -553,7 +573,7 @@ wrong.
   `RELEASED` (you hold no table from it, but a derived table or an open panel still uses it),
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
   warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
-  for room). `Query` shows the call that opened it, `RowsPublished` counts rows delivered, and
+  for room, a connection that is down or has gone quiet). `Query` shows the call that opened it, `RowsPublished` counts rows delivered, and
   `SchemaDrift` lists fields Massive added (`WebSocket:zz+`) or stopped sending (`REST:size-`).
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
@@ -801,6 +821,9 @@ this section) and look at what the library did.
 | `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
+| `connection down since <time>; no data` in `m.streams()` | The connection to Massive dropped and the library is reconnecting. The table resumes on its own if the outage is short. `m.connections()` shows the state and the next attempt. |
+| `... has been down since <time>, longer than MassiveConfig.max_outage` | The outage outlasted `max_outage`, so the table stopped rather than show stale data. Call the verb again for a new table; raise `max_outage` to ride out longer outages. See [live table lifetime](#live-tables). |
+| `no data since <time> during ... trading hours` in `m.streams()` | The connection is up but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
 | a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; your plan is 15 minutes delayed; or the stream failed (`m.streams()`). |
 | a download is slow | Basic plans allow five requests a minute (`m.rate_limits()` shows the pace). Use flat files for many symbols, and `wait=False` for long reads. |
 | memory keeps growing | `append_only()` keeps every row. Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |

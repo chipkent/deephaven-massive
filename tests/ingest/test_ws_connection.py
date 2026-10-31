@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, TypeAlias, cast
 
@@ -1370,6 +1371,7 @@ OTHER_SETTINGS: dict[str, object] = {
     "ack_timeout": 7.0,
     "reconnect_backoff": 45.0,
     "max_reconnect_backoff": 300.0,
+    "max_outage": timedelta(minutes=1),
     "flush_interval": 0.2,
     "rest_base_url": "https://rest.example.com",
 }
@@ -1837,6 +1839,115 @@ def test_an_outage_names_a_full_account_and_logs_once(
     ws_session.session.release(result)
 
 
+_DOWN = r"connection down since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ); no data"
+"""The pattern of the `Error` of a stream whose connection is down; its group is the start."""
+
+
+def _outage_failure(since: str, limit: str) -> str:
+    # The message a stream fails with once the outage passed `max_outage`.
+    return (
+        f"the WebSocket connection to socket.test/stocks has been down since {since}, longer "
+        f"than MassiveConfig.max_outage ({limit} s); the rows from {since} on are missing, so "
+        "this table stopped; call the verb again for a new live table"
+    )
+
+
+def _ack(topic: str) -> str:
+    # The acknowledgement of one topic, as Massive sends it.
+    return json.dumps([{"ev": "status", "status": "success", "message": f"subscribed to: {topic}"}])
+
+
+def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL"}  # the reconnect's subscription stays unanswered
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    fake_ws_server.wait_for(lambda s: "T.AAPL" in s.connections[-1].topics)
+    [row] = streams_of(ws_session, dh_to_pylist)
+    # Reconnected, but no data flows until the topic is acknowledged: still an outage.
+    assert re.fullmatch(_DOWN, row["Error"])
+    assert row["State"] == "RUNNING"
+    left = cast(
+        "float",
+        ws_session.on_loop(
+            connection,
+            lambda: (
+                cast("Any", connection._episodes.outage_timer).when()
+                - connection._client.loop.time()
+            ),
+        ),
+    )
+    assert 280.0 < left <= 300.0  # the default max_outage: five minutes from the drop
+    fake_ws_server.send(_ack("T.AAPL"))
+    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
+    assert ws_session.on_loop(connection, lambda: connection._episodes.outage_timer) is None
+    assert streams_of(ws_session, dh_to_pylist)[0]["State"] == "RUNNING"
+    ws_session.session.release(result)
+
+
+def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    other = ws_session.query(TRADES, ["MSFT"]).last_by()
+    ws_session.subscribed("T.MSFT")
+    derived = result.last_by("Symbol")  # a table built on the stream
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL", "T.MSFT"}  # the outage outlasts the reconnect
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+
+    def expire() -> None:
+        # What the clock reaching max_outage does: the armed timer's callback.
+        cast("Any", connection._episodes.outage_timer).cancel()
+        connection._outage_expired()
+
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        ws_session.on_loop(connection, expire)
+        ws_session.flush()
+    wait_for(lambda: bool(result.j_table.isFailed() and other.j_table.isFailed()))
+    wait_for(lambda: bool(derived.j_table.isFailed()))
+    rows = streams_of(ws_session, dh_to_pylist)
+    assert [r["State"] for r in rows] == ["FAILED", "FAILED"]
+    since = cast("re.Match[str]", re.search(r"since (\S+),", rows[0]["Error"])).group(1)
+    assert [r["Error"] for r in rows] == [_outage_failure(since, "300")] * 2
+    # An expected failure: one WARNING for both streams, never an ERROR.
+    failures = [r for r in caplog.records if "longer than MassiveConfig.max_outage" in r.message]
+    assert [r.levelno for r in failures] == [logging.WARNING]
+
+
+def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    custom_session = make_ws_session(max_outage=timedelta(0))
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.subscribed("T.AAPL")
+    connection = custom_session.connection()
+    fake_ws_server.close(1011)
+    custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
+    custom_session.flush()
+    wait_for(lambda: bool(result.j_table.isFailed()))
+    [row] = streams_of(custom_session, dh_to_pylist)
+    since = cast("re.Match[str]", re.search(r"since (\S+),", row["Error"])).group(1)
+    assert (row["State"], row["Error"]) == ("FAILED", _outage_failure(since, "0"))
+    assert custom_session.on_loop(connection, lambda: connection._episodes.outage_timer) is None
+
+
 def test_an_outage_without_live_tables_logs_nothing(
     ws_session: WsSession, fake_ws_server: FakeMassiveServer, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1856,9 +1967,12 @@ def test_an_outage_without_live_tables_logs_nothing(
     assert not [m for m in messages if "is down" in m or "reconnected after" in m]
 
 
-def _quiet_connection(acknowledged: frozenset[str], last: int) -> ws_connection.Connection:
+def _quiet_connection(
+    acknowledged: frozenset[str], last: int, notes: list[str | None] | None = None
+) -> ws_connection.Connection:
     # The state `Connection._check_frames` reads, without a socket: a live connection's status
-    # frames would move its last-frame time while the test owns it.
+    # frames would move its last-frame time while the test owns it. Each note the streams
+    # would show goes to `notes`.
     state = SimpleNamespace(
         url=_URL,
         asset_class=AssetClass.STOCKS,
@@ -1866,10 +1980,11 @@ def _quiet_connection(acknowledged: frozenset[str], last: int) -> ws_connection.
         subscriptions=SimpleNamespace(acknowledged=acknowledged),
         _episodes=ws_connection._Episodes(last_frame_at=last),
         _last_message_at=None,
+        _set_note=(notes if notes is not None else []).append,
     )
-    state._check_frames = functools.partial(
-        ws_connection.Connection._check_frames, cast("ws_connection.Connection", state)
-    )
+    for name in ("_check_frames", "_heard"):
+        method = getattr(ws_connection.Connection, name)
+        setattr(state, name, functools.partial(method, cast("ws_connection.Connection", state)))
     return cast("ws_connection.Connection", state)
 
 
@@ -1879,7 +1994,8 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
     trading = [False]
     monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: trading[0])
     last = 1_800_000_000 * 10**9
-    connection = _quiet_connection(frozenset({"T.AAPL"}), last)
+    notes: list[str | None] = []
+    connection = _quiet_connection(frozenset({"T.AAPL"}), last, notes)
     quiet = last + int(ws_connection.NO_FRAMES_WARNING * 1e9)
     with (
         caplog.at_level(logging.INFO, logger=ws.__name__),
@@ -1890,8 +2006,8 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
         connection._check_frames(quiet - 10**9)  # not silent long enough yet
         connection._check_frames(quiet)
         connection._check_frames(quiet + 60 * 10**9)  # the same episode: logged once
-        connection._episodes.last_frame_at = quiet + 61 * 10**9  # a frame arrives
-        connection._check_frames(quiet + 62 * 10**9)
+        connection._heard()  # a frame arrives: the recovery is logged at once
+        connection._heard()  # and only once
     assert [
         (r.levelno, r.getMessage())
         for r in caplog.records
@@ -1908,6 +2024,45 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
         ),
         (logging.INFO, f"{_URL}: frames arrive again"),
     ]
+    # The streams show the silence while it lasts, but keep running: nothing fails them.
+    assert notes == [
+        (
+            "no data since 2027-01-15T08:00:00Z during stocks trading hours; quiet symbols or "
+            "a market holiday may explain it"
+        ),
+        None,
+    ]
+
+
+def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: True)
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    ws_session.wait(lambda s: any(status.kind is StatusKind.ACK for status in s.statuses))
+    connection = ws_session.connection()
+    later = int(2 * ws_connection.NO_FRAMES_WARNING * 1e9)
+
+    def error() -> str | None:
+        [row] = streams_of(ws_session, dh_to_pylist)
+        assert row["State"] == "RUNNING"  # silence never fails a stream
+        return cast("str | None", row["Error"])
+
+    for frame in (_ack("T.AAPL"), json.dumps([trade("AAPL")])):  # a status, then data
+        ws_session.on_loop(connection, lambda: connection._check_frames(time.time_ns() + later))
+        assert re.fullmatch(
+            r"no data since \S+Z during stocks trading hours; quiet symbols or a market holiday "
+            r"may explain it",
+            error() or "",
+        )
+        fake_ws_server.send(frame)
+        wait_for(lambda: error() is None)
+    ws_session.session.release(result)
 
 
 def test_a_connection_with_nothing_acknowledged_is_never_silent(

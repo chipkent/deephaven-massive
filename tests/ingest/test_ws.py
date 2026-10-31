@@ -179,6 +179,14 @@ def settle(ws_session: WsSession) -> None:
             assert done.wait(TIMEOUT)
 
 
+STALL = (
+    r"connection down since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ; no data; waiting for a WebSocket "
+    r"slot on socket\.test/options: another connection with this API key, perhaps from another "
+    r"process, holds it; the plan allows one connection per cluster"
+)
+"""A pattern of the `Error` of an options stream whose connection waits for a slot."""
+
+
 def streams_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -1249,14 +1257,14 @@ def test_a_stream_waiting_for_a_slot_says_so(
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
-    stall = (
-        "waiting for a WebSocket slot on socket.test/options: another connection with this "
-        "API key, perhaps from another process, holds it; the plan allows one connection "
-        "per cluster"
-    )
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == stall)
+
+    def stalled(count: int) -> bool:
+        errors = [r["Error"] or "" for r in streams_of(ws_session, dh_to_pylist)]
+        return len(errors) == count and all(re.fullmatch(STALL, e) for e in errors)
+
+    wait_for(lambda: stalled(1))
     every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
-    wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [stall] * 2)
+    wait_for(lambda: stalled(2))
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
     del capped, every
@@ -1293,16 +1301,16 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
-    stall = (
-        "waiting for a WebSocket slot on socket.test/options: another connection with this "
-        "API key, perhaps from another process, holds it; the plan allows one connection "
-        "per cluster"
-    )
-    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")  # the stall keeps the skipped row
+    skipped = f"; {re.escape(SKIPPED_SPY)}"
+
+    def stalled(suffix: str) -> bool:
+        return re.fullmatch(STALL + suffix, cast("str", error() or "")) is not None
+
+    wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == stall)  # fixing the row keeps the stall
+    wait_for(lambda: stalled(""))  # fixing the row keeps the stall
     watchlist.add(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")
+    wait_for(lambda: stalled(skipped))
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     del capped

@@ -464,8 +464,10 @@ class MassiveSession:
         One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), and background
         read (`read`, from `fetch(wait=False)` or `history(..., wait=False)`). A stream or poll
         is `RUNNING`; a read is `LOADING`, then `DONE`, or `FAILED` with the error. `Error` also
-        shows warnings that do not stop a stream, such as deferred options contracts or the wait
-        for a WebSocket slot. Each call returns a new live view; after `close()` it keeps its
+        shows warnings that do not stop a stream, such as deferred options contracts, a
+        connection that is down (`connection down since <time>; no data`; an outage longer
+        than `MassiveConfig.max_outage` fails the stream), or one that has gone quiet during
+        market hours. Each call returns a new live view; after `close()` it keeps its
         final rows. How to read it: README.md#diagnostics.
 
         Returns:
