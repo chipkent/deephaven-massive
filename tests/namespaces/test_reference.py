@@ -833,6 +833,7 @@ class _Statuses:
         *,
         symbols: object,
         record: Callable[[object], None],
+        on_recency: Callable[[object], None],
         executor: ThreadPoolExecutor,
         cancel: object,
     ) -> tuple[pa.Table, int, float]:
