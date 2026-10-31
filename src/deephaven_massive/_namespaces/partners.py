@@ -79,7 +79,7 @@ def _list_spec(
     symbol: str | KeySpec | None = None,
     symbol_param: str | None = None,
     poll_keys: tuple[str, ...],
-    page_size: int,
+    page_size: int | None = None,
     asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY,
     time: str | None = None,
     time_axis: tuple[str, str] | None = None,
@@ -98,8 +98,9 @@ def _list_spec(
             whose rows describe no single instrument.
         symbol_param: The query parameter that carries the requested symbols, or None.
         poll_keys: The key columns of a keyed `poll()` table, unique per row.
-        page_size: The page size requested: the endpoint's documented maximum `limit`, or
-            less for rows that carry long text, so one page stays at tens of megabytes.
+        page_size: A page size below the endpoint's documented maximum `limit`, for rows
+            that carry long text, so one page stays at tens of megabytes; None, the default,
+            requests the documented maximum.
         asset_class: The class whose symbol rules apply to `symbols`, or `ClassFromPrefix.ANY`
             for a dataset whose symbols span classes.
         time: The path's instant column that holds the row's time, renamed to `Timestamp`.
@@ -134,7 +135,7 @@ def _list_spec(
 
 
 def _benzinga(
-    name: str, path: str, *, summary: str, page_size: int, tickers: bool = True
+    name: str, path: str, *, summary: str, page_size: int | None = None, tickers: bool = True
 ) -> DatasetSpec:
     """Declare a Benzinga v1 list dataset whose rows each carry a unique `benzinga_id`.
 
@@ -142,8 +143,8 @@ def _benzinga(
         name: The dataset's name below `partners.benzinga`, such as `"ratings"`.
         path: The REST path template.
         summary: The dataset's one-sentence summary.
-        page_size: The endpoint's documented maximum `limit`, or less for rows that carry
-            long text.
+        page_size: A page size below the endpoint's documented maximum `limit`, for rows
+            that carry long text; None, the default, requests the documented maximum.
         tickers: True when the endpoint filters by `ticker` and each row names at most one
             stock. The vendor marks `ticker` optional on every such endpoint, and its own
             analyst-insights sample has none, so a row without one keeps a null `Symbol`
@@ -187,7 +188,6 @@ def _etf_global(
         symbol="CompositeTicker",
         symbol_param="composite_ticker.any_of",
         poll_keys=poll_keys,
-        page_size=5_000,
     )
 
 
@@ -195,7 +195,6 @@ BENZINGA_ANALYSTS: Final = _benzinga(
     "analysts",
     "/benzinga/v1/analysts",
     summary="Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.",
-    page_size=50_000,
     tickers=False,
 )
 BENZINGA_ANALYST_INSIGHTS: Final = _benzinga(
@@ -210,7 +209,6 @@ BENZINGA_RATINGS: Final = _benzinga(
     "ratings",
     "/benzinga/v1/ratings",
     summary="Analyst rating and price-target actions on US stocks, as reported by Benzinga.",
-    page_size=50_000,
 )
 BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     "partners.benzinga.consensus_ratings",
@@ -221,32 +219,27 @@ BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     # names its stock, so a row without one fails loudly.
     symbol=KeySpec("Ticker"),
     poll_keys=("Symbol",),
-    page_size=50_000,
     per_symbol=True,
 )
 BENZINGA_BULLS_BEARS_SAY: Final = _benzinga(
     "bulls_bears_say",
     "/benzinga/v1/bulls-bears-say",
     summary="Benzinga's bull case and bear case summaries for US stocks.",
-    page_size=5_000,
 )
 BENZINGA_GUIDANCE: Final = _benzinga(
     "guidance",
     "/benzinga/v1/guidance",
     summary="Earnings and revenue guidance issued by US companies, as reported by Benzinga.",
-    page_size=50_000,
 )
 BENZINGA_EARNINGS: Final = _benzinga(
     "earnings",
     "/benzinga/v1/earnings",
     summary="Earnings announcements of US companies from Benzinga, with estimates and surprises.",
-    page_size=50_000,
 )
 BENZINGA_FIRMS: Final = _benzinga(
     "firms",
     "/benzinga/v1/firms",
     summary="The research firms behind Benzinga's analyst ratings.",
-    page_size=50_000,
     tickers=False,
 )
 BENZINGA_NEWS: Final = _list_spec(
@@ -306,7 +299,6 @@ TMX_CORPORATE_EVENTS: Final = _list_spec(
     # Wall Street Horizon's calendar is global (each event names its venue's MIC and an
     # ISIN), so its tickers are not US-market ones: they are kept as Massive writes them.
     symbols_as_written=True,
-    page_size=50_000,
 )
 
 FABLE_MERCHANT_AGGREGATES: Final = _list_spec(
@@ -329,7 +321,6 @@ FABLE_MERCHANT_AGGREGATES: Final = _list_spec(
         "MccGroup",
         "TransactionCurrency",
     ),
-    page_size=5_000,
 )
 FABLE_MERCHANT_HIERARCHY: Final = _list_spec(
     "partners.fable.merchant_hierarchy",
@@ -337,7 +328,6 @@ FABLE_MERCHANT_HIERARCHY: Final = _list_spec(
     summary="Fable Data's map from merchants to parent companies, tickers, and industries.",
     # One mapping per merchant and the date it became applicable.
     poll_keys=("LookupName", "ActiveFrom"),
-    page_size=50_000,
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (

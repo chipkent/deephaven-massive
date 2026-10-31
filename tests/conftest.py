@@ -407,14 +407,24 @@ def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
 
     def run() -> None:
         graph = dh_exec_ctx.update_graph.j_update_graph
+        lock = graph.exclusiveLock()
+        signal = lock.newCondition()
         first = graph.clock().currentStep()
+        # Asked for outside the lock, the signal comes from a terminal notification of the next
+        # cycle, which runs under the exclusive lock. Holding the lock, the waiter sees either a
+        # finished cycle (the step moved) or one not yet begun, whose signal `awaitNanos` waits
+        # for, so a cycle that ends before the wait starts is never missed.
+        graph.requestSignal(signal)
         graph.requestRefresh()
-        pause = threading.Event()  # never set; only paces the loop
-        for _ in range(1500):
-            if graph.clock().currentStep() != first:
-                return
-            pause.wait(0.02)
-        pytest.fail("no update cycle ran within 30 s")
+        remaining = 30_000_000_000  # nanoseconds
+        lock.lock()
+        try:
+            while graph.clock().currentStep() == first and remaining > 0:
+                remaining = signal.awaitNanos(remaining)
+        finally:
+            lock.unlock()
+        if graph.clock().currentStep() == first:
+            pytest.fail("no update cycle ran within 30 s")
 
     return run
 

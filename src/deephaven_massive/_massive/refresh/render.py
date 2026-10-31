@@ -117,6 +117,7 @@ def _param_json(item: Param) -> dict[str, Json]:
         "values": list(item.values),
         "unit": item.unit.value if item.unit else None,
         "default": item.default,
+        "maximum": item.maximum,
     }
 
 

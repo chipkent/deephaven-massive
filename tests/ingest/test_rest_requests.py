@@ -196,8 +196,8 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
         news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair
     )
     assert [(c.symbol, dict(c.query)) for c in calls] == [
-        ("AAPL", {"ticker": "AAPL"}),
-        ("MSFT", {"ticker": "MSFT"}),
+        ("AAPL", {"limit": 1000, "ticker": "AAPL"}),
+        ("MSFT", {"limit": 1000, "ticker": "MSFT"}),
     ]
     assert rest_requests.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
@@ -229,7 +229,10 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
     calls = rest_requests.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
-    assert [dict(c.query) for c in calls] == [{"ticker.any_of": ("A",)}, {"ticker.any_of": ("B",)}]
+    assert [dict(c.query) for c in calls] == [
+        {"limit": 5000, "ticker.any_of": ("A",)},
+        {"limit": 5000, "ticker.any_of": ("B",)},
+    ]
 
 
 def test_a_symbol_filled_into_a_query_parameter() -> None:
@@ -243,7 +246,7 @@ def test_a_symbol_filled_into_a_query_parameter() -> None:
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
     calls = rest_requests.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
     assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
-        ("A", {}, {"ticker": "A"})
+        ("A", {}, {"limit": 5000, "ticker": "A"})
     ]
 
 
@@ -461,3 +464,46 @@ def test_range_segments_floor_to_whole_milliseconds() -> None:
         "from": datetime(2025, 3, 3, 14, 30, 0, 123000, tzinfo=UTC),
         "to": datetime(2025, 3, 3, 15, 0, 0, 0, tzinfo=UTC),
     }
+
+
+def test_the_page_size_is_the_documented_maximum_unless_the_dataset_sets_one() -> None:
+    dividends = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="stocks.dividends",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=DIVIDENDS_PATH,
+        keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    )
+    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    assert rest_requests.page_size(dividends, path) == 5000
+    assert rest_requests.page_size(dataclasses.replace(dividends, page_size=100), path) == 100
+    # A path without `limit` has no page size, whatever the dataset sets.
+    movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
+    assert rest_requests.page_size(MOVERS, movers) is None
+
+
+def test_a_path_without_a_documented_maximum_sends_only_the_row_cap() -> None:
+    # The catalog requires a page size of such a path's datasets; a spec outside it that sets
+    # none sends Massive's default page, or the caller's cap.
+    bars = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="stocks.bars",
+        asset_class=AssetClass.STOCKS,
+        is_bars=True,
+        history_path=RANGE_PATH,
+        keys={
+            (R, RANGE_PATH): SourceKeys(
+                KeySpec("stocksTicker", from_request=True), KeySpec("WindowStart")
+            )
+        },
+    )
+    path = cast("RestPath", _massive.source(R, RANGE_PATH))
+    assert rest_requests.page_size(bars, path) is None
+    _, query = rest_requests.shared_params(bars, path, Request(), fixed={})
+    assert "limit" not in query
+    _, query = rest_requests.shared_params(bars, path, Request(limit=7), fixed={})
+    assert query["limit"] == 7
+    _, query = rest_requests.shared_params(
+        dataclasses.replace(bars, page_size=50_000), path, Request(), fixed={}
+    )
+    assert query["limit"] == 50_000

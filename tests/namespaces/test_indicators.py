@@ -18,6 +18,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import indicators
 from deephaven_massive._namespaces.query_building import Namespace
@@ -53,7 +54,7 @@ def test_each_indicator_reads_the_stock_and_crypto_paths(name: str) -> None:
     assert spec.per_symbol
     assert spec.time_axis == ("timestamp.gte", "timestamp.lt")
     assert spec.poll_keys == ("Symbol", "TimestampStart")
-    assert spec.page_size == 5000
+    assert {page_size(spec, CATALOG.rest_path(path)) for path in (stock, crypto)} == {5000}
     assert spec.keys_for(R, stock).symbol == KeySpec("stockTicker", from_request=True)
     assert spec.keys_for(R, crypto).symbol == KeySpec("cryptoTicker", from_request=True)
     schema = CATALOG.dataset_schema(spec)

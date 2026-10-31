@@ -12,6 +12,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import snapshots
 from deephaven_massive._session import CATALOG
@@ -54,7 +55,7 @@ def test_the_module_declares_the_one_session_dataset() -> None:
     assert spec.option_rows
     assert spec.fetch_path == "/v3/snapshot"
     assert spec.symbol_param == "ticker.any_of"
-    assert spec.page_size == spec.symbols_per_request == 250
+    assert page_size(spec, CATALOG.rest_path(spec.fetch_path)) == spec.symbols_per_request == 250
     assert not spec.per_symbol
     # An explicit APPEND poll appends each new state of a ticker, of any class.
     assert spec.revision_keys == ("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated")

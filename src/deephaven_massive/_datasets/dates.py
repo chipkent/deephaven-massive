@@ -34,7 +34,8 @@ day zone (for futures, the session the current instant belongs to). `bounds` app
 rules to a dataset's `history()` arguments.
 
 `day_start` and `instant_bound` turn a date sent to a REST parameter that compares instants
-into its instant, and `day_end` gives the instant a day is over by.
+into its instant, and `day_end` gives the instant a day is over by. Like `midnight`, they
+return their instants in UTC, whatever the zone whose day they start or end.
 
 A futures date names a trading session, whose 17:00 Chicago rule is `futures_sessions`; the
 bars of a timespan that fit a range are `bar_periods`; and whether a day's flat file can exist
@@ -677,12 +678,12 @@ def day_end(asset_class: AssetClass | ClassFromPrefix, day: date) -> datetime:
         day: The day; for futures, the session's `session_end_date`.
 
     Returns:
-        The aware instant: 17:00 Chicago time on a futures session's date
-        (`futures_session_end`); 01:00 New York time after an index day; otherwise midnight
-        after the day in the class's day zone.
+        The instant, in UTC as `day_start` and `midnight` return theirs: 17:00 Chicago time
+        on a futures session's date (`futures_session_end`); 01:00 New York time after an
+        index day; otherwise midnight after the day in the class's day zone.
     """
     if asset_class is AssetClass.FUTURES:
-        return futures_session_end(day)
+        return futures_session_end(day).astimezone(UTC)
     after = day_start(asset_class, day + _ONE_DAY)
     return after + _INDEX_DAY_END if asset_class is AssetClass.INDICES else after
 
@@ -787,11 +788,12 @@ def day_start(asset_class: AssetClass | ClassFromPrefix, day: date) -> datetime:
         day: The date.
 
     Returns:
-        The aware instant, in the day zone.
+        The instant, in UTC as `midnight` and `day_end` return theirs, whatever the zone
+        whose day it starts.
     """
     if asset_class is AssetClass.FUTURES:
-        return futures_session_open(day)
-    return datetime.combine(day, time(), tzinfo=day_zone(asset_class))
+        return futures_session_open(day).astimezone(UTC)
+    return midnight(day, day_zone(asset_class))
 
 
 def instant_bound(
