@@ -259,6 +259,7 @@ class RestTransport(Protocol):
         *,
         call: int,
         stop: threading.Event | None = None,
+        days: Sequence[date] | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
@@ -269,6 +270,9 @@ class RestTransport(Protocol):
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
             stop: A background read's stop token, as `fetch` takes it.
+            days: For `dm.ALL`, read one request per day, the only days of the window to
+                request (the days the flat files lack); None for every day of the window.
+                Ignored for explicit symbols, whose requests cover the window.
 
         Returns:
             A static table with the dataset's columns, holding the rows inside `window`.
@@ -362,12 +366,18 @@ class FlatFileRead:
             a file the read did not read, oldest first: a file held rows of a session other
             than its own day's, so the range's first or last session may be incomplete.
             Empty when no file did.
+        absent: When the read inferred holidays, the trading days at the range's end whose
+            file is missing with no later file, and that lie `ROLL_LIMIT` (7 days) or more
+            before the current day: Massive publishes a file the day after its day, so these
+            have no file at all, rather than one not published yet. Oldest first; empty for
+            none.
     """
 
     parts: tuple[tuple[date, Table], ...]
     empty: Table
     unread: tuple[date, ...]
     uncertain: tuple[date, ...] = ()
+    absent: tuple[date, ...] = ()
 
 
 class FlatFileTransport(Protocol):

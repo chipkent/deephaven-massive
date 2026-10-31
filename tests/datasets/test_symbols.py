@@ -109,6 +109,7 @@ NOT_CANONICAL = [
     (CRY, "X:BTC-USD"),
     (CRY, "X:"),
     (CRY, "x:BTCUSD"),
+    (CRY, "X:BTC"),  # one currency, not a pair
 ]
 
 
@@ -167,6 +168,23 @@ def test_every_futures_ticker_massive_writes_round_trips(
     for text in every:
         assert canonical_from_wire(FUT, text) == text
         assert dm.canonical_symbol(text, FUT) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Every crypto ticker the vendored documentation writes, and the short pairs the
+        # library's other tests use; a pair needs a base and a three-letter quote.
+        *("X:ADAUSD", "X:ALGOUSD", "X:ARDRUSD", "X:BOBAUSD", "X:BTCEUR", "X:BTCGBP"),
+        *("X:BTCUSD", "X:DRNUSD", "X:ETHBTC", "X:FSNUSD", "X:LCXUSD", "X:LINKUSD"),
+        *("X:LTCUSD", "X:MOBUSD", "X:NGCUSD", "X:RNDRUSD", "X:SOLUSD", "X:ZSCUSD"),
+        *("X:BTC-USD", "BCD-USD", "BTC-USD", "USD/EUR", "X:EUR-USD", "B-USD"),
+    ],
+)
+def test_every_crypto_pair_massive_writes_is_canonical(text: str) -> None:
+    symbol = dm.canonical_symbol_crypto(text)
+    assert symbol is not None
+    assert is_canonical(CRY, symbol)
 
 
 @pytest.mark.parametrize(("asset_class", "text"), CANONICAL)
@@ -480,6 +498,8 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         (dm.canonical_symbol_forex, "EUR USD", "two three-letter codes"),
         (dm.canonical_symbol_crypto, "BTC.USD", r"^cannot read 'BTC.USD' as a crypto pair"),
         (dm.canonical_symbol_crypto, "BTC--USD", r"^cannot read 'BTC--USD' as a crypto pair"),
+        (dm.canonical_symbol_crypto, "BTC", r"^cannot read .BTC. as a crypto pair: it is too"),
+        (dm.canonical_symbol_crypto, "X:ETH", r"^cannot read .X:ETH. as a crypto pair: it is"),
     ],
 )
 def test_a_converter_refuses_with_a_reason(

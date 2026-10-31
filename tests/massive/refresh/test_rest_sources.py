@@ -222,9 +222,9 @@ def test_the_type_fixes_follow_their_samples(
         (
             "/futures/v1/snapshot",
             "details.settlement_date",
-            (WireType.EPOCH, WireUnit.NS),
+            (WireType.DATE, None),
             1_753_851_600_000_000_000,
-            1_753_851_600_000_000_000,
+            date(2025, 7, 30),  # midnight in Chicago
         ),
         (
             "/v1/open-close/{indicesTicker}/{date}",
@@ -955,23 +955,16 @@ def test_gate_stale_entry_a_type_fix_the_specification_no_longer_needs() -> None
     ]
 
 
-def test_a_type_fix_to_an_epoch_takes_its_unit_from_units() -> None:
-    fix = overrides.TypeFix(conversion=Conversion.DATE_AS_EPOCH, reason="test")
+def test_a_type_fix_to_a_chicago_midnight_keeps_a_date() -> None:
+    fix = overrides.TypeFix(conversion=Conversion.CHICAGO_MIDNIGHT_DATE, reason="test")
     # The field's own example is the integer that makes the conversion necessary.
-    row = _row(settles_on={"type": "string", "format": "date", "example": 1_753_851_600})
-    hand = _hand(
-        type_fixes={(_PATH, "settles_on"): fix},
-        units={(_PATH, "settles_on"): overrides.Unit(unit=WireUnit.NS, reason="test")},
-    )
-    (field,) = _one(row, hand).fields
+    row = _row(settles_on={"type": "string", "format": "date", "example": 1_753_851_600 * 10**9})
+    (field,) = _one(row, _hand(type_fixes={(_PATH, "settles_on"): fix})).fields
     assert (field.wire_type, field.unit, field.conversion) == (
-        WireType.EPOCH,
-        WireUnit.NS,
-        Conversion.DATE_AS_EPOCH,
+        WireType.DATE,
+        None,
+        Conversion.CHICAGO_MIDNIGHT_DATE,
     )
-    without_unit = dataclasses.replace(hand, units={})
-    snapshot = _snapshot({_PATH: _item(row)})
-    assert _problems(snapshot, without_unit) == [("timestamp-unit", _PATH, "settles_on")]
 
 
 def test_gate_stale_entry_a_unit_on_a_field_a_type_fix_keeps_from_an_epoch() -> None:

@@ -501,11 +501,12 @@ def test_fmv_frames_convert_to_a_current_instant(
     """Whether a WebSocket `FMV` frame's `t` converts to the current instant.
 
     `FMV` `t` is documented in nanoseconds while the sample shows milliseconds, so the
-    library reads it by magnitude and logs once which unit it saw. Streams `X:BTCUSD`'s fair
-    market value (the cheapest Business plan is Currencies Business), asserts that Massive
-    acknowledged the topic, and records the first rows, their age, and that log line. Crypto
-    trades around the clock, so rows are required. Passes when the first row's instant is
-    within a day of now; the logged unit settles which unit Massive sends.
+    library reads each value by its magnitude and logs once which unit the column arrived
+    in. Streams `X:BTCUSD`'s fair market value (the cheapest Business plan is Currencies
+    Business), asserts that Massive acknowledged the topic, and records the first rows, their
+    age, and that log line. Crypto trades around the clock, so rows are required. Passes when
+    the first row's instant is within a day of now; the logged unit settles which unit
+    Massive sends.
     """
     caplog.set_level(logging.INFO, logger="deephaven_massive")
     table = live_session.crypto.fmv(_PAIR).append_only()
@@ -514,7 +515,7 @@ def test_fmv_frames_convert_to_a_current_instant(
     for line in stream_report(live_session):
         evidence(line)
     live_session.release(table)
-    detected = [r.getMessage() for r in caplog.records if "FMV timestamps detected" in r.message]
+    detected = [r.getMessage() for r in caplog.records if "read by magnitude" in r.message]
     evidence(f"magnitude rule log: {detected}")
     now = time.time_ns()
     for row in rows[:3]:

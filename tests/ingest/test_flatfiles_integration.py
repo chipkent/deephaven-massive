@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.timestamps import MAGNITUDE_NS_THRESHOLD
 from deephaven_massive._massive import Transport, WireEntitlementError, WireError, sources
 
 if TYPE_CHECKING:
@@ -101,11 +102,13 @@ def test_index_value_timestamps_are_nanoseconds(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether `us_indices/values_v1` `timestamp` is in nanoseconds, as the library reads it.
+    """Which unit `us_indices/values_v1` `timestamp` is in, and that the library reads it.
 
-    It is documented in milliseconds while the example rows have 19 digits. Records the first
-    rows' raw `timestamp`, its digit count, and the instant it is as nanoseconds. Passes when
-    that instant lies within a day of the file's day; a millisecond value lands in 1970.
+    It is documented in milliseconds while the example rows have 19 digits, so the library
+    reads each value by its magnitude (at least 10**17 is nanoseconds, less is milliseconds).
+    Records the first rows' raw `timestamp`, its digit count, and the instant the magnitude
+    rule makes of it. Passes when that instant lies within a day of the file's day; the digit
+    count settles the unit, after which the field can take the fixed unit.
     """
     result = flat_file_head("us_indices/values_v1", recent_monday, None)
     assert result is not None, f"no us_indices/values_v1 file for {recent_monday}"
@@ -118,7 +121,8 @@ def test_index_value_timestamps_are_nanoseconds(
         )
     evidence(f"undocumented headers: {sorted(extra)}")
     first = int(str(rows[0]["timestamp"]))
-    assert _day_ns(recent_monday) - _DAY_NS <= first < _day_ns(recent_monday) + 2 * _DAY_NS
+    nanos = first if first >= MAGNITUDE_NS_THRESHOLD else first * 10**6
+    assert _day_ns(recent_monday) - _DAY_NS <= nanos < _day_ns(recent_monday) + 2 * _DAY_NS
 
 
 def _day_ns(day: date) -> int:

@@ -864,6 +864,36 @@ def test_a_crypto_pair_lookup_never_guesses(
         reader.crypto_pair("X:DOTUSD")
 
 
+def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pair Massive lists after the session read the list is found without a restart; a
+    # ticker the list never holds costs no more than one read an hour.
+    clock = [1000.0]
+    monkeypatch.setattr(rest, "_monotonic", lambda: clock[0])
+    fake_rest.reply(
+        "/v3/reference/tickers",
+        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
+        Reply(envelope([])),
+        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD"), _ticker("X:DOTUSD", "DOT", "USD")])),
+        Reply(envelope([])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    clock[0] += 3599
+    with pytest.raises(rest.UnlistedPairError, match="does not list it"):
+        reader.crypto_pair("X:DOTUSD")  # the list is not an hour old: no read
+    assert len(fake_rest.get_queries()) == 2
+    clock[0] += 1
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # read again, and listed now
+    assert len(fake_rest.get_queries()) == 4
+    with pytest.raises(rest.UnlistedPairError, match="does not list it"):
+        reader.crypto_pair("X:ABCUSD")  # the new list is recent: no read
+    assert len(fake_rest.get_queries()) == 4
+    # A caller holding a list another caller has since replaced reads the current one.
+    assert reader.state.retire_crypto({}) is True
+
+
 def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -2186,6 +2216,25 @@ def test_all_daily_bars_read_one_grouped_day_at_a_time(
         GROUPED_PATH.format(date="2025-03-04"),
     ]
     assert [(r["Symbol"], r["Close"]) for r in out] == [("AAPL", 2.0), ("MSFT", 3.0)]
+
+
+def test_all_daily_bars_request_only_the_days_asked_for(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The days the flat files lack are read one grouped day each, not the whole range.
+    day = int(datetime(2025, 3, 4, 5, tzinfo=UTC).timestamp()) * 1000
+    fake_rest.reply(
+        GROUPED_PATH.format(date="2025-03-04"), Reply(envelope([{"T": "MSFT", "t": day, "c": 3.0}]))
+    )
+    q = query(session, BARS, symbols=dm.ALL, timespan=Timespan.DAY, adjusted=False)
+    first, last = date(2025, 3, 3), date(2025, 3, 7)
+    request = dataclasses.replace(q._request, start=first, end=last)
+    window = history_window(BARS, request, start=first, end=last, classes=())
+    table = session._core.rest_transport().history(
+        BARS, request, window, call=1, days=[date(2025, 3, 4)]
+    )
+    assert [(r["Symbol"], r["Close"]) for r in rows(table)] == [("MSFT", 3.0)]
+    assert [path for path, _ in fake_rest.get_queries()] == [GROUPED_PATH.format(date="2025-03-04")]
 
 
 def test_futures_bars_by_date_request_whole_sessions(
@@ -4067,6 +4116,24 @@ def test_a_delayed_envelope_needs_every_class_of_the_request_listed(
         else:
             with pytest.raises(dm.EntitlementError, match=rf"dm\.Subscription\.{refused} is"):
                 _unified(m, "AAPL", contract)
+    finally:
+        m.close()
+
+
+def test_a_delay_label_is_never_held_against_currencies(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive has no delayed currencies feed and the configuration cannot list one, so a
+    # refusal could only name a remedy the configuration refuses.
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.STOCKS)
+    try:
+        rows = [{"ticker": "AAPL"}, {"ticker": "X:BTCUSD"}]
+        fake_rest.reply(UNIFIED_PATH, Reply(envelope(rows, status="DELAYED")))
+        assert [r["Symbol"] for r in _unified(m, "AAPL", "X:BTCUSD")] == ["AAPL", "X:BTCUSD"]
+        crypto = {"ticker": "X:BTCUSD", "last_trade": {"timeframe": "DELAYED"}}
+        fake_rest.reply_first(UNIFIED_PATH, Reply(envelope([crypto])))
+        assert [r["Symbol"] for r in _unified(m, "X:BTCUSD")] == ["X:BTCUSD"]
     finally:
         m.close()
 

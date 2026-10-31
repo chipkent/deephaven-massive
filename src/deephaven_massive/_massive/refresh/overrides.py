@@ -569,12 +569,6 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ("last_quote.ask_timestamp", "last_quote.bid_timestamp"),
             _NS_SAMPLE,
         ),
-        ("/futures/v1/snapshot", "details.settlement_date"): Unit(
-            unit=WireUnit.NS,
-            reason="The settlement day, sent as an epoch (its `TYPE_FIXES` entry); the "
-            "specification example and the documentation sample, 1753851600000000000, have 19 "
-            "digits.",
-        ),
         **_for(
             ("/futures/v1/snapshot",),
             ("last_minute.last_updated",),
@@ -639,10 +633,11 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
         **_for(("futures/Q",), ("bt", "at"), _MS_WS_SAMPLE),
         **_for(_WS_BARS, ("s", "e"), _MS_WS),
         ("stocks/LULD", "t"): Unit(
-            unit=WireUnit.NS,
+            unit=WireUnit.MS_OR_NS,
             reason="Documented as Unix milliseconds, but the documentation sample, "
-            "1764086430905642800, has 19 digits: as milliseconds it would overflow the "
-            "nanosecond range, so the sample's nanoseconds are taken until live data confirms.",
+            "1764086430905642800, has 19 digits, nanoseconds. Each value is read by its "
+            "magnitude until live data shows which unit the stream sends: a guess of either "
+            "unit would drop every row of the other, and fail the stream.",
             verified=False,
         ),
         ("stocks/NOI", "t"): Unit(
@@ -658,10 +653,10 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             _FMV_CHANNELS,
             ("t",),
             Unit(
-                unit=WireUnit.NS,
+                unit=WireUnit.MS_OR_NS,
                 reason="Documented as a nanosecond timestamp; the options sample has 19 digits, "
-                "but the stocks, forex, and crypto samples have 13. The library tells the two "
-                "apart by magnitude for this field alone.",
+                "but the stocks, forex, and crypto samples have 13. Each value is read by its "
+                "magnitude.",
                 verified=False,
             ),
         ),
@@ -671,9 +666,11 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ("us_futures_{venue}/quotes_v1",), ("ask_timestamp", "bid_timestamp"), _NS_FILES_SAMPLE
         ),
         ("us_indices/values_v1", "timestamp"): Unit(
-            unit=WireUnit.NS,
-            reason="Documented as Unix milliseconds, but every example row has 19 digits, as do "
-            "the other index files' times.",
+            unit=WireUnit.MS_OR_NS,
+            reason="Documented as Unix milliseconds, but every example row has 19 digits, "
+            "nanoseconds, as do the other index files' times. Each value is read by its "
+            "magnitude until live data shows which unit the files hold: a guess of either unit "
+            "would drop every row of the other.",
             verified=False,
         ),
     }
@@ -733,13 +730,14 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("/v1/marketstatus/upcoming", "open"): _iso('"2020-11-27T14:30:00.000Z"'),
         ("/v1/marketstatus/upcoming", "close"): _iso('"2020-11-27T18:00:00.000Z"'),
         ("/futures/v1/snapshot", "details.settlement_date"): TypeFix(
-            conversion=Conversion.DATE_AS_EPOCH,
+            conversion=Conversion.CHICAGO_MIDNIGHT_DATE,
             reason="The specification declares format date, but its example and the "
             "documentation sample are the integer 1753851600000000000 (2025-07-30 05:00 UTC, "
-            "midnight in Chicago): an epoch in nanoseconds, whose unit `UNITS` gives. Kept "
-            "lossless as an instant. `/futures/v1/contracts` sends the same field as the date "
-            '"2026-12-18" (a `date` column there), which this path\'s conversion refuses '
-            "rather than guess a time zone.",
+            "midnight in Chicago): the settlement day as the epoch nanoseconds of its Chicago "
+            "midnight, the CME's calendar. The column stays a date, as on "
+            '`/futures/v1/contracts`, which sends the same field as the date "2026-12-18", so '
+            "the two join. Any instant other than a Chicago midnight is refused loudly rather "
+            "than shifted to a day.",
         ),
         ("/v1/open-close/{indicesTicker}/{date}", "from"): TypeFix(
             conversion=Conversion.MIDNIGHT_UTC_DATE,

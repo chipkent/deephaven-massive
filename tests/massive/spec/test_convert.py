@@ -176,7 +176,9 @@ _CONVERSIONS = [
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00+00:00", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "1969-12-31T00:00:00z", date(1969, 12, 31)),
-    (Conversion.DATE_AS_EPOCH, 1_753_851_600_000_000_000, 1_753_851_600_000_000_000),
+    (Conversion.CHICAGO_MIDNIGHT_DATE, 1_753_851_600_000_000_000, date(2025, 7, 30)),  # CDT
+    (Conversion.CHICAGO_MIDNIGHT_DATE, 1_765_778_400_000_000_000, date(2025, 12, 15)),  # CST
+    (Conversion.CHICAGO_MIDNIGHT_DATE, "2026-12-18", date(2026, 12, 18)),
     (Conversion.INTEGER_AS_NUMBER, 951.6112, 951.6112),  # a crypto volume
     (Conversion.INTEGER_AS_NUMBER, 91, 91.0),
 ]
@@ -218,8 +220,12 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.MIDNIGHT_UTC_DATE, "2023-03-09T19:00:00-05:00"),  # written on the 9th
         (Conversion.MIDNIGHT_UTC_DATE, "2023-02-30T00:00:00Z"),  # no such date
         (Conversion.MIDNIGHT_UTC_DATE, 1_678_406_400),
-        (Conversion.DATE_AS_EPOCH, "2025-07-30"),
-        (Conversion.DATE_AS_EPOCH, 2**63),
+        (Conversion.CHICAGO_MIDNIGHT_DATE, 1_753_833_600_000_000_000),  # midnight UTC
+        (Conversion.CHICAGO_MIDNIGHT_DATE, 1_753_851_600_000_000_001),  # not a whole second
+        (Conversion.CHICAGO_MIDNIGHT_DATE, 1_753_851_601_000_000_000),  # a second past
+        (Conversion.CHICAGO_MIDNIGHT_DATE, 2**63),
+        (Conversion.CHICAGO_MIDNIGHT_DATE, "2025-07-30T00:00:00Z"),
+        (Conversion.CHICAGO_MIDNIGHT_DATE, 1.5),
         (Conversion.CODE_LIST_TEXT, 2**63),
         (Conversion.CODE_LIST_TEXT, [12]),
         (Conversion.CODE_LIST_TEXT, "12, 37"),
@@ -245,7 +251,7 @@ _SAMPLES = {
     (Conversion.NUMBER_LABEL, WireType.DOUBLE): "1.0",
     (Conversion.CODE_LIST_TEXT, WireType.LONG): "12,37",
     (Conversion.MIDNIGHT_UTC_DATE, WireType.DATE): "2023-03-10T00:00:00Z",
-    (Conversion.DATE_AS_EPOCH, WireType.DATE): 1,
+    (Conversion.CHICAGO_MIDNIGHT_DATE, WireType.DATE): 1_753_851_600_000_000_000,
     (Conversion.INTEGER_AS_NUMBER, WireType.LONG): 951.6112,
 }
 
