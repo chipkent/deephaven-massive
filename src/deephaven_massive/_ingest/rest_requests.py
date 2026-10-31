@@ -11,7 +11,8 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
   whole days on a calendar-date axis and the instants that start the bounds' days on an
   instant axis, in the day zone of the request's own symbols (`axis_query`); the symbol
   parameter, at most `DatasetSpec.symbols_per_request` symbols a request; `adjusted`, the
-  futures `resolution`, the page size, and for `history()` the ascending direction;
+  futures `resolution`, the page size (`page_size`), and for `history()` the ascending
+  direction;
 - `history_calls` plans a `history()` call on the history path: futures sessions one session
   at a time by `session_end_date`, and every other window as its aggregate range segments.
 
@@ -52,6 +53,7 @@ __all__ = [
     "fetch_paths",
     "history_calls",
     "own_symbols",
+    "page_size",
     "plan_calls",
     "shared_params",
 ]
@@ -404,6 +406,28 @@ def _caller_params(
     return path, query
 
 
+def page_size(spec: DatasetSpec, rest_path: RestPath) -> int | None:
+    """Return the page size a request of a dataset's path asks for, before any row cap.
+
+    It is the dataset's own `DatasetSpec.page_size` where it sets one (below the documented
+    maximum for long rows, or a maximum the specification states only in prose), and the
+    path's documented maximum `limit` (`Param.maximum`) otherwise. The catalog's `page size`
+    gate ensures every catalog dataset's paged path has one.
+
+    Args:
+        spec: The dataset.
+        rest_path: One of its REST paths.
+
+    Returns:
+        The page size; None when the path takes no `limit` query parameter, or documents no
+        maximum for a dataset that sets no `page_size`.
+    """
+    for param in rest_path.params:
+        if param.name == "limit" and not param.in_path:
+            return param.maximum if spec.page_size is None else spec.page_size
+    return None
+
+
 def shared_params(
     spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -415,7 +439,9 @@ def shared_params(
     takes it (a path without it, the crypto indicators', serves prices no split changes, so
     `True` is left out there); and the
     futures `resolution` and the page size when the path takes them. The page size is
-    `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
+    `DatasetSpec.page_size`, or else the path's documented maximum `limit`, or `Request.limit`
+    when that is smaller; a path that documents no maximum, for a dataset without a
+    `page_size`, gets only `Request.limit`.
 
     Args:
         spec: The dataset.
@@ -446,12 +472,13 @@ def shared_params(
         raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
-    if spec.page_size is not None and "limit" in params:
+    if "limit" in params:
         # A page size, as the list paths read `limit`. The aggregates' range path reads its
         # `limit` as the number of base aggregates queried instead (at most 50,000); its
         # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
-        cap = request.limit
-        query["limit"] = spec.page_size if cap is None else min(cap, spec.page_size)
+        sizes = [v for v in (page_size(spec, rest_path), request.limit) if v is not None]
+        if sizes:
+            query["limit"] = min(sizes)
     path.update(fixed)
     return path, query
 

@@ -394,7 +394,7 @@ class _PathGenerator(SourceFields):
         return params
 
     def parameter(self, node: JsonObject) -> Param | None:
-        """Generate one parameter by the parameter rules, with the default its schema documents.
+        """Generate one parameter by the parameter rules, with its schema's default and maximum.
 
         Args:
             node: The resolved parameter object.
@@ -415,6 +415,9 @@ class _PathGenerator(SourceFields):
         default = schema.get("default")
         if not isinstance(default, (str, int, float)):  # bool is an int; a list or map is no scalar
             default = None
+        maximum = schema.get("maximum")
+        if not isinstance(maximum, int) or isinstance(maximum, bool):
+            maximum = None
         return Param(
             name=name,
             kind=kind,
@@ -422,6 +425,7 @@ class _PathGenerator(SourceFields):
             values=values,
             unit=unit,
             default=default,
+            maximum=maximum,
         )
 
     def parameter_kind(

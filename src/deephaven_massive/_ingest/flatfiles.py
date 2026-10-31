@@ -972,7 +972,8 @@ class FlatFileHistory:
         the body is closed, and the file is requested again and read from its start, after the
         wait of `FlatFileClient.wait_to_reread` (at most three rereads, 0.5, 1, then 2 seconds
         apart plus jitter). The wait ends early when the call is cancelled or the session
-        closes, and the next check then stops the read.
+        closes, and the next check then stops the read; a cancel or close that comes once the
+        rereads are spent is reported in place of the dropped connection.
 
         Args:
             transform: The request's block transform.
@@ -998,6 +999,15 @@ class FlatFileHistory:
                 return outcome
             # The body is closed by now, so no connection idles through the wait.
             if not self._client.wait_to_reread(outcome, retry, cancel):
+                # A stop or a close that came during the last read is what ended the call, so
+                # it is reported rather than the dropped connection.
+                if cancel.is_set() or self._client.closed:
+                    logger.debug(
+                        "%s: rereads spent as the read was stopped; reporting the stop, not: %s",
+                        key.key,
+                        outcome,
+                    )
+                self._check(cancel)
                 public = _public(outcome, key)
                 raise public from outcome
             retry += 1

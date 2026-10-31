@@ -36,7 +36,6 @@ SNAPSHOTS: Final = DatasetSpec(
     },
     option_rows=True,
     symbol_param="ticker.any_of",
-    page_size=250,
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     # The update times that cover every asset class: an index's own, and a ticker's last quote
     # and trade. An explicit APPEND poll appends each new state of a ticker.

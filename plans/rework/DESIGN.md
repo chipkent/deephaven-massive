@@ -1820,12 +1820,16 @@ Notation:
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
   one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
-  endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
-  when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
-  stops once `limit` rows have arrived.
-- `DatasetSpec.page_size` is the endpoint's documented maximum `limit`, lowered where the rows
-  are long so one page decodes to some tens of MB at most: Benzinga news 1,000 (each article
-  carries its whole HTML body, so 50,000 could reach hundreds of MB), Benzinga analyst
+  endpoint's page-size `limit`; the page size is the path's documented maximum (or
+  `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
+  (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging stops once `limit` rows
+  have arrived.
+- The page size is the endpoint's documented maximum `limit`, which the refresh generates from
+  the specification (`Param.maximum`), so no dataset types it. `DatasetSpec.page_size`
+  overrides it in two cases, and the catalog's `page size` gate refuses any other: a maximum
+  the specification states only in prose (the aggregates range paths, 50,000), and a lower
+  size where the rows are long so one page decodes to some tens of MB at most: Benzinga news
+  1,000 (each article carries its whole HTML body, so 50,000 could reach hundreds of MB), Benzinga analyst
   insights and filing risk factors 5,000 (each row quotes prose), and the three financial
   statements 10,000 (some fifty line items a row, over 60 MB at 50,000). Every other page
   size is the documented maximum: 50,000 short rows decode to some 10 to 40 MB, and the

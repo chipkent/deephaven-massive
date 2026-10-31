@@ -72,6 +72,7 @@ def test_parse_reads_parameter_values() -> None:
                 "values": ["asc"],
                 "unit": None,
                 "default": None,
+                "maximum": None,
             },
             {
                 "name": "window",
@@ -80,6 +81,7 @@ def test_parse_reads_parameter_values() -> None:
                 "values": [],
                 "unit": None,
                 "default": 50,
+                "maximum": 500,
             },
         ],
     }
@@ -87,7 +89,7 @@ def test_parse_reads_parameter_values() -> None:
     assert isinstance(value, RestPath)
     assert value.params == (
         Param(name="order", kind=ParamKind.ENUM, values=("asc",)),
-        Param(name="window", kind=ParamKind.INTEGER, default=50),
+        Param(name="window", kind=ParamKind.INTEGER, default=50, maximum=500),
     )
 
 
@@ -155,9 +157,26 @@ def test_parse_rejects_a_parameter_default_that_is_not_a_scalar() -> None:
         "values": [],
         "unit": None,
         "default": [50],
+        "maximum": None,
     }
     entry = {"key": "/v1/x", "result_key": None, "fields": [], "memberships": [], "params": [param]}
     with pytest.raises(TypeError, match=r"'default' is \[50\], not a JSON scalar"):
+        generated_schemas.parse(Transport.REST, _file(entry))
+
+
+@pytest.mark.parametrize("maximum", [1.5, True, "50"])
+def test_parse_rejects_a_parameter_maximum_that_is_not_an_integer(maximum: object) -> None:
+    param = {
+        "name": "limit",
+        "kind": "integer",
+        "in_path": False,
+        "values": [],
+        "unit": None,
+        "default": None,
+        "maximum": maximum,
+    }
+    entry = {"key": "/v1/x", "result_key": None, "fields": [], "memberships": [], "params": [param]}
+    with pytest.raises(TypeError, match=r"'maximum' is .*, not an integer"):
         generated_schemas.parse(Transport.REST, _file(entry))
 
 
