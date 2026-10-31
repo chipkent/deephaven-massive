@@ -3412,16 +3412,18 @@ Status(ACK, topics)
       covered explicit topics). The knowledge base shows one status object per topic, in one
       array.
 Status(ACK, no topics: the message could not be parsed)
-   -> WARNING once; treated as an acknowledgement of the topics awaiting an answer (below)
+   -> WARNING once; treated as an acknowledgement of, in turn: the in-flight step's unresolved
+      topics; else the topics of the re-send round awaiting its answer; else the latest
+      step's topics now in NO_ACK (a late answer to a large step whose watchdogs gave up),
+      until a re-send round goes out. A wrong credit only clears a NO_ACK note early.
 Status(REFUSED, topic)
    -> that topic's streams fail with EntitlementError (publish_failure); the topic leaves D
 Status(REFUSED, no topic)
-   -> applies to the topics awaiting an answer (below). See "Refusals name the feed" below.
-   The topics awaiting an answer, since answers come in the order of the frames they answer
-   and one subscribe awaits an answer at a time: the in-flight step's unresolved topics; else
-   the NO_ACK topic whose re-send went out within ack_timeout; else the latest step's topics
-   now in NO_ACK (a late answer to a large step whose watchdogs gave up). With none, a refusal
-   is logged at INFO and changes nothing.
+   -> applies to the in-flight step's unresolved topics, or to a re-send round awaiting its
+      answer that holds exactly one topic: answers come in the order of the frames they
+      answer, and a step and a round never await answers together. Any other (a late answer,
+      or one to a round of several topics) is logged at INFO and fails nothing, since it
+      could fail a healthy stream. See "Refusals name the feed" below.
 Status(MAX_CONNECTIONS) after authentication
    -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
@@ -3432,10 +3434,11 @@ still none after another ack_timeout, same check
       in its Error without failing, beside its other warnings (each its own part); after a
       drop, though, it keeps its stream down until data comes ("Outages" below). One
       WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
-      stays desired and subscribed, and its subscribe is re-sent alone every 60 s
-      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends, but
-      never while a step or another re-send awaits an answer (that round waits for the
-      next); a re-send awaits one for ack_timeout. A
+      stays desired and subscribed. Every 60 s (NO_ACK_RESEND) one round re-sends all NO_ACK
+      topics on the wire together, in one subscribe frame, until each is acknowledged, leaves
+      the wire, or the generation ends. A round due while a step is in flight waits
+      ack_timeout and tries again; a sent round awaits its answer for ack_timeout, and no
+      step goes out meanwhile. A
       late acknowledgement or a new generation clears the state and the streams' Error.
       Streams never fail on it, and the connection is never reconnected for it: a reconnect
       would cut every other stream on the shared connection over one late answer
@@ -3630,8 +3633,10 @@ sees:
   (`ErrorCause.EXPECTED`): "<dataset> poll(): last good cycle at <time>; the cycle running
   since <time> has received nothing for <n> s, longer than MassiveConfig.max_outage (<limit>
   s); the rows since then may be missing, so this table stopped; call the verb again for a
-  new live table". A cycle that keeps receiving pages, however slowly its requests are paced
-  or paused, never fails this way, so a Basic fan-out of twenty minutes keeps running, marked
+  new live table". The stall must also exceed the one-second spacing of the checks, and with
+  `max_outage=0` no running cycle fails this way (a failed cycle still fails at once). A cycle
+  that keeps receiving pages, however slowly its requests are paced or paused, never fails
+  this way, so a Basic fan-out of twenty minutes keeps running, marked
   late.
   (an expected cause) or ERROR (a defect, with its trace), later ones log at DEBUG, and the
   first cycle that succeeds again logs the recovery at INFO. A cycle that ends later than its

@@ -79,8 +79,9 @@ poller's thread, so the session's poll watch thread (`Pollers`) checks the runni
 `WATCH_INTERVAL` seconds: once one runs past its interval, its row's `Error` reads "cycle running
 since <start>; last good cycle at <time>" until the cycle ends. A late cycle that has received
 no page for more than `max_outage` seconds (from its start, or from the start of the run of
-failing cycles it continues) fails the table the same way; one that keeps receiving pages,
-however slowly, never does.
+failing cycles it continues, and never less than `WATCH_INTERVAL`) fails the table the same
+way; one that keeps receiving pages, however slowly, never does, and with a `max_outage` of
+zero only a cycle that ends in a failure fails the table.
 
 **Lifetime.** A poll keeps polling while its table is in use, by the result or by anything
 derived from it. Releasing the result (`m.release`, or garbage collection through the reaper)
@@ -786,8 +787,10 @@ class Poller:
         thread, which the cycle blocks. A running cycle that has passed its interval shows in
         the row's `Error`: "cycle running since <start>; last good cycle at <time>", until the
         cycle ends and updates the row. A cycle that has passed its interval and received no
-        page for more than `MassiveConfig.max_outage` seconds (counted from its start, or from
-        the start of the run of failing cycles it continues, until its first page) fails the
+        page for more than `MassiveConfig.max_outage` seconds, and more than `WATCH_INTERVAL`
+        (counted from its start, or from the start of the run of failing cycles it continues,
+        until its first page), fails the table; with a `max_outage` of zero, no running cycle
+        fails here, only one that ends in a failure. Such a failure fails the
         table with a `MassiveError` (`ErrorCause.EXPECTED`) and stops the poller: its rows may
         be missing while the table looks current. A cycle that keeps receiving pages, however
         slowly its requests are paced or paused, never fails here.
@@ -802,7 +805,9 @@ class Poller:
             if now - began <= self._interval:
                 return
             stalled = now - self._progress_at
-            failing = stalled > self._max_outage
+            # One check's spacing is the least stall it can measure; a zero limit fails only
+            # cycles that end in a failure (`_carry_on`), never a running one between pages.
+            failing = self._max_outage > 0 and stalled > max(self._max_outage, WATCH_INTERVAL)
             marking = not failing and not self._marked_late
             if marking:
                 self._marked_late = True

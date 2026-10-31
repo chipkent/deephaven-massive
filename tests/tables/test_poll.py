@@ -829,6 +829,7 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     _second_cycle_running(script, clock)
     clock.advance(250.0)
     script.record(DriftReport())  # a page: the paced cycle is making progress
+    script.keep_record = False
     del script.record  # it holds the session's core
     clock.advance(300.0)  # 550 s into the cycle, 300 s after its page
     pollers.check_running()
@@ -853,6 +854,46 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
         "stocks.dividends poll() stream 1: no page for 301 s, max_outage is 300 s; failing it"
         in caplog.messages
     )
+
+
+@pytest.mark.parametrize(
+    ("max_outage", "stall", "fails"),
+    [(0.0, 500.0, False), (0.5, 0.9, False), (0.5, 1.1, True)],
+    ids=["zero never fails a running cycle", "under one check", "past one check"],
+)
+def test_a_running_cycle_fails_only_past_both_max_outage_and_one_check(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    max_outage: float,
+    stall: float,
+    fails: bool,
+) -> None:
+    core = massive_session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, max_outage=max_outage))
+    script.rows(("AAPL", 1.0))
+    script.keep_record = True
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    _second_cycle_running(script, clock)
+    clock.advance(61.0)
+    script.record(DriftReport())  # a page, late in the cycle
+    script.keep_record = False
+    del script.record  # it holds the session's core
+    clock.advance(stall)
+    pollers.check_running()
+    assert script.cancel.is_set() is fails
+    script.rows(("AAPL", 2.0))  # the read returns
+    if fails:
+        until(lambda: bool(table.j_table.isFailed()))
+    else:
+        until(lambda: len(script.symbols) == 3)  # the cycle ended, and the next one runs
+        script.rows()
+        assert stream_rows()[0]["State"] == "RUNNING"
+        assert not table.j_table.isFailed()
 
 
 def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
