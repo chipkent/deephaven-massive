@@ -630,17 +630,17 @@ def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
     )
 
 
-def test_a_block_whose_every_time_is_in_a_wrong_unit_fails_the_call(
+def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
     # Every row dropped is a change in the file's format, not one odd row.
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of 1 rows "
-        r"of a block was dropped, so the file's format may have changed; the first: timestamp "
-        r"unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is outside 1990 to "
-        r"2100$",
+        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of the 1 "
+        r"rows of the requested symbols was dropped, so the file's format may have changed; the "
+        r"first: timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        r"outside 1990 to 2100$",
     ) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
@@ -1555,7 +1555,8 @@ def test_mixed_futures_bounds_are_refused_before_any_read(
 OTHER_SESSIONS = (
     "futures.trades: the flat file us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz holds rows "
     "of session 2025-03-03, not only of its own 2025-03-04; each row keeps its own session in "
-    "Date and is kept when that session was requested"
+    "Date and is kept when that session was requested, but rows of a requested session may "
+    "sit in a neighbouring day's file, which a call by dates does not read, and be missing"
 )
 
 

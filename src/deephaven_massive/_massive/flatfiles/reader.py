@@ -21,8 +21,10 @@ block then goes through pure Arrow operations, in this order:
 1. the symbol filter (`pyarrow.compute.is_in` on the symbol header);
 2. the key check on the surviving rows: a row whose key header (`ReadPlan.required`) is empty
    or does not parse as its type, or whose time header the plan's converter cannot place
-   (`ReadPlan.to_ns`), is dropped and counted; if every surviving row is dropped, the block
-   raises, since that is the sign of a change in the file's format rather than of one odd row;
+   (`ReadPlan.to_ns`), is dropped and counted; if every row of the requested symbols in the
+   whole file is dropped, the file raises after its last block, since that is the sign of a
+   change in the file's format rather than of one odd row (one block can hold a single row of
+   an illiquid symbol, so the rule is never applied to a block alone);
 3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds;
 4. on the rows left, the conversion of every other header to its type, and the parsing of list
    headers (`"12,37"` becomes `[12, 37]`): a value that does not parse is null, and its header
@@ -30,8 +32,9 @@ block then goes through pure Arrow operations, in this order:
    CSV headers to the library's column names.
 
 Instants stay in the file's own unit: the library converts them. Only an empty CSV field is
-null; text such as `NA` or `NULL` is data (both are valid tickers). A block is converted to
-Python objects only where a whole column fails to parse, to find the values that do not.
+null; text such as `NA` or `NULL` is data (both are valid tickers). A typed value's surrounding
+spaces are trimmed, as Arrow's typed parsing does. No block is converted to Python objects:
+the values of a column that do not parse are found by vectorized pattern and range tests.
 
 `ReadPlan` and `ReadColumn` describe what to read; the library builds them from a dataset, so
 this module knows no dataset. It imports only the standard library, `pyarrow`, and `net`: the
@@ -49,6 +52,7 @@ import gzip
 import threading
 import zlib
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, cast
 
 import pyarrow as pa
@@ -59,7 +63,7 @@ from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Mapping
     from types import TracebackType
 
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
@@ -299,9 +303,9 @@ class FlatFile:
                 drops (then `dropped` is True); if the file is empty (no header line); if the
                 header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
                 the header names a column twice or lacks a key header of `plan.required`
-                (before the first block, naming the headers); or if every row of a block that
-                holds the requested symbols is dropped for a key, naming the first one's
-                reason. Every message names the file.
+                (before the first block, naming the headers); or, after its last block, if
+                the file held rows of the requested symbols and every one of them was dropped
+                for a key, naming the first one's reason. Every message names the file.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
@@ -339,9 +343,20 @@ class FlatFile:
                     strings_can_be_null=True,
                 ),
             )
+            # Rows of the requested symbols the file held, and how many of them were dropped.
+            held = dropped = 0
+            reason = ""
             for block in reader:
-                rows, drift = self._apply(block, plan)
+                rows, drift, considered = self._apply(block, plan)
+                held += considered
+                dropped += drift.dropped_rows
+                reason = reason or drift.dropped_reason
                 yield rows, headers.merge(drift)
+            if held and dropped == held:
+                raise self._error(
+                    f"every one of the {held} rows of the requested symbols was dropped, so the "
+                    f"file's format may have changed; the first: {reason}"
+                )
         except (
             pa.ArrowException,
             OSError,
@@ -407,7 +422,9 @@ class FlatFile:
             unreadable=True,
         )
 
-    def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> tuple[pa.RecordBatch, DriftReport]:
+    def _apply(
+        self, block: pa.RecordBatch, plan: ReadPlan
+    ) -> tuple[pa.RecordBatch, DriftReport, int]:
         """Filter one block, drop the rows whose key cannot be read, and convert the rest.
 
         Args:
@@ -415,38 +432,32 @@ class FlatFile:
             plan: What to keep.
 
         Returns:
-            The kept rows, possibly none, in the plan's columns; and the block's own drift:
-            the rows dropped for a key (`_keyed`), and the headers that held text that does
-            not parse (`unconvertible`, with the first such text as the sample).
-
-        Raises:
-            WireError: If the block holds rows of the requested symbols and every one of them
-                is dropped for a key (`_keyed`).
+            The kept rows, possibly none, in the plan's columns; the block's own drift: the
+            rows dropped for a key (`_keyed`), and the headers that held text that does not
+            parse (`unconvertible`, with the first such text as the sample); and how many rows
+            of the requested symbols the block held, for the whole-file rule of `batches`.
         """
         if plan.symbols is not None:
             block = block.filter(pc.is_in(block[plan.symbol_header], value_set=plan.symbols))
+        considered = block.num_rows
         block, drift, nanos = self._keyed(block, plan)
         if plan.window_ns is not None:
             start, end = plan.window_ns
             if nanos is None:  # the time header is no key of this plan
-                times = pc.cast(block[plan.time_header], _read_type(plan, plan.time_header))
+                times, _ = _parsed(block[plan.time_header], _read_type(plan, plan.time_header))
                 nanos, _ = plan.to_ns(times)
             block = block.filter(pc.and_(pc.greater_equal(nanos, start), pc.less(nanos, end)))
         arrays = []
         odd: dict[str, DriftSample] = {}
         for column in plan.columns:
             sent = block[column.header]
-            if column.list_type is None:
-                convert = functools.partial(pc.cast, target_type=column.read_type)
-            else:
-                convert = functools.partial(_split_list, list_type=column.list_type)
-            values, failed = _parsed(sent, convert)
+            values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
                 first = pc.filter(sent, failed)[0].as_py()
                 odd[column.header] = DriftSample(None, first[:_SAMPLE_LIMIT])
             arrays.append(values)
         rows = pa.RecordBatch.from_arrays(arrays, names=[c.column for c in plan.columns])
-        return rows, drift.merge(DriftReport(unconvertible=frozenset(odd), samples=odd))
+        return rows, drift.merge(DriftReport(unconvertible=frozenset(odd), samples=odd)), considered
 
     def _keyed(
         self, block: pa.RecordBatch, plan: ReadPlan
@@ -466,11 +477,6 @@ class FlatFile:
             reason naming the header, and the value, of the first header that dropped a row;
             the library names the file); and the kept rows' times in epoch nanoseconds, or None
             when the time header is no key.
-
-        Raises:
-            WireError: If the block had rows and every one of them is dropped, the sign of a
-                change in the file's format rather than of one odd row; the message names the
-                row count and the reason.
         """
         keep = pa.repeat(pa.scalar(value=True), block.num_rows)
         nanos: pa.Array | None = None
@@ -478,7 +484,7 @@ class FlatFile:
         for header in sorted(plan.required):
             sent = block[header]
             read_type = _read_type(plan, header)
-            values, failed = _parsed(sent, functools.partial(pc.cast, target_type=read_type))
+            values, failed = _parsed(sent, read_type)
             bad = pc.is_null(sent) if failed is None else pc.or_(pc.is_null(sent), failed)
             if not reason and pc.any(bad).as_py():
                 reason = _unreadable_key(header, sent, bad=bad, read_type=read_type)
@@ -491,11 +497,6 @@ class FlatFile:
             return block, DriftReport(), nanos
         rows = block.num_rows
         block = block.filter(keep)
-        if not block.num_rows:
-            raise self._error(
-                f"every one of {rows} rows of a block was dropped, so the file's format may "
-                f"have changed; the first: {reason}"
-            )
         dropped = DriftReport(dropped_rows=rows - block.num_rows, dropped_reason=reason)
         return block, dropped, None if nanos is None else nanos.filter(keep)
 
@@ -532,6 +533,39 @@ def _unreadable_key(header: str, sent: pa.Array, *, bad: pa.Array, read_type: pa
     return f"{header} holds {text[:_SAMPLE_LIMIT]!r}, which is not {read_type}"
 
 
+_TEXT_OF: Final[Mapping[pa.DataType, str]] = MappingProxyType(
+    {
+        pa.int64(): r"^-?[0-9]{1,38}$",
+        pa.float64(): (
+            r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$|^(?i:[+-]?(nan|inf|infinity))$"
+        ),
+        pa.bool_(): r"^(?i:true|false|1|0)$",
+        pa.date32(): r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        pa.timestamp("ns", tz="UTC"): (
+            r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?"
+            r"(Z|[+-][0-9]{2}:[0-9]{2})$"
+        ),
+    }
+)
+"""The pattern a typed header's value must match, its surrounding spaces trimmed, for Arrow's
+cast to read it: every text a pattern admits is one the cast reads, so one vectorized match
+finds the values that do not parse without a Python call per value. An `int64` is then checked
+against its range, and a date or an instant against the calendar, which a pattern cannot see."""
+
+_CALENDAR: Final[Mapping[pa.DataType, tuple[int, str]]] = MappingProxyType(
+    {pa.date32(): (10, "%Y-%m-%d"), pa.timestamp("ns", tz="UTC"): (19, "%Y-%m-%dT%H:%M:%S")}
+)
+"""For a date or an instant, how many leading characters name its calendar day and time of
+day, and their format: a value is a real date only when that text reads and prints back the
+same (`2025-02-30` reads as March 2, so it fails)."""
+
+_INT64_LOW: Final = pa.scalar(-(2**63), pa.decimal128(38, 0))
+_INT64_HIGH: Final = pa.scalar(2**63 - 1, pa.decimal128(38, 0))
+"""The signed 64-bit range, as decimals, which hold every integer the `int64` pattern admits."""
+
+_NO_TEXT: Final = pa.scalar(None, pa.string())
+
+
 def _split_list(text: pa.Array, *, list_type: pa.DataType) -> pa.Array:
     """Parse a list header's comma-separated text (`"12,37"`) into its list type.
 
@@ -546,46 +580,81 @@ def _split_list(text: pa.Array, *, list_type: pa.DataType) -> pa.Array:
 
 
 def _parsed(
-    text: pa.Array, convert: Callable[[pa.Array], pa.Array]
+    text: pa.Array, read_type: pa.DataType, list_type: pa.DataType | None = None
 ) -> tuple[pa.Array, pa.Array | None]:
     """Convert a header's text to its type, the values that do not parse becoming null.
 
-    The whole column is converted in one Arrow call. Only when that call refuses the column
-    is each value tried on its own, to find the ones that do not parse; that is rare, so the
-    usual block makes no Python call per value.
+    A value's surrounding spaces are trimmed first, as Arrow's typed CSV parsing does (a list's
+    text is not, as before). The whole column is converted in one Arrow call; only when that
+    call refuses the column are the values that do not parse found, by vectorized tests
+    (`_parseable`, `_unparseable_lists`), so a column with odd values costs about what a clean
+    one does, never a Python call per value.
 
     Args:
         text: The header's text in each row; an empty field is null.
-        convert: Converts a text array to the header's type, raising `ArrowInvalid` when one
-            of its values does not parse.
+        read_type: The type of the header's values: `string` (a list's text, too) or one of
+            `_TEXT_OF`'s.
+        list_type: For a list header, its Arrow list type; None otherwise.
 
     Returns:
         The converted values, null where the text was empty or does not parse; and a mask of
         the values that did not parse, or None when every value did.
     """
+    if list_type is not None:
+        convert = functools.partial(_split_list, list_type=list_type)
+    elif read_type == pa.string():
+        return text, None
+    else:
+        text = pc.utf8_trim_whitespace(text)
+        convert = functools.partial(pc.cast, target_type=read_type)
     try:
         return convert(text), None
     except pa.ArrowInvalid:
         pass
-    failed = pa.array(
-        [value is not None and not _parses(value, convert) for value in text.to_pylist()]
-    )
-    cleaned = pc.if_else(failed, pa.scalar(None, pa.string()), text)
-    return convert(cleaned), failed
+    if list_type is None:
+        failed = pc.invert(pc.fill_null(_parseable(text, read_type), fill_value=True))
+    else:
+        failed = _unparseable_lists(text, list_type.value_type)
+    return convert(pc.if_else(failed, _NO_TEXT, text)), failed
 
 
-def _parses(value: str, convert: Callable[[pa.Array], pa.Array]) -> bool:
-    """Tell whether one text value parses as its header's type.
+def _parseable(text: pa.Array, read_type: pa.DataType) -> pa.Array:
+    """Tell which trimmed texts Arrow's cast reads as their type, in vectorized calls.
 
     Args:
-        value: The text.
-        convert: The header's conversion (`_parsed`).
+        text: Trimmed text values.
+        read_type: Their type; one of `_TEXT_OF`'s.
 
     Returns:
-        True when `convert` accepts it.
+        A boolean array, true where the value parses; null where the text is null.
     """
-    try:
-        convert(pa.array([value], pa.string()))
-    except pa.ArrowInvalid:
-        return False
-    return True
+    ok = pc.match_substring_regex(text, _TEXT_OF[read_type])
+    if read_type == pa.int64():
+        numbers = pc.cast(pc.if_else(ok, text, _NO_TEXT), pa.decimal128(38, 0))
+        inside = pc.and_(pc.greater_equal(numbers, _INT64_LOW), pc.less_equal(numbers, _INT64_HIGH))
+        return pc.and_(ok, pc.fill_null(inside, fill_value=False))
+    if read_type in _CALENDAR:
+        width, form = _CALENDAR[read_type]
+        day = pc.utf8_slice_codeunits(pc.if_else(ok, text, _NO_TEXT), 0, width)
+        read = pc.strptime(day, format=form, unit="s", error_is_null=True)
+        same = pc.equal(pc.strftime(read, format=form), day)
+        return pc.and_(ok, pc.fill_null(same, fill_value=False))
+    return ok
+
+
+def _unparseable_lists(text: pa.Array, element_type: pa.DataType) -> pa.Array:
+    """Find the list texts with an element that does not parse, in vectorized calls.
+
+    Args:
+        text: The list header's comma-separated text in each row.
+        element_type: The type of its elements, such as `int64`.
+
+    Returns:
+        A boolean array, true for a row whose text is not null and holds an element that
+        does not parse (an empty element, as in `"12,,3"`, included).
+    """
+    parts = pc.split_pattern(text, ",")
+    bad_items = pc.invert(_parseable(pc.list_flatten(parts), element_type))
+    bad_rows = pc.filter(pc.list_parent_indices(parts), bad_items)
+    rows = pc.subtract(pc.cumulative_sum(pa.repeat(pa.scalar(1, pa.int64()), len(text))), 1)
+    return pc.is_in(rows, value_set=pc.cast(bad_rows, pa.int64()))

@@ -3077,7 +3077,8 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     is ever labeled with a session it does not have; a call named by dates keeps the rows whose
     own session it requested, and one named by datetimes keeps rows by time. A file that holds
     rows of another session logs one WARNING per dataset per session, naming the file and the
-    session; a row whose `session_end_date` is empty or does not parse is dropped and counted
+    session, and saying that rows of a requested session may then sit in a neighbouring day's
+    file, which a call by dates does not read, and be missing; a row whose `session_end_date` is empty or does not parse is dropped and counted
     ([section 19.5](#195-runtime-drift)). Dates read one file per session date and never roll forward:
     a date names its own session exactly. Datetimes read the sessions from that of `start` to
     that of `end - 1 µs`, so an intraday window reads one file and an evening window only the
@@ -3990,8 +3991,8 @@ becomes a null column of its declared type, and a missing declared key header ra
 empty field is null: `NA` and `NULL` are text, since both are valid tickers. Each block then
 goes through pure Arrow operations in this order: the `Symbol` filter
 (`pyarrow.compute.is_in`); the key check, which drops and counts a row whose key header is
-empty or does not parse, or whose time the plan's converter cannot place, and fails the block
-when it drops every row; the window's half-open `Timestamp` range in nanoseconds (for bars, the
+empty or does not parse, or whose time the plan's converter cannot place, and fails the file
+after its last block when it dropped every row of the requested symbols; the window's half-open `Timestamp` range in nanoseconds (for bars, the
 starts of the bars whose whole window fits; not applied to futures trades, quotes, and session
 bars named by date, which `_ingest/flatfiles.py` keeps by each row's own session); and, on the
 surviving rows only, the conversion of each header to its column's type (epoch integers for
@@ -5163,8 +5164,8 @@ stalled part-way through the body). It tells a failed transfer from a broken fil
 first is worth reading again.
 `FlatFile.batches(plan)` yields one `(RecordBatch, DriftReport)` per block, in this order:
 (1) the symbol filter (`is_in`); (2) the key check: a row whose `required` header is empty or
-does not parse, or whose time `plan.to_ns` cannot place, is dropped and counted, and a block
-that drops every such row raises; (3) `[start, end)` on `plan.to_ns(time column)`; (4) on the
+does not parse, or whose time `plan.to_ns` cannot place, is dropped and counted, and a file
+whose every row of the requested symbols is dropped raises after its last block; (3) `[start, end)` on `plan.to_ns(time column)`; (4) on the
 survivors, the conversion of every header from text to its type (a value that does not parse
 is null and reported in `unconvertible`), list parsing, and the rename to long-form names.
 Instants stay in their wire unit; the library converts them. The reader first peeks the
@@ -5183,7 +5184,7 @@ decompressed text, a required field with no default;
 
 `_ingest/flatfiles.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
 `_datasets/timestamps.py` routine, returning the nanoseconds, null where a value fails, and the first
-failure's message, so a wrongly declared unit drops every row and fails the block; the window is
+failure's message, so a wrongly declared unit drops every row and fails the file; the window is
 never converted into wire units.
 
 ### 19.4 Generated schemas
@@ -5857,7 +5858,7 @@ that declares no key has none.
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); every later drop logs the dataset's running count at DEBUG. Never a failure, unless every row of a payload is dropped (below). |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, so a value that does not parse is null, the header in `unconvertible` with its first text | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
+| **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/host_decision.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `unreadable_symbols=LOG`, the default, the row is kept with a null `Symbol` and the text in `RawSymbol`, ERROR once per spelling with the library-bug text (at most 100); under `IGNORE` the same at DEBUG; under `RAISE`, a loud failure whose message names the setting and the bug report. |
@@ -5869,9 +5870,11 @@ serving it would quietly return an empty table. So a loud failure, a defect of t
 
 - **REST**: a page that had rows keeps none of them, its error rows included (`RowDataError`
   from `rest_rows.RowConverter.convert`). A one-row page whose row is dropped is such a page.
-- **Flat files**: a block holds rows of the requested symbols, and every one of them is
-  dropped (`WireError` from the reader, then `MassiveError` naming the file). Rows the symbol
-  filter removes do not count.
+- **Flat files**: a file holds rows of the requested symbols, and every one of them is
+  dropped (`WireError` from the reader after the file's last block, then `MassiveError` naming
+  the file). Rows the symbol filter removes do not count. The rule is per file, never per
+  block: a block can hold a single row of an illiquid symbol, and its one odd row must not
+  fail the call.
 - **WebSocket**: `DROPPED_RUN_LIMIT` (100) rows of one dataset on one channel of a connection
   have been dropped in a row, across flushes and symbols, with no row of the dataset published
   between them (`Flusher._counted`, counting the client's drops and the flush's). A flush is
@@ -6423,7 +6426,7 @@ document already reflects them.
     dropped and reported; a value that does not fit, outside the key columns, is null with one
     WARNING per dataset and field; a row whose key cannot be read is dropped, with one WARNING
     per dataset and a running count. Only a payload in which no row can be placed fails
-    loudly: a REST page, a flat-file block's rows of the requested symbols, or a run of
+    loudly: a REST page, a flat file's rows of the requested symbols, or a run of
     `DROPPED_RUN_LIMIT` (100) WebSocket rows of a dataset on a channel. A futures flat-file
     row keeps its own session. The table never silently lies.
 36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,

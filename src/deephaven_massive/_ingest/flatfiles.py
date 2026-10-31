@@ -79,7 +79,7 @@ logs one WARNING per (dataset, transport, header) through the session's `DriftRe
 whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
 fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
 WARNING per dataset with the running count). A file that lacks a key header fails the call
-with `MassiveError`, and so does a block whose every row of the requested symbols was dropped,
+with `MassiveError`, and so does a file whose every row of the requested symbols was dropped,
 the sign of a change in the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
@@ -535,7 +535,9 @@ class _Transform:
             self.warnings.log(
                 f"{self.dataset}\0other sessions",
                 "%s: the flat file %s holds rows of session %s, not only of its own %s; each "
-                "row keeps its own session in Date and is kept when that session was requested",
+                "row keeps its own session in Date and is kept when that session was requested, "
+                "but rows of a requested session may sit in a neighbouring day's file, which a "
+                "call by dates does not read, and be missing",
                 self.dataset,
                 key.key,
                 others[0].as_py().isoformat(),
@@ -683,7 +685,7 @@ class FlatFileHistory:
         s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
         s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
         part-way on its first read and on each of its three rereads, a file is not the
-        expected gzip CSV (for example, it lacks the symbol or time header), a block's every
+        expected gzip CSV (for example, it lacks the symbol or time header), a file's every
         row of the requested symbols was dropped because its key could not be read (`"...
         timestamp unit mismatch for <dataset>.<column>: ..."`, naming the file), or the session
         is closed during the call. Errors that come from S3 carry its `x-amz-request-id` as
@@ -950,8 +952,8 @@ class FlatFileHistory:
 
         Errors: `MassiveError` if converting or gathering the file's rows fails in Arrow (out of
         memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request or read
-        (for example, a file that is not the expected gzip CSV, or a block whose every row
-        was dropped for a key it cannot read) raises the public error of
+        (for example, a file that is not the expected gzip CSV, or a file whose every row
+        of the requested symbols was dropped for a key it cannot read) raises the public error of
         `_public`: `MassiveError`, `AuthenticationError`, or `EntitlementError`; a dropped
         connection raises it once the rereads are spent. A closed session raises the
         `MassiveError` of `_check_open`, and a cancelled call `_CancelledError`.

@@ -1,13 +1,17 @@
 import csv
 import gzip
 import io
+import sys
+import types
 from collections.abc import Callable
 from datetime import date
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
+from deephaven_massive._massive.flatfiles import reader
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample
@@ -190,18 +194,117 @@ def test_a_row_whose_time_cannot_be_placed_is_dropped_and_counted(trades: FlatFi
     )
 
 
-def test_a_block_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
+def test_a_file_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
     def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
         return pa.nulls(len(values), pa.int64()), "timestamp unit mismatch for x: 5 ns"
 
     with pytest.raises(WireError) as info:
         table(trades, plan(to_ns=to_ns))
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of 4 rows of "
-        "a block was dropped, so the file's format may have changed; the first: timestamp unit "
-        "mismatch for x: 5 ns"
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of the 4 rows "
+        "of the requested symbols was dropped, so the file's format may have changed; the "
+        "first: timestamp unit mismatch for x: 5 ns"
     )
     assert info.value.unreadable
+
+
+def test_one_odd_row_alone_in_its_block_never_fails_the_file(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # An illiquid symbol's only row, dropped for its time, can be the block's only row of the
+    # requested symbols; the file's other blocks hold its good rows, so the file is read.
+    odd = ",,4,0,1,1.5,1,4.0,10,1,ILLQ,,\n"
+    other = "".join(f",,4,{n},1,1.5,{n},1741012200000000000,10,1,ZZZZ,,\n" for n in range(60))
+    good = "".join(f",,4,{n},1,1.5,{n},1741012200000000000,10,1,AAPL,,\n" for n in range(1, 4))
+    with opened(KEY, TRADE_HEADER + odd + other + good) as file:
+        read = plan(symbols=pa.array(["ILLQ", "AAPL"], pa.string()), block_size=1024)
+        found = list(file.batches(read))
+    assert len(found) > 2
+    first, report = found[0]
+    assert (first.num_rows, report.dropped_rows) == (0, 1)  # the block's only requested row
+    assert sum(batch.num_rows for batch, _ in found) == 3
+
+
+def test_typed_values_with_surrounding_spaces_are_read(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow's typed parsing trimmed spaces around numbers; reading as text keeps that.
+    row = '"12,37",  1 ,4,1,1, 227.48 ,100, 1741012200000000123 ,100,3,AAPL,, 0\n'
+    with opened(KEY, TRADE_HEADER + row) as file:
+        [(batch, report)] = list(file.batches(plan()))
+    assert batch.to_pylist()[0] | {"Conditions": None} == {
+        "Symbol": "AAPL",
+        "Timestamp": 1741012200000000123,
+        "Price": 227.48,
+        "Id": "1",
+        "Conditions": None,
+        "Correction": 1,
+        "TrfTimestamp": 0,
+    }
+    assert (report.unconvertible, report.dropped_rows) == (frozenset(), 0)
+
+
+def python_lines(call: Callable[[], object]) -> int:
+    """Count the Python lines a call runs: a loop over values runs lines per value.
+
+    Returns:
+        The number of line events, in every frame the call enters.
+    """
+    lines = 0
+
+    def trace(_frame: types.FrameType, event: str, _arg: object) -> Callable[..., Any]:
+        nonlocal lines
+        lines += event == "line"
+        return trace
+
+    sys.settrace(trace)
+    try:
+        call()
+    finally:
+        sys.settrace(None)
+    return lines
+
+
+@pytest.mark.parametrize(
+    ("read_type", "list_type", "good", "odd"),
+    [
+        (
+            pa.int64(),
+            None,
+            [" 7 ", "-9223372036854775808", "007"],
+            ["4.0", "+4", "9223372036854775808", "1" * 40, "x", "  "],
+        ),
+        (pa.float64(), None, ["1.5", " -.5e-3", "NaN", "+inf", "5."], ["1.5e", "0x10", "lots"]),
+        (pa.bool_(), None, ["true", "FALSE", "1", " 0"], ["t", "yes", "2"]),
+        (pa.date32(), None, ["2024-02-29", " 2025-03-04 "], ["2025-02-30", "2025-3-4"]),
+        (
+            pa.timestamp("ns", tz="UTC"),
+            None,
+            ["2025-03-04T10:00:00Z", "2025-03-04T10:00:00.123456789+01:00"],
+            ["2025-03-04T10:00:00", "2025-02-30T10:00:00Z", "2025-03-04T25:00:00Z"],
+        ),
+        (
+            pa.string(),
+            pa.list_(pa.int64()),
+            ["12,37", "4"],
+            ["12,abc", "12,,3", "1,99999999999999999999"],
+        ),
+    ],
+)
+def test_odd_values_are_null_and_found_without_python_per_value(
+    read_type: pa.DataType, *, list_type: pa.DataType | None, good: list[str], odd: list[str]
+) -> None:
+    text = pa.array([*good, None, *odd], pa.string())
+    values, failed = reader._parsed(text, read_type, list_type)
+    assert failed is not None
+    assert failed.to_pylist() == [False] * (len(good) + 1) + [True] * len(odd)
+    assert values.null_count == len(odd) + 1
+    assert values.type == (list_type or read_type)
+    # The Python work is the same for ten values as for ten thousand: no loop per value.
+    few, many = (pa.array((good + odd) * n, pa.string()) for n in (1, 1000))
+    assert python_lines(lambda: reader._parsed(few, read_type, list_type)) == python_lines(
+        lambda: reader._parsed(many, read_type, list_type)
+    )
 
 
 @pytest.mark.parametrize(
