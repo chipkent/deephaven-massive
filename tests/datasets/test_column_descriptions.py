@@ -344,8 +344,8 @@ def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
     assert "17:00 Chicago time on its session date" in end
     assert "the later of that and Massive's `e`" in end
     trades = description(futures.TRADES, "Date")
-    assert "the next 17:00 Chicago time" in trades
-    assert "m.streams()" in trades
+    assert "the session Massive's futures schedules place it in" in trades
+    assert "has a null Date, with a WARNING in the log" in trades
 
 
 def test_the_library_describes_its_time_columns() -> None:
