@@ -25,10 +25,10 @@ A value that does not fit raises `WireError`: values are never coerced.
 **Two readings, one result.** A page is read column by column: each field's values are gathered
 into one list, the types of the whole list are checked at once, and the list goes to Arrow in
 one call, so a column of plain numbers or text costs no Python call per value. A page that
-column reading cannot vouch for (a bad row, or a value only its converter can judge and the
-converter refuses) is read again row by row, the reference reading, which converts it the same
-way or raises the error of its first bad row. Either way the batch, the drift, and the errors
-are the same; a page read row by row logs why at DEBUG.
+column reading cannot vouch for (an odd row, or a value only its converter can judge and the
+converter refuses) is read again row by row, the reference reading, which judges each value on
+its own. Either way the batch and the drift are the same; a page read row by row logs why at
+DEBUG.
 
 **Drift** is reported, not raised, in the returned `DriftReport`:
 
@@ -37,14 +37,19 @@ are the same; a page read row by row logs why at DEBUG.
 - `missing`: the fields the vendor marks required (`Field.required`) that some row lacked or
   held as null. Every other absent field is a null, silently: JSON omits absent values and the
   vendor marks almost nothing required.
+- `unconvertible`: the fields that held, in some row, a value that does not fit their type or
+  named conversion, read as null. A nested object the fields reach into that holds neither an
+  object nor null is reported by its own key, and its fields read as absent.
 
-  Each extra key carries a sample (`DriftReport.samples`): its value in the first row that had
-  it, so the library's WARNING can quote it.
+  Each extra or unconvertible key carries a sample (`DriftReport.samples`): its value in the
+  first row that had it, so the library's WARNING can quote it.
 
-A key the caller names in `required` (the dataset's key columns for this path) that is absent
-or null in any row is not drift: it raises `WireError`, because the row cannot be placed. Such a
-row, and one whose value does not fit, is logged whole at DEBUG (up to 2,000 characters of its
-JSON) on this module's logger before the error is raised, so the log shows every field it held.
+A key the caller names in `required` (the dataset's key columns for this path) that is absent,
+null, or does not fit in a row means the row cannot be placed: the row is dropped and counted
+(`DriftReport.dropped_rows`, with the first row's reason in `dropped_reason`). Whether a page
+whose every row was dropped is an error is the library's decision. A dropped row, and a row
+holding a value that does not fit, is logged whole at DEBUG (up to 2,000 characters of its
+JSON) on this module's logger, so the log shows every field it held.
 
 The function is safe from any thread and changes nothing but its own result and that DEBUG
 line. This module imports only the standard library, `pyarrow`, `net`, and `spec`.
@@ -52,6 +57,7 @@ line. This module imports only the standard library, `pyarrow`, `net`, and `spec
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import logging
 from types import MappingProxyType, NoneType
@@ -59,7 +65,6 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 
-from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
     convert_field,
@@ -169,6 +174,7 @@ def _row(
     keys: frozenset[str],
     objects: frozenset[str],
     extra: dict[str, object],
+    odd: dict[str, object],
 ) -> dict[str, object]:
     """Return the declared values of one row, by wire key, and collect its undeclared keys.
 
@@ -178,20 +184,17 @@ def _row(
         objects: The dotted prefixes of the fields' wire keys.
         extra: Updated in place with each undeclared key of the row not already in it, and
             the key's value, so it keeps the first value seen.
+        odd: Updated in place, the same way, with each object the fields reach into that holds
+            neither an object nor null; its fields are absent from the result.
 
     Returns:
         Each field's raw value by wire key; an absent field is absent here too.
-
-    Raises:
-        UnconvertibleError: If an object the fields reach into is neither an object nor null,
-            with the clause `"wire key <key> expects an object, got <value>"`, which `to_batch`
-            puts after the row's index.
     """
     found: dict[str, object] = {}
     for key, value in _leaves(row, "", objects=objects):
         if key in objects:
-            raise UnconvertibleError(f"wire key {key!r} expects an object, got {excerpt(value)}")
-        if key in keys:
+            odd.setdefault(key, value)
+        elif key in keys:
             found[key] = value
         else:
             extra.setdefault(key, value)
@@ -204,7 +207,9 @@ def to_batch(
     """Convert a page's rows into one Arrow batch of the path's fields, and report drift.
 
     Call it on each `Page.rows` the REST client returns; the library then renames, merges,
-    and converts the batch into its dataset's table. It allocates the batch and nothing else.
+    and converts the batch into its dataset's table. It allocates the batch and nothing else,
+    and never raises for a row: an odd value is drift, and a row that cannot be placed is
+    dropped and counted.
 
     Args:
         rows: The page's rows, decoded JSON objects in server order.
@@ -215,42 +220,60 @@ def to_batch(
 
     Returns:
         The batch, one column per field named by `Field.column` and typed by the module's
-        table, one row per input row; and the `DriftReport` of the rows (`extra` and
-        `missing`; `statuses` is always empty here).
+        table, one row per input row that was not dropped, in server order; and the
+        `DriftReport` of the rows (`extra`, `missing`, `unconvertible`, and the dropped rows;
+        `statuses` is always empty here). A row is dropped when a `required` column is absent,
+        null, or holds a value that does not fit; `dropped_reason` is then the path's template,
+        the first such row's index, and the clause `spec.convert` shares with every decoder
+        (the field, the expected type, and the first 200 characters of the value's JSON text).
+        Any other value that does not fit its field's type or named conversion is null, its
+        wire key in `unconvertible`.
 
     Raises:
         ValueError: If `required` names a column the path does not have.
-
-    A bad row raises `WireError`, through the row-by-row reading (`_by_row`): if it lacks a
-    `required` column or holds it as null, or a value does not fit its field's type or named
-    conversion, the message is the path's template and the row's index, then the clause
-    `spec.convert` shares with every decoder (the field, the expected type, and the first 200
-    characters of the value's JSON text); if an object the fields reach into is neither an
-    object nor null, the message names its wire key after the row's index and quotes the value
-    the same way. Its `path` is the path's template and its `status` is `None`.
     """
     fields = rest_path.fields
     unknown = set(required) - {f.column for f in fields}
     if unknown:
         raise ValueError(f"{rest_path.template} has no columns {sorted(unknown)}")
     objects = _prefixes(fields)
-    by_column = _by_column(rows, fields, objects=objects, required=required)
-    if isinstance(by_column, str):
-        _log.debug("%s: reading %d rows one by one: %s", rest_path.template, len(rows), by_column)
-        arrays, extra, missing = _by_row(rows, rest_path, objects=objects, required=required)
-    else:
-        arrays, extra, missing = by_column
+    reading = _by_column(rows, fields, objects=objects, required=required)
+    if isinstance(reading, str):
+        _log.debug("%s: reading %d rows one by one: %s", rest_path.template, len(rows), reading)
+        reading = _by_row(rows, rest_path, objects=objects, required=required)
     schema = pa.schema([pa.field(f.column, _ARROW[f.wire_type]) for f in fields])
-    batch = pa.RecordBatch.from_arrays(arrays, schema=schema)
+    batch = pa.RecordBatch.from_arrays(reading.arrays, schema=schema)
+    odd = {**reading.extra, **reading.unconvertible}
     return batch, DriftReport(
-        extra=frozenset(extra),
-        missing=frozenset(missing),
-        samples={key: DriftSample(None, excerpt(value)) for key, value in extra.items()},
+        extra=frozenset(reading.extra),
+        missing=frozenset(reading.missing),
+        unconvertible=frozenset(reading.unconvertible),
+        dropped_rows=reading.dropped,
+        dropped_reason=reading.reason,
+        samples={key: DriftSample(None, excerpt(value)) for key, value in odd.items()},
     )
 
 
-_Columns = tuple[list[pa.Array], dict[str, object], set[str]]
-"""A page's columns, its undeclared keys with their first values, and its missing keys."""
+@dataclasses.dataclass(slots=True)
+class _Reading:
+    """A page read into columns, and what the reading found.
+
+    Attributes:
+        arrays: The columns, one per field, holding the rows that were not dropped.
+        extra: The undeclared keys, with the first value of each.
+        missing: The wire keys of the vendor-required fields some row lacked or held as null.
+        unconvertible: The wire keys whose value did not fit in some row, with the first such
+            value; read as null.
+        dropped: How many rows were dropped for a required column.
+        reason: Why the first dropped row was dropped; `""` when none was.
+    """
+
+    arrays: list[pa.Array]
+    extra: dict[str, object]
+    missing: set[str]
+    unconvertible: dict[str, object] = dataclasses.field(default_factory=dict)
+    dropped: int = 0
+    reason: str = ""
 
 
 def _by_column(
@@ -259,7 +282,7 @@ def _by_column(
     *,
     objects: frozenset[str],
     required: Collection[str],
-) -> _Columns | str:
+) -> _Reading | str:
     """Convert a page column by column, or say why the page must be read row by row.
 
     The fast path, taken by nearly every page: each field's values are gathered into one list
@@ -269,11 +292,10 @@ def _by_column(
     calls the field's converter once per value. Undeclared keys are found by one subset test
     per object, and only an object that has one is walked.
 
-    It never raises for a bad row and never decides alone what a bad row means: anything it is
-    not sure of (a nested object that is neither an object nor null, a required key that is
-    absent or null, a value of another type, a value Arrow or the converter refuses) makes it
-    return the reason instead, and `to_batch` reads the page row by row (`_by_row`), which
-    converts it, or raises the error of its first bad row, exactly as before.
+    It never judges an odd row: anything it is not sure of (a nested object that is neither an
+    object nor null, a required key that is absent or null, a value of another type, a value
+    Arrow or the converter refuses) makes it return the reason instead, and `to_batch` reads
+    the page row by row (`_by_row`), which judges each value on its own.
 
     Args:
         rows: The page's rows.
@@ -282,9 +304,8 @@ def _by_column(
         required: The long-form columns every row must carry with a value.
 
     Returns:
-        The columns, the undeclared keys with the first value of each, and the wire keys of
-        the vendor-required fields some row lacked; or, when the page must be read row by row,
-        why.
+        The reading, with no value found unconvertible and no row dropped; or, when the page
+        must be read row by row, why.
     """
     # Each object the fields reach into, one per row, by its dotted prefix; "" is the rows.
     levels: dict[str, Sequence[Mapping[str, object]]] = {"": rows}
@@ -312,7 +333,7 @@ def _by_column(
         if array is None:
             return f"the column {f.column} holds a value that needs its own check"
         arrays.append(array)
-    return arrays, extra, missing
+    return _Reading(arrays, extra, missing)
 
 
 def _undeclared(
@@ -381,11 +402,13 @@ def _by_row(
     *,
     objects: frozenset[str],
     required: Collection[str],
-) -> _Columns:
-    """Convert a page row by row, raising the error of its first bad row.
+) -> _Reading:
+    """Convert a page row by row, judging each value on its own.
 
     The reference reading of a page: `to_batch` takes it when `_by_column` cannot vouch for the
     fast path. Each row is walked key by key, and each value checked and converted on its own.
+    A row whose required column is absent, null, or does not fit is dropped; any other value
+    that does not fit is null. Each such row is logged whole at DEBUG (`_logged`).
 
     Args:
         rows: The page's rows.
@@ -394,44 +417,72 @@ def _by_row(
         required: The long-form columns every row must carry with a value.
 
     Returns:
-        The columns, the undeclared keys with the first value of each, and the wire keys of the
-        vendor-required fields some row lacked.
-
-    Raises:
-        WireError: For the first bad row, as `to_batch` documents.
+        The reading of the rows kept, with the values that did not fit and the rows dropped.
     """
     fields = rest_path.fields
     keys = frozenset(f.wire_key for f in fields)
     columns: list[list[object]] = [[] for _ in fields]
-    extra: dict[str, object] = {}
-    missing: set[str] = set()
+    reading = _Reading([], {}, set())
     for index, row in enumerate(rows):
-        try:
-            found = _row(row, keys=keys, objects=objects, extra=extra)
-        except UnconvertibleError as error:
-            message = _rejected(rest_path, index=index, row=row, problem=str(error))
-            raise WireError(message, path=rest_path.template) from None
-        for f, column in zip(fields, columns, strict=True):
-            value = found.get(f.wire_key)
-            if value is None and f.column in required:
-                message = _rejected(rest_path, index=index, row=row, problem=missing_key_message(f))
-                raise WireError(message, path=rest_path.template)
-            if value is None:
-                if f.required:
-                    missing.add(f.wire_key)
-                column.append(None)
-                continue
-            try:
-                column.append(convert_field(f, value))
-            except UnconvertibleError as error:
-                message = _rejected(rest_path, index=index, row=row, problem=str(error))
-                raise WireError(message, path=rest_path.template) from None
-    arrays = [pa.array(c, type=_ARROW[f.wire_type]) for c, f in zip(columns, fields, strict=True)]
-    return arrays, extra, missing
+        odd: dict[str, object] = {}
+        found = _row(row, keys=keys, objects=objects, extra=reading.extra, odd=odd)
+        problems = [
+            f"wire key {key!r} expects an object, got {excerpt(v)}" for key, v in odd.items()
+        ]
+        values: list[object] = []
+        absent: list[str] = []
+        dropped = ""
+        for f in fields:
+            raw = found.get(f.wire_key)
+            value, problem = _value(f, raw)
+            if f.column in required and (raw is None or problem is not None):
+                dropped = problem or missing_key_message(f)
+                break
+            if problem is not None:
+                odd.setdefault(f.wire_key, raw)
+                problems.append(problem)
+            elif raw is None and f.required:
+                absent.append(f.wire_key)
+            values.append(value)
+        if dropped:
+            message = _logged(rest_path, index=index, row=row, problem=dropped)
+            reading.dropped += 1
+            reading.reason = reading.reason or message
+            continue
+        if problems:
+            _logged(rest_path, index=index, row=row, problem="; ".join(problems))
+        reading.missing.update(absent)
+        for key, value in odd.items():
+            reading.unconvertible.setdefault(key, value)
+        for value, column in zip(values, columns, strict=True):
+            column.append(value)
+    reading.arrays = [
+        pa.array(c, type=_ARROW[f.wire_type]) for c, f in zip(columns, fields, strict=True)
+    ]
+    return reading
 
 
-def _rejected(rest_path: RestPath, *, index: int, row: Mapping[str, object], problem: str) -> str:
-    """Log a row that cannot be converted, whole, at DEBUG, and return its error's message.
+def _value(field: Field, value: object) -> tuple[object, str | None]:
+    """Convert one value of a row, or say why it cannot be read.
+
+    Args:
+        field: The value's field.
+        value: Its raw value, or None when the row lacks it or holds it as null.
+
+    Returns:
+        The converted value and None, or `(None, None)` for an absent value; or, when the
+        value does not fit, None and the clause `spec.convert` shares with every decoder.
+    """
+    if value is None:
+        return None, None
+    try:
+        return convert_field(field, value), None
+    except UnconvertibleError as error:
+        return None, str(error)
+
+
+def _logged(rest_path: RestPath, *, index: int, row: Mapping[str, object], problem: str) -> str:
+    """Log a row the reading dropped or nulled a value of, whole, at DEBUG; return its reason.
 
     Args:
         rest_path: The path the row came from.
@@ -441,7 +492,7 @@ def _rejected(rest_path: RestPath, *, index: int, row: Mapping[str, object], pro
             type, and the value, or the missing key.
 
     Returns:
-        `"<template>: row <index>: <problem>"`, the message of the `WireError` to raise.
+        `"<template>: row <index>: <problem>"`.
     """
     message = f"{rest_path.template}: row {index}: {problem}"
     if _log.isEnabledFor(logging.DEBUG):  # the row's JSON is built only for the line

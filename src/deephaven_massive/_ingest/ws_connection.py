@@ -10,10 +10,10 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   `socket.` connection whose recency was unknown, which moves the connection's streams to the
   `delayed.` host (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
   rejected key, a handshake error retrying cannot fix) fails every stream on it.
-- **Rows, rejects, drift, and its row.** Rows go to the flush thread; a rejected row fails the
-  streams that would have received it; drift is recorded on the connection's `SchemaDrift`. A
-  row with no symbol fails only the channel's `dm.ALL` streams and is logged at ERROR as a
-  defect of the library, once per spelling. The connection logs one WARNING per outage, and one
+- **Rows, drift, and its row.** Rows go to the flush thread; drift, and the rows the client
+  dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
+  handed to the flush thread, which logs them and counts the drops; a dropped row fails no
+  stream. The connection logs one WARNING per outage, and one
   when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each with its
   recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
@@ -52,6 +52,7 @@ import itertools
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -77,8 +78,8 @@ from deephaven_massive._ingest.subscriptions import (
     channel_of,
     stream_topics,
 )
-from deephaven_massive._log_limits import BoundedLog, bounded_list, log_failure
-from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
+from deephaven_massive._log_limits import bounded_list, log_failure
+from deephaven_massive._massive import Cancel, DriftReport, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -98,7 +99,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError
+    from deephaven_massive._massive import Reject, Source, Status, WireError
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
 
@@ -136,11 +137,6 @@ NO_FRAMES_WARNING: Final = 300.0
 class's regular trading hours before it logs a WARNING that its live tables may be stale. Five
 minutes, since a connection carrying only a few quiet symbols can go a minute or two without a
 trade; the check runs with each `SUMMARY_INTERVAL` summary."""
-
-_UNREADABLE_ROW_LIMIT: Final = 100
-"""The most distinct rows with no valid symbol logged at ERROR per process."""
-
-_unreadable_rows: Final = BoundedLog(logger, limit=_UNREADABLE_ROW_LIMIT, level=logging.ERROR)
 
 CONNECTION_SETTINGS: Final = (
     "api_key",
@@ -229,7 +225,7 @@ class _Traffic:
     Attributes:
         batches: The data batches received in the window, one per channel of a frame.
         rows: The valid rows received in the window, per channel.
-        rejects: The rows rejected in the window.
+        dropped: The rows the client dropped in the window because a key could not be read.
         last_data: When each channel last had rows, in nanoseconds since the epoch.
         acknowledged: The acknowledged topics at the last summary.
         published: Each stream's `StreamSink.rows_published` at the last summary, or at its
@@ -238,31 +234,31 @@ class _Traffic:
 
     batches: int = 0
     rows: dict[str, int] = field(default_factory=dict)
-    rejects: int = 0
+    dropped: int = 0
     last_data: dict[str, int] = field(default_factory=dict)
     acknowledged: frozenset[str] = frozenset()
     published: dict[int, int] = field(default_factory=dict)
 
-    def received(self, channel: str, rows: int, rejects: int, *, now: int) -> None:
+    def received(self, channel: str, rows: int, dropped: int, *, now: int) -> None:
         """Count one batch of a channel.
 
         Args:
             channel: The batch's channel.
             rows: Its valid rows.
-            rejects: Its rejected rows.
+            dropped: Its rows dropped because a key could not be read.
             now: When it arrived, in nanoseconds since the epoch.
         """
         self.batches += 1
         if rows:
             self.rows[channel] = self.rows.get(channel, 0) + rows
             self.last_data[channel] = now
-        self.rejects += rejects
+        self.dropped += dropped
 
     def next_window(self) -> None:
         """Start the next window: clear the counts and keep `last_data`."""
         self.batches = 0
         self.rows = {}
-        self.rejects = 0
+        self.dropped = 0
 
 
 @dataclass(slots=True)
@@ -629,7 +625,7 @@ class Connection:
 
         `set_required` runs before the channel's first subscribe, and again when a stream of
         another dataset on the same channel widens its keys. The keys of all datasets on a
-        channel are required together, so such a dataset's key also rejects the rows the
+        channel are required together, so such a dataset's key also drops the rows the
         other datasets read; every declared dataset reads its own channel today.
 
         Args:
@@ -927,12 +923,16 @@ class Connection:
         rejects: list[Reject],
         drift: DriftReport,
     ) -> None:
-        """Hand one channel's rows to the flush thread; fail the rejects' streams; record drift.
+        """Hand one channel's rows to the flush thread, and record the frame's drift.
+
+        A row the client dropped because a key could not be read (a reject) fails no stream:
+        it is counted in the drift (`DriftReport.dropped_rows`, with the first reject's error
+        as the reason), which the flush thread logs and counts for each dataset.
 
         Args:
             channel: The channel.
-            rows: The valid rows.
-            rejects: The rows that failed validation.
+            rows: The decoded rows, without the dropped ones.
+            rejects: The rows the client dropped.
             drift: The frame's drift for the channel.
         """
         now = time.time_ns()
@@ -941,13 +941,14 @@ class Connection:
             self._episodes.data_since_open = True
             self._check_recovered()
         self._traffic.received(channel, len(rows), len(rejects), now=now)
+        if rejects:
+            lost = DriftReport(dropped_rows=len(rejects), dropped_reason=rejects[0].error.message)
+            drift = drift.merge(lost)
         if rows:
             self.flusher.rows(channel, rows)
             self._arm_backlog_row()  # the row write below may be throttled
-        for reject in rejects:
-            self._reject(channel, reject)
-        if drift.extra or drift.missing:
-            self._record_drift(channel, drift)
+        if drift.fields_drifted or drift.dropped_rows:
+            self._record_drift(channel, drift, dropped=self._dropped_symbols(rejects))
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -957,8 +958,8 @@ class Connection:
 
         Runs on the loop thread every `SUMMARY_INTERVAL` seconds from the first generation on,
         whether or not DEBUG is on (the line is built only when it is): the data batches and
-        rows per channel received, the rejected rows, the rows each stream published and the
-        streams that published none, the acknowledged topics (their count, the first
+        rows per channel received, the rows dropped for a key, the rows each stream published
+        and the streams that published none, the acknowledged topics (their count, the first
         `LIST_LIMIT`, and those added and removed since the last summary), and how long ago
         each channel last had data, so a stream that went quiet shows in the log even though
         nothing failed. Every list is bounded (`bounded_list`), so a connection of thousands
@@ -981,14 +982,14 @@ class Connection:
             # adopted from another connection counts from its total at the adoption (`adopt`).
             got = {sid: n - traffic.published.get(sid, 0) for sid, n in sorted(published.items())}
             logger.debug(
-                "%s: last %.0f s: %d data batches, rows %s, %d rejected; rows per stream %s, "
+                "%s: last %.0f s: %d data batches, rows %s, %d dropped; rows per stream %s, "
                 "streams with no rows %s; %d of %d topics acknowledged %s, added %s, removed %s, "
                 "%d pending, %d with no acknowledgement; last data %s; state %s, %d reconnects",
                 self.url,
                 SUMMARY_INTERVAL,
                 traffic.batches,
                 rows or "none",
-                traffic.rejects,
+                traffic.dropped,
                 bounded_list(f"{sid}={n}" for sid, n in got.items() if n),
                 bounded_list(sid for sid, n in got.items() if not n),
                 acked,
@@ -1134,47 +1135,6 @@ class Connection:
 
     # --- loop thread: failures and drift -------------------------------------------------------
 
-    def _reject(self, channel: str, reject: Reject) -> None:
-        """Fail the streams that would have received a rejected row.
-
-        Args:
-            channel: The row's channel.
-            reject: The rejected row, with its raw wire symbol.
-        """
-        symbol = None
-        why = "it has none"
-        if reject.symbol is not None:
-            symbol = canonical_from_wire(self.asset_class, reject.symbol)
-            why = f"{reject.symbol!r} is not a spelling the library reads"
-        if symbol is None:
-            _unreadable_rows.log(
-                f"{self.path}\0{channel}\0{reject.symbol}",
-                "%s%s: a %s row has no valid symbol (%s); failing the channel's ALL streams: "
-                "%s. %s",
-                self.decision.host,
-                self.path,
-                channel,
-                why,
-                reject.error.message,
-                LIBRARY_BUG,
-            )
-        ids = [
-            s.stream_id
-            for s in self._streams.values()
-            if s.channel == channel
-            and (s.symbols is None or (symbol is not None and symbol in s.symbols))
-        ]
-        logger.debug(
-            "%s channel %s: a rejected row fails streams %s: %s; the row: %s",
-            self.url,
-            channel,
-            ids,
-            reject.error.message,
-            reject.raw,
-        )
-        if ids:  # a row the library cannot read is its own defect, never the user's
-            self.flusher.fail(ids, from_wire(reject.error, cause=ErrorCause.LIBRARY_DEFECT))
-
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`.
 
@@ -1225,18 +1185,35 @@ class Connection:
             self._moving = self._group.reroute(self, status.message)
         return self._moving
 
-    def _record_drift(self, channel: str, drift: DriftReport) -> None:
+    def _record_drift(
+        self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
+    ) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
 
         Args:
             channel: The channel.
             drift: Its drift in the frame.
+            dropped: How many of the frame's dropped rows each canonical symbol had.
         """
         text = self._drift_seen.record(self.key, channel, drift)
         if text is not None:
             self._drift = text
             self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
+        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
+
+    def _dropped_symbols(self, rejects: list[Reject]) -> dict[str, int]:
+        """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
+
+        Args:
+            rejects: The rows the client dropped.
+
+        Returns:
+            Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
+            not text, or a spelling the library cannot read is left out (the dataset's own run
+            still counts it).
+        """
+        found = (canonical_from_wire(self.asset_class, r.symbol) for r in rejects if r.symbol)
+        return dict(Counter(symbol for symbol in found if symbol is not None))
 
     # --- loop thread: outages and notes --------------------------------------------------------
 

@@ -12,9 +12,9 @@ to keep.
 
 - `FlatFileHistory` reads the files of one `history()` call in parallel, at most
   `MassiveConfig.max_concurrency` at a time, each in blocks of `BLOCK_SIZE` bytes. Each block
-  is first checked (futures sessions), then filtered to the requested symbols with
-  `pyarrow.compute.is_in` (symbol pushdown) and to the window's `Timestamp` range (for bars,
-  the starts of the bars whose whole window fits the range); only the surviving rows are
+  is filtered to the requested symbols with `pyarrow.compute.is_in` (symbol pushdown), cleared
+  of the rows whose key cannot be read, and filtered to the window's `Timestamp` range (for
+  bars, the starts of the bars whose whole window fits the range); only the surviving rows are
   renamed to the dataset's columns, have their condition and indicator lists parsed, and are
   converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
   start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
@@ -70,22 +70,26 @@ reads identically. Every `Instant` column goes through the timestamp routine of
 `_datasets/timestamps.py`: Massive writes `0` where a timestamp has no value (`trf_timestamp` of
 a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` becomes null; each
 value is then scaled to nanoseconds by its field's unit, with an overflow check, and must lie in
-1990 to 2100, so a file in another unit than documented fails the read instead of returning
-wrong instants.
+1990 to 2100, so a value in another unit than documented is never served as a wrong instant.
 
-Schema drift is reported, not raised: a header the dataset does not document is dropped, and a
-documented header the file lacks becomes a column of nulls; each logs one WARNING per
-(dataset, transport, header) through the session's `DriftRegistry`. A file that lacks the symbol
-or time header (or, for futures, the session header), a value that does not parse as its type,
-and a timestamp out of bounds fail the call with `MassiveError`.
+Schema drift is reported, not raised: a header the dataset does not document is dropped, a
+documented header the file lacks becomes a column of nulls, and a value that does not parse as
+its type, or an `Instant` other than the time column that fails the routine, is null; each
+logs one WARNING per (dataset, transport, header) through the session's `DriftRegistry`. A row
+whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
+fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
+WARNING per dataset with the running count). A file that lacks a key header fails the call
+with `MassiveError`, and so does a file whose every row of the requested symbols was dropped,
+the sign of a change in the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
 the placeholder `{venue}`, `venues` (all four by default) picks the venues read, and HTTP 403 on any
 venue raises `EntitlementError` naming the venue and the `venues=` parameter; a 403 that rejects the
-S3 credentials themselves raises `AuthenticationError` for every class. Futures files are assumed to
-be keyed by trading session (`session_end_date`), which Massive's documentation does not state
-outright, so every block of every futures file is checked against its key's date, and a mismatch (or
-a missing session date) raises `MassiveError` rather than return rows of the wrong session. Every
+S3 credentials themselves raises `AuthenticationError` for every class. Each futures row keeps its
+own session (`session_end_date`) in `Date`, whichever file it came from, since Massive's
+documentation does not state that a file holds only the session of its date; a call named by
+dates keeps the rows of the requested sessions, and a file that holds another session's rows logs
+one WARNING per dataset per session. A row is never labeled with a session it does not have. Every
 error of the wire package becomes its public counterpart, with its status and request id: a rejected
 credential or a refusal gains the remedy (the settings to check, the plan, the `venues=` parameter),
 and any other wire error goes through `_errors.from_wire`. An Arrow error while converting or
@@ -110,17 +114,18 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
-from deephaven_massive._datasets.dates import TimeRange, day_start, is_trading_day
+from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start, is_trading_day
 from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -135,9 +140,9 @@ from deephaven_massive._datasets.row_times import (
 from deephaven_massive._datasets.source_columns import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import (
-    UnitMismatchError,
-    instants,
-    to_epoch_ns_array,
+    first_failure,
+    masked_instants,
+    mismatch_message,
 )
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
@@ -154,6 +159,8 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import (
     Cancel,
+    DriftReport,
+    DriftSample,
     ReadColumn,
     ReadPlan,
     Transport,
@@ -181,7 +188,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import DriftReport, Field, FlatFileClient
+    from deephaven_massive._massive import Field, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
@@ -230,8 +237,7 @@ def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
 
     Returns:
         The range of `HistoryWindow.times`; None where only sessions bound the rows (futures
-        trades, quotes, and session bars named by date, whose files hold exactly the
-        sessions read).
+        trades, quotes, and session bars named by date, kept by each row's own session).
     """
     times = window.times
     return None if times is None else (times.start_ns, times.end_ns)
@@ -318,6 +324,60 @@ text: its only lists are the code lists of a `code-list-text` field."""
 _LONG_LIST: Final = pa.list_(pa.int64())
 
 
+class _OtherSessions:
+    """What one futures read's files showed of rows from sessions other than their own day's.
+
+    A futures flat file is named by session date, but Massive does not document that it holds
+    only that session's rows. When a file holds a row of an earlier session, a requested
+    session's rows may also sit in the file after it, which a call by dates reads only up to
+    its last session; when a file holds a row of a later session, they may sit in the file
+    before it. The read cannot see those files, so it says which requested sessions may be
+    incomplete (`uncertain`). Shared by the read's reader threads; one leaf lock guards it.
+    """
+
+    __slots__ = ("_earlier", "_later", "_lock")
+
+    def __init__(self) -> None:
+        """Start having seen no other session."""
+        self._lock = threading.Lock()
+        self._earlier = False
+        self._later = False
+
+    def saw(self, others: pa.Array, day: date) -> None:
+        """Record a file's rows of other sessions.
+
+        Args:
+            others: The sessions, `date32`, of the file's rows whose session is not its day.
+            day: The file's day.
+        """
+        own = pa.scalar(day, pa.date32())
+        earlier = bool(pc.any(pc.less(others, own)).as_py())
+        later = bool(pc.any(pc.greater(others, own)).as_py())
+        with self._lock:
+            self._earlier |= earlier
+            self._later |= later
+
+    def uncertain(self, sessions: DaySpan | None) -> tuple[date, ...]:
+        """Return the requested sessions whose rows may sit in a file the read did not read.
+
+        Args:
+            sessions: The sessions a call by dates requested, or None for a call by instants,
+                whose files cover its whole time range.
+
+        Returns:
+            The first session when some file held a later session's rows, and the last when
+            some file held an earlier session's rows, oldest first, without repeats; empty
+            when no file held another session's rows.
+        """
+        if sessions is None:
+            return ()
+        with self._lock:
+            found = {sessions.first} if self._later else set()
+            if self._earlier:
+                found.add(sessions.last)
+        return tuple(sorted(found))
+
+
 @dataclass(frozen=True, eq=False, slots=True)
 class _Transform:
     """How one request turns flat-file batches into blocks of the dataset's schema.
@@ -328,14 +388,18 @@ class _Transform:
 
     Attributes:
         dataset: The dataset name, for messages.
-        plan: What every file of the request reads and keeps; `plan_for` adds a futures
-            file's session.
+        plan: What every file of the request reads and keeps; `plan_for` narrows its time
+            range to a file's own day when `tile` is set.
         columns: Per schema column, in order: its type, its name, and the source column that
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
         date_columns: The dataset's calendar-date columns, stored one shared string per date
             (`columns.dataset_table`).
         session_header: For futures, the header that holds the session date; None otherwise.
+        sessions: For futures named by date, the sessions whose rows are kept
+            (`HistoryWindow.sessions`); None to keep every session.
+        warnings: The session's once-per-session warnings, for a futures file that holds
+            rows of sessions other than its own.
         prefix: The prefix the files come from, for messages.
         symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
             the library cannot read does.
@@ -349,6 +413,9 @@ class _Transform:
             instants, `[day_start(day), day_start(day + 1))` (for futures, its session's
             hours), so a file's rows and REST's rows of another day never overlap; None to
             trim only to the call's range.
+        seen: What the read's futures files showed of other sessions' rows, for the
+            sessions the read may have left incomplete (`FlatFileRead.uncertain`); its own
+            per call, shared by the call's reader threads.
     """
 
     dataset: str
@@ -357,6 +424,8 @@ class _Transform:
     arrow_schema: pa.Schema
     date_columns: tuple[str, ...]
     session_header: str | None
+    sessions: DaySpan | None
+    warnings: BoundedLog
     prefix: str
     times: TimeRule
     time_name: str
@@ -364,6 +433,7 @@ class _Transform:
     stamps: StampRule | None = None
     bars: BarBounds | None = None
     tile: AssetClass | None = None
+    seen: _OtherSessions = field(default_factory=_OtherSessions)
 
     @classmethod
     def build(
@@ -395,8 +465,8 @@ class _Transform:
                 spelling `wire_symbols.canonical_from_wire` reads as one of the symbols
                 (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
-                the starts of the bars that fit wholly); futures sessions named by date keep
-                every time of their files, which hold exactly the requested sessions.
+                the starts of the bars that fit wholly); futures named by date keep the rows of
+                `HistoryWindow.sessions`, by each row's own session.
             unreadable_symbols: The session's setting for a ticker spelling the library cannot
                 read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
             warnings: The session's once-per-session warnings, which the time rule of a daily
@@ -421,9 +491,7 @@ class _Transform:
         session_header = None if keys.date is None else header[DATE]
         time_name = time_column(spec.times)
         to_ns = functools.partial(
-            to_epoch_ns_array,
-            f"{spec.name}.{time_name}",
-            cast("TimeUnit", by_column[time_name].unit),
+            _time_nanos, f"{spec.name}.{time_name}", cast("TimeUnit", by_column[time_name].unit)
         )
         symbols = request.symbols
         plan = ReadPlan(
@@ -448,7 +516,6 @@ class _Transform:
             time_header=header[time_name],
             window_ns=_window_ns(window),
             to_ns=to_ns,
-            session=None,
             block_size=BLOCK_SIZE,
             required=frozenset(f.wire_key for f in required_fields(spec, source)),
         )
@@ -459,6 +526,8 @@ class _Transform:
             arrow_schema=schema.arrow_schema(),
             date_columns=schema.date_columns,
             session_header=session_header,
+            sessions=window.sessions,
+            warnings=warnings,
             prefix=prefix,
             times=time_rule(spec, request, asset_class=file_class, warnings=warnings),
             time_name=time_name,
@@ -470,25 +539,24 @@ class _Transform:
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
-        """Return the read plan of one file: a futures file must hold only its own session.
+        """Return the read plan of one file: with `tile`, its time range is the file's own day.
 
         Args:
             key: The file.
 
         Returns:
-            The request's plan, with the session check of a futures file, and, with `tile`,
-            the time range narrowed to the file's own day.
+            The request's plan; with `tile`, its time range narrowed to the file's own day.
         """
         plan = self.plan
-        if self.session_header is not None:
-            plan = replace(plan, session=(self.session_header, key.day))
         if self.tile is None or plan.window_ns is None:
             return plan
         own = TimeRange(day_start(self.tile, key.day), day_start(self.tile, key.day + _ONE_DAY))
         start, end = plan.window_ns
         return replace(plan, window_ns=(max(start, own.start_ns), min(end, own.end_ns)))
 
-    def apply(self, batch: pa.RecordBatch, *, received: int) -> pa.RecordBatch:
+    def apply(
+        self, batch: pa.RecordBatch, *, received: int, key: _Key
+    ) -> tuple[pa.RecordBatch, DriftReport]:
         """Turn one batch of surviving rows into a block of the dataset's schema.
 
         Pure Arrow: the timestamp routine on every epoch `Instant`, the merge's widening of a
@@ -496,29 +564,39 @@ class _Transform:
         columns the prefix does not carry, and the library's time columns
         (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
-        reader. A bar whose window does not lie in the window is dropped (`row_times.within`).
+        reader, which also dropped every row whose time the routine cannot place. A bar whose
+        window does not lie in the window is dropped (`row_times.within`).
+
+        A futures row keeps its own session, the file's `session_end_date` header, in `Date`,
+        whatever file it came from, and is kept only when that session was requested
+        (`sessions`). A file that holds rows of a session other than its own logs one WARNING
+        per dataset per session, naming the file and the session found.
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
             received: When the block was decoded, epoch nanoseconds: every row's
                 `TimestampInsert`.
+            key: The file the block came from.
 
         Returns:
-            The block in the dataset's schema.
+            The block in the dataset's schema; and the drift of its timestamps: the headers of
+            the epoch columns other than the time column that held a value the routine cannot
+            place (null), each with its first such value.
 
-        A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
-        `timestamps.instants`.
         A 1-day bar stamped at a time of day Massive is not known to use is served and logs
         the WARNING of `row_times.StampRule.stamp`.
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
                 session's `unreadable_symbols` is `RAISE`
-                (`wire_symbols.unreadable_symbol_message`); under `WARN` the row keeps a null
-                `Symbol` and the text in `RawSymbol`.
+                (`wire_symbols.unreadable_symbol_message`); under `LOG` and `IGNORE` the row
+                keeps a null `Symbol` and the text in `RawSymbol`.
         """
+        if self.session_header is not None:
+            batch = self._own_sessions(batch, key)
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(batch.num_rows, pa.string())
+        odd: dict[str, DriftSample] = {}
         for column in self.columns:
             column_type, name, _ = column
             if name == OPTION_ROOT:
@@ -534,32 +612,78 @@ class _Transform:
                     )
                 values, raw = read.symbols, read.raw
             else:
-                values = self._column(batch, column)
+                values = self._column(batch, column, odd=odd)
             arrays[name] = widen(values, column_type.arrow_type)
         rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         filled = self.times.fill(rows, received=received)
-        return filled if self.bars is None else within(filled, self.bars)
+        kept = filled if self.bars is None else within(filled, self.bars)
+        return kept, DriftReport(unconvertible=frozenset(odd), samples=odd)
+
+    def _own_sessions(self, batch: pa.RecordBatch, key: _Key) -> pa.RecordBatch:
+        """Keep a futures block's rows of the requested sessions; warn of a file's other sessions.
+
+        Args:
+            batch: The block's rows, whose `Date` holds each row's own session date.
+            key: The file the block came from.
+
+        Returns:
+            The rows whose session was requested; every row when the call names instants,
+            whose rows the reader already kept by time.
+        """
+        sessions = batch[DATE]
+        own = pa.scalar(key.day, pa.date32())
+        others = pc.filter(sessions, pc.not_equal(sessions, own))
+        if len(others):
+            self.seen.saw(others, key.day)
+            self.warnings.log(
+                f"{self.dataset}\0other sessions",
+                "%s: the flat file %s holds rows of session %s, not only of its own %s; each "
+                "row keeps its own session in Date and is kept when that session was requested, "
+                "but rows of a requested session may sit in a neighbouring day's file, which a "
+                "call by dates does not read, and be missing",
+                self.dataset,
+                key.key,
+                others[0].as_py().isoformat(),
+                key.day.isoformat(),
+            )
+        if self.sessions is None:
+            return batch
+        first = pa.scalar(self.sessions.first, pa.date32())
+        last = pa.scalar(self.sessions.last, pa.date32())
+        return batch.filter(
+            pc.and_(pc.greater_equal(sessions, first), pc.less_equal(sessions, last))
+        )
 
     def _column(
-        self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
+        self,
+        batch: pa.RecordBatch,
+        column: tuple[ColumnType, str, SourceColumn | None],
+        *,
+        odd: dict[str, DriftSample],
     ) -> pa.Array:
         """Convert one column's values to its type, or make the column of nulls it lacks.
 
         Args:
             batch: The filtered batch.
             column: The column's type, its name, and the source column that fills it, or None.
+            odd: Updated with the header of an epoch column whose value the timestamp routine
+                cannot place, and its first such value.
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
-            column other than the dataset's time column, an epoch value of `0` is null.
+            column other than the dataset's time column, an epoch value of `0` is null, and so
+            is a value the routine cannot place.
         """
         column_type, name, source = column
         if source is None:
             return pa.nulls(batch.num_rows, column_type.arrow_type)
         values = batch[name]
         if source.unit is not None:
-            label = f"{self.dataset}.{name}"
-            values = instants(label, source.unit, values, time_column=name == self.time_name)
+            sent = values
+            values, failed = masked_instants(source.unit, sent, time_column=name == self.time_name)
+            first = first_failure(sent, failed)
+            if first is not None:
+                odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
         values = widen(values, column_type.arrow_type)
         if name == self.time_name and self.stamps is not None:
             values = self.stamps.stamp(
@@ -568,6 +692,26 @@ class _Transform:
                 source=f"the flat files {self.prefix}",
             )
         return values
+
+
+def _time_nanos(label: str, unit: TimeUnit, values: pa.Array) -> tuple[pa.Array, str]:
+    """Convert a flat file's time header to epoch nanoseconds, for the reader's key check.
+
+    The reader's `ReadPlan.to_ns`: the timestamp routine (`timestamps.masked_instants`) on the
+    dataset's time column, whose failing values the reader drops with their rows.
+
+    Args:
+        label: The column, as `<dataset>.<column>`, for the reason.
+        unit: The header's unit.
+        values: The header's epoch integers.
+
+    Returns:
+        The nanoseconds, null where a value fails the routine; and the first failure's
+        message (`timestamps.mismatch_message`), or `""` when no value fails.
+    """
+    nanos, failed = masked_instants(unit, values, time_column=True)
+    first = first_failure(values, failed)
+    return nanos, "" if first is None else mismatch_message(label, unit, first)
 
 
 class _CancelledError(Exception):
@@ -648,13 +792,13 @@ class FlatFileHistory:
         s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
         s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
         part-way on its first read and on each of its three rereads, a file is not the
-        expected gzip CSV (for example, it lacks the symbol or time header, or a value does
-        not parse as its type), a timestamp
-        overflows or lies outside 1990 to 2100 (`"timestamp unit mismatch for
-        <dataset>.<header>: ..."`, then the file), a futures file holds another session, or
-        the session is closed during the call. Errors that come from S3 carry its
-        `x-amz-request-id` as `request_id`. An extra or missing documented header is not an
-        error: it logs a WARNING once per header and session.
+        expected gzip CSV (for example, it lacks the symbol or time header), a file's every
+        row of the requested symbols was dropped because its key could not be read (`"...
+        timestamp unit mismatch for <dataset>.<column>: ..."`, naming the file), or the session
+        is closed during the call. Errors that come from S3 carry its `x-amz-request-id` as
+        `request_id`. An extra or missing documented header, a value that does not parse, and
+        a row dropped for its key are not errors: they log a WARNING once per header, and per
+        dataset for dropped rows, each session.
         """
         prefix = spec.flat_file_prefixes[timespan_key(request.timespan)]
         transform = _Transform.build(
@@ -797,7 +941,9 @@ class FlatFileHistory:
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
             empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
-        return FlatFileRead(tuple(kept), empty, unread)
+        return FlatFileRead(
+            tuple(kept), empty, unread, transform.seen.uncertain(transform.sessions)
+        )
 
     def _after_missing(
         self,
@@ -1020,9 +1166,9 @@ class FlatFileHistory:
             cancel: The call's cancel event, checked before the request and after each block.
 
         Errors: `MassiveError` if converting or gathering the file's rows fails in Arrow (out of
-        memory, say): `"cannot read <location>: <Arrow's message>"`; if a timestamp fails the
-        timestamp routine: its text, then `"(in <location>)"`. A failed request or read (for
-        example, a file that is not the expected gzip CSV) raises the public error of
+        memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request or read
+        (for example, a file that is not the expected gzip CSV, or a file whose every row
+        of the requested symbols was dropped for a key it cannot read) raises the public error of
         `_public`: `MassiveError`, `AuthenticationError`, or `EntitlementError`; a dropped
         connection raises it once the rereads are spent. A closed session raises the
         `MassiveError` of `_check_open`, and a cancelled call `_CancelledError`.
@@ -1030,10 +1176,9 @@ class FlatFileHistory:
         Returns:
             The file's tables, or None if the file does not exist.
         """
-        plan = transform.plan_for(key)
         retry = 0
         while True:
-            outcome = self._read_once(transform, key, plan, cancel=cancel)
+            outcome = self._read_once(transform, key, cancel=cancel)
             if not isinstance(outcome, WireError):
                 return outcome
             # The body is closed by now, so no connection idles through the wait.
@@ -1052,14 +1197,13 @@ class FlatFileHistory:
             retry += 1
 
     def _read_once(
-        self, transform: _Transform, key: _Key, plan: ReadPlan, *, cancel: threading.Event
+        self, transform: _Transform, key: _Key, *, cancel: threading.Event
     ) -> list[Table] | WireError | None:
         """Request one file and read it from its start once; `_read_key` reads it again.
 
         Args:
             transform: The request's block transform.
             key: The file to read.
-            plan: The file's read plan.
             cancel: The call's cancel event, checked before the request and after each block.
 
         Returns:
@@ -1080,24 +1224,19 @@ class FlatFileHistory:
             file = self._client.open(key.key)
             if file is None:
                 return None
-            with file, contextlib.closing(file.batches(plan)) as batches:
+            with file, contextlib.closing(file.batches(transform.plan_for(key))) as batches:
                 self._check(cancel)
                 try:
                     return self._gather(
                         batches,
                         transform,
-                        limit=_TABLE_BLOCKS * plan.block_size,
+                        key=key,
                         cancel=cancel,
                         where=file.location,
                     )
                 except pa.ArrowException as error:
                     raise MassiveError(
                         f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
-                    ) from error
-                except UnitMismatchError as error:
-                    # The routine knows the field, not the file: name the file too.
-                    raise MassiveError(
-                        f"{error} (in {file.location})", cause=error.cause
                     ) from error
         except WireError as error:
             if file is not None and file.dropped:
@@ -1114,20 +1253,22 @@ class FlatFileHistory:
         batches: Iterator[tuple[pa.RecordBatch, DriftReport]],
         transform: _Transform,
         *,
-        limit: int,
+        key: _Key,
         cancel: threading.Event,
         where: str,
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
-        Reports the file's drift, which its first batch carries, to the session's
-        `DriftRegistry`, which logs a WARNING the first time the dataset's flat files show each
-        extra or missing header.
+        Once the file is read, reports its drift (the blocks' drift and their timestamps')
+        to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
+        flat files show each extra, missing, or unconvertible header, and counts the rows
+        dropped for a key. A read that a dropped connection ends reports nothing, so a file
+        read again is counted once.
 
         Args:
-            batches: The file's batches, one per block, each with the file's drift.
+            batches: The file's batches, one per block, each with its drift.
             transform: The request's block transform.
-            limit: The bytes of surviving rows that make one table.
+            key: The file the batches come from.
             cancel: The call's cancel event, checked after each block.
             where: The file's location (`s3://<bucket>/<key> at <endpoint>`), for the drift
                 WARNING.
@@ -1138,15 +1279,12 @@ class FlatFileHistory:
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
         size = 0
-        reported = False
+        limit = _TABLE_BLOCKS * transform.plan.block_size
+        found = DriftReport()
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
-                if not reported:  # every batch of a file carries the same report
-                    self._core.drift.report(
-                        transform.dataset, Transport.FLAT_FILES, drift, where=where
-                    )
-                    reported = True
-                rows = transform.apply(batch, received=time.time_ns())
+                rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
+                found = found.merge(drift).merge(odd)
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1162,6 +1300,7 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
+        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=where)
         return tables
 
 

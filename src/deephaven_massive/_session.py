@@ -449,8 +449,9 @@ class MassiveSession:
             the topic counts `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`,
             `BufferedRows` (a WARNING past 1,000,000), `Reconnects`, `LastMessageAt`,
             `NextReconnectAt`, `UpdatedAt`, `LastError`, and `SchemaDrift` (fields frames had
-            beyond the documented schema, `channel:field+`, or lacked, `channel:field-`). Each
-            column's tooltip says what it holds.
+            beyond the documented schema, `channel:field+`, lacked, `channel:field-`, or held
+            with a value that does not fit, read as null, `channel:field?`). Each column's
+            tooltip says what it holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -477,8 +478,8 @@ class MassiveSession:
             `dm.ALL`), `Symbols`, `HeldResults`, `Deferred`, `Transport`, `Host`, `Path`,
             `RowsPublished`, `RequestsPerCycle`, `State` (`RUNNING`, `LOADING`, `DONE`,
             `FAILED`, `RELEASED`, or `CLOSED`), `Error`, `CreatedAt`, and `SchemaDrift`
-            (`transport:field+` or `transport:field-`). Each column's tooltip says what it
-            holds.
+            (`transport:field+`, `transport:field-`, or `transport:field?`, as in
+            `connections()`). Each column's tooltip says what it holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).

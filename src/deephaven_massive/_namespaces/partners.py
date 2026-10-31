@@ -216,7 +216,7 @@ BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     summary="The consensus of analyst ratings and price targets for each US stock, from Benzinga.",
     asset_class=AssetClass.STOCKS,
     # The row's own `ticker` is its `Symbol`, as on the other Benzinga datasets; every row
-    # names its stock, so a row without one fails loudly.
+    # names its stock, so a row without one is dropped and counted.
     symbol=KeySpec("Ticker"),
     poll_keys=("Symbol",),
     per_symbol=True,

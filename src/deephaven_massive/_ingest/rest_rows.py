@@ -14,8 +14,11 @@ batches of the dataset's merged schema, one page at a time:
   serves every bar and warns on a stamp Massive is not known to use; `keep_window` and
   `whole_bars` keep the rows a `history()` window holds.
 
-A row that breaks the schema raises `RowDataError`. Everything here is pure apart from that
-conversion: no request, no thread, and no state, and a converter is shared read-only by the
+An odd value never costs a page its other rows: a value that does not fit, outside the key
+columns, is null and reported as drift, and a row whose key cannot be read is dropped and
+counted. A page whose every row was dropped raises `RowDataError`, since that is the sign of a
+change in Massive's format. Everything here is pure: no request, no thread, and no state, and
+a converter is shared read-only by the
 worker threads of one read. The REST transport (`rest.py`) reads the pages, and the host
 decision (`host_decision.py`) uses the same error-row rule.
 """
@@ -33,11 +36,11 @@ from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYM
 from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, within
 from deephaven_massive._datasets.source_columns import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import option_roots
-from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
+from deephaven_massive._datasets.timestamps import first_failure, masked_instants, mismatch_message
 from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import RowDataError
-from deephaven_massive._massive import DriftReport, WireError, to_batch
+from deephaven_massive._massive import DriftReport, DriftSample, to_batch
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -46,7 +49,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
-    from deephaven_massive._massive import DriftSample, RestPath
+    from deephaven_massive._massive import RestPath
 
 __all__ = [
     "RowConverter",
@@ -139,6 +142,11 @@ class RowConverter:
         Error rows (`is_error_row`: a ticker the plan does not include) are decoded
         apart, with only their symbol required, and come after the page's other rows.
 
+        A row is dropped, and counted in the drift (`DriftReport.dropped_rows`), when a key the
+        dataset requires is absent, null, or does not fit (`to_batch`), or when its time column
+        overflows or lies outside 1990 to 2100. Any other value that does not fit, or any other
+        timestamp out of bounds, is null and reported in `DriftReport.unconvertible`.
+
         Args:
             rows: The page's rows.
             symbol: The request's one symbol, which fills the keys taken from the request.
@@ -147,33 +155,37 @@ class RowConverter:
             The batches (none for an empty page), the page's drift, and the error rows.
 
         Raises:
-            RowDataError: If a row lacks a required key or holds a value that does not convert
-                (`to_batch`), or a timestamp overflows or lies outside 1990 to 2100.
+            RowDataError: If the page had rows and every one of them was dropped, the sign of
+                a change in Massive's format (a renamed key, a new timestamp unit) rather than
+                of one odd row; the message names the dataset and the first row's reason. Also
+                the `RowDataError` of `_apply`, for a symbol spelling the library cannot read.
         """
         flagged = [row for row in rows if is_error_row(row)]
         good = [row for row in rows if not is_error_row(row)] if flagged else rows
         batches: list[pa.RecordBatch] = []
-        extra: set[str] = set()
-        missing: set[str] = set()
-        samples: dict[str, DriftSample] = {}
+        drift = DriftReport()
         for part, required in ((good, self.required), (flagged, self.required_on_error)):
             if not part:
                 continue
-            try:
-                batch, drift = to_batch(part, self.rest_path, required=required)
-                batches.append(self._apply(batch, symbol))
-            except WireError as error:
-                raise RowDataError(f"{self.dataset}: {error.message}") from error
-            except UnitMismatchError as error:
-                raise RowDataError(str(error)) from error
-            extra |= drift.extra
-            missing |= drift.missing
-            samples = {**drift.samples, **samples}  # the first part's sample of a key wins
-        drift = DriftReport(extra=frozenset(extra), missing=frozenset(missing), samples=samples)
+            batch, decoded = to_batch(part, self.rest_path, required=required)
+            batch, checked = self._apply(batch, symbol)
+            batches.append(batch)
+            drift = drift.merge(decoded).merge(checked)
+        if rows and not any(batch.num_rows for batch in batches):
+            raise RowDataError(
+                f"{self.dataset}: every row of a page of {len(rows)} was dropped, so Massive's "
+                f"format may have changed; the first: {drift.dropped_reason}"
+            )
         return batches, drift, flagged
 
-    def _apply(self, batch: pa.RecordBatch, symbol: str | None) -> pa.RecordBatch:
+    def _apply(
+        self, batch: pa.RecordBatch, symbol: str | None
+    ) -> tuple[pa.RecordBatch, DriftReport]:
         """Turn one decoded batch into a batch of the dataset's schema.
+
+        Each epoch column runs through the masked timestamp routine
+        (`timestamps.masked_instants`): a row whose time column fails it is dropped, and any
+        other value that fails it is null.
 
         Args:
             batch: The path's fields, by long-form column (`to_batch`).
@@ -181,18 +193,21 @@ class RowConverter:
 
         Returns:
             The batch in the dataset's schema, with the derived columns (`OptionRoot`,
-            `RawSymbol`) computed from the symbols.
+            `RawSymbol`) computed from the symbols; and the drift of its timestamps: the rows
+            dropped for their time column, and the wire keys of the other epoch fields that
+            held a value out of bounds, each with its first such value.
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
                 session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
                 row keeps a null `Symbol` and the text in `RawSymbol`.
-
-        A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
         rows = batch.num_rows
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(rows, pa.string())
+        dropped: pa.Array | None = None
+        reason = ""
+        odd: dict[str, DriftSample] = {}
         for column_type, name, source in self.columns:
             target = column_type.arrow_type
             if name == OPTION_ROOT:
@@ -211,12 +226,24 @@ class RowConverter:
                         raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
                     values, raw = read.symbols, read.raw
                 if source.unit is not None:
-                    label = f"{self.dataset}.{name}"
-                    values = instants(
-                        label, source.unit, values, time_column=name == self.time_name
+                    sent = values
+                    values, failed = masked_instants(
+                        source.unit, sent, time_column=name == self.time_name
                     )
+                    first = first_failure(sent, failed)
+                    if first is not None and name == self.time_name:
+                        dropped = failed
+                        reason = mismatch_message(f"{self.dataset}.{name}", source.unit, first)
+                    elif first is not None:
+                        odd[source.field.wire_key] = DriftSample(None, str(first))
             arrays[name] = widen(values, target)
-        return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+        converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+        drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
+        if dropped is not None:
+            converted = converted.filter(pc.invert(dropped))
+            count = rows - converted.num_rows
+            drift = drift.merge(DriftReport(dropped_rows=count, dropped_reason=reason))
+        return converted, drift
 
 
 def whole_bars(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:

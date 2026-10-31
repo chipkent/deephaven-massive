@@ -927,7 +927,8 @@ class StreamQuery(QueryBase):
     channel family streams in the session), connects if no connection to that host exists, and
     subscribes; the verb returns once the stream's tables exist, without waiting for the
     server's acknowledgement. A failure the server reports later (a refused topic, a rejected
-    key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
+    key) fails the stream's tables and shows in `m.streams()`, while a row that does not decode
+    is dropped and logged and the stream goes on; a
     verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
     and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
     options contracts that would put more than 1,000 topics on the session's `/options`
@@ -1532,9 +1533,10 @@ class HistoryQuery(QueryBase):
                 f"{spec.name}: the flat file for {first} is not published yet. "
                 f"{PUBLICATION_NOTE}. {remedy}"
             )
+        doubt = self._uncertain_sessions(read.uncertain)
         if not read.unread:
             with entered(self._core.exec_ctx):
-                return merge([read.empty, *(part for _, part in read.parts)]), None
+                return merge([read.empty, *(part for _, part in read.parts)]), doubt
         rest = self._rest_days(request, window, read.unread, call=call, stop=stop)
         with entered(self._core.exec_ctx):
             # The files' days and REST's tile (the files are trimmed to their own days), so
@@ -1544,7 +1546,38 @@ class HistoryQuery(QueryBase):
         days = ", ".join(day.isoformat() for day in read.unread)
         self._warn_rest_served(f"the flat files for {days} are missing")
         flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
-        return table, f"Read from {flat}, and from REST for {days}, whose files are missing."
+        served = f"Read from {flat}, and from REST for {days}, whose files are missing."
+        return table, served if doubt is None else f"{served} {doubt}"
+
+    def _uncertain_sessions(self, sessions: Sequence[date]) -> str | None:
+        """Warn that a futures read by dates may lack rows of some requested sessions.
+
+        A futures flat file held rows of a session other than its own day's, so rows of the
+        range's first or last session may sit in the file before or after the range, which a
+        read by dates does not open (`FlatFileRead.uncertain`). The read never mislabels a
+        row; it may only miss some, and says so on the table and in the log, on every such
+        call.
+
+        Args:
+            sessions: The sessions that may be incomplete, oldest first; empty for none.
+
+        Returns:
+            The table description's sentence naming them, or None when there are none.
+        """
+        if not sessions:
+            return None
+        named = ", ".join(day.isoformat() for day in sessions)
+        logger.warning(
+            "%s history: the flat files hold rows of sessions other than their own day's, so "
+            "rows of session(s) %s may sit in a file outside the range and be missing; read a "
+            "wider range of dates, or by datetimes, to include them",
+            self._spec.name,
+            named,
+        )
+        return (
+            f"Session(s) {named} may be incomplete: Massive's flat files held rows of other "
+            "sessions, so some of their rows may sit in a file outside the range."
+        )
 
     def _rest_days(
         self,
