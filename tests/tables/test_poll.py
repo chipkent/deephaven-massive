@@ -2,6 +2,7 @@
 
 import copy
 import dataclasses
+import functools
 import gc
 import logging
 import queue
@@ -20,6 +21,7 @@ from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive import _session
@@ -1866,3 +1868,201 @@ def test_a_list_poll_key_is_order_sensitive(
     table = start_holdings(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
     expected = [("C1", ("A", "B"), 1.0), ("C1", ("B", "A"), 2.0)]
     until(lambda: holdings(table, dh_to_pylist) == expected)
+
+
+# --- Failure delivery: every mode, every way a poll fails --------------------------------------
+# A table that hears of a second failure ends the process, and a poll can fail from its own
+# cycle (a refused or rejected request), from the session's close, or both, while the user
+# releases it or edits its watchlist. Each case polls through the fake REST server, derives the
+# user's tables from the result, and checks that they end failed, that every table that failed
+# heard of it exactly once, and that the process is still running.
+
+ROW = Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}]))
+"""The one dividend each cycle reads until a case fails it."""
+
+REFUSED = Reply(envelope(status="ERROR", message="not entitled to dividends"), status=403)
+"""A cycle's reply that Massive refuses for the plan: an `EntitlementError`."""
+
+REJECTED = Reply(envelope(status="ERROR", message="Unknown API Key"), status=401)
+"""A cycle's reply that rejects the key: an `AuthenticationError`."""
+
+
+@dataclasses.dataclass
+class PollCase:
+    """One case's session, clock, result, and the user's tables on it.
+
+    Attributes:
+        m: The session, on the fake REST server.
+        fake_rest: The fake REST server.
+        clock: The pollers' clock, which only the case moves.
+        table: The poll's result.
+        watchlist: The symbol table the poll reads each cycle, or None for static symbols.
+        derived: The user's tables on the result (the `user_tables` fixture).
+        heard: The result and each derived table, with the reader of its failure count.
+        race: Runs calls at the same moment (the `race` fixture).
+        cycles_ended: Waits until every queued failure is delivered (the `cycles_ended`
+            fixture).
+    """
+
+    m: dm.MassiveSession
+    fake_rest: FakeRestServer
+    clock: FakeClock
+    table: Table
+    race: Callable[..., None]
+    cycles_ended: Callable[[], None]
+    watchlist: InputTable | None = None
+    derived: list[Table] = dataclasses.field(default_factory=list)
+    heard: list[tuple[Table, Callable[[], int]]] = dataclasses.field(default_factory=list)
+
+    def fail_next_cycle(self, reply: Reply) -> None:
+        self.fake_rest.reply_first(PATH, reply)
+
+    def next_cycle(self) -> None:
+        self.clock.advance(60)
+
+
+def open_poll_case(
+    m: dm.MassiveSession,
+    *,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    mode: PollMode,
+    watched: bool,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    failures_heard: Callable[[Table], Callable[[], int]],
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+) -> PollCase:
+    # Polls AAPL's dividends, of a watchlist under `watched`, until the first cycle landed and
+    # the poller waits for the next; then derives and listens.
+    fake_rest.reply(PATH, ROW)
+    watchlist: InputTable | None = None
+    symbols: object = ["AAPL"]
+    if watched:
+        symbols = watchlist = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+        watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q = build_query(m._core, DIVIDENDS, symbols=cast("Any", symbols))
+    assert isinstance(q, Query)
+    case = PollCase(m, fake_rest, clock, q.poll(60, mode=mode), race, cycles_ended, watchlist)
+    until(lambda: case.table.size == 1)
+    clock.wait_for_sleepers(1)
+    case.derived = user_tables(case.table, "Symbol", "CashAmount")
+    case.heard = [(t, failures_heard(t)) for t in (case.table, *case.derived)]
+    return case
+
+
+def failed_by_cycle(reply: Reply) -> Callable[[PollCase], None]:
+    def path(case: PollCase) -> None:
+        case.fail_next_cycle(reply)
+        case.next_cycle()
+
+    return path
+
+
+def closed(case: PollCase) -> None:
+    case.m.close()
+
+
+def refused_then_closed(case: PollCase) -> None:
+    failed_by_cycle(REFUSED)(case)
+    until(lambda: bool(case.table.j_table.isFailed()))
+    case.cycles_ended()
+    case.m.close()
+
+
+def close_racing_a_refusal(case: PollCase) -> None:
+    case.fail_next_cycle(REFUSED)
+    case.race(case.m.close, case.next_cycle)
+
+
+def release_racing_a_refusal(case: PollCase) -> None:
+    # The user's tables keep the poll running after the release, so its refused cycle still
+    # fails them.
+    case.fail_next_cycle(REFUSED)
+    case.race(functools.partial(case.m.release, case.table), case.next_cycle)
+
+
+POLL_PATHS: dict[str, Callable[[PollCase], None]] = {
+    "HTTP 403": failed_by_cycle(REFUSED),
+    "HTTP 401": failed_by_cycle(REJECTED),
+    "session closed": closed,
+    "HTTP 403, then session closed": refused_then_closed,
+    "close racing an HTTP 403": close_racing_a_refusal,
+    "release racing an HTTP 403": release_racing_a_refusal,
+}
+"""Each way a case's poll fails, by test id."""
+
+
+def is_failed(table: Table) -> bool:
+    return bool(table.j_table.isFailed())
+
+
+def poll_failed_once(case: PollCase) -> None:
+    # The user's tables end failed; once the cycles that delivered the failure are over, every
+    # table that failed heard of it exactly once.
+    for table in case.derived:
+        until(functools.partial(is_failed, table))
+    case.cycles_ended()
+    heard = [(bool(table.j_table.isFailed()), count()) for table, count in case.heard]
+    assert [count for _, count in heard] == [int(failed) for failed, _ in heard]
+
+
+@pytest.mark.parametrize("path", list(POLL_PATHS))
+@pytest.mark.parametrize("mode", [PollMode.REPLACE, PollMode.UPSERT, PollMode.APPEND])
+def test_every_poll_mode_fails_once_by_every_path(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    failures_heard: Callable[[Table], Callable[[], int]],
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+    mode: PollMode,
+    path: str,
+) -> None:
+    case = open_poll_case(
+        rest_session,
+        fake_rest=fake_rest,
+        clock=clock,
+        mode=mode,
+        watched=False,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
+    )
+    POLL_PATHS[path](case)
+    poll_failed_once(case)
+    rest_session.release(case.table)
+
+
+@pytest.mark.parametrize("path", ["HTTP 403", "session closed", "close racing an HTTP 403"])
+def test_a_poll_failing_while_its_watchlist_changes_fails_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    failures_heard: Callable[[Table], Callable[[], int]],
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+    path: str,
+) -> None:
+    # The edit lands while the cycle that reads it fails, or while the session closes.
+    case = open_poll_case(
+        rest_session,
+        fake_rest=fake_rest,
+        clock=clock,
+        mode=PollMode.REPLACE,
+        watched=True,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
+    )
+    assert case.watchlist is not None
+    case.watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    POLL_PATHS[path](case)
+    poll_failed_once(case)
+    rest_session.release(case.table)

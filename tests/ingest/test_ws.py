@@ -11,6 +11,7 @@ flush interval is an hour unless a test needs the flush thread itself.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import gc
 import importlib
 import json
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
+    from deephaven_massive._query import StreamQuery
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
@@ -68,6 +70,9 @@ RowsWhen: TypeAlias = (
     "Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]"
 )
 ToPylist: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
+UserTables: TypeAlias = "Callable[[Table, str, str], list[Table]]"
+FailuresHeard: TypeAlias = "Callable[[Table], Callable[[], int]]"
+Opener: TypeAlias = "Callable[[WsSession, list[Table], InputTable | None], Live]"
 W = Transport.WS
 _JAVA_SYSTEM = cast("Any", importlib.import_module("jpy")).get_type("java.lang.System")
 
@@ -1882,6 +1887,290 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     assert polls[1] == f"{polls[0]} rest_0"
     custom_session.session.release(result)
     custom_session.session.release(table)
+
+
+# --- Failure delivery: every stream shape, every way its stream fails --------------------------
+# Deephaven queues a blink table's failure until the next update cycle, and a table that hears
+# of a second failure trips an assertion whose fatal-error handler exits the process. A stream
+# fails through its blink table alone, once (`BlinkPublisher`), but every shape built on it
+# (append-only, ring, last_by, a watchlist's join) and every table a user derives from a result
+# is another node the failure passes through. The matrix crosses each shape a stream result
+# takes with each way its stream fails: alone, twice in a row, racing a close or a release, and
+# while a watchlist edit is on its way. Each case checks that the user's tables on the result
+# end failed, that every table that failed heard of it exactly once, and that the process is
+# still running.
+
+
+WATCHED = "AAPL"
+"""The symbol every matrix result streams, as the topic `T.AAPL`."""
+
+ANCHOR = "MSFT"
+"""The symbol of the quote stream each case opens first, so the connection is up, and its
+reads can be held, before the result's own subscription is sent."""
+
+ADDED = "NVDA"
+"""The symbol a watchlist edit adds while the stream fails."""
+
+
+@dataclasses.dataclass
+class Live:
+    """One case's result, the session's other results it holds, and the user's tables on it.
+
+    Attributes:
+        result: The result under test, a stream of `T.AAPL` trades.
+        upstream: The session's other results: the anchor's quotes and, for a result that
+            watches another stream, that stream's `last_by`.
+        watchlist: The input table the result follows, directly or through the stream it
+            watches; None for static symbols.
+        derived: The user's tables on the result (the `user_tables` fixture).
+        heard: Each table above, with the reader of the failures its listener heard.
+        race: Runs calls at the same moment (the `race` fixture).
+        cycles_ended: Waits until every queued failure is delivered (the `cycles_ended`
+            fixture).
+    """
+
+    result: Table
+    upstream: list[Table]
+    watchlist: InputTable | None = None
+    derived: list[Table] = dataclasses.field(default_factory=list)
+    heard: list[tuple[Table, Callable[[], int]]] = dataclasses.field(default_factory=list)
+    race: Callable[..., None] = dataclasses.field(init=False)
+    cycles_ended: Callable[[], None] = dataclasses.field(init=False)
+
+
+def quote(symbol: str) -> dict[str, object]:
+    return {"ev": "Q", "sym": symbol, "bx": 4, "bp": 1.0, "bs": 100, "ax": 7, "ap": 1.1} | {
+        "as": 100,
+        "t": 1_700_000_000_000,
+        "z": 3,
+    }
+
+
+def symbol_watchlist() -> InputTable:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", [WATCHED])]))
+    return watchlist
+
+
+def static_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
+    def open_result(ws_session: WsSession, upstream: list[Table], _: InputTable | None) -> Live:
+        return Live(verb(ws_session.query(TRADES, [WATCHED])), upstream)
+
+    return open_result
+
+
+def watchlist_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
+    def open_result(ws_session: WsSession, upstream: list[Table], _: InputTable | None) -> Live:
+        watchlist = symbol_watchlist()
+        return Live(verb(ws_session.query(TRADES, watchlist)), upstream, watchlist)
+
+    return open_result
+
+
+def watching_shape(
+    ws_session: WsSession, upstream: list[Table], watchlist: InputTable | None
+) -> Live:
+    # Trades of the symbols another stream's last_by holds: the result's watchlist is a live
+    # result of the session, which a close or a connection's failure fails with it.
+    quotes = upstream[-1]
+    return Live(ws_session.query(TRADES, quotes.view("Symbol")).last_by(), upstream, watchlist)
+
+
+WATCHING = "last_by of another stream's symbols"
+
+SHAPES: dict[str, Opener] = {
+    "blink": static_shape(lambda q: q.blink()),
+    "append_only": static_shape(lambda q: q.append_only()),
+    "ring": static_shape(lambda q: q.ring(5)),
+    "last_by": static_shape(lambda q: q.last_by()),
+    "append_only of a watchlist": watchlist_shape(lambda q: q.append_only()),
+    "last_by of a watchlist": watchlist_shape(lambda q: q.last_by()),
+    WATCHING: watching_shape,
+}
+"""How each case opens its result, by test id."""
+
+
+def open_live(
+    ws_session: WsSession,
+    shape: str,
+    *,
+    user_tables: UserTables,
+    failures_heard: FailuresHeard,
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+    refused: bool = False,
+) -> Live:
+    # Opens the anchor (and, for a watching result, the stream it watches, of a watchlist),
+    # then the result and the user's tables on it, and listens to each. Under `refused` the
+    # server's reads are held until then, so everything is built before Massive refuses the
+    # topic.
+    upstream = [ws_session.query(QUOTES, [ANCHOR]).blink()]
+    ws_session.subscribed(f"Q.{ANCHOR}")
+    watchlist = None
+    if shape == WATCHING:
+        watchlist = symbol_watchlist()
+        quotes = ws_session.query(QUOTES, watchlist).last_by()
+        ws_session.subscribed(f"Q.{WATCHED}")
+        ws_session.publish(quote(WATCHED))
+        wait_for(lambda: quotes.size == 1)
+        upstream.append(quotes)
+    if refused:
+        ws_session.server.refuse[f"T.{WATCHED}"] = f"not authorized to access T.{WATCHED}"
+        ws_session.server.hold_reads(held=True)
+    live = SHAPES[shape](ws_session, upstream, watchlist)
+    live.race = race
+    live.cycles_ended = cycles_ended
+    live.derived = user_tables(live.result, "Symbol", "Timestamp")
+    live.heard = [(t, failures_heard(t)) for t in (live.result, *upstream, *live.derived)]
+    if refused:
+        ws_session.server.hold_reads(held=False)
+    else:
+        ws_session.subscribed(f"T.{WATCHED}")
+    return live
+
+
+def let_go(ws_session: WsSession, live: Live) -> None:
+    # Releases the session's results; the user's tables and listeners go with their fixtures.
+    for table in (live.result, *live.upstream):
+        ws_session.session.release(table)
+
+
+def reject_the_key(ws_session: WsSession) -> None:
+    # The server drops the connection and rejects the key on the reconnect: a fatal failure
+    # that fails every stream on the connection.
+    ws_session.server.auth_replies.append("auth_failed")
+    ws_session.server.close(1011)
+
+
+def refuse_the_upgrade(ws_session: WsSession) -> None:
+    # The server drops the connection and answers the reconnect's upgrade with HTTP 404, a
+    # handshake that retrying cannot fix: every stream on the connection fails.
+    ws_session.server.reject_next(404)
+    ws_session.server.close(1011)
+
+
+def connection_failure(fail: Callable[[WsSession], None]) -> Callable[[WsSession, Live], None]:
+    def path(ws_session: WsSession, _live: Live) -> None:
+        connection = ws_session.connection()
+        fail(ws_session)
+        ws_session.wait(lambda s: WsState.FAILED in s.states)
+        assert connection.flusher.join(TIMEOUT)  # its last flush applied the failures
+
+    return path
+
+
+def topic_refused(ws_session: WsSession, _live: Live) -> None:
+    ws_session.wait(lambda s: any(status.kind is StatusKind.REFUSED for status in s.statuses))
+
+
+def closed(ws_session: WsSession, _live: Live) -> None:
+    ws_session.session.close()
+
+
+def then_closed(first: Callable[[WsSession, Live], None]) -> Callable[[WsSession, Live], None]:
+    def path(ws_session: WsSession, live: Live) -> None:
+        first(ws_session, live)
+        wait_for(functools.partial(failed_after_flush, ws_session, live.result))
+        live.cycles_ended()
+        ws_session.session.close()
+
+    return path
+
+
+def close_racing_a_rejected_key(ws_session: WsSession, live: Live) -> None:
+    live.race(ws_session.session.close, functools.partial(reject_the_key, ws_session))
+
+
+def release_racing_a_rejected_key(ws_session: WsSession, live: Live) -> None:
+    live.race(
+        functools.partial(ws_session.session.release, live.result),
+        functools.partial(reject_the_key, ws_session),
+    )
+    ws_session.wait(lambda s: WsState.FAILED in s.states)
+
+
+PATHS: dict[str, tuple[Callable[[WsSession, Live], None], bool]] = {
+    "topic refused": (topic_refused, False),
+    "key rejected": (connection_failure(reject_the_key), True),
+    "upgrade refused": (connection_failure(refuse_the_upgrade), True),
+    "session closed": (closed, True),
+    "topic refused, then session closed": (then_closed(topic_refused), True),
+    "key rejected, then session closed": (then_closed(connection_failure(reject_the_key)), True),
+    "close racing a rejected key": (close_racing_a_rejected_key, True),
+    "release racing a rejected key": (release_racing_a_rejected_key, True),
+}
+"""Each way a case's stream fails, by test id, and whether the session's other results fail
+with it (a refusal fails only the refused topic's streams)."""
+
+
+def failed_once(ws_session: WsSession, live: Live, *, everything: bool) -> None:
+    # The user's tables, and with `everything` the session's other results, end failed. Once
+    # the update cycles that delivered the failures are over, every table that failed heard of
+    # it exactly once, and every table that did not fail heard nothing.
+    for table in [*live.derived, *(live.upstream if everything else ())]:
+        wait_for(functools.partial(failed_after_flush, ws_session, table))
+    live.cycles_ended()
+    heard = [(bool(table.j_table.isFailed()), count()) for table, count in live.heard]
+    assert [count for _, count in heard] == [int(failed) for failed, _ in heard]
+    if not everything:
+        assert not any(failed for failed, _ in heard[1 : 1 + len(live.upstream)])
+
+
+@pytest.mark.parametrize("path", list(PATHS))
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_every_stream_shape_fails_once_by_every_path(
+    ws_session: WsSession,
+    shape: str,
+    path: str,
+    *,
+    user_tables: UserTables,
+    failures_heard: FailuresHeard,
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+) -> None:
+    fail, everything = PATHS[path]
+    live = open_live(
+        ws_session,
+        shape,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
+        refused=path.startswith("topic refused"),
+    )
+    fail(ws_session, live)
+    failed_once(ws_session, live, everything=everything)
+    let_go(ws_session, live)
+
+
+@pytest.mark.parametrize("path", ["key rejected", "session closed", "close racing a rejected key"])
+@pytest.mark.parametrize("shape", [s for s in SHAPES if s.endswith("watchlist") or s == WATCHING])
+def test_a_stream_failing_while_its_watchlist_changes_fails_once(
+    ws_session: WsSession,
+    shape: str,
+    path: str,
+    *,
+    user_tables: UserTables,
+    failures_heard: FailuresHeard,
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+) -> None:
+    # The edit adds a symbol and the stream fails before the subscription it asks for is sent:
+    # the watch's change and the failure are on their way at once.
+    fail, everything = PATHS[path]
+    live = open_live(
+        ws_session,
+        shape,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
+    )
+    assert live.watchlist is not None
+    live.watchlist.add(new_table([string_col("Symbol", [ADDED])]))
+    fail(ws_session, live)
+    failed_once(ws_session, live, everything=everything)
+    let_go(ws_session, live)
 
 
 # --- Soak tests: long runs under load (marker `soak`, left out of a plain run) ----------------

@@ -3550,7 +3550,7 @@ def test_a_background_fetch_lands_the_rows_the_read_requested(
     _join_reads(session)
     # The read's own row says how it ended; a failure shows its error here. It shows DONE
     # only after the update cycle that added the rows, so the table holds them from then on.
-    (row,) = rows_when(session.streams(), lambda rows: rows[0]["State"] != "LOADING")
+    (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
     assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
     session.release(table)
