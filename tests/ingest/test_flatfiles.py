@@ -2968,6 +2968,25 @@ def test_a_background_history_lands_the_files_rows(
     session.release(table)
 
 
+def test_a_background_read_rest_could_complete_says_so_in_its_description(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None], rows_when: RowsWhen
+) -> None:
+    # A background read's description is written before the read, so under AUTO with REST
+    # able to serve it, it says what may happen; the files cover the range here.
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=MANY)
+    table = q.history("2025-03-03", "2025-03-03", wait=False)
+    assert (
+        "A day the flat files cannot serve is read from REST; the log names it."
+        in (table.attributes()["TableDescription"])
+    )
+    for state in list(session._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+    (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
+    assert row["State"] == "DONE"
+    session.release(table)
+
+
 def test_a_set_stop_token_cancels_a_flat_file_read(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
