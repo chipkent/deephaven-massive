@@ -1236,7 +1236,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     # Another connection with the key (another process, here the fake's reply) holds the slot.
     monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
-    ws_session = make_ws_session(backoff=1.0)
+    ws_session = make_ws_session(backoff=3.0)  # long enough to change the watchlist during the wait
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
@@ -1255,7 +1255,16 @@ def test_a_stream_waiting_for_a_slot_says_so(
     wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == stall)
     every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [stall] * 2)
+    # A contract added during the wait is counted, while the wait stays the `Error`.
+    watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
+    wait_for(
+        lambda: (
+            [(r["Deferred"], r["Error"]) for r in streams_of(ws_session, dh_to_pylist)]
+            == [(2, stall), (0, stall)]
+        )
+    )
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
+    cap = "over capacity: 3/1; 2 deferred"
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
     del capped, every
 

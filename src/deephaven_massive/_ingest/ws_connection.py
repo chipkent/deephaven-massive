@@ -1333,8 +1333,7 @@ class Connection:
                 update = StreamUpdate()
             if options:
                 update = replace(update, deferred=count)
-            if update != StreamUpdate():
-                updates[stream.stream_id] = update
+            updates[stream.stream_id] = update
         if updates:
             self._update_streams(updates)
 
