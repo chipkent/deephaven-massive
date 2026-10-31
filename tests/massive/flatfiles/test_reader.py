@@ -1,4 +1,5 @@
 import csv
+import gc
 import gzip
 import io
 import statistics
@@ -265,6 +266,10 @@ def test_typed_values_with_surrounding_spaces_are_read(
 def python_lines(call: Callable[[], object]) -> int:
     """Count the Python lines a call runs: a loop over values runs lines per value.
 
+    The garbage collector is off while it counts: a collection that happened to run during the
+    call would run the finalizers of earlier tests' objects on this thread, and count their
+    lines too.
+
     Returns:
         The number of line events, in every frame the call enters.
     """
@@ -276,11 +281,14 @@ def python_lines(call: Callable[[], object]) -> int:
         return trace
 
     previous = sys.gettrace()  # coverage's tracer, which must survive the count
+    gc.collect()
+    gc.disable()
     sys.settrace(trace)
     try:
         call()
     finally:
         sys.settrace(previous)
+        gc.enable()
     return lines
 
 
