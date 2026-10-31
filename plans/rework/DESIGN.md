@@ -2986,7 +2986,8 @@ or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worke
 no Deephaven call, so a console command holding the update graph's lock may run it. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
 the gap between one loaded session's close and the next one's first event gets the next
-session's date; the 17:00 rule's date is never kept. An
+session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
+rule's date is never kept. An
 answer the calendar cannot read, or any other failure of a lookup, is a miss of its contracts'
 rows too, and the worker carries on. A miss past the loaded sessions asks for a reload of its
 product, at most once per 10 minutes (`RELOAD_SPACING`, so a stream of misses never spends a
