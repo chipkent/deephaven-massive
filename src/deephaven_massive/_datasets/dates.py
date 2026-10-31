@@ -38,8 +38,7 @@ into its instant, and `day_end` gives the instant a day is over by. Like `midnig
 return their instants in UTC, whatever the zone whose day they start or end.
 
 A futures date names a trading session, whose 17:00 Chicago rule is `futures_sessions`; the
-bars of a timespan that fit a range are `bar_periods`; and whether a day's flat file can exist
-yet is `history_source.flat_file_published`.
+bars of a timespan that fit a range are `bar_periods`.
 
 Every function is thread-safe and pure (the current time is a parameter), apart from the
 DEBUG lines `parse_date_like` logs when it rounds an instant from Java, numpy, or pandas, or
@@ -101,7 +100,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
-"""The day zone of stocks, options, and indices, and the zone of the flat-file cutoff."""
+"""The day zone of stocks, options, and indices."""
 
 DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,

@@ -323,15 +323,17 @@ and the trade count. These rules hold for every `bars()` dataset.
 
 ### Where history comes from
 
-`history()` reads from one of two sources, and one call never mixes them.
+`history()` reads from one of two sources. The default picks one and uses the other only for
+what the first cannot serve, so a call returns your data whenever either source has it.
 
 - **REST** serves explicit symbols on any dataset with a REST history endpoint. For `dm.ALL` it
   serves only the daily bars of stocks, forex, and crypto, through Massive's grouped daily
   endpoint, one request per day; options and indices have none.
-- **Flat files** serve a read when you have set S3 keys, the dataset has files for the request,
-  and every day's file has been published: a day's file appears the next morning, from about
-  11:00 New York time. Bars come in files only as 1-minute and 1-day bars (and 1-session bars for
-  futures), and only as traded (`adjusted=False`).
+- **Flat files** serve a read when you have set S3 keys and the dataset has files for the
+  request. Massive usually publishes a day's files by about 11:00 New York time the next day,
+  but the time varies: Friday's can arrive late on Saturday morning. Bars come in files only as
+  1-minute and 1-day bars (and 1-session bars for futures), and only as traded
+  (`adjusted=False`).
 
 The default, `source=dm.HistorySource.AUTO`, picks flat files when only they can serve the read,
 or when both can and the read has many symbols (50 or more, the `flat_file_symbol_threshold`
@@ -341,8 +343,20 @@ files do not); when `AUTO`'s choice leaves columns empty that the other source f
 library logs a WARNING naming them and the `source=` that fills them. Each result's description,
 shown in the web UI, names its source and why.
 
-Flat-file reads skip a missing weekend file silently and a missing weekday file (a holiday) with
-a WARNING. A history read pages through everything in its range, so it takes no `limit`.
+With `AUTO`, when REST can serve the read, any weekday whose flat file is missing (not out yet,
+or missed) is read from REST, one day at a time, so you get the whole range; those rows may
+leave empty a column only the files fill, and a WARNING and the table's description name the
+days. If your plan lacks the flat files a read needs, or S3 rejects your S3 keys, `AUTO` reads
+REST instead and logs a WARNING. When REST cannot serve the read (for example, trades of
+`dm.ALL`), a missing weekday with a later day's file is taken for a holiday, and one with no
+later file makes the call fail. With
+`source=dm.HistorySource.FLAT_FILES`, a file not out yet or refused is always an error.
+Split-adjusted bars come only from REST, one symbol at a time (every symbol at once only for
+1-day bars), so split-adjusted minute bars of `dm.ALL` have no source: pass `adjusted=False`
+for the as-traded files, or name the symbols.
+
+Flat-file reads skip a missing weekend file silently. A history read pages through everything in its
+range, so it takes no `limit`.
 
 <a id="split-adjustment"></a>
 
@@ -778,8 +792,8 @@ this section) and look at what the library did.
 | `... refused the subscription to ...` | Your plan includes some streams of the class but not this one. Stream bars instead of trades, or use the REST counterpart. |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |
-| `the plan does not include these flat files` | Pass `source=dm.HistorySource.REST`; the message says when REST can serve the read. |
-| `... is not yet published (flat files land ~11:00 ET next day)` | Read that day with `source=dm.HistorySource.REST`, or wait. |
+| `the plan does not include these flat files` | Pass `source=dm.HistorySource.REST`, or leave `source` at `AUTO`, which reads REST when REST can serve the read. |
+| `the flat file for <date> is not published yet` | Massive usually publishes by about 11:00 ET the next day, but the time varies. Retry later, or read with `source=dm.HistorySource.REST`. |
 | `... poll() needs a start or a limit` | A news or filings poll would re-read the whole archive each cycle. Give the query a `start` or a `limit`. |
 | `MassiveSession #1 was closed; this table no longer updates` | The session was closed. Take `table.snapshot()` to keep the rows; create a new session for new tables. |
 | `Can not listen to failed table` | Deephaven builds nothing on a failed table. Work on `table.snapshot()`. |
