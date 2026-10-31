@@ -67,6 +67,13 @@ dependencies = [
     # websockets.asyncio.client, which does not export it). Proxy support from the environment
     # (15.0) and cp314t wheels are older.
     "websockets>=17.1",
+    # The library reads its settings file, which is YAML, with a loader built on PyYAML's
+    # BaseLoader, so every value is read as plain text and no value's type is guessed (ON stays
+    # the text "ON"); the library converts each setting itself. 6.0.3 is the first release with
+    # wheels for Python 3.14 and its free-threaded build, and it declares itself safe to run
+    # without the GIL, so importing it leaves the GIL off on 3.14t. BaseLoader and the YAMLError
+    # exceptions are much older.
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -88,6 +95,9 @@ dev = [
     "ruff>=0.17.2",
     "mypy>=2.4",
     "types-boto3[s3]>=1.43",
+    # The stubs released when PyYAML 6.0.3 came out; mypy checks the settings file reader with
+    # them.
+    "types-PyYAML>=6.0.12.20250915",
     # 9.0.3 is the first release that stops trusting a /tmp/pytest-of-{user} directory another
     # local user could have created first (GHSA-6w46-j5rx-g56g).
     "pytest>=9.0.3",
