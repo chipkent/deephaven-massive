@@ -30,7 +30,7 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
-from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets import history_source, row_times
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
@@ -1224,10 +1224,12 @@ class RestRecorder:
         assert call > 0
         assert stop is None  # a blocking read has no stop token
         self.calls.append((spec, request, window))
-        # A table in the dataset's schema, as the REST transport returns.
-        return dh_arrow.to_table(
-            schema_of(spec).to_arrow([{"Symbol": "from REST", "TimestampInsert": 1}])
-        )
+        # A table in the dataset's schema, as the REST transport returns: one row at the
+        # window's first instant, so a merge sorted by time places it.
+        row: dict[str, object] = {"Symbol": "from REST", "TimestampInsert": 1}
+        if window.times is not None:
+            row[row_times.time_column(spec.times)] = window.times.start_ns
+        return dh_arrow.to_table(schema_of(spec).to_arrow([row]))
 
 
 def test_auto_delegates_few_symbols_to_rest(
@@ -1487,6 +1489,104 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
             FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
         )
     assert waits == list(range(stopped_at + 1))
+
+
+def test_an_early_opened_session_and_rest_s_holiday_never_repeat_a_row(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Martin Luther King Day, Monday 2025-01-20, has no file; REST reads its session,
+    # [Sunday 17:00, Monday 17:00) Chicago. The 01-21 file also holds the hours from Sunday
+    # 17:00 on, since that session opened early, so it is trimmed to its own session's hours:
+    # every instant comes from one source, and the rows come out in time order.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    friday = epoch_ns(datetime(2025, 1, 17, 9, tzinfo=CHICAGO))
+    sunday = epoch_ns(datetime(2025, 1, 19, 18, tzinfo=CHICAGO))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    wednesday = epoch_ns(datetime(2025, 1, 22, 9, tzinfo=CHICAGO))
+
+    def put(day: date, *moments: int) -> None:
+        rows = "".join(f",1.0,1,1,1,1,{day},ESH5,{moment}\n" for moment in moments)
+        fake_s3.put(FUTURES_KEY.format("cme", day), make_csv_gz(FUTURES_HEADER + rows))
+
+    put(date(2025, 1, 17), friday)
+    put(date(2025, 1, 21), sunday, tuesday)
+    put(date(2025, 1, 22), wednesday)
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
+    t = q.history(
+        datetime(2025, 1, 17, 8, tzinfo=CHICAGO), datetime(2025, 1, 22, 12, tzinfo=CHICAGO)
+    )
+    opens = datetime(2025, 1, 19, 17, tzinfo=CHICAGO)
+    assert pick(t, "Symbol", "Timestamp") == [
+        ("ESH5", friday),
+        ("from REST", epoch_ns(opens)),
+        ("ESH5", tuesday),
+        ("ESH5", wednesday),
+    ]
+    ((_, req, _),) = rest.calls
+    assert (req.start, req.end) == (opens, datetime(2025, 1, 20, 17, tzinfo=CHICAGO))
+
+
+class DayBars:
+    # Stands in for REST's day bars: one bar each of 03-03, 03-04, and 03-05, whatever the
+    # window, and records each call's request and window.
+    def __init__(self) -> None:
+        self.calls: list[tuple[Request, HistoryWindow]] = []
+
+    def history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        del call, stop
+        self.calls.append((request, window))
+        rows = [
+            {
+                "Symbol": "from REST",
+                "Date": f"2025-03-0{day}",
+                "TimestampStart": epoch_ns(datetime(2025, 3, day, tzinfo=NEW_YORK)),
+                "TimestampInsert": 1,
+            }
+            for day in (3, 4, 5)
+        ]
+        return dh_arrow.to_table(schema_of(spec).to_arrow(rows))
+
+
+def test_rest_serves_day_bars_by_their_date_within_a_range_of_instants(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A day bar may end after its day's instants (an index bar at 01:00 the next day) or
+    # start before them (a futures session bar), so REST reads the call's own range and only
+    # the missing days' bars are kept, by their Date.
+    day_bars = DayBars()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: day_bars)
+    put(
+        "us_stocks_sip/day_aggs_v1/2025/03/2025-03-03.csv.gz",
+        "us_stocks_sip_day_aggs_v1_2025-03-03.csv",
+    )
+    q = query(session, STOCK_BARS, symbols=MANY, timespan=Timespan.DAY, adjusted=False)
+    # The day bars of 03-03 and 03-04 fit the range; 03-04 has no file.
+    start = datetime(2025, 3, 3, tzinfo=NEW_YORK)
+    end = datetime(2025, 3, 5, 12, tzinfo=NEW_YORK)
+    t = q.history(start, end)
+    assert pick(t, "Symbol", "Date") == [("AAPL", "2025-03-03"), ("from REST", "2025-03-04")]
+    ((request, window),) = day_bars.calls
+    assert (request.start, request.end) == (start, end)
+    assert window.span == TimeRange(start, end)
 
 
 def test_a_futures_range_with_no_later_session_within_a_week_raises(

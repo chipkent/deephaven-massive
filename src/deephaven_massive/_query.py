@@ -65,6 +65,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar, cast
 
 import numpy as np
+import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import merge
 from deephaven.stream import blink_to_append_only
@@ -84,6 +85,7 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
+from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, _require_enum
 from deephaven_massive._errors import (
@@ -1530,55 +1532,73 @@ class HistoryQuery(QueryBase):
                 f"{spec.name}: the flat file for {first} is not published yet. "
                 f"{PUBLICATION_NOTE}. {remedy}"
             )
-        pieces = list(read.parts)
-        pieces.extend(
-            (day, self._rest_day(request, window, day, call=call, stop=stop)) for day in read.unread
-        )
-        pieces.sort(key=lambda piece: piece[0])  # stable: a day's files keep their order
-        with entered(self._core.exec_ctx):
-            table = merge([read.empty, *(part for _, part in pieces)])
         if not read.unread:
-            return table, None
+            with entered(self._core.exec_ctx):
+                return merge([read.empty, *(part for _, part in read.parts)]), None
+        rest = self._rest_days(request, window, read.unread, call=call, stop=stop)
+        with entered(self._core.exec_ctx):
+            # The files' days and REST's tile (the files are trimmed to their own days), so
+            # sorting by the time column puts every row in time order across the sources.
+            merged = merge([read.empty, *(part for _, part in read.parts), *rest])
+            table = merged.sort(time_column(spec.times))
         days = ", ".join(day.isoformat() for day in read.unread)
         self._warn_rest_served(f"the flat files for {days} are missing")
         flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
         return table, f"Read from {flat}, and from REST for {days}, whose files are missing."
 
-    def _rest_day(
+    def _rest_days(
         self,
         request: Request,
         window: HistoryWindow,
-        day: date,
+        days: Sequence[date],
         *,
         call: int,
         stop: threading.Event | None,
-    ) -> Table:
-        """Read one day of a `history()` call from REST, clipped to the call's range.
+    ) -> list[Table]:
+        """Read the days the flat files could not serve from REST, each within the call's range.
+
+        Bars of a day or longer are read with the call's own request and window, which keep a
+        bar only when its whole window fits the range, and then only the days asked for are
+        kept, by their `Date` (for futures, the session label): an index day bar ends at 01:00
+        New York the next day and a futures session bar starts before its session opens, so a
+        window of the day's own instants would drop them. Every other dataset is read one day
+        at a time, clipped to the range: a range of days reads the whole day, and a range of
+        instants the day's instants inside it (for futures, its session's hours), which tile
+        with the files' days.
 
         Args:
             request: The request with static symbols and the parsed bounds.
             window: The call's window: whole days, or a range of instants.
-            day: The day (for futures, the session).
+            days: The days (for futures, sessions), oldest first.
             call: The call id.
             stop: A background read's stop token, or None for a blocking read.
 
         Returns:
-            The day's rows inside the range; none for a day without trading.
+            The days' rows inside the range; none for a day without trading.
         """
         spec = self._spec
-        start: date | datetime = day
-        end: date | datetime | None = day
-        if not isinstance(window.span, DaySpan):
-            # The day's instants, clipped to the range: for futures, its session's hours.
-            opens, closes = (
-                day_start(spec.asset_class, day),
-                day_start(spec.asset_class, day + _ONE_DAY),
-            )
-            start = max(cast("datetime", request.start), opens)
-            end = closes if request.end is None else min(cast("datetime", request.end), closes)
-        one = replace(request, start=start, end=end)
-        one_window = history_window(spec, one, start=start, end=end)
-        return self._core.rest_transport().history(spec, one, one_window, call=call, stop=stop)
+        rest = self._core.rest_transport()
+        timespan = request.timespan
+        if spec.is_bars and timespan is not None and not intraday(timespan):
+            rows = rest.history(spec, request, window, call=call, stop=stop)
+            # A static key table, not a formula: a formula's query scope would capture this
+            # frame, and with it the session.
+            labels = pa.table({"Date": [day.isoformat() for day in days]})
+            with entered(self._core.exec_ctx):
+                return [rows.where_in(dh_arrow.to_table(labels), "Date")]
+        tables = []
+        for day in days:
+            start: date | datetime = day
+            end: date | datetime | None = day
+            if not isinstance(window.span, DaySpan):
+                opens = day_start(spec.asset_class, day)
+                closes = day_start(spec.asset_class, day + _ONE_DAY)
+                start = max(cast("datetime", request.start), opens)
+                end = closes if request.end is None else min(cast("datetime", request.end), closes)
+            one = replace(request, start=start, end=end)
+            one_window = history_window(spec, one, start=start, end=end)
+            tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
+        return tables
 
     def _warn_rest_served(self, why: str) -> None:
         """Warn that REST served part or all of an `AUTO` read meant for the flat files.

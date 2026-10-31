@@ -117,9 +117,10 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 
+from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
-from deephaven_massive._datasets.dates import TimeRange, is_trading_day
+from deephaven_massive._datasets.dates import TimeRange, day_start, is_trading_day
 from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -191,6 +192,8 @@ BLOCK_SIZE: Final = 1024 * 1024
 """Bytes of decompressed CSV per block. Arrow reads about 32 blocks ahead of the consumer, so
 this sets a reader's memory: about 32 MiB of text in flight per concurrent reader."""
 
+_ONE_DAY: Final = timedelta(days=1)
+
 _TABLE_BLOCKS: Final = 16
 """A file's surviving rows are converted to a Deephaven table each time they reach this many
 blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far less JVM heap
@@ -232,6 +235,29 @@ def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
     """
     times = window.times
     return None if times is None else (times.start_ns, times.end_ns)
+
+
+def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
+    """Tell whether a read's files are trimmed to their own days, to tile with REST's days.
+
+    A range of instants keeps a file's rows by the call's range only, and a futures session
+    a holiday folded into opens early, so its file holds hours that REST's read of the
+    holiday's session also returns. Trimming each file to its day's instants makes the files'
+    days and REST's days tile exactly. Bars of a day or longer are not trimmed: a session bar
+    starts before its session's open, and REST serves those bars by their `Date` instead.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments; for bars, the timespan.
+        window: The call's window.
+
+    Returns:
+        True for a range of instants, except for bars of a day or longer.
+    """
+    if not isinstance(window.span, TimeRange):
+        return False
+    timespan = request.timespan
+    return not spec.is_bars or timespan is None or intraday(timespan)
 
 
 def _ends_at_an_instant(spec: DatasetSpec, window: HistoryWindow) -> bool:
@@ -319,6 +345,10 @@ class _Transform:
             zone (`row_times.stamp_rule`); None otherwise.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
             None for ticks.
+        tile: The asset class whose day rules trim each file's rows to its own day's
+            instants, `[day_start(day), day_start(day + 1))` (for futures, its session's
+            hours), so a file's rows and REST's rows of another day never overlap; None to
+            trim only to the call's range.
     """
 
     dataset: str
@@ -333,6 +363,7 @@ class _Transform:
     symbols: WireSymbols
     stamps: StampRule | None = None
     bars: BarBounds | None = None
+    tile: AssetClass | None = None
 
     @classmethod
     def build(
@@ -445,11 +476,17 @@ class _Transform:
             key: The file.
 
         Returns:
-            The request's plan, with the session check of a futures file.
+            The request's plan, with the session check of a futures file, and, with `tile`,
+            the time range narrowed to the file's own day.
         """
-        if self.session_header is None:
-            return self.plan
-        return replace(self.plan, session=(self.session_header, key.day))
+        plan = self.plan
+        if self.session_header is not None:
+            plan = replace(plan, session=(self.session_header, key.day))
+        if self.tile is None or plan.window_ns is None:
+            return plan
+        own = TimeRange(day_start(self.tile, key.day), day_start(self.tile, key.day + _ONE_DAY))
+        start, end = plan.window_ns
+        return replace(plan, window_ns=(max(start, own.start_ns), min(end, own.end_ns)))
 
     def apply(self, batch: pa.RecordBatch, *, received: int) -> pa.RecordBatch:
         """Turn one batch of surviving rows into a block of the dataset's schema.
@@ -630,6 +667,8 @@ class FlatFileHistory:
             warnings=self._core.warnings,
             stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
+        if not infer_holidays and _tiles(spec, request, window):
+            transform = replace(transform, tile=cast("AssetClass", spec.asset_class))
         keys = _keys(prefix, request.venues, dates)
         threads = f"{self._core.thread_prefix} call-{call} files"
         return self._read(
