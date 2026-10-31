@@ -22,6 +22,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, sources
 from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.query_building import Namespace
@@ -154,7 +155,8 @@ TEXT_PAGES = {"partners.benzinga.news": 1_000, "partners.benzinga.analyst_insigh
 @pytest.mark.parametrize("name", DATASETS)
 def test_the_page_size_is_the_documented_maximum_unless_rows_carry_long_text(name: str) -> None:
     expected = 5_000 if name in SMALL_PAGES else 50_000
-    assert spec_of(name).page_size == TEXT_PAGES.get(name, expected)
+    path, _ = DATASETS[name]
+    assert page_size(spec_of(name), CATALOG.rest_path(path)) == TEXT_PAGES.get(name, expected)
 
 
 # The schemas the declarations yield.
@@ -616,7 +618,8 @@ def test_fetch_returns_every_fixture_value(
     table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch()
 
     # One request, for the documented maximum page, and nothing the caller did not set.
-    assert sent(fake_rest) == [(target, {"limit": [str(spec.page_size)]})]
+    size = page_size(spec, CATALOG.rest_path(path))
+    assert sent(fake_rest) == [(target, {"limit": [str(size)]})]
     schema = CATALOG.dataset_schema(spec)
     assert table.column_names == list(schema.column_names)
     out = dh_to_pylist(table)
@@ -768,10 +771,11 @@ def test_every_symbol_list_goes_in_one_request(
     name: str, param: str, *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     path, _ = DATASETS[name]
+    spec = spec_of(name)
     fake_rest.reply(path, Reply(envelope([])))
     factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch()
     assert sent(fake_rest) == [
-        (path, {param: ["AAPL,MSFT"], "limit": [str(spec_of(name).page_size)]})
+        (path, {param: ["AAPL,MSFT"], "limit": [str(page_size(spec, CATALOG.rest_path(path)))]})
     ]
 
 

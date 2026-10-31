@@ -160,11 +160,16 @@ def _is_default(value: object, default: object) -> bool:
     Returns:
         True for the default object itself, or a value equal to a default other than None
         (`{dm.FuturesVenue.CME, ...}` equals the default `frozenset`). None is compared by
-        identity, so a symbol table is never compared with `==`.
+        identity, so a symbol table is never compared with `==`. An array-like value, whose
+        `==` answers element by element (a numpy array, a pandas series), is never the
+        default: only a plain `bool` answer counts, since the truth of an array raises.
     """
-    return value is default or (
-        default is not None and default is not inspect.Parameter.empty and value == default
-    )
+    if value is default:
+        return True
+    if default is None or default is inspect.Parameter.empty:
+        return False
+    equal: object = value == default  # an array's `==` is an array
+    return isinstance(equal, bool) and equal
 
 
 def _frozen(value: object) -> object:

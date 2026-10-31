@@ -1821,12 +1821,16 @@ Notation:
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
   one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
-  endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
-  when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
-  stops once `limit` rows have arrived.
-- `DatasetSpec.page_size` is the endpoint's documented maximum `limit`, lowered where the rows
-  are long so one page decodes to some tens of MB at most: Benzinga news 1,000 (each article
-  carries its whole HTML body, so 50,000 could reach hundreds of MB), Benzinga analyst
+  endpoint's page-size `limit`; the page size is the path's documented maximum (or
+  `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
+  (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging stops once `limit` rows
+  have arrived.
+- The page size is the endpoint's documented maximum `limit`, which the refresh generates from
+  the specification (`Param.maximum`), so no dataset types it. `DatasetSpec.page_size`
+  overrides it in two cases, and the catalog's `page size` gate refuses any other: a maximum
+  the specification states only in prose (the aggregates range paths, 50,000), and a lower
+  size where the rows are long so one page decodes to some tens of MB at most: Benzinga news
+  1,000 (each article carries its whole HTML body, so 50,000 could reach hundreds of MB), Benzinga analyst
   insights and filing risk factors 5,000 (each row quotes prose), and the three financial
   statements 10,000 (some fifty line items a row, over 60 MB at 50,000). Every other page
   size is the documented maximum: 50,000 short rows decode to some 10 to 40 MB, and the
@@ -7019,3 +7023,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 65 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/massive/rest/test_client_integration.py` (a class on Basic): seven requests within a minute; record each answer's status, rate-limit headers, and message |
 | 66 | Whether reference data and the other datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count in a bucket of their own, as Massive's knowledge base says ("What is the request limit for Massive's RESTful APIs?": reference and cross-asset endpoints are "counted in their own bucket"), rather than against a subscription's limit, and whether that bucket has the Basic limit of 5 per minute | They go to the `other` bucket, every reference endpoint included (options contracts, IPOs, and reference reads filtered by market); `other` cannot be declared and is paced once a 429 names the per-minute limit | `tests/ingest/test_rest.py`: such a request, filtered by market or not, is charged to `other`; `tests/ingest/test_rate_limits.py`: a Basic-worded refusal paces `other` | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
 | 67 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/massive/rest/test_client_integration.py` (a class on Basic): requests until the first 429, then one every 5 s; record when the first is answered again |
+| 68 | Whether every row of Benzinga's consensus ratings (`/benzinga/v1/consensus-ratings/{ticker}`) carries `ticker`, which the vendor's schema marks optional | Each row's `ticker` is its `Symbol` and its `poll()` key, so a row without one fails the call rather than keeping a null `Symbol` | `tests/namespaces/test_partners.py`: a consensus row without its ticker fails | `tests/namespaces/test_partners_integration.py` (the Benzinga add-on, $99 a month; skipped without it): three stocks' consensus ratings read raw; every row names the requested ticker |

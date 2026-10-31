@@ -104,6 +104,10 @@ _GROUPED: Final = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
 _MINUTE_FILES: Final = "us_stocks_sip/minute_aggs_v1"
 _DAY_FILES: Final = "us_stocks_sip/day_aggs_v1"
 
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
+
 TRADES: Final = DatasetSpec(
     name="stocks.trades",
     summary="Trades of US-listed stocks, tick by tick.",
@@ -118,7 +122,6 @@ TRADES: Final = DatasetSpec(
         (_F, "us_stocks_sip/trades_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 # Each one-row dataset joins the kind of its stream and history dataset, so its rows have the
 # same columns; an explicit APPEND poll() records each new row by its time.
@@ -146,7 +149,6 @@ QUOTES: Final = DatasetSpec(
         (_F, "us_stocks_sip/quotes_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 LAST_QUOTE: Final = DatasetSpec(
     name="stocks.last_quote",
@@ -179,7 +181,7 @@ BARS: Final = DatasetSpec(
         (_F, _MINUTE_FILES): ticker_key("WindowStart"),
         (_F, _DAY_FILES): ticker_key("WindowStart"),
     },
-    page_size=50_000,
+    page_size=_AGGREGATES_PAGE,
     column_notes=_BAR_NOTES,
 )
 PREVIOUS_DAY_BAR: Final = DatasetSpec(
@@ -276,7 +278,6 @@ DIVIDENDS: Final = DatasetSpec(
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
-    page_size=5_000,
 )
 SPLITS: Final = DatasetSpec(
     name="stocks.splits",
@@ -287,7 +288,6 @@ SPLITS: Final = DatasetSpec(
     time_axis=("execution_date.gte", "execution_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
-    page_size=5_000,
 )
 # The IPO path filters one `ticker` per request, so the REST layer sends one request per symbol.
 IPOS: Final = DatasetSpec(
@@ -306,7 +306,6 @@ IPOS: Final = DatasetSpec(
     # and ISIN are no key: an offering can be postponed to a new date, and either can be
     # missing before the listing.
     poll_keys=("Symbol", "IssuerName"),
-    page_size=1_000,
 )
 SHORT_INTEREST: Final = DatasetSpec(
     name="stocks.short_interest",
@@ -317,7 +316,6 @@ SHORT_INTEREST: Final = DatasetSpec(
     time_axis=("settlement_date.gte", "settlement_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "SettlementDate"),
-    page_size=50_000,
 )
 SHORT_VOLUME: Final = DatasetSpec(
     name="stocks.short_volume",
@@ -328,7 +326,6 @@ SHORT_VOLUME: Final = DatasetSpec(
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
-    page_size=50_000,
 )
 SHARE_FLOAT: Final = DatasetSpec(
     name="stocks.share_float",
@@ -337,7 +334,6 @@ SHARE_FLOAT: Final = DatasetSpec(
     fetch_path=_FLOAT,
     keys={(_R, _FLOAT): ticker_key()},
     symbol_param="ticker.any_of",
-    page_size=5_000,
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (

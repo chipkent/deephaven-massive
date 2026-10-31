@@ -178,6 +178,8 @@ there is no year bar yet, and the year read is recorded as skipped.
 
 Partner datasets (Benzinga, ETF Global, TMX, consumer spending) are $99 a month each; NOI is
 a $49 expansion ([S9]); economy data and each class's reference data are free on Basic.
+The Benzinga add-on adds one check, that every consensus-ratings row names its ticker; without
+the add-on that check skips.
 Massive's knowledge base already states some answers, which the live tests confirm: a missing
 flat file answers 404 `NoSuchKey`, one subscribe frame of 120,003 entries is accepted, a
 connection carries about 1,000 options contracts, grouped daily stamps the end of its window,

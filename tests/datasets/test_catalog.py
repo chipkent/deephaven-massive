@@ -55,7 +55,6 @@ STOCK_TRADES = DatasetSpec(
     asset_class=AssetClass.STOCKS,
     kind="trades",
     history_path="/v3/trades/{stockTicker}",
-    page_size=1000,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
@@ -81,7 +80,6 @@ CRYPTO_TRADES = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     history_path="/v3/trades/{cryptoTicker}",
-    page_size=1000,
     channels={NotBars.ANY: "XT"},
     flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
@@ -105,7 +103,6 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     kind="trades",
     history_path="/futures/v1/trades/{ticker}",
-    page_size=1000,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
     keys={
@@ -149,7 +146,6 @@ CONTRACTS = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.OPTIONS,
     fetch_path="/v3/reference/options/contracts",
-    page_size=1000,
     extra_paths=("/v3/reference/options/contracts/{options_ticker}",),
     keys={
         (R, "/v3/reference/options/contracts"): keys("Ticker", fanout="UnderlyingTicker"),
@@ -172,7 +168,6 @@ DIVIDENDS = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     fetch_path="/stocks/v1/dividends",
-    page_size=1000,
     keys={(R, "/stocks/v1/dividends"): keys("Ticker")},
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
@@ -395,7 +390,7 @@ def test_a_daily_summary_needs_its_date_key_on_every_source() -> None:
             change(summary, asset_class=no_zone)
 
 
-def test_a_dataset_sets_its_page_size_exactly_when_a_path_takes_limit() -> None:
+def test_every_paged_request_has_a_page_size_and_page_size_is_set_only_where_needed() -> None:
     contracts = "/v3/reference/options/contracts"
     paged = DatasetSpec(
         name="options.contracts",
@@ -403,12 +398,33 @@ def test_a_dataset_sets_its_page_size_exactly_when_a_path_takes_limit() -> None:
         asset_class=AssetClass.OPTIONS,
         fetch_path=contracts,
         keys={(R, contracts): keys("Ticker")},
-        page_size=1000,
     )
+    # The path documents a maximum of 1,000, which the request reads; a dataset may lower it.
     assert problems(paged) == ()
-    assert problems(change(paged, page_size=None)) == (
-        f"page size: options.contracts: {contracts} takes limit, but page_size is unset",
+    assert problems(change(paged, page_size=500)) == ()
+    redundant = (
+        "page size: options.contracts: page_size 1000 is the documented maximum limit of every "
+        "path, so it is read from the specification and must be left unset"
     )
+    assert problems(change(paged, page_size=1000)) == (redundant,)
+    too_large = "page size: options.contracts: page_size 1001 exceeds the maximum limit 1000 of "
+    too_large += contracts
+    assert problems(change(paged, page_size=1001)) == (too_large,)
+    # The aggregates range path states its maximum only in prose, so its dataset sets one.
+    bars_path = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+    bars = DatasetSpec(
+        name="stocks.bars",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        is_bars=True,
+        history_path=bars_path,
+        keys={(R, bars_path): keys(request("stocksTicker"), "WindowStart")},
+        time_axis=("from", "to"),
+    )
+    assert problems(bars) == (
+        f"page size: stocks.bars: {bars_path} documents no maximum limit, so page_size must be set",
+    )
+    assert problems(change(bars, page_size=50_000)) == ()
     open_close = "/v1/open-close/{stocksTicker}/{date}"
     unpaged = DatasetSpec(
         name="stocks.daily_open_close",
@@ -577,7 +593,6 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
                 name="a.b",
                 summary="A dataset for the tests.",
                 history_path="/v3/trades/{stockTicker}",
-                page_size=1000,
             ),
             False,
         ),
@@ -586,7 +601,6 @@ def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
                 name="a.b",
                 summary="A dataset for the tests.",
                 history_path="/v3/trades/{stockTicker}",
-                page_size=1000,
                 keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"))},
             ),
             True,  # a symbol filled from the request
@@ -741,7 +755,6 @@ def test_members_of_one_group_follow_their_positions() -> None:
         asset_class=AssetClass.STOCKS,
         kind="trades",
         history_path="/v3/trades/{stockTicker}",
-        page_size=1000,
         keys={(R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp")},
     )
     assert Catalog((last, history)).members("trades") == (history, last)
@@ -804,7 +817,6 @@ def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
         name="stocks.institutional_holdings",
         summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
-        page_size=1000,
         poll_keys=("AccessionNumber",),
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
     )
@@ -837,7 +849,6 @@ def test_a_classed_reference_dataset_declares_no_key() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         fetch_path="/futures/v1/exchanges",
-        page_size=1000,
         poll_keys=("Id",),
     )
     assert not Catalog((exchanges,)).takes_symbols(exchanges)
@@ -1008,7 +1019,6 @@ def test_declared_keys_gate_needs_an_instant_as_the_time_key() -> None:
         name="economy.inflation",
         summary="A dataset for the tests.",
         fetch_path="/fed/v1/inflation",
-        page_size=1000,
         keys={(R, "/fed/v1/inflation"): keys(time="Date")},
         poll_keys=("Date",),
     )
@@ -1029,7 +1039,6 @@ def test_fanout_keys_of_datasets_in_no_kind_need_not_agree() -> None:
         name="stocks.institutional_holdings",
         summary="A dataset for the tests.",
         fetch_path="/stocks/filings/vX/13-F",
-        page_size=1000,
         keys={(R, "/stocks/filings/vX/13-F"): keys(fanout=KeySpec("FilerCik", instrument=False))},
         poll_keys=("AccessionNumber",),
     )
@@ -1108,7 +1117,6 @@ def test_kind_membership_gate() -> None:
     twice = change(
         STOCK_LAST_TRADE,
         extra_paths=("/v3/trades/{stockTicker}",),
-        page_size=1000,
         keys={
             **STOCK_LAST_TRADE.keys,
             (R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp"),
@@ -1179,6 +1187,11 @@ def test_poll_keys_gate() -> None:
     assert problems(change(EXCHANGES, revision_keys=("Updated", "Name"))) == (
         "poll keys: reference.exchanges: ['Updated'] are not columns",
     )
+
+
+def test_the_arrival_time_is_never_a_poll_key() -> None:
+    with pytest.raises(ValueError, match="poll_keys cannot hold TimestampInsert"):
+        change(EXCHANGES, poll_keys=("Id", "TimestampInsert"))
 
 
 def test_nullable_poll_keys_are_poll_keys_with_a_reason() -> None:

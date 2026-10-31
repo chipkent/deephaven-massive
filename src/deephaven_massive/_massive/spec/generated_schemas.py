@@ -444,14 +444,15 @@ def _param(item: dict[str, object]) -> Param:
     """Build a parameter from its JSON object.
 
     Args:
-        item: `{"name", "kind", "in_path", "values", "unit", "default"}`, where `default` is
-            a JSON scalar or `null`.
+        item: `{"name", "kind", "in_path", "values", "unit", "default", "maximum"}`, where
+            `default` is a JSON scalar or `null`, and `maximum` an integer or `null`.
 
     Returns:
         The parameter.
 
     Raises:
-        TypeError: If `values` is not an array of strings, or `default` is not a scalar.
+        TypeError: If `values` is not an array of strings, `default` is not a scalar, or
+            `maximum` is neither an integer nor `null`.
     """
     unit = _optional(item, "unit")
     values = _member(item, "values")
@@ -460,6 +461,9 @@ def _param(item: dict[str, object]) -> Param:
     default = _member(item, "default")
     if default is not None and not isinstance(default, (str, int, float)):
         raise TypeError(f"'default' is {default!r:.80}, not a JSON scalar")
+    maximum = _member(item, "maximum")
+    if maximum is not None and (not isinstance(maximum, int) or isinstance(maximum, bool)):
+        raise TypeError(f"'maximum' is {maximum!r:.80}, not an integer")
     return Param(
         name=_text(item, "name"),
         kind=ParamKind(_text(item, "kind")),
@@ -467,6 +471,7 @@ def _param(item: dict[str, object]) -> Param:
         values=tuple(values),
         unit=None if unit is None else WireUnit(unit),
         default=default,
+        maximum=maximum,
     )
 
 

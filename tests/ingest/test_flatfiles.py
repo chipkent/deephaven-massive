@@ -1325,6 +1325,53 @@ def test_a_stopped_read_stops_its_roll_forward(
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
+@pytest.mark.parametrize("stopped_at", [2, 3])
+def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
+    stopped_at: int,
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The next session's file drops its connection on every read, and the background read is
+    # released while the roll forward waits for its last reread (2), or during that last read,
+    # once the rereads are spent (3): the call reports the stop, not the dropped connection.
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    rolled = FUTURES_KEY.format("cme", date(2025, 1, 21))
+    data = make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-21,ESH5,{tuesday}\n")
+    fake_s3.put_dropped(rolled, data[: len(data) // 2])
+    stop = _massive.Cancel()
+    # The session's client class itself: the session fixture wraps `_massive.FlatFileClient`.
+    transport = cast("flatfiles.FlatFileHistory", session._core.flat_file_transport())
+    client_class = type(transport._client)
+    wait_to_reread = client_class.wait_to_reread
+    waits: list[int] = []
+
+    def released_while_rereading(
+        self: _massive.FlatFileClient, error: _massive.WireError, *args: object
+    ) -> bool:
+        retry, cancel = cast("tuple[int, threading.Event]", args)
+        waits.append(retry)
+        if retry == stopped_at:
+            stop.set()
+        return bool(wait_to_reread(self, error, retry, cancel))
+
+    monkeypatch.setattr(client_class, "wait_to_reread", released_while_rereading)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
+    start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
+    end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
+    window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
+    dates = history_source.partition_dates(FUTURES_TRADES, window)
+    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+        session._core.flat_file_transport().history(
+            FUTURES_TRADES, q._request, window, dates=dates, call=1, stop=stop
+        )
+    assert waits == list(range(stopped_at + 1))
+
+
 def test_a_roll_forward_gives_up_loudly_after_a_week(
     *,
     session: dm.MassiveSession,

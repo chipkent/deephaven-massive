@@ -52,8 +52,6 @@ __all__ = ["DATASETS", "_Reference"]
 logger = logging.getLogger(__name__)
 
 _REST: Final = Transport.REST
-_LIST_PAGE: Final = 1000
-"""The largest page of the tickers, news, and conditions endpoints (their `limit` maximum)."""
 
 TICKERS: Final = DatasetSpec(
     name="reference.tickers",
@@ -63,7 +61,6 @@ TICKERS: Final = DatasetSpec(
     # `ticker` takes one value, so a symbol list fans out one request per symbol, while
     # no symbols at all is one request that lists every ticker.
     symbol_param="ticker",
-    page_size=_LIST_PAGE,
 )
 TICKER_DETAILS: Final = DatasetSpec(
     name="reference.ticker_details",
@@ -114,7 +111,6 @@ NEWS: Final = DatasetSpec(
     symbols_overlap=True,
     poll_mode=PollMode.APPEND,
     poll_keys=("Id",),
-    page_size=_LIST_PAGE,
 )
 EXCHANGES: Final = DatasetSpec(
     name="reference.exchanges",
@@ -161,7 +157,6 @@ CONDITIONS: Final = DatasetSpec(
             "empty for a SIP that has no code for the condition",
         ),
     },
-    page_size=_LIST_PAGE,
 )
 MARKET_STATUS: Final = DatasetSpec(
     name="reference.market_status",
@@ -611,7 +606,7 @@ class _Reference(Namespace):
             sip: The SIP whose condition mapping to list; None for every SIP.
             sort: See README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: See README.md#filters.
 
         Returns:
