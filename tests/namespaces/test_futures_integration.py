@@ -369,18 +369,25 @@ def test_shapes_of_futures_contract_tickers(
     """Which shapes single futures contract tickers take: one- or two-digit years.
 
     Records one page of NG contracts with the tickers outside a product code, a month letter,
-    and a one- or two-digit year, and the library's `contracts` of NG. Reading it: every
-    single contract inside that shape confirms the ticker grammar (a year is never rewritten,
-    so `ESZ25` is not `ESZ5`); anything else extends it, or is left to the handling of unknown
-    symbols. Spread tickers are the next test's.
+    and a one- or two-digit year, and the library's `contracts` of NG with each row's ticker
+    and date. Reading it: every single contract inside that shape confirms the ticker grammar
+    (a year is never rewritten, so `ESZ25` is not `ESZ5`); anything else extends it, or is
+    left to the handling of unknown symbols. Spread tickers are the next test's.
+
+    Without a `date`, Massive's page held few distinct tickers among many rows, and the
+    library's 20 rows one ticker; the library reads 20 rows in one page, so it repeats no page.
+    The rows' distinct `(ticker, date)` pairs say whether each row is the contract on another
+    day (its point-in-time history) or an exact repeat that Massive sends.
     """
     singles = _page(live_rest, _CONTRACTS, query={"product_code": "NG", "limit": 1000})
     tickers = sorted({str(row.get("ticker")) for row in singles})
+    days = {(str(row.get("ticker")), str(row.get("date"))) for row in singles}
     odd = [ticker for ticker in tickers if not _CONTRACT_SHAPE.fullmatch(ticker)]
     evidence(f"NG contracts: {len(tickers)} tickers, e.g. {tickers[:10]} ... {tickers[-10:]}")
+    evidence(f"NG page: {len(singles)} rows, {len(days)} distinct (ticker, date) pairs")
     evidence(f"NG tickers outside letters, a month code, and a 1-2 digit year: {odd}")
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
-    evidence(f"library contracts(NG): Symbol {[r['Symbol'] for r in library]}")
+    evidence(f"library contracts(NG): (Symbol, Date) {[(r['Symbol'], r['Date']) for r in library]}")
     assert tickers
 
 
@@ -397,8 +404,9 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
 ) -> None:
     """Which forms futures spread (combo) tickers take on each venue, and how they name their legs.
 
-    Massive documents no grammar for spreads; the library accepts exactly the forms its samples
-    show (`GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `CL:BZ U6-V6`, `6A:XF:AUDUSD:Q6`) and
+    Massive documents no grammar for spreads; the library accepts any combo shape (runs of
+    upper-case letters and digits joined by single `-`, `:`, or spaces, such as `GCQ6-GCZ6`,
+    `BOB 02-01 U6`, `1Y:SA 03M F6`, `10YF5-10YG5XXX`) and
     builds no spread from its legs. Reads every combo product (`/futures/v1/products?type=combo`,
     one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
     COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of

@@ -2,7 +2,6 @@
 
 import dataclasses
 import inspect
-from datetime import time
 from typing import Any, cast
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _query, _session
 from deephaven_massive._config import MassiveConfig
-from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._enums import AssetClass, Subscription
 
 ENV = (
@@ -119,7 +117,6 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.reconnect_backoff == 30.0
     assert base.max_reconnect_backoff == 120.0
     assert base.flat_file_symbol_threshold == 50
-    assert base.flat_file_publish_cutoff == time(11, 30)
     assert base.max_concurrency == 8
     assert base.rest_basic_subscriptions == frozenset()
     assert base.flush_interval == 0.05
@@ -332,11 +329,6 @@ def test_symbol_settings_are_the_enum(base: MassiveConfig, setting: str, variabl
         _replace(base, **{setting: "log"})
 
 
-def test_publish_cutoff_is_a_wall_clock_time(base: MassiveConfig) -> None:
-    with pytest.raises(ValueError, match="drop tzinfo"):
-        _replace(base, flat_file_publish_cutoff=time(11, 30, tzinfo=NEW_YORK))
-
-
 def test_api_key_must_be_a_string() -> None:
     with pytest.raises(TypeError, match="api_key must be a str, not NoneType"):
         MassiveConfig(api_key=cast("str", None))
@@ -352,13 +344,6 @@ def test_configs_are_hashable_and_compare_by_value() -> None:
     assert repr(a.ws_hosts) == repr(hosts)
     assert len(a.ws_hosts) == 1
     assert list(a.ws_hosts) == [AssetClass.STOCKS]
-
-
-def test_publish_cutoff_must_be_a_time(base: MassiveConfig) -> None:
-    with pytest.raises(
-        TypeError, match=r"flat_file_publish_cutoff must be a datetime\.time, not str"
-    ):
-        _replace(base, flat_file_publish_cutoff="11:30")
 
 
 def test_equal_backoffs_are_accepted() -> None:

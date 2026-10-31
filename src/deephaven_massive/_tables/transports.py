@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from deephaven_massive._errors import MassiveError
 
 __all__ = [
+    "FlatFileRead",
     "FlatFileTransport",
     "HostDecision",
     "IngestPorts",
@@ -354,6 +355,28 @@ class StreamTransport(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class FlatFileRead:
+    """What a flat-file `history` read returns: its rows by day, and the days it could not read.
+
+    Returned by `FlatFileTransport.history`; immutable. The query merges `empty` and the parts,
+    with any rows it reads elsewhere for the unread days, in date order.
+
+    Attributes:
+        parts: Each kept file's static tables with the file's day (for futures, its session),
+            in date order and, within a day, venue and file order.
+        empty: A static table with every column of the dataset and no row, which the merge
+            starts from so a read without rows keeps every column.
+        unread: The trading days whose rows the parts leave out, oldest first: every day
+            whose file is missing, or, when the read inferred holidays, the first day whose
+            file is missing with no later file, the parts then holding no later day either.
+    """
+
+    parts: tuple[tuple[date, Table], ...]
+    empty: Table
+    unread: tuple[date, ...]
+
+
 class FlatFileTransport(Protocol):
     """The flat-file transport, from `SessionCore.flat_file_transport()` (`IngestPorts.flat_files`).
 
@@ -369,8 +392,9 @@ class FlatFileTransport(Protocol):
         *,
         dates: Sequence[date],
         call: int,
+        infer_holidays: bool,
         stop: threading.Event | None = None,
-    ) -> Table:
+    ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
 
         Args:
@@ -382,20 +406,22 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            infer_holidays: True when no other source can serve the call: a missing trading
+                day's file with a later day's file is a day without trading. False to return
+                every missing trading day as unread.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
 
         Returns:
-            A static table with the dataset's columns: the files' rows in date order. A
-            range without rows or files gives an empty table with every column.
+            The read (`FlatFileRead`): the files' tables by day, an empty table with every
+            column, and the days the files could not serve.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
             EntitlementError: If the plan does not include the files (S3 answers 403); for
                 futures files the message names the venue and the `venue=` parameter.
-            MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
-                missing within a day of its publication time, or a read fails in any other
+            MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is
                 returned and logs a WARNING; it raises nothing.
         """

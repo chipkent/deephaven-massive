@@ -24,6 +24,11 @@ bucket is:
   while fewer than its limit of *slots* are held. A slot is held by a request in flight, and by
   a finished one until `RATE_WINDOW` (61 s: Massive's minute plus one second of margin for
   latency and clock skew) after its response arrived, which bounds when Massive counted it.
+  Massive's minute is the clock minute (a live check saw a spent allowance freed as the
+  minute turned, not 60 s after the first request); no clock minute ever holds more starts
+  than a 61 s window does, so the hold is safe for either, at worst a minute slower. Waiting
+  for the next minute instead would trust the local clock to agree with Massive's to the
+  second, and a fast clock would draw a 429 and a whole window's pause.
 - **Unpaced** otherwise: requests start at once, except during a pause. A bucket named in
   `learn_only` at construction (the library's bucket for reference and other data of no
   subscription, which Massive counts in a bucket of its own) cannot be declared; it is paced
@@ -133,7 +138,10 @@ BASIC_REQUESTS_PER_MINUTE: Final = 5
 """The requests per minute Massive allows a subscription on its free Basic tier."""
 
 RATE_WINDOW: Final = 61.0
-"""Seconds a finished request holds its slot of a paced bucket: Massive's minute plus 1 s."""
+"""Seconds a finished request holds its slot of a paced bucket: Massive's minute plus 1 s.
+
+Massive counts by the clock minute; holding a slot this long after each response is never
+faster than that allows, whatever the local clock reads."""
 
 MAX_RETRY_AFTER: Final = 600.0
 """The longest pause a 429's `Retry-After` sets, in seconds: 10 minutes. A longer one is clamped

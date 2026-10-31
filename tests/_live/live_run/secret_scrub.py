@@ -1,4 +1,4 @@
-"""Keeping the live run's secrets out of its results: the filter and the scan before packing.
+r"""Keeping the live run's secrets out of its results: the filter and the scan before packing.
 
 The live-run program (`live_run`) reads four secrets from the environment, the API key, the
 optional delayed key, and the S3 pair, and must never write one to disk. Two guards stand
@@ -10,7 +10,14 @@ between them and the results folder:
 - `scan`, which `pack` runs over every file of the results folder before it writes the zip,
   Parquet files and the library's own debug logs included: it looks for every secret plain,
   URL-encoded, and base64-encoded (at each of the three byte alignments, standard and URL-safe
-  alphabets), and names the file and the line or byte offset of each find.
+  alphabets), each also spelled with JSON escapes (`\u0050` for `P`, `\/` for `/`), and names
+  the file and the line or byte offset of each find.
+
+The library's own redaction replaces a secret that a reply spells with JSON escapes, so the
+files should never hold one; the scan still looks, since it is the last guard before the zip
+leaves the machine. It reads the escapes as JSON does, left to right, into a copy of each line
+that holds a backslash, and searches that copy for every form: one pass finds a secret with
+any of its characters escaped, in any case of hex digit, a surrogate pair included.
 
 An empty or unset variable is no secret and is ignored. Every function is pure except `scan`,
 which reads files.
@@ -28,7 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
 SECRET_VARIABLES: Final = (
@@ -55,6 +62,29 @@ _INLINE_HEADER: Final = re.compile(
     r"(?i)((?:'|\")(?:Authorization|X-Amz-[A-Za-z0-9-]+)(?:'|\")\s*:\s*)(?:'[^']*'|\"[^\"]*\")"
 )
 """An `Authorization` or `X-Amz-*` header inside a printed mapping: `'Authorization': '...'`."""
+
+_JSON_ESCAPE: Final = re.compile(
+    rb"\\(?:u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})"
+    rb"|u([0-9a-fA-F]{4})|([\"\\/bfnrt]))"
+)
+"""One JSON escape: a surrogate pair of `u` escapes, one `u` escape, or a short escape."""
+
+_SHORT_ESCAPES: Final = {
+    b'"': b'"',
+    b"\\": b"\\",
+    b"/": b"/",
+    b"b": b"\b",
+    b"f": b"\f",
+    b"n": b"\n",
+    b"r": b"\r",
+    b"t": b"\t",
+}
+"""The character each short JSON escape spells, by the letter after its backslash."""
+
+_SURROGATE_BASE: Final = 0x10000
+_HIGH_SURROGATE: Final = 0xD800
+_LOW_SURROGATE: Final = 0xDC00
+_SURROGATE_BITS: Final = 10
 
 
 @dataclass(frozen=True)
@@ -158,8 +188,58 @@ def _base64_inner(raw: bytes, pad: int) -> bytes:
     return encoded[first:last]
 
 
+def _spelled(match: re.Match[bytes]) -> bytes:
+    """Return the UTF-8 bytes of the character one JSON escape spells.
+
+    Args:
+        match: A match of `_JSON_ESCAPE`.
+
+    Returns:
+        The character's UTF-8 bytes; a lone surrogate's bytes as `surrogatepass` writes them,
+        which match no secret.
+    """
+    high, low, single, short = match.groups()
+    if short is not None:
+        return _SHORT_ESCAPES[short]
+    if high is not None:
+        code = (
+            _SURROGATE_BASE
+            + ((int(high, 16) - _HIGH_SURROGATE) << _SURROGATE_BITS)
+            + (int(low, 16) - _LOW_SURROGATE)
+        )
+        return chr(code).encode()
+    return chr(int(single, 16)).encode("utf-8", "surrogatepass")
+
+
+def _escaped_finds(data: bytes, forms: Sequence[bytes]) -> set[int]:
+    """Find the lines that spell a secret's form with JSON escapes.
+
+    Args:
+        data: A file's bytes.
+        forms: The forms to look for (`SecretFilter.forms`).
+
+    Returns:
+        The byte offset of the start of each line whose escapes, read as JSON reads them,
+        spell one of the forms.
+    """
+    found: set[int] = set()
+    if b"\\" not in data:
+        return found
+    start = 0
+    for line in data.split(b"\n"):
+        if b"\\" in line:
+            plain = _JSON_ESCAPE.sub(_spelled, line)
+            if any(form in plain for form in forms):
+                found.add(start)
+        start += len(line) + 1
+    return found
+
+
 def scan(root: Path, secrets: SecretFilter, *, skip: Iterable[Path] = ()) -> list[str]:
-    """Search every file under a folder for the secrets, in every form `forms` gives.
+    r"""Search every file under a folder for the secrets, in every form `forms` gives.
+
+    Each form is searched as it is and, on every line that holds a backslash, as JSON escapes
+    spell it, so a secret written as `\u0050LANTED` is found as `PLANTED` would be.
 
     Args:
         root: The results folder.
@@ -169,7 +249,9 @@ def scan(root: Path, secrets: SecretFilter, *, skip: Iterable[Path] = ()) -> lis
 
     Returns:
         One line per find, such as `"evidence/2026-11-03-1/debug.log: line 12"`, or `"... :
-        byte offset 4096"` for a file that is not UTF-8 text; empty when nothing was found.
+        byte offset 4096"` for a file that is not UTF-8 text (for a form spelled with escapes,
+        the offset of the start of its line); one per line of text however many forms it
+        holds; empty when nothing was found.
     """
     forms = secrets.forms()
     skipped = {path.resolve() for path in skip}
@@ -178,7 +260,9 @@ def scan(root: Path, secrets: SecretFilter, *, skip: Iterable[Path] = ()) -> lis
         if path.resolve() in skipped:
             continue
         data = path.read_bytes()
-        offsets = sorted({i for form in forms if (i := data.find(form)) >= 0})
+        offsets = sorted(
+            {i for form in forms if (i := data.find(form)) >= 0} | _escaped_finds(data, forms)
+        )
         if not offsets:
             continue
         name = path.relative_to(root).as_posix()
@@ -187,7 +271,7 @@ def scan(root: Path, secrets: SecretFilter, *, skip: Iterable[Path] = ()) -> lis
         except UnicodeDecodeError:
             finds.extend(f"{name}: byte offset {offset}" for offset in offsets)
         else:
-            lines = [data.count(b"\n", 0, offset) + 1 for offset in offsets]
+            lines = sorted({data.count(b"\n", 0, offset) + 1 for offset in offsets})
             finds.extend(f"{name}: line {line}" for line in lines)
     return finds
 
