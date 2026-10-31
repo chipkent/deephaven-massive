@@ -71,6 +71,7 @@ from deephaven_massive._errors import (
     wire_cause,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
+from deephaven_massive._ingest.host_decision import unlabelled
 from deephaven_massive._ingest.recency_labels import shows_real_time
 from deephaven_massive._ingest.subscriptions import (
     Sender,
@@ -1065,14 +1066,16 @@ class Connection:
             refused: The refused topics.
 
         Returns:
-            On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed,
-            that the subscription is listed in `delayed_subscriptions` and that removing it
-            uses the real-time feed; on the real-time feed of a key whose snapshot showed
-            real-time data, that its plan or an add-on may not include the data (such a key
-            has nothing to gain from the delayed feed); on the real-time feed otherwise, how
-            to use Massive's delayed feed instead; for fair-market-value topics, that they
-            need a Business plan; on another host, that `ws_hosts` chooses it; and for index
-            values, that they may need `business.massive.com`.
+            On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed, that
+            the subscription is listed in `delayed_subscriptions` and that removing it uses the
+            real-time feed; on the real-time feed of a key whose snapshot showed real-time data,
+            that its plan or an add-on may not include the data (such a key has nothing to gain from
+            the delayed feed); on the real-time feed of a key whose snapshot carried no label (a
+            base Business key's), that `ws_hosts` pins the host the plan serves it on, or the
+            delayed feed if its data is delayed; on the real-time feed otherwise, how to use
+            Massive's delayed feed instead; for fair-market-value topics, that they need a Business
+            plan; on another host, that `ws_hosts` chooses it; and for index values, that they may
+            need `business.massive.com`.
         """
         subscription = subscription_of(self.asset_class)
         if self.decision.evidence == "ws_hosts":
@@ -1092,6 +1095,15 @@ class Connection:
                 f"the {subscription} subscription's plan is real-time "
                 f"({self.decision.evidence}) but may not include this data; it may need a "
                 "higher plan or an add-on"
+            )
+        elif self.decision.host == REALTIME_HOST and unlabelled(self.decision.evidence):
+            hint = (
+                f"the {subscription} snapshot carried no recency label, as a Business plan's "
+                "without the trades and quotes expansion does, so the plan may serve this data "
+                "on another host: pin it with "
+                f'MassiveConfig(ws_hosts={{dm.AssetClass.{self.asset_class.name}: "<host>"}}); '
+                f"if the plan's data is delayed instead, use Massive's delayed {subscription} "
+                f"feed: {delayed_fix(subscription)}"
             )
         elif self.decision.host == REALTIME_HOST:
             hint = (

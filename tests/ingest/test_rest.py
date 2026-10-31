@@ -512,7 +512,7 @@ def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # The indicators have no asset class: each request follows its symbol's class.
-    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": []})))
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
     by_path = dict(fake_rest.get_queries())
@@ -566,7 +566,7 @@ def test_a_read_of_several_paths_shares_one_patience(
 ) -> None:
     # The stock and crypto indicator paths are one fetch: its patience is taken once, so the
     # second path never gets a fresh ten minutes after the first spent its own.
-    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": []})))
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     patiences = _Patiences(monkeypatch)
     fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")

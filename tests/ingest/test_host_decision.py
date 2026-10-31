@@ -16,6 +16,7 @@ from deephaven_massive._ingest.host_decision import (
     SnapshotProbe,
     decide,
     recency_of,
+    unlabelled,
 )
 from deephaven_massive._massive import Transport, source
 from deephaven_massive._tables.transports import HostDecision
@@ -328,3 +329,13 @@ def test_mixed_tiers_real_time_stocks_and_delayed_options(
     options = run(AssetClass.OPTIONS, snapshot("stocks_delayed.json"), delayed=delayed)
     assert (stocks.host, stocks.recency) == (REALTIME_HOST, Recency.REALTIME)
     assert (options.host, options.recency) == (DELAYED_HOST, Recency.DELAYED)
+
+
+def test_only_a_snapshot_without_a_label_is_unlabelled_evidence(
+    snapshot: Callable[[str], Snapshot],
+) -> None:
+    decision = run(AssetClass.STOCKS, snapshot("stocks_fmv_only.json"))
+    assert decision.evidence == "no timeframe in the stocks snapshot"
+    assert unlabelled(decision.evidence)
+    assert not unlabelled("last_trade.timeframe=REAL-TIME")
+    assert not unlabelled("ws_hosts")

@@ -329,6 +329,18 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             ),
         ),
         (
+            # A snapshot without a label (a base Business key's) proves nothing about the
+            # plan: its data may be served on another host, which ws_hosts pins.
+            on_host(REALTIME_HOST, "no timeframe in the futures snapshot"),
+            (
+                "the futures snapshot carried no recency label, as a Business plan's without "
+                "the trades and quotes expansion does, so the plan may serve this data on "
+                "another host: pin it with MassiveConfig(ws_hosts={dm.AssetClass.FUTURES: "
+                "\"<host>\"}); if the plan's data is delayed instead, use Massive's delayed "
+                "futures feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
+            ),
+        ),
+        (
             # A key whose snapshot proved real-time data gains nothing from the delayed feed.
             on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
             (

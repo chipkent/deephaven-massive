@@ -64,6 +64,7 @@ __all__ = [
     "SnapshotProbe",
     "decide",
     "recency_of",
+    "unlabelled",
 ]
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,26 @@ SNAPSHOT_PROBES: Final[Mapping[AssetClass, SnapshotProbe]] = {
 }
 """The snapshot each class's TICK host is checked against: the unified snapshot of two liquid
 stocks, one contract of the SPY option chain, the S&P 500 index, and one E-mini S&P contract."""
+
+
+_NO_TIMEFRAME: Final = "no timeframe in the {} snapshot"
+"""The evidence of a decision whose snapshot carried no recency label, by its class."""
+
+
+def unlabelled(evidence: str) -> bool:
+    """Return whether a host decision's evidence is a snapshot that carried no recency label.
+
+    Such a snapshot proves nothing about the plan: a base Business key's (without the trades
+    and quotes expansion) carries none, and its plan may serve the class's streams on another
+    host than the real-time one, so a refusal's message names `MassiveConfig.ws_hosts`.
+
+    Args:
+        evidence: The decision's evidence, such as `"no timeframe in the stocks snapshot"`.
+
+    Returns:
+        True for the evidence of a snapshot without a `timeframe`, of any class.
+    """
+    return any(evidence == _NO_TIMEFRAME.format(asset_class) for asset_class in AssetClass)
 
 
 def recency_of(host: str) -> Recency:
@@ -206,7 +227,7 @@ def _from_labels(
         )
     if labels.real_time is not None:
         return _real_time(asset_class, labels.real_time)
-    evidence = f"no timeframe in the {asset_class} snapshot"
+    evidence = _NO_TIMEFRAME.format(asset_class)
     if asset_class is AssetClass.INDICES:  # the field is documented: its absence is anomalous
         return _unconfirmed_real_time(asset_class, evidence)
     return _real_time(asset_class, evidence)

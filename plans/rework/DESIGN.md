@@ -3547,8 +3547,10 @@ feed: on the real-time feed of an unpinned class, how to use Massive's delayed f
 (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`), since a delayed plan's subscription is
 refused there, unless the host decision's snapshot labelled the class's data `REAL-TIME`: that key's
 plan is real-time, so the refused data (an add-on such as stocks imbalances, or a higher tier) is
-something its plan or add-ons may not include, and the delayed feed is not suggested; on the
-delayed feed, that the subscription is listed in `MassiveConfig.delayed_subscriptions`
+something its plan or add-ons may not include, and the delayed feed is not suggested; when
+that snapshot carried no `timeframe` at all (a base Business key's), that the plan may serve the
+data on another host, pinned with `MassiveConfig.ws_hosts[dm.AssetClass.<X>]`, and the delayed
+feed only if the plan's data is delayed; on the delayed feed, that the subscription is listed in `MassiveConfig.delayed_subscriptions`
 and that removing it uses the real-time feed (Massive acknowledges a real-time key's
 subscription on the delayed feed; whether rows then flow is **UNVERIFIED**); on a pinned host,
 `MassiveConfig.ws_hosts`.
