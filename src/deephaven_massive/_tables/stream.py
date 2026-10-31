@@ -109,7 +109,7 @@ from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, lib
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
-from deephaven_massive._tables.diagnostics import StreamUpdate
+from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -1135,7 +1135,7 @@ class Flusher:
         # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         # Flush-lock state: per `dm.ALL` stream, the symbols whose rows are being dropped, with
-        # the first reason, which its `Error` names; and the `Error` text last written.
+        # the first reason, which its `Error` names; and the stale-symbol part last written.
         self._stale: dict[int, dict[str, str]] = {}
         self._noted: dict[int, str] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
@@ -1492,27 +1492,27 @@ class Flusher:
     def _write_notes(
         self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
     ) -> None:
-        """Write each stream's warning into its `Error` when it changed, or clear it.
+        """Write each `dm.ALL` stream's stale-symbol part of its `Error` when it changed.
 
-        A `dm.ALL` stream's warning names the symbols whose rows are being dropped
-        (`_stale_text`); it does not fail the stream.
+        The part (`NotePart.STALE_SYMBOLS`) names the symbols whose rows are being dropped
+        (`_stale_text`); it does not fail the stream, and the other sources' parts (the
+        connection's outage or options-cap notes) stay as they are.
 
         Args:
             readers: The dataset's streams on the channel.
-            updates: Receives each stream's new `Error`, or its clearing.
+            updates: Receives each stream's changed parts.
         """
         for sink in readers:
             key = sink.stream_id
-            text = _stale_text(self._stale.get(key, {}))
-            if text == self._noted.get(key, ""):
+            text = _stale_text(self._stale.get(key, {})) or None
+            if text == self._noted.get(key):
                 continue
-            found = updates.get(sink, StreamUpdate())
-            if text:
-                self._noted[key] = text
-                updates[sink] = replace(found, error=text)
-            else:
+            if text is None:
                 del self._noted[key]
-                updates[sink] = replace(found, clear_error=True)
+            else:
+                self._noted[key] = text
+            found = updates.get(sink, StreamUpdate())
+            updates[sink] = replace(found, notes={NotePart.STALE_SYMBOLS: text})
 
     def _counted(
         self,

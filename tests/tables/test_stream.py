@@ -34,7 +34,7 @@ from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
-from deephaven_massive._tables.diagnostics import StreamUpdate
+from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -1046,7 +1046,12 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
         flusher.rows("T", [trade("AAPL"), *[trade(symbol, SipTimestamp=5)] * limit])
         flusher.flush()
     assert not every.failed
-    errors = [u.error for u in written if u.error is not None]
+
+    def stale(update: StreamUpdate) -> str | None:
+        # The stale-symbol part an update sets; None when it sets or clears no such part.
+        return (update.notes or {}).get(NotePart.STALE_SYMBOLS)
+
+    errors = [stale(u) for u in written if stale(u) is not None]
     assert errors == [
         f"rows for ILLQ are being dropped ({reason}); its last values may be stale",
         f"rows for ILLQ, AAA are being dropped ({reason}); their last values may be stale",
@@ -1059,17 +1064,17 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
     written.clear()
     flusher.rows("T", [trade(symbol) for symbol in ("ILLQ", "AAA", "BBB")])
     flusher.flush()
-    assert [u.error for u in written] == [
+    assert [stale(u) for u in written] == [
         f"rows for CCC are being dropped ({reason}); its last values may be stale"
     ]
     written.clear()
     flusher.rows("T", [trade("CCC")])
     flusher.flush()
-    assert [(u.error, u.clear_error) for u in written] == [(None, True)]
+    assert [u.notes for u in written] == [{NotePart.STALE_SYMBOLS: None}]
     written.clear()
     flusher.rows("T", [trade("CCC")])
     flusher.flush()
-    assert [u.clear_error for u in written] == [False]  # nothing left to clear
+    assert [u.notes for u in written] == [None]  # nothing left to clear
     flusher.routes.remove(7)
     flusher.flush()
     assert (flusher._stale, flusher._noted) == ({}, {})

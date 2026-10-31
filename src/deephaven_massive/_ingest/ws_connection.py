@@ -18,6 +18,11 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
+- **Outages and silence.** A live table never shows stale data as if it were current. While
+  the connection is down, every stream on it says so in its `m.streams()` `Error`, and an
+  outage that lasts `MassiveConfig.max_outage` fails them all, since their rows from the
+  outage's start on are missing. A silent connection's streams say so in their `Error` too,
+  but keep running: quiet symbols and market holidays are silent as well.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
@@ -60,6 +65,7 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, subscription_of
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
+    ErrorCause,
     MassiveError,
     from_wire,
     wire_cause,
@@ -71,6 +77,7 @@ from deephaven_massive._ingest.subscriptions import (
     Timer,
     channel_of,
     stream_topics,
+    wildcard,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import (
@@ -84,14 +91,16 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
     DriftRegistry,
+    NotePart,
     StreamUpdate,
     describe_symbols,
+    utc_text,
 )
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Collection, Hashable, Sequence
+    from collections.abc import Callable, Collection, Hashable, Iterable, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -141,12 +150,19 @@ class's regular trading hours before it logs a WARNING that its live tables may 
 minutes, since a connection carrying only a few quiet symbols can go a minute or two without a
 trade; the check runs with each `SUMMARY_INTERVAL` summary."""
 
+KEEPALIVE_WINDOW: Final = 40.0
+"""Seconds a socket that died silently may still look open: the `websockets` keepalive's
+default `ping_interval` (20 s) plus its `ping_timeout` (20 s), which `WsClient` keeps. A
+connection's pings are no frames, so after a quiet spell an outage's timer counts from the
+drop less this window, not from the last frame, which may be hours old."""
+
 CONNECTION_SETTINGS: Final = (
     "api_key",
     "ws_hosts",
     "ack_timeout",
     "reconnect_backoff",
     "max_reconnect_backoff",
+    "max_outage",
     "flush_interval",
     "rest_base_url",
 )
@@ -293,20 +309,43 @@ class ConnectionStream:
 class _Episodes:
     """A connection's two silence episodes, each logged once as a WARNING. Loop-confined.
 
+    Each also shows in its streams' `Error` while it lasts, and an outage that lasts
+    `MassiveConfig.max_outage` for a stream fails it (`down`).
+
     Attributes:
         lost_at: When the socket was lost (seconds since the epoch), or None while connected.
         lost_warned: Whether the outage's WARNING was logged (only when the connection had
             live tables), so its reconnect logs the recovery.
+        down_since: When the outage began: the last frame before it (seconds since the
+            epoch), or None outside one. Unlike `lost_at`, it lasts until every stream has
+            recovered on a reconnected socket, so a reconnect that drops again before that
+            keeps it.
+        down: The streams the outage holds down, each with the loop timer that fails it at
+            `max_outage`, by id.
+        published_at_open: Each down stream's `StreamSink.rows_published` when the current
+            socket opened (or when it joined), so rows since then show its data flows again.
+        data_since_open: Whether a data frame arrived since the current socket opened.
+        down_note: The `Error` of a down stream during the outage under way, or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
         quiet_at: When the no-frames WARNING was logged (nanoseconds since the epoch), or
             None outside that episode.
+        quiet_note: The `Error` of every stream that is not down during that episode, or None.
+        failure: The error the outage fails its streams with, made at its first failure, so
+            the outage logs it once however many streams it fails; None until then.
     """
 
     lost_at: float | None = None
     lost_warned: bool = False
+    down_since: float | None = None
+    down: dict[int, Timer] = field(default_factory=dict)
+    published_at_open: dict[int, int] = field(default_factory=dict)
+    data_since_open: bool = False
+    down_note: str | None = None
     last_frame_at: int = 0
     quiet_at: int | None = None
+    quiet_note: str | None = None
+    failure: MassiveError | None = None
 
 
 class Connection:
@@ -419,7 +458,7 @@ class Connection:
         self._summary: Timer | None = None
         self._traffic = _Traffic()
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
-        self._stalled = self._ended = False
+        self._ended = False
         self._episodes = _Episodes()
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
@@ -584,8 +623,10 @@ class Connection:
             stream: The stream.
         """
         self._streams[stream.stream_id] = stream
-        if self._stalled:
-            self._update_streams({stream.stream_id: StreamUpdate(error=self._stall_text())})
+        if self._episodes.down_since is not None:  # it opens during an outage: held down
+            self._hold_down(stream.stream_id, self._group.max_outage)
+        if self._episodes.down_since is not None or self._episodes.quiet_note is not None:
+            self._show_outage_notes([stream.stream_id])
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
             self._required[stream.channel] = keys
@@ -607,6 +648,7 @@ class Connection:
             return
         self.flusher.routes.remove(stream_id)
         self._notes_shown.pop(stream_id, None)
+        self._release_down(stream_id)
         self.subscriptions.remove(stream.topics, static=stream.static)
         logger.debug(
             "stream %d shut down: its route is removed and %d topics released on %s",
@@ -722,10 +764,11 @@ class Connection:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
-        if self._stalled:
-            self._stalled = False
-            self._unstall()
+        episodes.data_since_open = False
+        for stream_id in episodes.down:  # only rows of the new socket show data flows again
+            episodes.published_at_open[stream_id] = self._streams[stream_id].sink.rows_published
         self.subscriptions.opened(generation)
+        self._check_recovered()  # with nothing to confirm, the outage ends now
 
     def _on_status(self, generation: int, status: Status) -> None:
         """Apply a status object of the current generation; an older one's is stale.
@@ -735,6 +778,7 @@ class Connection:
             status: The decoded status.
         """
         self._episodes.last_frame_at = time.time_ns()
+        self._heard()
         if generation == self.subscriptions.generation:
             self.subscriptions.status(status)
 
@@ -759,6 +803,10 @@ class Connection:
             drift: The frame's drift for the channel.
         """
         now = time.time_ns()
+        self._heard()
+        if self._episodes.down_since is not None:  # data flows again: the outage may be over
+            self._episodes.data_since_open = True
+            self._check_recovered()
         self._traffic.received(channel, len(rows), len(rejects), now=now)
         if rejects:
             lost = DriftReport(dropped_rows=len(rejects), dropped_reason=rejects[0].error.message)
@@ -787,6 +835,7 @@ class Connection:
         """
         self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._check_frames(time.time_ns())
+        self._check_recovered()  # rows flushed since the last data frame may recover a stream
         traffic = self._traffic
         acknowledged = frozenset(self.subscriptions.acknowledged)
         published = {sid: stream.sink.rows_published for sid, stream in self._streams.items()}
@@ -830,20 +879,19 @@ class Connection:
 
         A connection that holds acknowledged subscriptions and has received no frame of any
         kind for `NO_FRAMES_WARNING` seconds, during its asset class's regular trading hours
-        (`in_trading_hours`), logs one WARNING that its live tables may be stale; the first
-        frame after it logs the recovery at INFO. A connection that is not connected is the
-        outage WARNING's (`_on_state`), not this one's.
+        (`in_trading_hours`), logs one WARNING that its live tables may be stale and shows it
+        in every stream's `Error` (`_set_quiet_note`); the streams keep running, since quiet symbols
+        and market holidays are silent too. The first frame after it clears the note and logs
+        the recovery at INFO (`_heard`). A connection that is not connected is the outage's
+        (`_on_state`), not this one's.
 
         Args:
             now: The current time, in nanoseconds since the epoch.
         """
         episodes = self._episodes
-        last = max(episodes.last_frame_at, self._last_message_at or 0)
         if episodes.quiet_at is not None:
-            if last > episodes.quiet_at:
-                logger.info("%s: frames arrive again", self.url)
-                episodes.quiet_at = None
             return
+        last = max(episodes.last_frame_at, self._last_message_at or 0)
         silent = (now - last) / 1e9
         if (
             self._state is not ConnectionState.CONNECTED
@@ -862,6 +910,27 @@ class Connection:
             self.asset_class.value,
             len(self.subscriptions.acknowledged),
         )
+        self._set_quiet_note(
+            f"no data since {utc_text(last / 1e9)} during {self.asset_class.value} trading "
+            "hours; quiet symbols or a market holiday may explain it"
+        )
+
+    def _heard(self) -> None:
+        """End a silence episode on a frame's arrival: log the recovery and clear the note."""
+        if self._episodes.quiet_at is None:
+            return
+        self._episodes.quiet_at = None
+        logger.info("%s: frames arrive again", self.url)
+        self._set_quiet_note(None)
+
+    def _set_quiet_note(self, note: str | None) -> None:
+        """Show the silence's note on every stream, or clear it.
+
+        Args:
+            note: The text, or None to clear it.
+        """
+        self._episodes.quiet_note = note
+        self._show_outage_notes(list(self._streams))
 
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         """Show the client's state; on a fatal failure, fail every stream.
@@ -869,7 +938,7 @@ class Connection:
         The first `RECONNECTING` or `WAITING_SLOT` of an outage logs one WARNING when the
         connection carries live tables, since they get no data until it reconnects; each
         later attempt of the same outage logs nothing here, and the reconnect logs the
-        recovery at INFO (`_on_open`).
+        recovery at INFO (`_on_open`). Each also starts or continues the outage (`_outage`).
 
         Args:
             state: The client's new state.
@@ -895,10 +964,7 @@ class Connection:
                         len(self._streams),
                         cast("float", detail) - episodes.lost_at,
                     )
-            if state is WsState.WAITING_SLOT and not self._stalled:
-                self._stalled = True
-                text = self._stall_text()
-                self._update_streams({s: StreamUpdate(error=text) for s in self._streams})
+            self._outage(waiting_slot=state is WsState.WAITING_SLOT)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
             self._failed(cast("WireError", detail))
@@ -910,6 +976,7 @@ class Connection:
             # The client's last callback: the loop runs nothing that would release these, so
             # it lets them go now. A call posted later is dropped, or ignored (`_ended`).
             self._ended = True
+            self._cancel_outage_timers()
             self._streams.clear()
             self._notes_shown.clear()
 
@@ -1048,42 +1115,196 @@ class Connection:
         found = (canonical_from_wire(self.asset_class, r.symbol) for r in rejects if r.symbol)
         return dict(Counter(symbol for symbol in found if symbol is not None))
 
-    def _stall_text(self) -> str:
-        """Return the `Error` of a stream whose connection waits for a slot.
+    # --- loop thread: outages and notes --------------------------------------------------------
 
-        Returns:
-            The text, naming the host and the cluster.
-        """
-        return (
-            f"waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
-            "connection with this API key, perhaps from another process, holds it; the plan "
-            "allows one connection per cluster"
-        )
+    def _outage(self, *, waiting_slot: bool) -> None:
+        """Start or continue an outage: hold every stream down, and fail each at its limit.
 
-    def _unstall(self) -> None:
-        """Clear the streams' wait for a slot, showing their notes again if any."""
-        updates: dict[int, StreamUpdate] = {}
-        for stream_id in self._streams:
-            text = self._note_text(self._notes_shown.get(stream_id))
-            updates[stream_id] = (
-                StreamUpdate(clear_error=True) if text is None else StreamUpdate(error=text)
-            )
-        self._update_streams(updates)
-
-    def _note_text(self, note: tuple[int, frozenset[str]] | None) -> str | None:
-        """Return the `Error` a stream's notes give it: the options cap first, then no-acks.
+        The first `RECONNECTING` or `WAITING_SLOT` of an outage dates it at the last frame the
+        connection received (when the data stopped), or now if none ever arrived; the note and
+        the failure name that time. Each stream not yet down is held down with a loop timer
+        (`_stream_expired`) that fires `MassiveConfig.max_outage` seconds after the later of
+        that last frame and the drop less `KEEPALIVE_WINDOW`: a socket's keepalive pings are
+        no frames, so after a quiet spell (a night, a weekend, an illiquid symbol) the last
+        frame can be long past while the connection was healthy until moments before the
+        drop. A limit of zero, or one already passed, fires on the loop's next turn. Every
+        attempt rewrites the note, since a wait for a slot and a plain reconnect read
+        differently.
 
         Args:
-            note: The stream's deferred-topic count and unacknowledged topics, or None.
+            waiting_slot: True for `WAITING_SLOT`: the note says another connection holds the
+                account's slot.
+        """
+        episodes = self._episodes
+        now = time.time()
+        last = max(episodes.last_frame_at, self._last_message_at or 0) / 1e9
+        if episodes.down_since is None:
+            episodes.down_since = last or now
+            episodes.quiet_at = None  # the outage's note replaces the silence's
+            episodes.quiet_note = None
+        since = utc_text(episodes.down_since)
+        note = f"connection down since {since}; no data"
+        if waiting_slot:
+            note += (
+                f"; waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
+                "connection with this API key, perhaps from another process, holds it; the "
+                "plan allows one connection per cluster"
+            )
+        left = max(max(last, now - KEEPALIVE_WINDOW) + self._group.max_outage - now, 0.0)
+        newly = [s for s in self._streams if s not in episodes.down]
+        for stream_id in newly:
+            self._hold_down(stream_id, left)
+        logger.debug(
+            "%s: outage since %s (the last frame); streams %s held down, failing in %.0f s "
+            "unless they recover (max_outage %g s)",
+            self.url,
+            since,
+            newly,
+            left,
+            self._group.max_outage,
+        )
+        changed = note != episodes.down_note
+        episodes.down_note = note
+        self._show_outage_notes(list(episodes.down) if changed else newly)
+
+    def _hold_down(self, stream_id: int, left: float) -> None:
+        """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
+
+        Args:
+            stream_id: The stream, one of the connection's.
+            left: Seconds until its `max_outage` runs out.
+        """
+        episodes = self._episodes
+        episodes.down[stream_id] = self._client.loop.call_later(
+            left, self._stream_expired, stream_id
+        )
+        episodes.published_at_open[stream_id] = self._streams[stream_id].sink.rows_published
+
+    def _release_down(self, stream_id: int) -> None:
+        """Stop holding a stream down: cancel its timer. Does nothing for a stream not down.
+
+        Args:
+            stream_id: The stream.
+        """
+        timer = self._episodes.down.pop(stream_id, None)
+        if timer is not None:
+            timer.cancel()
+        self._episodes.published_at_open.pop(stream_id, None)
+
+    def _stream_expired(self, stream_id: int) -> None:
+        """Fail a stream the outage has held down for `max_outage`.
+
+        Its rows from the outage's start on are missing, so a table that kept running (a
+        `last_by`, say) would show the rows from before the drop as if they were current. It
+        fails through its flush thread's `publish_failure`, and a table derived from it fails
+        with it. The connection keeps reconnecting.
+
+        Args:
+            stream_id: The stream; still on the connection, since its release cancels this.
+        """
+        episodes = self._episodes
+        del episodes.down[stream_id]
+        episodes.published_at_open.pop(stream_id, None)
+        logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
+        if episodes.failure is None:
+            since = utc_text(cast("float", episodes.down_since))
+            episodes.failure = MassiveError(
+                f"the WebSocket connection to {self.decision.host}{self.path} has been down "
+                f"since {since}, longer than MassiveConfig.max_outage "
+                f"({self._group.max_outage:g} s); the rows from {since} on are missing, so this "
+                "table stopped; call the verb again for a new live table",
+                cause=ErrorCause.EXPECTED,
+            )
+        self.flusher.fail([stream_id], episodes.failure)
+
+    def _recovered(self, stream: ConnectionStream) -> bool:
+        """Tell whether a down stream's data flows again on the reconnected socket.
+
+        It does once rows reached it since the socket opened, or once each of its topics the
+        options cap admits is acknowledged (directly or through its channel's wildcard). A
+        topic in `NO_ACK` keeps it down: Massive never confirmed it, so its rows may never come.
+
+        Args:
+            stream: A down stream.
 
         Returns:
-            The text, or None when the stream has no note.
+            Whether it has recovered.
         """
-        if note is None:
-            return None
-        deferred, missing = note
-        if deferred:
-            return self._cap_text()
+        if stream.sink.rows_published > self._episodes.published_at_open[stream.stream_id]:
+            return True
+        acked = self.subscriptions.acknowledged
+        return all(
+            t in acked or wildcard(channel_of(t)) in acked
+            for t in stream.topics - self.subscriptions.deferred
+        )
+
+    def _check_recovered(self) -> None:
+        """Release each down stream whose data flows again; end the outage when all have.
+
+        Runs while the connection is `CONNECTED` after a change of its subscriptions, a data
+        frame, and each summary. A recovered stream's timer is cancelled and its note
+        cleared, while a stream with a topic in `NO_ACK` stays down and fails at its limit, so
+        one silent topic never holds the others down. The outage ends once no stream is down
+        and the socket has proved itself: a topic is acknowledged, or data arrived. A socket
+        that the server accepts but never answers is still down, so a stream that opens on
+        it is held down too.
+        """
+        episodes = self._episodes
+        if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
+            return
+        recovered = [s for s in episodes.down if self._recovered(self._streams[s])]
+        for stream_id in recovered:
+            self._release_down(stream_id)
+        if recovered:
+            logger.debug("%s: streams %s receive data again", self.url, recovered)
+            self._show_outage_notes(recovered)
+        if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
+            return
+        logger.debug(
+            "%s: the outage that began at %s is over", self.url, utc_text(episodes.down_since)
+        )
+        episodes.down_since = None
+        episodes.down_note = None
+        episodes.failure = None
+
+    def _cancel_outage_timers(self) -> None:
+        """Cancel every down stream's timer: the connection has ended or handed its streams on."""
+        for stream_id in list(self._episodes.down):
+            self._release_down(stream_id)
+
+    def _show_outage_notes(self, stream_ids: Iterable[int]) -> None:
+        """Write each stream's outage and silence parts of its `Error`, or clear them.
+
+        Only these two parts change (`NotePart.OUTAGE`, `NotePart.QUIET`): a down stream shows
+        the outage's note, every stream the silence's while it lasts, and the other parts (the
+        options cap, a stale symbol) stay as their sources left them.
+
+        Args:
+            stream_ids: The streams whose notes may have changed.
+        """
+        episodes = self._episodes
+        self._update_streams(
+            {
+                stream_id: StreamUpdate(
+                    notes={
+                        NotePart.OUTAGE: episodes.down_note if stream_id in episodes.down else None,
+                        NotePart.QUIET: episodes.quiet_note,
+                    }
+                )
+                for stream_id in stream_ids
+            }
+        )
+
+    @staticmethod
+    def _no_ack_text(missing: frozenset[str]) -> str:
+        """Return the `Error` part of a stream whose topics Massive has not acknowledged.
+
+        Args:
+            missing: The stream's topics in `NO_ACK`; at least one.
+
+        Returns:
+            The text, naming the first `_NOTE_TOPICS` of them.
+        """
         shown = sorted(missing)[:_NOTE_TOPICS]
         more = len(missing) - len(shown)
         return (
@@ -1123,6 +1344,7 @@ class Connection:
         """Publish the streams' notes and rewrite the row for the changes of a loop turn."""
         self._change_scheduled = False
         self._show_notes()
+        self._check_recovered()
         self._write_row()
 
     def _show_notes(self, *, opened: Collection[int] = ()) -> None:
@@ -1130,12 +1352,13 @@ class Connection:
 
         A stream's notes are its options topics the cap defers (with `Deferred`, the stream's
         own deferred topics, one per contract since a stream reads one channel) and its topics
-        Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; the
-        cap's text wins when both apply. A note is cleared once it no longer holds: room
-        frees, a late acknowledgement arrives, or a new generation starts. On `/options`, the
-        admitted set is published, and an opening stream's pending topics dropped, in one
-        section of the group's lock, so a verb's cap check never sees the stream's topics in
-        neither.
+        Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; each
+        is its own part of the `Error` (`NotePart.CAP`, `NotePart.NO_ACK`), shown beside the
+        stream's other warnings and never replacing them. A note is cleared once it no longer
+        holds: room frees, a late acknowledgement arrives, or a new generation starts. On
+        `/options`, the admitted set is published, and an opening stream's pending topics
+        dropped, in one section of the group's lock, so a verb's cap check never sees the
+        stream's topics in neither.
 
         Args:
             opened: The streams whose pending topics are now counted through the admitted set.
@@ -1164,11 +1387,12 @@ class Connection:
             else:
                 self._notes_shown[stream.stream_id] = note
             self._log_note(stream, count=count, old_count=old_count, missing=missing)
-            text = self._note_text(note)
-            update = StreamUpdate(clear_error=True) if text is None else StreamUpdate(error=text)
-            # While the connection waits for a slot, that wait stays the stream's `Error`.
-            if self._stalled:
-                update = StreamUpdate()
+            # Two parts of the stream's `Error`, each set or cleared alone, beside its others.
+            notes = {
+                NotePart.CAP: self._cap_text() if count else None,
+                NotePart.NO_ACK: self._no_ack_text(missing) if missing else None,
+            }
+            update = StreamUpdate(notes=notes)
             if options:
                 update = replace(update, deferred=count)
             updates[stream.stream_id] = update
@@ -1411,6 +1635,7 @@ class ConnectionGroup:
         factory: ClientFactory,
         ack_timeout: float,
         flush_interval: float,
+        max_outage: float,
     ) -> None:
         """Create an empty group; `attach` creates them.
 
@@ -1422,6 +1647,7 @@ class ConnectionGroup:
             factory: Creates each connection's client.
             ack_timeout: `MassiveConfig.ack_timeout` of its sessions.
             flush_interval: `MassiveConfig.flush_interval` of its sessions.
+            max_outage: `MassiveConfig.max_outage` of its sessions, in seconds.
         """
         self.key: Final = key
         self.label: Final = label
@@ -1429,6 +1655,7 @@ class ConnectionGroup:
         self.factory: Final = factory
         self.ack_timeout: Final = ack_timeout
         self.flush_interval: Final = flush_interval
+        self.max_outage: Final = max_outage
         # Guarded by lock.
         self.connections: dict[str, Connection] = {}
         self.streams: dict[int, Connection] = {}
@@ -1481,6 +1708,7 @@ class ConnectionGroup:
                     factory=factory,
                     ack_timeout=config.ack_timeout,
                     flush_interval=config.flush_interval,
+                    max_outage=config.max_outage,
                 )
             with group.lock:
                 group.sessions.add(owner)

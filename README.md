@@ -467,6 +467,29 @@ A script that only reads static tables can let a `with` block close the session:
 `with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own,
 with an INFO line in the log.
 
+**A long feed outage fails live tables.** When the connection to Massive drops, the library
+reconnects on its own. While it is down, each of its live tables keeps its last rows, and
+`m.streams()` says so in `Error`: `connection down since 2026-10-30T14:03:05Z; no data`, the
+time (UTC) of the last message Massive sent. Each table's note clears once its own data flows
+again: Massive has confirmed its subscriptions, or sent it rows. A table still waiting
+`max_outage` seconds after the drop (300 by default) **fails**, naming when the gap began: the
+trades or quotes sent since then are missing, and a table that kept running would look complete
+when it is not. One symbol Massive never confirms fails only its own table. Call the same verb
+again for a new live table; it streams once the connection is back. A `poll()` table follows
+the same limit: while its cycles fail, `Error` names the last good cycle, and once they have
+kept failing for `max_outage` seconds, the table fails; one failed cycle of an hourly poll
+never does. A cycle that finds nothing new is a
+good cycle, so a quiet dataset never fails. To fail at the first disconnect or failed cycle
+instead, set the limit to zero:
+
+```python
+m = dm.MassiveSession(dm.MassiveConfig(max_outage=0))
+```
+
+A connected feed can also go quiet: when nothing arrives for 5 minutes during the market's
+regular hours, `Error` says `no data since <time> during stocks trading hours`, but the table
+keeps running, since a quiet symbol or a market holiday looks the same.
+
 **The console holds the lock live tables need.** Deephaven runs each console command while
 holding the lock every live table needs to update, so a `history()` or `fetch()` that downloads
 for ten minutes pauses every live table on the server for ten minutes; the library logs a
@@ -590,7 +613,8 @@ wrong.
   `RELEASED` (you hold no table from it, but a derived table or an open panel still uses it),
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
   warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
-  for room). `Query` shows the call that opened it, `Recency` whether its data is real-time
+  for room, a connection that is down or has gone quiet), all of them at once, joined with
+  `;`. `Query` shows the call that opened it, `Recency` whether its data is real-time
   (`REALTIME`), delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`),
   `RowsPublished` counts rows delivered, and
   `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), or
@@ -844,6 +868,11 @@ this section) and look at what the library did.
 | `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
+| `connection down since <time>; no data` in `m.streams()` | The connection to Massive dropped and the library is reconnecting. The table resumes on its own if the outage is short. `m.connections()` shows the state and the next attempt. |
+| `... has been down since <time>, longer than MassiveConfig.max_outage` | The outage outlasted `max_outage`, so the table stopped rather than show stale data. Call the verb again for a new table; raise `max_outage` to ride out longer outages. See [live table lifetime](#live-tables). |
+| `...; last good cycle at <time>` in a `poll()` table's `Error` | Its latest cycle failed with the error before it; the next cycle runs as scheduled and clears it on success. |
+| `poll(): last good cycle at <time>; every cycle since <time> has failed ... longer than MassiveConfig.max_outage` | Its cycles kept failing for `max_outage` seconds, so the table stopped rather than show stale data. Fix the error it names, then call the verb again. |
+| `no data since <time> during ... trading hours` in `m.streams()` | The connection is up but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
 | a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; the table reads Massive's delayed feed (`Recency` `DELAYED` in `m.streams()`), which starts 15 minutes behind; or the stream failed (`m.streams()`). |
 | a download is slow | Basic plans allow five requests a minute (`m.rate_limits()` shows the pace). Use flat files for many symbols, and `wait=False` for long reads. |
 | memory keeps growing | `append_only()` keeps every row. Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |
