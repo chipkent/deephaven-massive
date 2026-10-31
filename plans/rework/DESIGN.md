@@ -3524,7 +3524,13 @@ through `publish_failure` (`Flusher.fail`, so through `BlinkPublisher`) with a `
 rows from <time> on are missing, so this table stopped; call the verb again for a new live
 table". Tables derived from the stream fail with it, as with every stream failure.
 `max_outage=0` fails them at the drop: the timers fire on the loop's next turn. The
-connection itself keeps reconnecting.
+connection itself keeps reconnecting. So that a held-down stream always gets one full attempt
+before its timer fires, the client asks the connection before each reconnect wait for its
+deadline: the earliest held-down stream's time left, less `ack_timeout`. A wait that would start
+the next attempt later than that deadline less `HANDSHAKE_TIMEOUT` is shortened to fit, but never
+below `reconnect_backoff` or a 429's `Retry-After`. Without it, the default waits (30, 60, then
+100 to 120 seconds) would put the fourth attempt at 290 to 348 seconds, after a 300-second
+`max_outage`.
 
 **Silence.** A `CONNECTED` connection with acknowledged topics that receives no frame for
 `NO_FRAMES_WARNING` (5 minutes) during its asset class's regular trading hours logs its WARNING
@@ -3559,9 +3565,16 @@ sees:
 
 - **HTTP 401** raises `AuthenticationError`. **HTTP 403**, and a 200 response whose envelope
   `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
-  the table from `poll()`.
-- **Delayed data on a real-time subscription.** `fetch()` and `poll()` read current data, and
-  each label Massive puts on it is held against the subscription of the data it labels. A
+  the table from `poll()`. The message names the dataset and the subscription the request is
+  charged to ("your account" for data of none), then Massive's answer, and, where the dataset
+  declares one (`DatasetSpec.refused_alternative`), the dataset to try instead: the class's
+  snapshots for its last trade or last quote.
+- **Delayed data on a real-time subscription.** A `fetch()` or `poll()` of a dataset of current
+  data (`DatasetSpec.serves_current_data`: the snapshots, the last trade and quote, the movers,
+  the option chain, the unified snapshot, the forex conversion) is checked; datasets of past
+  data (`previous_day_bar`, a `daily_open_close`, indicators, dividends, splits) are not, since
+  Massive labels them `DELAYED` on a Basic or Starter key though their rows are final. Each
+  label Massive puts on current data is held against the subscription of the data it labels. A
   page charged to a subscription (its rate-limit bucket names one) is that subscription's
   data. A page of the `other` bucket that is not a reference endpoint, such as the unified
   snapshot of several classes, is each row's own: a row's subscription is its ticker's class's
@@ -3573,7 +3586,8 @@ sees:
   Forex and crypto are never held to a label: Massive has no delayed currencies feed, and
   `delayed_subscriptions` cannot list `CURRENCIES`, so a refusal could name no remedy. A
   refusal raises `EntitlementError` from `fetch()` and fails the table from `poll()`, naming
-  the evidence and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
+  the dataset, the tickers of the refused rows (the first five, then a count), the field that
+  said `DELAYED`, and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
   `underlying_asset.timeframe` is never read: Massive's option-chain sample shows the
   underlying delayed beside a real-time contract. Reference endpoints are never checked.
   REST cannot ask for delayed data, so a listed subscription's labels pass and it returns what
@@ -7295,3 +7309,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 70 | Whether Massive accepts a real-time key on the delayed feed `delayed.massive.com` | A listed subscription always streams from the delayed feed; a refusal there fails the streams with Massive's text and says that removing the subscription from `MassiveConfig.delayed_subscriptions` uses the real-time feed | `tests/ingest/test_ws_connection.py`: a refusal on the delayed feed names the fix | `docs/live-tests.md` (a real-time key, the subscription listed): subscribe on `delayed.` and record the answer |
 | 71 | Whether a delayed options plan's option-chain snapshot (`/v3/snapshot/options/{underlyingAsset}`) carries the envelope status `DELAYED` (the futures snapshot is item 69) | A `DELAYED` envelope or row label refuses the data of a subscription not listed; without one, the table shows `Recency` `UNKNOWN`, never real-time | `tests/ingest/test_rest.py`: a `DELAYED` envelope and row labels | `tests/ingest/test_host_decision_integration.py` (Options Starter): read an SPY chain raw and record its envelope status and timeframe fields |
 | 72 | How Massive writes a futures contract's year: one digit (`ESZ5`) or two (`ESZ25`), for which contracts, and whether it answers the other spelling of the same contract | A year is never rewritten: `ESZ25` and `ESZ5` are different tickers, and a spelling Massive does not use returns no rows | `tests/datasets/test_symbols.py`: `ESZ5` and `ESZ25` are both canonical and stay as written | `tests/namespaces/test_futures_integration.py`: one page of ES single contracts; record each ticker's year digits beside its last trade date, and the rows Massive answers for the first one-digit and two-digit contract under the other spelling |
+| 73 | Whether past data (`previous_day_bar`, a past `daily_open_close`) reads on a Basic or Starter key with no subscription in `MassiveConfig.delayed_subscriptions`, though Massive labels it `DELAYED` | Only datasets of current data (`DatasetSpec.serves_current_data`) are checked for a `DELAYED` label; past data is served as Massive sends it | `tests/ingest/test_rest.py`: past data is never checked | `tests/namespaces/test_stocks_integration.py` (Stocks Basic): fetch AAPL's previous-day bar and last trading day's open and close on the default configuration |

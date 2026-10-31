@@ -91,6 +91,8 @@ CRYPTO_LAST = DatasetSpec(
     name="crypto.last",
     asset_class=AssetClass.CRYPTO,
     fetch_path=CRYPTO_LAST_PATH,
+    serves_current_data=True,
+    refused_alternative="crypto.snapshots",
     keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
 )
 MOVERS_PATH = "/v2/snapshot/locale/us/markets/stocks/{direction}"
@@ -99,6 +101,7 @@ MOVERS = DatasetSpec(
     name="stocks.movers",
     asset_class=AssetClass.STOCKS,
     fetch_path=MOVERS_PATH,
+    serves_current_data=True,
     keys={(R, MOVERS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
 CONTRACTS_PATH = "/v3/reference/options/contracts"
@@ -138,6 +141,7 @@ CONVERSION = DatasetSpec(
     name="forex.conversion",
     asset_class=AssetClass.FOREX,
     fetch_path=CONVERSION_PATH,
+    serves_current_data=True,
     keys={(R, CONVERSION_PATH): SourceKeys(symbol=KeySpec("Symbol"))},
 )
 INDEX_SNAPSHOT_PATH = "/v3/snapshot/indices"
@@ -146,6 +150,7 @@ INDEX_SNAPSHOTS = DatasetSpec(
     name="indices.snapshots",
     asset_class=AssetClass.INDICES,
     fetch_path=INDEX_SNAPSHOT_PATH,
+    serves_current_data=True,
     symbol_param="ticker.any_of",
     keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
@@ -156,6 +161,7 @@ INDEX_LEVELS = DatasetSpec(
     asset_class=AssetClass.INDICES,
     row_times=RowTimes.TICK,
     fetch_path=INDEX_SNAPSHOT_PATH,
+    serves_current_data=True,
     symbol_param="ticker.any_of",
     keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
 )
@@ -312,6 +318,7 @@ UNIFIED = DatasetSpec(
     summary="A dataset for the tests.",
     name="snapshots",
     fetch_path=UNIFIED_PATH,
+    serves_current_data=True,
     symbol_param="ticker.any_of",
     keys={(R, UNIFIED_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
@@ -2044,6 +2051,64 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
 
 
 # --- Errors ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spec", "path", "symbols", "refusal"),
+    [
+        (
+            DIVIDENDS,
+            DIVIDENDS_PATH,
+            ["AAPL"],
+            (
+                "stocks.dividends: the Stocks subscription of your plan does not include this "
+                "data; Massive answered HTTP 403 from GET /stocks/v1/dividends?"
+            ),
+        ),
+        (
+            CONTRACTS,
+            CONTRACTS_PATH,
+            None,
+            (
+                "options.contracts: your account does not include this data; Massive answered "
+                "HTTP 403 from GET /v3/reference/options/contracts?"
+            ),
+        ),
+    ],
+)
+def test_a_refusal_names_the_dataset_and_its_subscription(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    spec: DatasetSpec,
+    path: str,
+    symbols: list[str] | None,
+    refusal: str,
+) -> None:
+    fake_rest.reply(path, Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403))
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, spec, **({} if symbols is None else {"symbols": symbols}))
+    assert str(info.value).startswith(refusal)
+    assert str(info.value).endswith("upgrade")
+    assert (info.value.status, info.value.cause) == (403, dm.ErrorCause.EXPECTED)
+
+
+def test_a_refusal_names_the_alternative_where_one_exists(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        CRYPTO_LAST_PATH.format(**{"from": "BTC", "to": "USD"}), Reply(b"{}", status=403)
+    )
+    serve_pairs(fake_rest)
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
+    assert str(info.value).startswith(
+        "crypto.last: the Currencies subscription of your plan does not include this data; "
+        "Massive answered HTTP 403 from GET /v1/last/crypto/BTC/USD"
+    )
+    assert str(info.value).endswith(
+        "; try m.crypto.snapshots(...), which carries the same values and is in more plans"
+    )
 
 
 @pytest.mark.parametrize(
@@ -3912,7 +3977,8 @@ def test_a_delayed_row_fails_a_real_time_fetch(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert str(info.value) == (
-        "indices.snapshots data would be delayed (Massive reports timeframe=DELAYED), and "
+        "indices.snapshots data for I:SPX would be delayed (Massive reports timeframe=DELAYED), "
+        "and "
         "dm.Subscription.INDICES is not in MassiveConfig.delayed_subscriptions, so the library "
         "serves only real-time indices data. To accept delayed indices data (its streams then "
         "use Massive's delayed feed too): "
@@ -3980,6 +4046,46 @@ def test_history_is_never_checked(*, session: dm.MassiveSession, fake_rest: Fake
     )
     out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert [r["Symbol"] for r in out] == ["AAPL"]
+
+
+def test_past_data_is_never_checked(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive labels past data DELAYED on a plan whose current data is delayed, though its rows
+    # are final: only a dataset of current data is checked, so the dividends are served.
+    labelled = {**AAPL_DIVIDEND, "timeframe": "DELAYED"}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([labelled], status="DELAYED")))
+    assert [r["Symbol"] for r in fetch(session, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
+
+
+def test_a_delayed_refusal_names_five_refused_tickers_and_counts_the_rest(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    names = ["I:SPX", "I:NDX", "I:DJI", "I:VIX", "I:RUT", "I:OEX", "I:XAU"]
+    delayed = [{"ticker": t, "last_quote": {"timeframe": "DELAYED"}} for t in names]
+    real_time = {"ticker": "I:COMP", "timeframe": "REAL-TIME"}
+    # A repeated ticker is named once, and a row with no ticker is refused but names none.
+    unnamed = {"timeframe": "DELAYED"}
+    rows = [real_time, *delayed, delayed[0], unnamed]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(rows)))
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, INDEX_SNAPSHOTS, symbols=[*names, "I:COMP"])
+    assert str(info.value).startswith(
+        "indices.snapshots data for I:SPX, I:NDX, I:DJI, I:VIX, I:RUT and 2 more would be delayed "
+        "(Massive reports last_quote.timeframe=DELAYED), and dm.Subscription.INDICES is not in "
+        "MassiveConfig.delayed_subscriptions"
+    )
+
+
+def test_a_delayed_envelope_names_the_requested_tickers(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX"}], status="DELAYED")))
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert str(info.value).startswith(
+        "indices.snapshots data for I:SPX would be delayed (Massive reports status=DELAYED)"
+    )
 
 
 def test_a_delayed_label_fails_a_real_time_poll_table(
@@ -4067,8 +4173,8 @@ def test_a_delayed_stock_row_fails_a_unified_snapshot(
     with pytest.raises(dm.EntitlementError) as info:
         _unified(session, "AAPL")
     assert str(info.value).startswith(
-        "snapshots data would be delayed (Massive reports last_trade.timeframe=DELAYED), and "
-        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+        "snapshots data for AAPL would be delayed (Massive reports last_trade.timeframe=DELAYED), "
+        "and dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
     )
 
 

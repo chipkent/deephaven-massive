@@ -10,6 +10,7 @@ client, because the library filters the very bars in question. How to run these 
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -905,3 +906,31 @@ def test_day_file_before_a_split_is_as_traded(
     evidence(f"{symbol} {_DAY_FILE} {before}: {rows}; REST as-traded close {rest_close}")
     assert rows, f"no {symbol} row in the {before} day file"
     assert abs(float(str(rows[0]["close"])) / rest_close - 1) < _SPLIT_TOLERANCE / 10
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.verifies("73")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_past_stock_data_is_served_with_the_default_config(
+    live_config: dm.MassiveConfig, *, previous_trading_day: date, evidence: Evidence
+) -> None:
+    """The previous day's bar and a past day's open and close fetch on the default config.
+
+    Massive labels past data `DELAYED` on Basic and Starter keys, though its rows are final, so
+    only datasets of the market's current state are checked against
+    `MassiveConfig.delayed_subscriptions`. A session with no subscription listed reads AAPL's
+    `previous_day_bar` and its `daily_open_close` of the last trading day before the run. Fails
+    if either raises `EntitlementError` or returns no row.
+    """
+    config = dataclasses.replace(live_config, delayed_subscriptions=frozenset())
+    session = dm.MassiveSession(config)
+    try:
+        previous = session.stocks.previous_day_bar(_SYMBOL).fetch()
+        evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
+        day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch()
+        evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
+    finally:
+        session.close()
+    assert previous.size == 1, "previous_day_bar returned no row"
+    assert day.size == 1, f"daily_open_close returned no row for {previous_trading_day}"

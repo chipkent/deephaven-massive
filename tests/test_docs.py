@@ -121,6 +121,7 @@ def readme_server(
         on_status: Callable[..., None],
         on_data: Callable[..., None],
         on_state: Callable[..., None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> WsClient:
         return WsClient(
             fake_ws_server.url("/" + url.split("/", 3)[3]),
@@ -132,6 +133,7 @@ def readme_server(
             on_state=on_state,
             reconnect_backoff=0.05,
             max_reconnect_backoff=0.1,
+            reconnect_deadline=reconnect_deadline,
         )
 
     def session(*_args: object, **_kwargs: object) -> dm.MassiveSession:
@@ -283,9 +285,8 @@ def test_the_namespace_table_lists_the_catalogs_namespaces() -> None:
     start = text.index('<a id="namespaces"></a>')
     table = text[start : text.index("<a id=", start + 1)]
     listed = re.findall(r"^\| `(m\.[a-z_.]+)` \|", table, re.MULTILINE)
-    catalog = {
-        f"m.{spec.name.rpartition('.')[0] or spec.name}" for spec in CATALOG.by_name.values()
-    }
+    # The unified snapshot, a dataset of no namespace, is the session's own method.
+    catalog = {f"m.{spec.name.rpartition('.')[0]}" for spec in CATALOG.by_name.values()} - {"m."}
     assert len(listed) == len(set(listed))
     assert set(listed) == catalog
 
@@ -343,10 +344,11 @@ def test_the_split_adjustment_examples_run(
         ),
     )
     blocks = _section_blocks("split-adjustment")
-    assert len(blocks) == 3
-    # The section continues the console session the README opened before it.
+    assert len(blocks) == 2
+    [recipe] = _section_blocks("backfill-then-live")
+    # The sections continue the console session the README opened before them.
     names = _run_blocks(
-        ["import deephaven_massive as dm\n\nm = dm.MassiveSession()\n", *blocks],
+        ["import deephaven_massive as dm\n\nm = dm.MassiveSession()\n", *blocks, recipe],
         tmp_path,
         "split_adjustment",
     )

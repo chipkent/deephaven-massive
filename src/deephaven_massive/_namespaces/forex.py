@@ -96,6 +96,8 @@ LAST_QUOTE: Final = DatasetSpec(
     asset_class=AssetClass.FOREX,
     kind="quotes",
     fetch_path=_LAST_QUOTE,
+    serves_current_data=True,
+    refused_alternative="forex.snapshots",
     keys={
         # The last quote's `timestamp` is `Timestamp` after its projection onto the quotes kind.
         (_REST, _LAST_QUOTE): SourceKeys(
@@ -173,6 +175,7 @@ SNAPSHOTS: Final = DatasetSpec(
     ),
     asset_class=AssetClass.FOREX,
     fetch_path=_SNAPSHOTS,
+    serves_current_data=True,
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="tickers",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -187,6 +190,7 @@ MOVERS: Final = DatasetSpec(
     summary="The twenty currency pairs that gained or lost the most since the previous UTC close.",
     asset_class=AssetClass.FOREX,
     fetch_path=_MOVERS,
+    serves_current_data=True,
     keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
     revision_keys=("Updated",),
 )
@@ -199,6 +203,7 @@ CONVERSION: Final = DatasetSpec(
     summary="An amount converted between two currencies at the latest quote.",
     asset_class=AssetClass.FOREX,
     fetch_path=_CONVERSION,
+    serves_current_data=True,
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
     keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
     # The quote the conversion used: an explicit APPEND poll appends each new conversion.
