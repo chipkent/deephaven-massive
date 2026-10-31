@@ -61,12 +61,12 @@ def test_when_each_days_file_was_published(
 ) -> None:
     """When Massive publishes each day's stock file, against the documented ~11:00 New York.
 
-    The library treats a day's file as unpublished before `flat_file_publish_cutoff` (11:30
-    New York time the next day). Records the `LastModified` of `us_stocks_sip/day_aggs_v1`
-    for each of the last ten weekdays, in New York time, or why it has none (a holiday has no
-    file). Reading it: every file modified before 11:30 the next weekday confirms the cutoff;
-    later ones show how far to move it. Skips when the S3 credentials do not reach the stock
-    day files.
+    The library assumes no publication time: a missing day's file with no later file is taken
+    for one not out yet, and read from REST under `AUTO`. Records the `LastModified` of
+    `us_stocks_sip/day_aggs_v1` for each of the last ten weekdays, in New York time, or why it
+    has none (a holiday has no file). Reading it: the spread of times, Fridays' included, is
+    what the error message's "about 11:00 ET, but the time varies" describes. Skips when the
+    S3 credentials do not reach the stock day files.
     """
     if not flat_files_reached(_DAY_FILE):
         pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")

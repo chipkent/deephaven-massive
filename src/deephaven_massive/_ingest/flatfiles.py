@@ -37,20 +37,20 @@ Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NY
 then file order; they are not sorted by time across venues. Only an empty CSV field is null:
 text such as `NA` or `NULL` is data (both are valid tickers).
 
-A missing file is judged by its date: on a weekend (for every class but crypto, which trades
-every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
-likely a market holiday. A futures exchange holiday folds into the next session, so when a
-futures range named by instants ends with a run of missing files that holds a weekday (a
-holiday, alone or followed by a weekend), the next existing session file within `ROLL_LIMIT`
-(7 days) of the run's first day is read too: its early-opened hours may lie inside the
-range. If that file is not published yet, may still be late, or does not exist within the
-limit, the call raises `MassiveError` rather than return a short table. A range named by
+A missing file is judged by what exists, never by the clock, since Massive's publication time
+varies. On a day without trading (a weekend for every class but crypto, which trades every
+day) it is skipped silently. A missing trading day's file depends on whether another source
+can serve the call (`infer_holidays`, which the query sets). When REST can, the read does not
+guess: it returns every such day as unread (`FlatFileRead.unread`), keeping no row of it, and
+the query reads each from REST, where no rows means a day without trading. When nothing else
+can serve the call, Massive's order decides: it writes a day's file after the day ends, in date
+order, so a missing trading day's file with a later day's file after it (in the range, or
+looked for in the days after it, up to `ROLL_LIMIT`, 7 days, and before the current day) is a
+day without trading, a holiday, and is skipped with a WARNING; the first one with no later
+file may simply not be published yet, and the query raises. A futures exchange holiday folds
+into the next session, so in that case a futures range named by instants reads the later
+session file found too: its early-opened hours may lie inside the range. A range named by
 session dates never rolls forward: a date names its own session's file exactly.
-
-A missing file for the last requested date may instead be late: within a day after its
-publication time (`within_publication_grace` in `_datasets/history_source.py`) it raises
-`MassiveError` naming both causes, and after that it is skipped with a WARNING like any other
-weekday.
 
 A missing file is one S3 answers with HTTP 404 and the S3 error code `NoSuchKey`. Any other
 404 (another S3 code, or a page that is not S3's at all, such as the HTML "404 Not Found" page
@@ -114,23 +114,19 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from deephaven import merge
 
+from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
-from deephaven_massive._datasets.dates import DaySpan, TimeRange, is_trading_day
-from deephaven_massive._datasets.history_source import (
-    NOT_PUBLISHED,
-    published,
-    within_publication_grace,
-)
+from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start, is_trading_day
+from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
     BarBounds,
@@ -176,6 +172,7 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.transports import FlatFileRead
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -202,6 +199,8 @@ BLOCK_SIZE: Final = 1024 * 1024
 """Bytes of decompressed CSV per block. Arrow reads about 32 blocks ahead of the consumer, so
 this sets a reader's memory: about 32 MiB of text in flight per concurrent reader."""
 
+_ONE_DAY: Final = timedelta(days=1)
+
 _TABLE_BLOCKS: Final = 16
 """A file's surviving rows are converted to a Deephaven table each time they reach this many
 blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far less JVM heap
@@ -209,10 +208,10 @@ than one per block (each table carries a fixed overhead), while memory stays bou
 
 
 ROLL_LIMIT: Final = timedelta(days=7)
-"""How far past the first missing day of a futures range's end the next session file is sought.
+"""How far past the first missing trading day of a range's end a later day's file is sought.
 
-A holiday folds its trading into the next session; the longest run of days without a session
-is a holiday weekend of four days, so a week always reaches the next session."""
+The longest run of days without trading (or, for futures, without a session) is a holiday
+weekend of four days, so a week always reaches the next day with a file once it is out."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +241,29 @@ def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
     """
     times = window.times
     return None if times is None else (times.start_ns, times.end_ns)
+
+
+def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
+    """Tell whether a read's files are trimmed to their own days, to tile with REST's days.
+
+    A range of instants keeps a file's rows by the call's range only, and a futures session
+    a holiday folded into opens early, so its file holds hours that REST's read of the
+    holiday's session also returns. Trimming each file to its day's instants makes the files'
+    days and REST's days tile exactly. Bars of a day or longer are not trimmed: a session bar
+    starts before its session's open, and REST serves those bars by their `Date` instead.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments; for bars, the timespan.
+        window: The call's window.
+
+    Returns:
+        True for a range of instants, except for bars of a day or longer.
+    """
+    if not isinstance(window.span, TimeRange):
+        return False
+    timespan = request.timespan
+    return not spec.is_bars or timespan is None or intraday(timespan)
 
 
 def _ends_at_an_instant(spec: DatasetSpec, window: HistoryWindow) -> bool:
@@ -312,7 +334,8 @@ class _Transform:
 
     Attributes:
         dataset: The dataset name, for messages.
-        plan: What every file of the request reads and keeps.
+        plan: What every file of the request reads and keeps; `plan_for` narrows its time
+            range to a file's own day when `tile` is set.
         columns: Per schema column, in order: its type, its name, and the source column that
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
@@ -332,6 +355,10 @@ class _Transform:
             zone (`row_times.stamp_rule`); None otherwise.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
             None for ticks.
+        tile: The asset class whose day rules trim each file's rows to its own day's
+            instants, `[day_start(day), day_start(day + 1))` (for futures, its session's
+            hours), so a file's rows and REST's rows of another day never overlap; None to
+            trim only to the call's range.
     """
 
     dataset: str
@@ -348,6 +375,7 @@ class _Transform:
     symbols: WireSymbols
     stamps: StampRule | None = None
     bars: BarBounds | None = None
+    tile: AssetClass | None = None
 
     @classmethod
     def build(
@@ -451,6 +479,22 @@ class _Transform:
             stamps=stamps,
             bars=window.bars,
         )
+
+    def plan_for(self, key: _Key) -> ReadPlan:
+        """Return the read plan of one file: with `tile`, its time range is the file's own day.
+
+        Args:
+            key: The file.
+
+        Returns:
+            The request's plan; with `tile`, its time range narrowed to the file's own day.
+        """
+        plan = self.plan
+        if self.tile is None or plan.window_ns is None:
+            return plan
+        own = TimeRange(day_start(self.tile, key.day), day_start(self.tile, key.day + _ONE_DAY))
+        start, end = plan.window_ns
+        return replace(plan, window_ns=(max(start, own.start_ns), min(end, own.end_ns)))
 
     def apply(
         self, batch: pa.RecordBatch, *, received: int, key: _Key
@@ -645,9 +689,10 @@ class FlatFileHistory:
         *,
         dates: Sequence[date],
         call: int,
+        infer_holidays: bool,
         stop: threading.Event | None = None,
-    ) -> Table:
-        """Return the rows of `window` from the dataset's flat files, as one static table.
+    ) -> FlatFileRead:
+        """Return the rows of `window` from the dataset's flat files, and the days they lack.
 
         Flat files have already been chosen for the request
         (`choose_source` in `_datasets/history_source.py`), so the dataset has a file for its
@@ -657,7 +702,7 @@ class FlatFileHistory:
         failure of the earliest file is raised. Closing the session stops the reads the same
         way, and so does setting a background read's `stop` token, after which the call raises
         `MassiveError("<dataset> history: the read was cancelled")` once the pool has drained.
-        Logs `source=S3 files=<n> skipped=<dates>` at INFO.
+        Logs `source=S3 files=<n> skipped=<dates> unread=<dates>` at INFO.
 
         Args:
             spec: The dataset.
@@ -667,20 +712,23 @@ class FlatFileHistory:
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The call's id (`SessionCore.next_stream_id`), which names its reader threads
                 (`"massive #1 call-9 files_0"`).
+            infer_holidays: True when no other source can serve the call: a missing trading
+                day's file with a later day's file is skipped as a day without trading, and
+                only the first day with no later file is unread. False to report every missing
+                trading day as unread, for the query to read from REST.
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
                 None when only the session's close should stop the reads.
 
         Returns:
-            A static table in the dataset's schema: the files' rows in date order (and, for
-            futures, venue order within a date), each file's rows in file order. A range
-            without rows, or without any file, gives an empty table with every column.
+            The read (`FlatFileRead`): each kept file's static tables with its day, in date
+            order (and, for futures, venue order within a date), each file's rows in file
+            order; an empty table with every column; and the unread days, whose rows (and,
+            under `infer_holidays`, every later day's) the parts leave out.
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
-        the venue and the `venues=` parameter for futures; `MassiveError` when the file for the
-        last requested date is missing on a trading day within a day after its publication time
-        (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
-        holiday"`), when the S3 client cannot be created, the bucket is unreachable, answers
+        the venue and the `venues=` parameter for futures; `MassiveError` when the S3 client
+        cannot be created, the bucket is unreachable, answers
         a 404 that is not S3's `NoSuchKey` (a wrong bucket or endpoint: `"cannot read
         s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
         s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
@@ -704,15 +752,17 @@ class FlatFileHistory:
             warnings=self._core.warnings,
             stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
+        if not infer_holidays and _tiles(spec, request, window):
+            transform = replace(transform, tile=cast("AssetClass", spec.asset_class))
         keys = _keys(prefix, request.venues, dates)
-        roll = prefix if _ends_at_an_instant(spec, window) else None
         threads = f"{self._core.thread_prefix} call-{call} files"
         return self._read(
             spec,
             transform,
             keys,
-            last=dates[-1],
-            roll=roll,
+            prefix=prefix,
+            roll=_ends_at_an_instant(spec, window),
+            infer_holidays=infer_holidays,
             threads=threads,
             stop=cast("Cancel | None", stop),
         )
@@ -723,12 +773,13 @@ class FlatFileHistory:
         transform: _Transform,
         keys: Sequence[_Key],
         *,
-        last: date,
-        roll: str | None = None,
+        prefix: str,
+        roll: bool = False,
+        infer_holidays: bool = True,
         threads: str,
         stop: Cancel | None = None,
-    ) -> Table:
-        """Read files on a pool of reader threads and merge their rows into one static table.
+    ) -> FlatFileRead:
+        """Read files on a pool of reader threads, and say which days they could not serve.
 
         Waits until every read has finished or one has failed. On a failure, or an interrupt
         of this thread, it sets the call's cancel event, which stops the other reads at their
@@ -736,23 +787,33 @@ class FlatFileHistory:
         raises the failure of the earliest file (an interrupt is re-raised as is). If the
         session was closed meanwhile, it raises `"MassiveSession #1 is closed"`, whatever the
         reads returned: a request in flight at the close may have been answered with any
-        outcome. The missing-file error of `_skip_missing` propagates.
+        outcome. A missing file of a day without trading (`dates.is_trading_day`) is skipped
+        silently. A missing trading day's file is judged by `infer_holidays`. When it is set
+        (no other source can serve the call), `_after_missing` decides: the day is skipped with
+        a WARNING when a later day's file exists (a day without trading, such as a holiday),
+        and the first one with no later file is unread, with no row kept from it on. When it
+        is not set, the library does not guess: every missing trading day is unread, and no
+        row of it is kept (for futures, of any venue), since the query reads it from REST.
 
         Args:
             spec: The dataset.
             transform: The request's block transform.
             keys: The files to read, in result order.
-            last: The last partition date of the request.
-            roll: The futures prefix when the range ends at an instant: when the run of
-                missing files that ends a venue's keys holds a weekday, the next existing
-                session file is read too (`_roll_forward`). None reads only `keys`.
+            prefix: The dataset's prefix, with its `{venue}` placeholder for futures: where to
+                look for the files after a range's missing last files.
+            roll: True when a futures range ends at an instant: the next existing session file
+                after a venue's missing last files is read too (`_after_missing`), when
+                `infer_holidays` is set.
+            infer_holidays: True to take a missing trading day with a later file for a day
+                without trading; False to report every missing trading day as unread.
             threads: The name prefix of the reader threads, such as `"massive #1 call-9 files"`.
             stop: A background read's stop token, which the call's cancel event follows; once
                 it is set, the call raises `MassiveError` naming the cancellation after the
                 pool has drained. None for none.
 
         Returns:
-            The merged table.
+            The read: each kept file's tables with its day, the empty table in the schema, and
+            the unread days.
 
         Raises:
             MassiveError: If `stop` was set: the read was cancelled.
@@ -775,26 +836,55 @@ class FlatFileHistory:
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)
-        self._skip_missing(spec, missing, last=last)
+        trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
+        later: list[tuple[date, Table]] = []
+        unread: tuple[date, ...]
+        if infer_holidays:
+            unpublished, later = self._after_missing(
+                spec,
+                transform,
+                keys=keys,
+                missing=set(missing),
+                prefix=prefix,
+                roll=roll,
+                stop=stop,
+            )
+            unread = () if unpublished is None else (unpublished,)
+            holidays = [day for day in trading if unpublished is None or day < unpublished]
+        else:
+            unread, holidays = tuple(trading), []
+        for key in missing:
+            if key.day in holidays:
+                logger.warning(
+                    "%s: %s does not exist, though a later day's file does; skipping %s, a day "
+                    "without trading (a holiday?)",
+                    spec.name,
+                    key.key,
+                    key.day.isoformat(),
+                )
         logger.info(
-            "%s history: source=S3 files=%d skipped=%s",
+            "%s history: source=S3 files=%d skipped=%s unread=%s",
             spec.name,
             len(keys) - len(missing),
             ",".join(sorted({key.day.isoformat() for key in missing})) or "none",
+            ",".join(day.isoformat() for day in unread) or "none",
         )
-        tables = [table for part in parts if part is not None for table in part]
-        if roll is not None:
-            tables.extend(
-                self._roll_forward(
-                    spec, transform, keys=keys, missing=set(missing), prefix=roll, stop=stop
-                )
-            )
+        first = unread[0] if infer_holidays and unread else None
+        kept = [
+            (key.day, table)
+            for key, part in zip(keys, parts, strict=True)
+            if part is not None and key.day not in unread and (first is None or key.day < first)
+            for table in part
+        ]
+        if not unread:
+            # A later file read for a holiday's hours.
+            kept.extend(later)
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
-            empty = transform.arrow_schema.empty_table()
-            return merge([dataset_table(empty, transform.date_columns), *tables])
+            empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
+        return FlatFileRead(tuple(kept), empty, unread)
 
-    def _roll_forward(
+    def _after_missing(
         self,
         spec: DatasetSpec,
         transform: _Transform,
@@ -802,50 +892,56 @@ class FlatFileHistory:
         keys: Sequence[_Key],
         missing: set[_Key],
         prefix: str,
+        roll: bool,
         stop: Cancel | None,
-    ) -> list[Table]:
-        """Read, per venue, the first session file after a range's missing last files.
+    ) -> tuple[date | None, list[tuple[date, Table]]]:
+        """Tell the files missing at a range's end apart: a day without trading, or not out yet.
 
-        A holiday's trading belongs to the next session, which opens early: the session of
-        Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, and after Good
-        Friday 2024 the session of Monday 2024-04-01 opened on Thursday 2024-03-28. So a range
-        that ends on the holiday, or on the weekend after it, finds rows in a later file. For
-        each venue, the run of missing files that ends its keys is examined: a run of weekend
-        days only follows an existing file and needs nothing, while a run that holds a
-        weekday is followed by the days after the range, up to `ROLL_LIMIT` (7 days) past the
-        run's first day, until a file exists. A day whose file is not published yet, or a
-        missing file that may still be late (`within_publication_grace`), stops the search
-        with an error naming the run's first missing weekday, and so does a search that finds
-        no file: the range's last hours may lie in the file, so the call never returns a
-        silently short table. The reads run on the caller thread, one at a time; the transform
-        keeps only the rows inside the range. Each read checks the session before its request
-        and after every block, as the pool's reads do, so a close stops it with
-        `"MassiveSession #1 is closed"`. The pool's cancel event is already set when this runs,
-        so these reads listen to the background read's stop token instead, if there is one: a
-        read released meanwhile stops at its next block, and nothing after it is read.
+        Massive writes a day's file after the day ends, in date order, so a missing trading
+        day's file with a later day's file after it is a day without trading (a holiday), and
+        one with no later file may simply not be published yet. For each venue (one, outside
+        futures), the run of missing files that ends its keys is examined: a run of days
+        without trading only (weekends) needs nothing; otherwise the days after the range are
+        looked for, trading days only, up to `ROLL_LIMIT` (7 days) past the run's first
+        missing trading day and never as far as `current_partition`, whose file cannot exist
+        yet. A file found makes the run days without trading. None found makes the run's
+        first missing trading day unpublished. No clock time is assumed: Massive's publication
+        time varies.
+
+        When `roll` is set (futures named by instants), the file found is read, since a
+        holiday's trading folds into the next session, which opens early: the session of
+        Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, so a range that
+        ends on the holiday, or on the weekend after it, finds rows in the later file; the
+        transform keeps only the rows inside the range. Otherwise the file is only opened and
+        closed. The looks run on the caller thread, one at a time. Each checks the session
+        before its request and after every block, as the pool's reads do, so a close stops it
+        with `"MassiveSession #1 is closed"`. The pool's cancel event is already set when this
+        runs, so these looks listen to the background read's stop token instead, if there is
+        one.
 
         Args:
-            spec: The dataset, for the log.
+            spec: The dataset.
             transform: The request's block transform.
             keys: The request's files, in date and then venue order.
             missing: The files of `keys` that do not exist.
-            prefix: The futures prefix, with its `{venue}` placeholder.
+            prefix: The dataset's prefix, with its `{venue}` placeholder for futures.
+            roll: True to read the later file found (futures named by instants).
             stop: A background read's stop token, or None when only the session's close
                 should stop the reads.
 
         Returns:
-            The tables of the files found, in venue order; empty when no run needs a roll.
+            The first unpublished day over all venues, or None; and the tables of the later
+            files read for `roll`, each with its file's day, in venue order.
 
         Raises:
-            MassiveError: If the next session's file is not published yet, or a missing
-                file may still be late, or no file exists within `ROLL_LIMIT` of the
-                run's first day, or `"<dataset> history: the read was cancelled"` once `stop`
-                is set. A failed read raises the public error `_read_key` raises
+            MassiveError: `"<dataset> history: the read was cancelled"` once `stop` is set. A
+                failed request or read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
         cancel = threading.Event() if stop is None else stop
-        tables: list[Table] = []
-        cutoff = self._core.config.flat_file_publish_cutoff
+        current = current_partition(spec)
+        unpublished: date | None = None
+        tables: list[tuple[date, Table]] = []
         for venue in dict.fromkeys(key.venue for key in keys):
             own = [key for key in keys if key.venue == venue]
             run: list[_Key] = []
@@ -853,52 +949,110 @@ class FlatFileHistory:
                 if key not in missing:
                     break
                 run.append(key)
-            if not any(is_trading_day(spec.asset_class, key.day) for key in run):
+            trading = [key for key in run if is_trading_day(spec.asset_class, key.day)]
+            if not trading:
                 continue
-            name = None if venue is None else venue.value
-            # The run is newest first; name its first missing weekday, the likely holiday.
-            holiday = next(
-                key for key in reversed(run) if is_trading_day(spec.asset_class, key.day)
+            first = trading[-1]  # the run is newest first
+            later = self._later_file(
+                spec,
+                transform,
+                first,
+                after=own[-1].day,
+                current=current,
+                prefix=prefix,
+                roll=roll,
+                cancel=cancel,
             )
-            day, limit = own[-1].day, run[-1].day + ROLL_LIMIT
-            while True:
-                day += timedelta(days=1)
-                if day > limit:
-                    raise MassiveError(
-                        f"{spec.name}: {holiday.key} does not exist and no session file follows "
-                        f"within {ROLL_LIMIT.days} days, so the hours of the range a holiday "
-                        "moved into a later session cannot be read"
-                    )
-                key = _Key(object_key(prefix, day, name), day, venue)
-                if not published(spec, day, cutoff=cutoff):
-                    raise MassiveError(
-                        f"{spec.name}: {holiday.key} does not exist, and the range's last hours "
-                        f"may lie in the next session's file, {key.key}, which is "
-                        f"{NOT_PUBLISHED}; retry once it is published, or read REST with "
-                        "source=dm.HistorySource.REST"
-                    )
-                try:
-                    part = self._read_key(transform, key, cancel=cancel)
-                except _CancelledError:
-                    logger.debug("%s history: stopped before reading %s", spec.name, key.key)
-                    raise MassiveError(f"{spec.name} history: the read was cancelled") from None
-                if part is not None:
-                    logger.info(
-                        "%s: %s is missing; reading %s for the hours a holiday moved into it",
-                        spec.name,
-                        holiday.key,
-                        key.key,
-                    )
-                    tables.extend(part)
-                    break
-                if within_publication_grace(spec, day, cutoff=cutoff):
-                    raise MassiveError(
-                        f"{spec.name}: {holiday.key} does not exist, and the next session's file, "
-                        f"{key.key}, does not exist either: {day.isoformat()} is "
-                        f"{NOT_PUBLISHED}, or was a market holiday; retry later, or read REST "
-                        "with source=dm.HistorySource.REST"
-                    )
-        return tables
+            if later is None:
+                unpublished = first.day if unpublished is None else min(unpublished, first.day)
+            else:
+                tables.extend(later)
+        return unpublished, tables
+
+    def _later_file(
+        self,
+        spec: DatasetSpec,
+        transform: _Transform,
+        first: _Key,
+        *,
+        after: date,
+        current: date,
+        prefix: str,
+        roll: bool,
+        cancel: threading.Event,
+    ) -> list[tuple[date, Table]] | None:
+        """Look for the first file after a range's missing last files; see `_after_missing`.
+
+        Args:
+            spec: The dataset.
+            transform: The request's block transform.
+            first: The run's first missing trading day's file.
+            after: The range's last partition date: the look starts the day after.
+            current: `current_partition`: the look stops before it.
+            prefix: The dataset's prefix, with its `{venue}` placeholder for futures.
+            roll: True to read the file found; False to only open and close it.
+            cancel: The event that stops a look: the background read's stop token, or a
+                private one when only the session's close should stop it.
+
+        Returns:
+            The file's tables, each with the file's day, when it is read (none when it is only
+            opened), or None when no later file exists in the looked-for days.
+
+        Raises:
+            MassiveError: `"<dataset> history: the read was cancelled"` once `cancel` is set;
+                a failed request or read raises the public error `_read_key` raises.
+        """
+        name = None if first.venue is None else first.venue.value
+        day, limit = after, first.day + ROLL_LIMIT
+        while (day := day + timedelta(days=1)) < current and day <= limit:
+            if not is_trading_day(spec.asset_class, day):
+                continue
+            key = _Key(object_key(prefix, day, name), day, first.venue)
+            try:
+                found = (
+                    self._read_key(transform, key, cancel=cancel)
+                    if roll
+                    else self._opened(key, cancel=cancel)
+                )
+            except _CancelledError:
+                logger.debug("%s history: stopped before reading %s", spec.name, key.key)
+                raise MassiveError(f"{spec.name} history: the read was cancelled") from None
+            if found is not None:
+                logger.info(
+                    "%s: %s is missing and %s exists, so it was a day without trading%s",
+                    spec.name,
+                    first.key,
+                    key.key,
+                    "; read for the hours a holiday moved into it" if roll else "",
+                )
+                return [(day, table) for table in found]
+        return None
+
+    def _opened(self, key: _Key, *, cancel: threading.Event) -> list[Table] | None:
+        """Tell whether a file exists by opening it and closing it unread.
+
+        Args:
+            key: The file.
+            cancel: The call's cancel event, checked before the request.
+
+        Returns:
+            No tables when the file exists; None when it does not.
+
+        Raises:
+            MassiveError: The public error of `_public` when the request fails, including
+                `AuthenticationError` and `EntitlementError`; `_check_open`'s when the session
+                is closed. A cancelled call raises `_CancelledError`.
+        """
+        self._check(cancel)
+        try:
+            file = self._client.open(key.key)
+        except WireError as error:
+            public = _public(error, key)
+            raise public from error
+        if file is None:
+            return None
+        with file:
+            return []
 
     def _check_open(self) -> None:
         """Reject further work once the session's flat-file client is closed.
@@ -1009,7 +1163,7 @@ class FlatFileHistory:
             file = self._client.open(key.key)
             if file is None:
                 return None
-            with file, contextlib.closing(file.batches(transform.plan)) as batches:
+            with file, contextlib.closing(file.batches(transform.plan_for(key))) as batches:
                 self._check(cancel)
                 try:
                     return self._gather(
@@ -1088,49 +1242,14 @@ class FlatFileHistory:
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=where)
         return tables
 
-    def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
-        """Apply the missing-file rules to the files that did not exist.
-
-        A file of a day without trading is skipped silently: a weekend for stocks, options,
-        indices, and futures, a Saturday for forex (`dates.is_trading_day`); crypto trades
-        every day. A trading day's file is skipped with a WARNING (most likely a market
-        holiday). The file for the
-        last requested date may instead be late, so within `PUBLICATION_GRACE` (in
-        `_datasets/history_source.py`) after its publication time it raises; after that it is
-        skipped with a WARNING too.
-
-        Args:
-            spec: The dataset.
-            missing: The keys that S3 reported as missing, in date order.
-            last: The last partition date of the request.
-
-        Raises:
-            MassiveError: If the file for `last` is missing on a trading day within a day after
-                its publication time: `"<dataset>: <key> does not exist: <date> is not yet
-                published (flat files land ~11:00 ET next day), or was a market holiday"`.
-        """
-        cutoff = self._core.config.flat_file_publish_cutoff
-        for key in missing:
-            if not is_trading_day(spec.asset_class, key.day):
-                continue
-            day = key.day.isoformat()
-            if key.day == last and within_publication_grace(spec, key.day, cutoff=cutoff):
-                raise MassiveError(
-                    f"{spec.name}: {key.key} does not exist: {day} is not yet published (flat "
-                    "files land ~11:00 ET next day), or was a market holiday"
-                )
-            logger.warning(
-                "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
-            )
-
 
 def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:
     """Warn when not one of several trading days' files exists: the address may be wrong.
 
-    Each missing trading day's file is otherwise skipped as a likely holiday, so a wrong prefix,
-    bucket, or venue would read as a run of holidays and return an empty table quietly. Two
-    or more trading days' files, all missing, are logged at WARNING with the count and where
-    they were looked for.
+    A wrong prefix, bucket, or venue reads as a run of missing files, which the read takes for
+    days not published yet: the call then reads REST or raises "not published yet", which
+    would hide the real cause. Two or more trading days' files, all missing, are logged at
+    WARNING with the count and where they were looked for.
 
     Args:
         spec: The dataset.
