@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from deephaven_massive._errors import MassiveError
 
 __all__ = [
+    "FlatFileRead",
     "FlatFileTransport",
     "HostDecision",
     "IngestPorts",
@@ -348,6 +349,26 @@ class StreamTransport(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class FlatFileRead:
+    """What a flat-file `history` read returns: its rows, and the first day it could not read.
+
+    Returned by `FlatFileTransport.history`; immutable.
+
+    Attributes:
+        table: A static table in the dataset's schema: the rows of every day before
+            `unpublished` (of every day when it is None).
+        unpublished: The first partition date whose file is not published yet: a trading
+            day's file is missing and no later day's file exists, so the day may simply not be
+            out yet. The table holds no row of that date or a later one; the query reads them
+            from REST, or raises. None when every needed file was read or is a day without
+            trading.
+    """
+
+    table: Table
+    unpublished: date | None
+
+
 class FlatFileTransport(Protocol):
     """The flat-file transport, from `SessionCore.flat_file_transport()` (`IngestPorts.flat_files`).
 
@@ -364,7 +385,7 @@ class FlatFileTransport(Protocol):
         dates: Sequence[date],
         call: int,
         stop: threading.Event | None = None,
-    ) -> Table:
+    ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
 
         Args:
@@ -381,15 +402,15 @@ class FlatFileTransport(Protocol):
                 the session's close stops.
 
         Returns:
-            A static table with the dataset's columns: the files' rows in date order. A
-            range without rows or files gives an empty table with every column.
+            The read: a static table with the dataset's columns, the files' rows in date
+            order (an empty table with every column for a range without rows or files), and
+            the first day whose file is not published yet, if any.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
             EntitlementError: If the plan does not include the files (S3 answers 403); for
                 futures files the message names the venue and the `venue=` parameter.
-            MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
-                missing within a day of its publication time, or a read fails in any other
+            MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is
                 returned and logs a WARNING; it raises nothing.
         """

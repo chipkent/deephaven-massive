@@ -862,12 +862,12 @@ def test_a_fair_value_frame_lands_in_blink(ws_session: WsSession, rows_when: Row
 # --- Flat files, end to end -------------------------------------------------------------------
 
 FILE_DAY = "2025-03-03"
-AFTER_PUBLICATION = datetime(2025, 3, 10, 16, tzinfo=UTC)
+FILES_PUBLISHED = datetime(2025, 3, 10, 16, tzinfo=UTC)
 
 
 @pytest.fixture
 def files_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
-    monkeypatch.setattr(history_source, "_now", lambda: AFTER_PUBLICATION)
+    monkeypatch.setattr(history_source, "_now", lambda: FILES_PUBLISHED)
     credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "flat-file-secret"}
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", **cast("Any", credentials)))
     yield m

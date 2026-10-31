@@ -37,8 +37,7 @@ rules to a dataset's `history()` arguments.
 into its instant, and `day_end` gives the instant a day is over by.
 
 A futures date names a trading session, whose 17:00 Chicago rule is `futures_sessions`; the
-bars of a timespan that fit a range are `bar_periods`; and whether a day's flat file can exist
-yet is `history_source.flat_file_published`.
+bars of a timespan that fit a range are `bar_periods`.
 
 Every function is thread-safe and pure (the current time is a parameter), apart from the
 DEBUG lines `parse_date_like` logs when it rounds an instant from Java, numpy, or pandas, or

@@ -20,28 +20,26 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
 - `choose_source` decides between flat files and REST for the whole range. Flat files can serve
   a request when S3 credentials are configured, the dataset has a file for the request (for
   bars only 1-minute and 1-day bars, and 1-session bars for futures, and only unadjusted where
-  the dataset has an `adjusted` parameter), and every file the range needs is already
-  published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
-  or more, or `dm.ALL`) read flat files and fewer use REST. One call never mixes sources, and
-  so never mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
+  the dataset has an `adjusted` parameter). When both sources can, many symbols
+  (`MassiveConfig.flat_file_symbol_threshold` or more, or `dm.ALL`) read flat files and fewer
+  use REST. Whether a day's file is published yet is never guessed from the clock: the
+  flat-file transport finds out by reading, and under `AUTO` the query reads the days whose
+  files are not there yet from REST, with the same unadjusted request, so one call never
+  mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
   day or longer are stamped alike by every source (`row_times.stamp_rule`), so the choice never
   changes which day a bar is labelled with; a stamp of a form Massive is not known to use is
   served too, labelled the same way, and logs a WARNING.
 
-A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
-after the next day starts in the class's day zone (`publish_time`); futures use their
-Chicago session date. Massive says files land "by approximately 11:00 AM ET the following day".
-On weekdays they land shortly after midnight, but Friday's landed on Saturday at 10:27 and
-11:17 New York time in a live check, close to the 11:30 default; so a file whose cutoff falls
-on a Saturday or Sunday counts as published `WEEKEND_PUBLICATION_DELAY` later (14:30 by
-default).
+Massive says a day's files land "by approximately 11:00 AM ET the following day", and the
+time varies (Friday's files have landed late on Saturday morning), so every message about a
+file not there yet says so (`PUBLICATION_NOTE`).
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
@@ -53,14 +51,12 @@ from deephaven_massive._datasets.bar_periods import (
 )
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import (
-    NEW_YORK,
     DaySpan,
     TimeRange,
     bounds,
     day_class,
     day_end,
     day_zone,
-    midnight,
 )
 from deephaven_massive._datasets.filters import filter_key, param_family
 from deephaven_massive._datasets.futures_sessions import (
@@ -75,8 +71,7 @@ from deephaven_massive._massive import ParamKind, Transport, source
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
-    from datetime import tzinfo
+    from collections.abc import Iterable
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -84,41 +79,26 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike
 
 __all__ = [
-    "NOT_PUBLISHED",
-    "PUBLICATION_GRACE",
-    "WEEKEND_PUBLICATION_DELAY",
+    "PUBLICATION_NOTE",
     "Alternative",
     "HistoryWindow",
     "SourceChoice",
     "choose_source",
+    "current_partition",
     "flat_file_prefix",
-    "flat_file_published",
     "history_window",
     "partition_dates",
-    "publish_time",
-    "published",
     "rest_history_problem",
     "session_date_param",
-    "within_publication_grace",
 ]
 
 logger = logging.getLogger(__name__)
 
-NOT_PUBLISHED: Final = "not yet published; flat files land ~11:00 ET next day"
-"""The wording for a flat file that cannot be expected to exist yet."""
-
-PUBLICATION_GRACE: Final = timedelta(days=1)
-"""How long after its publication time a missing file may still just be late."""
-
-WEEKEND_PUBLICATION_DELAY: Final = timedelta(hours=3)
-"""How much later than the cutoff a file whose cutoff falls on a weekend counts as published.
-
-Massive publishes a weekday's files shortly after midnight New York time, far ahead of the
-11:30 default cutoff, but Friday's files landed on Saturday at 10:27 and 11:17 in a live check.
-Three hours keeps a margin like a weekday's over that: 14:30 by default."""
-
-_SATURDAY: Final = 5
-"""`date.weekday()` of a Saturday; a larger value is a Sunday."""
+PUBLICATION_NOTE: Final = (
+    "Massive usually publishes a day's flat files by about 11:00 ET the next day, but the time "
+    "varies"
+)
+"""What every message about a flat file not published yet says about when it will be."""
 
 _ONE_DAY: Final = timedelta(days=1)
 
@@ -324,45 +304,24 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
     return times.partition_dates(day_zone(spec.asset_class))
 
 
-def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None) -> bool:
-    """Tell whether a day's flat file of a dataset counts as published (`publish_time`).
+def current_partition(spec: DatasetSpec, *, now: datetime | None = None) -> date:
+    """Return the partition date being traded now, whose flat file cannot exist yet.
+
+    A day's file is written after the day ends, so the file of this date, and of every later
+    one, is certainly not published. The flat-file read looks for a later day's file only
+    before this date.
 
     Args:
-        spec: The dataset; its asset class picks the day zone (Chicago sessions for futures).
-        day: The file's partition date.
-        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+        spec: The dataset; its asset class picks the day zone (for futures, the session).
         now: The current instant; None reads the clock.
 
     Returns:
-        True from the file's publication time on.
+        The current date in the class's day zone, or for futures the current session.
     """
     moment = _now() if now is None else now
-    zone = day_zone(spec.asset_class)
-    return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
-
-
-def within_publication_grace(
-    spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None
-) -> bool:
-    """Tell whether a missing file for `day` may still just be late, rather than a holiday.
-
-    A file counts as published from `publish_time` (the configured cutoff, New York time, after
-    the day ends in the class's day zone). For `PUBLICATION_GRACE` after that, a missing file
-    is treated as late; from then on, as a market holiday that has no file. There is no holiday
-    calendar, so this window is the only way to tell the two apart.
-
-    Args:
-        spec: The dataset; its asset class picks the day zone (Chicago sessions for futures).
-        day: The file's partition date.
-        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
-        now: The current instant; None reads the clock.
-
-    Returns:
-        True before `publish_time(day) + PUBLICATION_GRACE`.
-    """
-    moment = _now() if now is None else now
-    published = publish_time(day, zone=day_zone(spec.asset_class), cutoff=cutoff)
-    return moment.astimezone(UTC) < (published + PUBLICATION_GRACE).astimezone(UTC)
+    if spec.asset_class is AssetClass.FUTURES:
+        return futures_session(moment)
+    return moment.astimezone(day_zone(spec.asset_class)).date()
 
 
 def flat_file_prefix(spec: DatasetSpec, request: Request) -> str | None:
@@ -408,7 +367,7 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     return None
 
 
-def _lasting_flat_file_problems(
+def _flat_file_problems(
     spec: DatasetSpec,
     request: Request,
     *,
@@ -416,8 +375,8 @@ def _lasting_flat_file_problems(
 ) -> list[str]:
     """List every lasting reason flat files cannot serve a request; empty when none holds.
 
-    A lasting reason does not change with time: credentials, the dataset's files, and
-    adjustment. The one reason that does, a file not yet published, is `_unpublished`.
+    These reasons do not change with time: credentials, the dataset's files, and adjustment.
+    A file not published yet is found by the flat-file read itself, never guessed here.
 
     Args:
         spec: The dataset.
@@ -449,50 +408,18 @@ def _lasting_flat_file_problems(
     return problems
 
 
-def _unpublished(
-    spec: DatasetSpec, dates: Sequence[date], *, config: MassiveConfig, now: datetime
-) -> str | None:
-    """Say which flat file of a request is not published yet, if one is.
-
-    The one reason flat files cannot serve a request that changes with time alone.
-
-    Args:
-        spec: The dataset.
-        dates: The partition dates of the request.
-        config: The session's configuration (the publish cutoff).
-        now: The current instant.
-
-    Returns:
-        The reason, naming the first unpublished date, or None when every file is published.
-    """
-    zone = day_zone(spec.asset_class)
-    cutoff = config.flat_file_publish_cutoff
-    late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
-    if not late:
-        return None
-    published = publish_time(late[0], zone=zone, cutoff=cutoff)
-    return (
-        f"the file for {late[0].isoformat()} is {NOT_PUBLISHED} (it counts as published from "
-        f"{published.strftime('%Y-%m-%d %H:%M')} New York time)"
-    )
-
-
 class Alternative(StrEnum):
     """Whether the source an `AUTO` choice passed over could serve the same call.
 
-    `history()` warns about columns the chosen source leaves null only when the answer can
-    differ between two runs of one call, or when the caller can pick the other source.
+    `history()` warns about columns the chosen source leaves null only when the caller can
+    pick the other source.
     """
 
     AVAILABLE = "available"
     """It can serve the request now: `source=` picks it."""
-    AFTER_PUBLICATION = "after publication"
-    """Flat files are held back only by a day's file not yet published, and once it is,
-    `AUTO` picks them for this call: the same call changes source the next day."""
     UNAVAILABLE = "unavailable"
-    """It cannot serve the request, for a reason that does not change with time (no
-    credentials, no files or endpoint for the request, adjusted bars, `dm.ALL` over REST),
-    or `AUTO` would not pick it once it could; also for an explicit source."""
+    """It cannot serve the request (no credentials, no files or endpoint for the request,
+    adjusted bars, `dm.ALL` over REST); also for an explicit source."""
 
 
 class SourceChoice(NamedTuple):
@@ -510,32 +437,29 @@ class SourceChoice(NamedTuple):
 def choose_source(
     spec: DatasetSpec,
     request: Request,
-    dates: Sequence[date],
     *,
     requested: HistorySource,
     config: MassiveConfig,
-    now: datetime | None = None,
 ) -> SourceChoice:
     """Decide whether a `history()` call reads flat files or REST, for the whole range.
 
     Flat files are possible when S3 credentials are configured, the dataset has a file for the
     request (for bars: multiplier 1 and a timespan the dataset has files for, which is `MINUTE`
     or `DAY`, or `MINUTE` or `SESSION` for futures), the request is not adjusted
-    (`Request.adjusted` is not True), and every partition date is published at `now`. REST is
-    possible when `rest_history_problem` finds nothing. Under `AUTO`, when both are possible,
-    flat files win for `dm.ALL` (and for datasets without instruments) or for at least
-    `config.flat_file_symbol_threshold` symbols, and REST wins for fewer. The choice covers the
-    whole range: one unpublished date sends all of it to REST. Pure: no I/O.
+    (`Request.adjusted` is not True). REST is possible when `rest_history_problem` finds
+    nothing. Under `AUTO`, when both are possible, flat files win for `dm.ALL` (and for
+    datasets without instruments) or for at least `config.flat_file_symbol_threshold` symbols,
+    and REST wins for fewer. Whether each day's file is published is not part of the choice:
+    the flat-file read finds the days whose files are not there yet, and the query reads those
+    from REST under `AUTO` (`HistoryQuery.history()`). Pure: no I/O.
 
     Args:
         spec: The dataset.
         request: The normalized arguments, with static symbols (a tuple, `dm.ALL`, or None for
             a dataset without instruments).
-        dates: The partition dates of the request (`partition_dates`).
         requested: `HistorySource.AUTO` or `HistorySource.FLAT_FILES`. An explicit `REST` is
             checked by the query with `rest_history_problem` alone.
         config: The session's configuration.
-        now: The current instant, for the publication rule; None reads the clock.
 
     Returns:
         The source, the reason it was chosen, and under `AUTO` whether the other source could
@@ -545,15 +469,26 @@ def choose_source(
         ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
             neither source can. The message lists every violated constraint, per source.
     """
-    moment = _now() if now is None else now
-    lasting = _lasting_flat_file_problems(spec, request, config=config)
-    unpublished = _unpublished(spec, dates, config=config, now=moment)
-    flat = lasting if unpublished is None else [*lasting, unpublished]
+    flat = _flat_file_problems(spec, request, config=config)
     if requested is HistorySource.FLAT_FILES:
         if flat:
             raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
         return SourceChoice(HistorySource.FLAT_FILES, "requested")
     rest = rest_history_problem(spec, request)
+    if (
+        rest is not None
+        and request.adjusted is True
+        and len(flat) == 1
+        and isinstance(request.symbols, _All)
+    ):
+        # Only adjustment holds flat files back, and only dm.ALL holds REST back: say so.
+        raise ValueError(
+            f"{spec.name} history of every symbol (dm.ALL) with adjusted=True has no source: "
+            "only REST serves split-adjusted bars, and REST reads bars one symbol at a time "
+            "(every symbol at once only for 1-day bars), while flat files hold as-traded "
+            "prices. Pass adjusted=False to read the as-traded flat files, or name the symbols "
+            "to read adjusted bars from REST"
+        )
     if flat and rest is not None:
         raise ValueError(
             f"{spec.name} history has no possible source. "
@@ -564,12 +499,10 @@ def choose_source(
     threshold = config.flat_file_symbol_threshold
     many = not isinstance(request.symbols, tuple) or len(request.symbols) >= threshold
     if flat:
-        # Only an unpublished file changes with time; then the call moves to flat files later.
-        later = many and not lasting
         return SourceChoice(
             HistorySource.REST,
             f"flat files cannot serve it: {'; '.join(flat)}",
-            Alternative.AFTER_PUBLICATION if later else Alternative.UNAVAILABLE,
+            Alternative.UNAVAILABLE,
         )
     if not isinstance(request.symbols, tuple):
         return SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
@@ -582,54 +515,3 @@ def choose_source(
         f"{count} symbols < flat_file_symbol_threshold {threshold}",
         Alternative.AVAILABLE,
     )
-
-
-def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
-    """Return the instant a day's flat file counts as published.
-
-    That is the first `cutoff` in New York strictly after the start of the next day,
-    `partition + 1 day`, in the class's day zone. For a New York class it is the cutoff on the
-    following day; for a UTC class it is the first cutoff after the following UTC midnight.
-    When that cutoff falls on a Saturday or Sunday in New York, the file counts as published
-    `WEEKEND_PUBLICATION_DELAY` later, since Massive's weekend publication runs later in the
-    morning (Friday's files are published on Saturday).
-
-    Args:
-        partition: The file's partition date.
-        zone: The asset class's day zone.
-        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
-
-    Returns:
-        The publication instant, aware.
-    """
-    # Comparisons are made in UTC: Python compares two datetimes that share a tzinfo by their
-    # wall clocks, which is wrong across the repeated hour of a daylight-saving change.
-    start = midnight(partition + _ONE_DAY, zone)
-    local = start.astimezone(NEW_YORK)
-    candidate = datetime.combine(local.date(), cutoff, tzinfo=NEW_YORK)
-    if candidate.astimezone(UTC) <= start:
-        candidate = datetime.combine(local.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
-    if candidate.weekday() >= _SATURDAY:
-        # Added in UTC, so a daylight-saving change in the delay never yields a missing hour.
-        return (candidate.astimezone(UTC) + WEEKEND_PUBLICATION_DELAY).astimezone(NEW_YORK)
-    return candidate
-
-
-def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff: time) -> bool:
-    """Tell whether a day's flat file should exist yet.
-
-    Files land "by approximately 11:00 AM ET the following day", so a partition counts as
-    published once `now` reaches `publish_time(partition)`. Full instants are compared, which
-    keeps the rule correct in every day zone.
-
-    Args:
-        partition: The file's partition date.
-        now: The current instant, aware.
-        zone: The asset class's day zone.
-        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
-
-    Returns:
-        True if the file can be expected to exist.
-    """
-    published = publish_time(partition, zone=zone, cutoff=cutoff)
-    return now.astimezone(UTC) >= published.astimezone(UTC)

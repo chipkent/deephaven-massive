@@ -365,7 +365,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          datetimes and epoch nanoseconds
   row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
                          TimestampInsert; RowTimes, TimeRule, and the bar-stamp rule (section 12)
-  history_source.py      the history window, partition dates, publication and its grace, REST
+  history_source.py      the history window, partition dates, the current partition, REST
                          capability, the AUTO choice (section 16)
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
@@ -643,7 +643,6 @@ defined in exactly one place: the field defaults of this class.
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be at least 15 s, else `ValueError` naming Massive's guidance: a shorter wait can be refused for holding the allowance the dropped connection still holds, and on an individual plan that wastes the one slot there is. Tests never need a shorter value: they drive `WsClient` directly, with its backoff as constructor arguments and an injected clock. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
-| `flat_file_publish_cutoff: datetime.time` | `time(11, 30)`, America/New_York | A partition for day D counts as published from the first occurrence of this New York time after day D ends ([section 16](#16-historysourceauto)). The documentation says files land "by approximately 11:00 AM ET the following day". A naive `time` (a New York wall-clock time); one with `tzinfo` raises `ValueError`. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
@@ -3047,11 +3046,11 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     holds a weekday (a holiday, alone or followed by a weekend, such as Good Friday and the
     Saturday after it), the next existing session file within 7 days of the run's first day is
     read too, because the holiday's hours lie in it; its rows are filtered on `Timestamp` like
-    the others. A run of weekend days after an existing Friday file reads nothing more. If that
-    next file is not published yet, a missing weekday file on the way may still be late
-    (within a day of its publication time), or no file exists within 7 days, the call raises
-    `MassiveError`: the range's last hours may lie there, so it never returns a silently short
-    table.
+    the others. A run of weekend days after an existing Friday file reads nothing more. When no
+    later session file exists yet (before the current session, within 7 days), the run's first
+    missing weekday may not be published yet, and [section 16](#16-historysourceauto) reads it
+    from REST under `AUTO` or raises: the range's last hours may lie there, so the call never
+    returns a silently short table.
 
 **Long downloads.** Grouped daily (`dm.ALL` 1-day bars over REST) makes one request per day,
 skipping the days without trading (`dates.is_trading_day`): Saturdays and Sundays for stocks,
@@ -3839,37 +3838,53 @@ S3 possible   iff S3 credentials are configured
               and (not bars, or ((adjusted is False or the dataset has no adjusted parameter)
                                   and (multiplier, timespan) in {(1, MINUTE), (1, DAY)}
                                       or, for futures, (1, SESSION)))
-              and every partition date is published:
-                    now >= publish_time(date)
 REST possible iff the dataset has a REST history endpoint
               and (symbols is not ALL or (bars and (1, DAY)))        # grouped daily
 none possible -> ValueError listing, per source, the violated constraint
 one possible  -> use it
 both          -> S3 if symbols is ALL or len(symbols) >= flat_file_symbol_threshold, else REST
+AUTO on S3, then:
+  S3 refuses the files (403) and REST possible -> the whole call from REST, one WARNING
+  a day's file not published yet and REST possible -> that day and later ones from REST
+  either, and REST not possible -> raise
 ```
 
-`publish_time(date)` is the first `flat_file_publish_cutoff` (New York time) strictly after the
-start of the next day, `date + 1 day`, in the class day zone of
-[section 12](#12-timestamp-units-and-day-boundaries). For stocks, options, and indices that is
-11:30 New York time on the following day. For forex and crypto, whose days are UTC, it is the
-first 11:30 New York time after the following UTC midnight. When that cutoff falls on a
-Saturday or Sunday in New York, the file counts as published 3 hours later (14:30 by default):
-weekday files land shortly after midnight, but Friday's landed on Saturday at 10:27 and 11:17
-in the live check of 2026-10-30 (item 14), close to the 11:30 cutoff. The delay is added in
-UTC, so a daylight-saving change never yields a missing hour; it is not configurable (owner
-decision pending: the rule and its 3 hours). A partition is published once `now`
-reaches that instant; comparing full instants, not a time of day, keeps the rule correct for
-every day zone. Futures files are named by session date, and their clock starts at the next
-midnight in America/Chicago, where Massive standardizes futures data. `indices.values` is
-flat-file only.
+**AUTO serves from whichever source can; it errors only when none can** (decision 78).
+Massive says a day's files land "by approximately 11:00 AM ET the following day", and the time
+varies: weekday files landed at about 00:45 New York time in the live check of 2026-10-30, but
+Friday's on Saturday at 10:27 and 11:17. So the library never guesses publication from the
+clock, and has no publish cutoff setting. The flat-file read finds out from what exists:
+Massive writes a day's file after the day ends, in date order, so a missing trading day's file
+with a later day's file after it (in the range, or looked for after it, trading days only, up
+to 7 days past the first missing one and never as far as the current day, whose file cannot
+exist) is a day without trading, and one with no later file may simply not be published yet.
+From that first unpublished day on, the flat-file read keeps no row, and under `AUTO`, when
+REST can serve the request, the query reads that day and every later one from REST, with the
+same request from the day's start (for datetimes, the later of the range's start and the day's
+first instant; for futures, its session's open), and returns the whole range: the rows REST
+adds may leave null a column only flat files fill. Under `FLAT_FILES`, or when REST cannot
+serve the request, the call raises `MassiveError("<dataset>: the flat file for <date> is not
+published yet. Massive usually publishes a day's flat files by about 11:00 ET the next day,
+but the time varies. Retry later, or read REST with source=dm.HistorySource.REST")` (or, when
+REST cannot serve it, `Retry later; REST cannot serve this read: <reason>`). A REST day that
+returns no rows is a day without data. Likewise, when S3 refuses the flat files a read needs
+(HTTP 403: the plan lacks them) under `AUTO` and REST can serve the request, the whole call is
+read from REST, with one WARNING naming the refusal; under `FLAT_FILES`, or when REST cannot
+serve the request, the refusal is raised. When neither source can serve the request, the
+`ValueError` lists every violated constraint per source; for split-adjusted bars of `dm.ALL`
+other than 1-day bars, it says exactly why (only REST serves adjusted bars, and REST reads
+them one symbol at a time, while flat files hold as-traded prices) and what to do: pass
+`adjusted=False` for the as-traded flat files, or name the symbols. Futures files are named by
+session date, and their day ends at the next midnight in America/Chicago, where Massive
+standardizes futures data. `indices.values` is flat-file only.
 `indices.bars`, `forex.bars`, and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
-The choice covers the whole range: one unpublished partition sends all of it to REST, and
-nothing is split between the sources. The partition dates are those of the rows the call keeps
+The choice covers the whole range, except for the days a flat-file read finds not published
+yet, which `AUTO` reads from REST as above. The partition dates are those of the rows the call keeps
 ([section 12](#12-timestamp-units-and-day-boundaries)): for bars, the days of the bars whose
 whole window fits, so the unfinished current day never needs a file. Bars of a day or longer
 follow the same rule as every other dataset: the two sources may serve one call or the next by
-symbol count or publication, and the stamp check of
+symbol count, and the stamp check of
 [section 12](#12-timestamp-units-and-day-boundaries) stamps their bars alike and warns on a stamp
 it does not know, so the choice never changes which day a bar is labelled with. If live REST
 crypto bars turn out to be cut at midnight New York time, every REST crypto daily call
@@ -3888,14 +3903,10 @@ An `AUTO` call logs its choice and the reason once, for example
 columns: a REST history endpoint and a flat file can each carry fields the other lacks (REST
 trades have `DecimalSize`; futures files have `Exchange`, and futures trade files
 `Correction`), and a column a source does not carry is null. Under `AUTO` the source changes
-with the symbol count and with the time of day (yesterday's file is published at 11:30 New York
-time), so the same call could return a column filled one hour and null the next. `choose_source`
-therefore classifies the source it passed over (`Alternative`): `AVAILABLE` when it can serve
-the request now; `AFTER_PUBLICATION` when the only reason flat files cannot is a file not yet
-published and, once it is, `AUTO` picks them for this call (`dm.ALL`, or at least
-`flat_file_symbol_threshold` symbols); `UNAVAILABLE` for every reason that does not change with
-time (no S3 credentials, no file or endpoint for the request, adjusted bars, `dm.ALL` over
-REST), or when `AUTO` would not pick the other source anyway. Unless the other source is
+with the symbol count, so the same query could return a column filled for many symbols and
+null for few. `choose_source` therefore classifies the source it passed over (`Alternative`):
+`AVAILABLE` when it can serve the request; `UNAVAILABLE` when it cannot (no S3 credentials, no
+file or endpoint for the request, adjusted bars, `dm.ALL` over REST). Unless the other source is
 `UNAVAILABLE`, the query compares the columns of the chosen source's history sources (REST: the
 history and grouped-daily paths; flat files: every prefix of the dataset) with the other
 source's, by the generated schemas (`Catalog.history_columns`). When the other source fills
@@ -3903,9 +3914,7 @@ columns the chosen one leaves null, it logs one WARNING per session, dataset, an
 columns (`SessionCore.warnings`), naming them, the choice and its reason, and what fills them:
 `stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold 50); the
 read leaves DecimalSize null, which the other source, REST, fills: pass
-source=dm.HistorySource.REST to get them (logged once per session)`, or, for
-`AFTER_PUBLICATION`, `... which the other source, flat files, fills: the same call reads them
-once the file lands, the next day`. An `UNAVAILABLE` alternative means the result cannot change
+source=dm.HistorySource.REST to get them (logged once per session)`. An `UNAVAILABLE` alternative means the result cannot change
 and the caller cannot pick the other source, so nothing is logged, as with an explicit
 `source=`; a range no row can lie in reads nothing and logs nothing either. Every `history()`
 table records its source in its table description ([section 7.4](#74-column-descriptions)),
@@ -3915,22 +3924,19 @@ requested with source=...`. The flat-file refusal of adjusted bars reads `adjust
 REST, since flat-file bars are unadjusted (as traded); pass adjusted=False for the flat files`,
 so the description says why an adjusted read used REST. A range no row can lie in returns its
 empty table before any source is read, with the summary alone. Each
-transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
-(`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
+transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>
+unpublished_from=<date>` (`none` for either when nothing was missing or unpublished), the REST
+transport `source=REST requests=<n>`.
 Missing keys on non-trading dates are skipped. A trading date is a weekday, a forex Sunday, or
 any crypto day, by the one test `dates.is_trading_day` that
-the REST transport's weekend skipping uses too. A missing key on a trading date logs a WARNING.
-The source choice has already required every partition to be past its `publish_time`, so a
-missing key for the last requested date is either late or a market holiday (there is no holiday
-calendar). Within one day after its `publish_time` it raises `MassiveError("<dataset>: <key>
-does not exist: <date> is not yet published (flat files land ~11:00 ET next day), or was a
-market holiday")`. After that window it is treated as a holiday: a WARNING, and the date is
-skipped like any other missing weekday, so the rest of the range is returned. A futures range
-named by datetimes that ends on a holiday reads the next session's file, or raises, as [section
-12](#12-timestamp-units-and-day-boundaries) describes. No data is no data: a range in which no
-file exists, whatever the reason (a weekend, a holiday, a range before the dataset's first
-file), returns an empty table with every column, and its missing weekdays log their WARNINGs as
-above. A missing file is a 404 whose body is S3's XML error with the code `NoSuchKey`. Any other
+the REST transport's weekend skipping uses too. A missing key on a trading date with a later
+day's file after it is a day without trading (a holiday; there is no holiday calendar): it logs
+a WARNING and the rest of the range is returned. One with no later file is not published yet,
+as above. A futures range named by datetimes that ends on a holiday reads the next session's
+file, as [section 12](#12-timestamp-units-and-day-boundaries) describes. A range in which no
+file exists and none follows raises under `FLAT_FILES` (or reads REST under `AUTO`) rather than
+return an empty table, and also logs the WARNING that the bucket, prefix, or venue may be wrong.
+A missing file is a 404 whose body is S3's XML error with the code `NoSuchKey`. Any other
 404 (another S3 code, no code, or a body that is not S3's, such as the HTML "Massive 404 Not
 Found" page Massive's front end serves for a path it does not route, which is what a wrong
 `s3_bucket` meets) raises `MassiveError` naming `s3://<bucket>/<key> at <endpoint>` and adding
@@ -6898,6 +6904,17 @@ document already reflects them.
     logs one WARNING per dataset per session, through the session's once-per-session warnings
     as decision 70's bar stamps do: its day boundary differs from the other crypto tables', so
     its dates may not line up with theirs. It never raises.
+78. **`AUTO` serves from whichever source can; it errors only when none can** (2026-10-30,
+    owner). `history()` must return the data whenever any source can, and Massive's publish
+    times are approximate and change, so nothing is guessed from the clock: the
+    `flat_file_publish_cutoff` setting, the publication time, and its one-day grace are gone.
+    A flat-file read finds a day not published yet by what exists (a missing trading day's
+    file with no later day's file); under `AUTO` that day and later ones are read from REST
+    when REST can serve the request, and a flat-file refusal (HTTP 403) reads the whole call
+    from REST with one WARNING. `FLAT_FILES`, or a request REST cannot serve, raises, with a
+    message that says the publication time is approximate and what to do. Mixing sources in
+    one call can leave null, on REST's rows, a column only flat files fill; returning the data
+    outweighs that ([section 16](#16-historysourceauto)).
 
 ## 23. Open verification items
 
@@ -6924,7 +6941,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 12 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
-| 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET. The live check of 2026-10-30 found weekday files landing at about 00:45 ET, but Friday's on Saturday at 10:27 and 11:17 ET, 13 minutes before the cutoff; so a file whose cutoff falls on a Saturday or Sunday counts as published 3 hours later (14:30 by default), and a Saturday-morning request for Friday reads REST under `AUTO` until then (owner decision pending) | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff; a Friday's and a Saturday's file count from 14:30 the next day, a Thursday's and a Sunday's from 11:30 | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff; `tests/massive/flatfiles/test_client_integration.py`: record when each of the last ten weekdays' files was published, Fridays' included |
+| 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | Settled by owner decision 78: no publish time is assumed. The live check of 2026-10-30 found weekday files landing at about 00:45 ET, but Friday's on Saturday at 10:27 and 11:17 ET, so the time varies. A missing trading day's file with a later day's file is a day without trading; one with no later file is not published yet, and `AUTO` reads it from REST when REST can serve the request, else the call raises with a message that the time is approximate | `tests/ingest/test_flatfiles.py`: a missing day with and without a later file, under `FLAT_FILES` and `AUTO`; `tests/test_query.py`: `AUTO` reads the unpublished days from REST | `tests/massive/flatfiles/test_client_integration.py`: record when each of the last ten weekdays' files was published, Fridays' included |
 | 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/massive/ws/test_client_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 16 | A missing flat-file key, requested through `files.massive.com`, answers HTTP 404 with S3's XML error and the code `NoSuchKey`, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`), and not a 404 page the front end rewrites (a wrong path gets an HTML "Massive 404 Not Found" page, which botocore reads as the code `404`). If it answers anything but `NoSuchKey`, the library raises on every range that holds a weekend | Only a 404 `NoSuchKey` is a missing file; any other 404 raises, naming the bucket and the endpoint settings; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: `NoSuchKey`, other-code, and HTML 404 replies, and 403 replies | `tests/massive/flatfiles/test_client_integration.py` (S3 credentials): request a weekend key and record the status, the error code, and the content type |
 | 17 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
@@ -6974,7 +6991,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served, labelled by the day it falls on, with a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
 | 62 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | A symbol with no data returns no rows; a 404 after the first page of a request series raises `MassiveError`; a futures session is its own series, so a 404 on a later session drops that session with its own WARNING | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises; a later futures session's 404 is left out with a per-session WARNING | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |
 | 63 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Settled by the live check of 2026-10-30: calendar days. AAPL's 2-day bars were stamped on Monday, Wednesday, Friday, Sunday, Tuesday, and Thursday; the Friday bar's volume was Friday's alone and the Sunday bar's Monday's. A bar of `n` days spans `n` calendar days from its stamp, weekends included, and `history()` keeps it when that end lies in the range. Only stocks were observed; options and indices read the same aggregates endpoint and are treated alike. Forex and crypto bars count calendar days too | `tests/datasets/test_row_times.py`, `tests/datasets/test_bar_periods.py`, `tests/namespaces/test_stocks.py`: 2-day bars stamped Friday, Sunday, and Tuesday end two calendar days later, and `history()` of Friday to Wednesday keeps all three | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; fail unless each 2-day bar's volume is that of its two calendar days |
-| 64 | Whether Massive publishes forex flat files for a Saturday and a Sunday (forex trades from Sunday evening to Friday evening UTC) | A forex Saturday is a day without trading (`dates.is_trading_day`): its missing file is skipped silently and never raises "not yet published", and REST grouped daily does not request it; a missing Sunday file warns like a missing weekday | `tests/datasets/test_dates.py`, `tests/ingest/test_flatfiles.py`, `tests/ingest/test_rest.py`: a missing Saturday file is silent even within its publication grace, a Sunday's warns, and grouped daily skips the Saturday | `tests/namespaces/test_forex_integration.py`: `global_forex/day_aggs_v1` for a Saturday and a Sunday; record whether each file exists and its row count |
+| 64 | Whether Massive publishes forex flat files for a Saturday and a Sunday (forex trades from Sunday evening to Friday evening UTC) | A forex Saturday is a day without trading (`dates.is_trading_day`): its missing file is skipped silently and is never taken for a file not published yet, and REST grouped daily does not request it; a missing Sunday file before a later file warns like a missing weekday | `tests/datasets/test_dates.py`, `tests/ingest/test_flatfiles.py`, `tests/ingest/test_rest.py`: a missing Saturday file is silent even as the last day before any later file can exist, a Sunday's warns, and grouped daily skips the Saturday | `tests/namespaces/test_forex_integration.py`: `global_forex/day_aggs_v1` for a Saturday and a Sunday; record whether each file exists and its row count |
 | 65 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/massive/rest/test_client_integration.py` (a class on Basic): seven requests within a minute; record each answer's status, rate-limit headers, and message |
 | 66 | Whether reference data and the other datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count in a bucket of their own, as Massive's knowledge base says ("What is the request limit for Massive's RESTful APIs?": reference and cross-asset endpoints are "counted in their own bucket"), rather than against a subscription's limit, and whether that bucket has the Basic limit of 5 per minute | They go to the `other` bucket, every reference endpoint included (options contracts, IPOs, and reference reads filtered by market); `other` cannot be declared and is paced once a 429 names the per-minute limit | `tests/ingest/test_rest.py`: such a request, filtered by market or not, is charged to `other`; `tests/ingest/test_rate_limits.py`: a Basic-worded refusal paces `other` | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
 | 67 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window. The live check of 2026-10-30 settled the window: after 5 answered requests and refusals every 5 s, the first answer came at 47.3 s, as the clock minute turned, so Massive counts by the clock minute. No clock minute holds more starts than a 61 s window, so the hold stays: never refused for pacing, at worst a minute slower; waiting for the next minute instead would trust the local clock to the second. Whether a refusal counts is moot within a clock minute | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/massive/rest/test_client_integration.py` (a class on Basic): requests until the first 429, then one every 5 s; record when the first is answered again |

@@ -23,7 +23,6 @@ import re
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from datetime import time
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import (
@@ -191,11 +190,6 @@ class MassiveConfig:
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
-        flat_file_publish_cutoff: A New York wall-clock time, a `datetime.time` without a
-            timezone. Before it, yesterday's flat file is treated as not yet published (files
-            land around 11:00 ET). On a Saturday or Sunday the file counts as published three
-            hours later (14:30 by default), since Massive publishes Friday's files late on
-            Saturday morning. Defaults to 11:30.
         max_concurrency: Maximum parallel REST requests of one `poll()` fan-out, and parallel
             S3 reads: a count of threads. Defaults to 8.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
@@ -248,7 +242,6 @@ class MassiveConfig:
     reconnect_backoff: float = 30.0
     max_reconnect_backoff: float = 120.0
     flat_file_symbol_threshold: int = 50
-    flat_file_publish_cutoff: time = time(11, 30)
     max_concurrency: int = 8
     rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
@@ -269,13 +262,11 @@ class MassiveConfig:
         `require_positive_int`).
 
         Raises:
-            TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
-                `datetime.time`.
+            TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
             ValueError: If `reconnect_backoff` is below `MIN_RECONNECT_BACKOFF`,
                 `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
-                backoff, interval, or count is not positive,
-                `flat_file_publish_cutoff` carries a timezone, only one of the two S3
+                backoff, interval, or count is not positive, only one of the two S3
                 credentials is set, or a `ws_hosts` value is not a bare hostname.
         """
         if not isinstance(self.api_key, str):
@@ -301,12 +292,6 @@ class MassiveConfig:
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
-        cutoff: object = self.flat_file_publish_cutoff  # checked at run time, whatever the hint
-        if not isinstance(cutoff, time):
-            kind = type(cutoff).__name__
-            raise TypeError(f"flat_file_publish_cutoff must be a datetime.time, not {kind}")
-        if cutoff.tzinfo is not None:
-            raise ValueError("flat_file_publish_cutoff is a New York wall-clock time; drop tzinfo")
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))

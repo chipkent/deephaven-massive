@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -18,19 +18,15 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import (
-    WEEKEND_PUBLICATION_DELAY,
     Alternative,
     HistoryWindow,
     SourceChoice,
     choose_source,
+    current_partition,
     flat_file_prefix,
-    flat_file_published,
     history_window,
     partition_dates,
-    publish_time,
-    published,
     rest_history_problem,
-    within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import (
@@ -333,14 +329,6 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
     assert partition_dates(FUTURES_BARS, bars_window) == (date(2025, 3, 4),)
 
 
-def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    cutoff = time(11, 30)
-    assert published(STOCK_TRADES, date(2025, 3, 7), cutoff=cutoff, now=NOW)
-    assert not published(STOCK_TRADES, date(2025, 3, 10), cutoff=cutoff, now=NOW)
-    monkeypatch.setattr(history_source, "_now", lambda: NOW)
-    assert published(STOCK_TRADES, date(2025, 3, 7), cutoff=cutoff)
-
-
 # --- partition_dates -------------------------------------------------------------------------
 
 
@@ -432,8 +420,6 @@ def test_rest_history_problem() -> None:
 
 # --- choose_source: every branch of the AUTO rule --------------------------------------------
 
-MARCH_3 = (date(2025, 3, 3),)
-
 
 def decide(
     spec: DatasetSpec,
@@ -441,10 +427,8 @@ def decide(
     *,
     requested: HistorySource = HistorySource.AUTO,
     cfg: dm.MassiveConfig | None = None,
-    now: datetime = NOW,
-    dates: tuple[date, ...] = MARCH_3,
 ) -> SourceChoice:
-    return choose_source(spec, req, dates, requested=requested, config=cfg or config(), now=now)
+    return choose_source(spec, req, requested=requested, config=cfg or config())
 
 
 def choose(spec: DatasetSpec, req: Request, **kwargs: object) -> HistorySource:
@@ -454,12 +438,7 @@ def choose(spec: DatasetSpec, req: Request, **kwargs: object) -> HistorySource:
 def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
     bars = request(dm.ALL, timespan=Timespan.HOUR, multiplier=5, adjusted=True)
     with pytest.raises(ValueError, match=r"stocks\.bars history has no possible source") as info:
-        choose(
-            STOCK_BARS,
-            bars,
-            cfg=NO_S3,
-            now=datetime(2025, 3, 4, 15, tzinfo=UTC),  # 10:00 New York: March 3 not published
-        )
+        choose(STOCK_BARS, bars, cfg=NO_S3)
     assert str(info.value) == (
         "stocks.bars history has no possible source. Flat files: "
         "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
@@ -467,9 +446,7 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
         "stocks.bars flat files hold only 1-minute, 1-day bars; "
         "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
         "history() never mixes adjusted and unadjusted prices; pass adjusted=False for the "
-        "flat files; "
-        "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
-        "(it counts as published from 2025-03-04 11:30 New York time). "
+        "flat files. "
         "REST: stocks.bars history over REST needs explicit symbols."
     )
 
@@ -492,28 +469,6 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
         "flat files cannot serve it: economy.yields has no flat files",
         Alternative.UNAVAILABLE,
     )
-
-
-@pytest.mark.parametrize(
-    ("symbols", "cfg", "expected"),
-    [
-        # Only the unpublished file holds flat files back, and 500 symbols read them once it
-        # lands: the same call changes source the next day.
-        (many(500), None, Alternative.AFTER_PUBLICATION),
-        (dm.ALL, None, Alternative.AFTER_PUBLICATION),
-        # Two symbols stay on REST after publication too: nothing changes.
-        (many(2), None, Alternative.UNAVAILABLE),
-        # A reason that does not change with time comes with it.
-        (many(500), "no s3", Alternative.UNAVAILABLE),
-    ],
-)
-def test_an_unpublished_file_is_the_one_reason_that_changes(
-    symbols: object, cfg: str | None, expected: Alternative
-) -> None:
-    unpublished = datetime(2025, 3, 4, 10, tzinfo=NEW_YORK)  # March 3's file lands at 11:30
-    req = request(symbols, timespan=Timespan.DAY, adjusted=False)
-    choice = decide(STOCK_BARS, req, now=unpublished, cfg=NO_S3 if cfg else None)
-    assert (choice.source, choice.alternative) == (HistorySource.REST, expected)
 
 
 @pytest.mark.parametrize(
@@ -556,19 +511,25 @@ def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
     forced = HistorySource.FLAT_FILES
     assert decide(STOCK_TRADES, request(), requested=forced) == SourceChoice(forced, "requested")
     with pytest.raises(ValueError, match="cannot be read from flat files") as info:
-        choose(
-            STOCK_TRADES,
-            request(),
-            requested=forced,
-            cfg=NO_S3,
-            now=datetime(2025, 3, 4, 10, tzinfo=NEW_YORK),
-        )
+        choose(STOCK_TRADES, request(), requested=forced, cfg=NO_S3)
     assert str(info.value) == (
         "stocks.trades cannot be read from flat files: no S3 credentials are configured "
         "(MassiveConfig s3_access_key_id and s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID "
-        "and MASSIVE_S3_SECRET_ACCESS_KEY); the file for 2025-03-03 is not yet published; flat "
-        "files land ~11:00 ET next day (it counts as published from 2025-03-04 11:30 New York "
-        "time)"
+        "and MASSIVE_S3_SECRET_ACCESS_KEY)"
+    )
+
+
+def test_adjusted_bars_of_every_symbol_say_why_no_source_serves_them() -> None:
+    # Flat files hold as-traded prices and REST reads minute bars one symbol at a time.
+    req = request(dm.ALL, timespan=Timespan.MINUTE, adjusted=True)
+    with pytest.raises(ValueError, match=r"with adjusted=True has no source") as info:
+        choose(STOCK_BARS, req)
+    assert str(info.value) == (
+        "stocks.bars history of every symbol (dm.ALL) with adjusted=True has no source: only "
+        "REST serves split-adjusted bars, and REST reads bars one symbol at a time (every "
+        "symbol at once only for 1-day bars), while flat files hold as-traded prices. Pass "
+        "adjusted=False to read the as-traded flat files, or name the symbols to read adjusted "
+        "bars from REST"
     )
 
 
@@ -611,106 +572,12 @@ def test_flat_file_constraints_of_bars_and_datasets(
             choose(spec, req, requested=forced)
 
 
-@pytest.mark.parametrize(
-    ("minute", "published"),
-    [(29, False), (31, True)],
-)
-def test_the_publish_cutoff_applies_the_next_day(minute: int, published: bool) -> None:
-    now = datetime(2025, 3, 4, 11, minute, tzinfo=NEW_YORK)
-    forced = HistorySource.FLAT_FILES
-    if published:
-        assert choose(STOCK_TRADES, request(), requested=forced, now=now) is forced
-    else:
-        with pytest.raises(ValueError, match=r"2025-03-03 is not yet published.*11:30 New York"):
-            choose(STOCK_TRADES, request(), requested=forced, now=now)
-    # Under AUTO the same request falls back to REST until the file is published.
-    expected = HistorySource.FLAT_FILES if published else HistorySource.REST
-    assert choose(STOCK_TRADES, request(many(50)), now=now) is expected
-
-
-def test_the_publish_cutoff_comes_from_the_config() -> None:
-    now = datetime(2025, 3, 4, 9, 30, tzinfo=NEW_YORK)
-    early = config(flat_file_publish_cutoff=time(9))
-    forced = HistorySource.FLAT_FILES
-    assert choose(STOCK_TRADES, request(), requested=forced, now=now, cfg=early) is forced
-    with pytest.raises(ValueError, match="not yet published"):
-        choose(STOCK_TRADES, request(), requested=forced, now=now)
-
-
-def test_futures_are_published_by_their_chicago_session_date() -> None:
-    # With a 00:30 New York cutoff, a stocks day is published 30 minutes after New York's
-    # midnight; a futures session only from the first 00:30 New York after Chicago's midnight,
-    # which falls at 01:00 New York, so on the following night.
-    cutoff = config(flat_file_publish_cutoff=time(0, 30))
-    forced = HistorySource.FLAT_FILES
-    req = request(("ESH5",))
-    night = datetime(2025, 3, 4, 0, 45, tzinfo=NEW_YORK)
-    next_night = datetime(2025, 3, 5, 0, 45, tzinfo=NEW_YORK)
-    assert choose(STOCK_TRADES, req, requested=forced, now=night, cfg=cutoff) is forced
-    with pytest.raises(ValueError, match="2025-03-03 is not yet published"):
-        choose(FUTURES_TRADES, req, requested=forced, now=night, cfg=cutoff)
-    assert choose(FUTURES_TRADES, req, requested=forced, now=next_night, cfg=cutoff) is forced
-
-
-def test_every_partition_date_must_be_published() -> None:
-    now = datetime(2025, 3, 5, 12, tzinfo=NEW_YORK)  # March 4 is published, March 5 is not
-    dates = (date(2025, 3, 4), date(2025, 3, 5))
-    with pytest.raises(ValueError, match="2025-03-05 is not yet published"):
-        choose(STOCK_TRADES, request(), requested=HistorySource.FLAT_FILES, now=now, dates=dates)
-
-
-def test_the_clock_is_read_when_no_instant_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert history_source._now().tzinfo is UTC
-
-    def before_the_cutoff() -> datetime:
-        return datetime(2025, 3, 4, 11, 29, tzinfo=NEW_YORK)
-
-    monkeypatch.setattr(history_source, "_now", before_the_cutoff)
-    with pytest.raises(ValueError, match="2025-03-03 is not yet published"):
-        choose_source(
-            STOCK_TRADES, request(), MARCH_3, requested=HistorySource.FLAT_FILES, config=config()
-        )
-
-
-@pytest.mark.parametrize(
-    ("spec", "day", "now", "late"),
-    [
-        # March 4's stocks file is published at 11:30 New York on March 5, so it may be late
-        # until 11:30 on March 6.
-        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 5, 11, tzinfo=NEW_YORK), True),
-        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
-        (STOCK_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), False),
-        # A futures session's clock starts at Chicago's midnight, 01:00 New York, so its first
-        # 11:30 New York is the same morning; a forex day's at UTC midnight.
-        (FUTURES_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
-        (FUTURES_TRADES, date(2025, 3, 4), datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), False),
-        (FOREX_BARS, date(2025, 3, 4), datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK), True),
-    ],
-)
-def test_within_publication_grace(
-    *, spec: DatasetSpec, day: date, now: datetime, late: bool
-) -> None:
-    assert within_publication_grace(spec, day, cutoff=time(11, 30), now=now) is late
-
-
-def test_publication_grace_reads_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    def much_later() -> datetime:
-        return datetime(2025, 4, 1, tzinfo=UTC)
-
-    monkeypatch.setattr(history_source, "_now", much_later)
-    assert within_publication_grace(STOCK_TRADES, date(2025, 3, 4), cutoff=time(11, 30)) is False
-
-
 def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
     # Every source stamps them alike, and a crypto stamp off the cut fails loudly, so AUTO
     # picks the source by symbol count as for every other dataset.
     for spec, pair in ((CRYPTO_BARS, "X:BTCUSD"), (FOREX_BARS, "C:EURUSD")):
         assert choose(spec, request((pair,), timespan=Timespan.DAY)) is HistorySource.REST
         assert choose(spec, request(many(60), timespan=Timespan.DAY)) is (HistorySource.FLAT_FILES)
-    # An unpublished day sends the whole range to REST, with S3 configured or not.
-    unpublished = (date(2025, 3, 10),)
-    crypto = request(many(60), timespan=Timespan.DAY)
-    assert choose(CRYPTO_BARS, crypto, dates=unpublished) is HistorySource.REST
 
 
 def test_futures_bars_of_several_sessions_by_date_fit_under_both_label_readings() -> None:
@@ -745,110 +612,17 @@ def test_a_session_end_date_filter_needs_datetimes(key: str) -> None:
     assert window(FUTURES_TRADES, start, start + timedelta(hours=1), filters=filters).times
 
 
-# --- Publication ----------------------------------------------------------------------------
+# --- The current partition --------------------------------------------------------------
 
 
-CUTOFF = time(11, 30)
-
-
-def test_publish_time_in_new_york() -> None:
-    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=CUTOFF) == datetime(
-        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
-    )
-
-
-def test_publish_time_in_utc() -> None:
-    # March 4 00:00 UTC is March 3 19:00 in New York; the first 11:30 after it is March 4.
-    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=CUTOFF) == datetime(
-        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
-    )
-    # A cutoff later than 19:00 New York time falls on the same New York evening.
-    late = time(20, 0)
-    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=late) == datetime(
-        2025, 3, 3, 20, 0, tzinfo=NEW_YORK
-    )
-    early = time(18, 0)
-    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=early) == datetime(
-        2025, 3, 4, 18, 0, tzinfo=NEW_YORK
-    )
-
-
-def test_publish_time_is_strictly_after_the_day_starts() -> None:
-    # A cutoff at exactly the New York midnight that starts the next day is not "after" it.
-    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=time(0, 0)) == datetime(
-        2025, 3, 5, 0, 0, tzinfo=NEW_YORK
-    )
-
-
-def _published(partition: date, now: datetime) -> bool:
-    return flat_file_published(partition, now=now, zone=NEW_YORK, cutoff=CUTOFF)
-
-
-def test_flat_file_publish_cutoff() -> None:
-    today = date(2025, 3, 4)
-    yesterday = date(2025, 3, 3)
-    before = datetime(2025, 3, 4, 11, 29, tzinfo=NEW_YORK)
-    after = datetime(2025, 3, 4, 11, 31, tzinfo=NEW_YORK)
-    assert not _published(yesterday, before)
-    assert _published(yesterday, after)
-    assert _published(date(2025, 3, 2), before)
-    assert not _published(today, after)
-    assert not _published(date(2025, 3, 5), after)
-
-
-def test_flat_file_day_zone_is_the_class_zone() -> None:
-    # 01:00 UTC on March 4 is 20:00 New York time on March 3. For a UTC class, March 3's file
-    # lands at 11:30 New York time on March 4, so it is not published yet.
-    now = datetime(2025, 3, 4, 1, tzinfo=UTC)
-    march_3 = date(2025, 3, 3)
-    assert not flat_file_published(march_3, now=now, zone=NEW_YORK, cutoff=CUTOFF)
-    assert not flat_file_published(march_3, now=now, zone=UTC, cutoff=CUTOFF)
-    assert flat_file_published(date(2025, 3, 2), now=now, zone=UTC, cutoff=CUTOFF)
-    later = datetime(2025, 3, 4, 11, 30, tzinfo=NEW_YORK)
-    assert flat_file_published(march_3, now=later, zone=UTC, cutoff=CUTOFF)
-
-
-def test_publish_time_across_the_spring_dst_change() -> None:
-    # Saturday March 8's crypto file has its cutoff on Sunday, so it counts three hours later.
-    published = publish_time(date(2025, 3, 8), zone=UTC, cutoff=time(11, 30))
-    assert published == datetime(2025, 3, 9, 14, 30, tzinfo=NEW_YORK)
-    assert published.astimezone(UTC) == datetime(2025, 3, 9, 18, 30, tzinfo=UTC)
-
-
-@pytest.mark.parametrize(
-    ("partition", "expected"),
-    [
-        (date(2026, 10, 29), datetime(2026, 10, 30, 11, 30, tzinfo=NEW_YORK)),  # Thu -> Fri
-        (date(2026, 10, 30), datetime(2026, 10, 31, 14, 30, tzinfo=NEW_YORK)),  # Fri -> Sat
-        (date(2026, 10, 31), datetime(2026, 11, 1, 14, 30, tzinfo=NEW_YORK)),  # Sat -> Sun
-        (date(2026, 11, 1), datetime(2026, 11, 2, 11, 30, tzinfo=NEW_YORK)),  # Sun -> Mon
-    ],
-)
-def test_a_cutoff_on_a_weekend_counts_three_hours_later(
-    partition: date, expected: datetime
+def test_the_current_partition_is_today_in_the_day_zone_or_the_current_session(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Friday's files landed on Saturday at 10:27 and 11:17 New York time, near the 11:30 cutoff.
-    assert publish_time(partition, zone=NEW_YORK, cutoff=CUTOFF) == expected
-    assert timedelta(hours=3) == WEEKEND_PUBLICATION_DELAY
-
-
-def test_a_weekend_file_is_not_published_until_the_delayed_cutoff() -> None:
-    friday = date(2026, 10, 30)
-    at_noon = datetime(2026, 10, 31, 12, 0, tzinfo=NEW_YORK)
-    assert not flat_file_published(friday, now=at_noon, zone=NEW_YORK, cutoff=CUTOFF)
-    later = datetime(2026, 10, 31, 14, 30, tzinfo=NEW_YORK)
-    assert flat_file_published(friday, now=later, zone=NEW_YORK, cutoff=CUTOFF)
-
-
-def test_publication_compares_instants_across_the_fall_back_hour() -> None:
-    # Saturday November 1's crypto file: its 22:30 EDT cutoff that Saturday evening, three hours
-    # later in UTC, is 01:30 EDT on Sunday, the first of the two 01:30s of the fall back.
-    cutoff = time(22, 30)
-    published = publish_time(date(2025, 11, 1), zone=UTC, cutoff=cutoff)
-    assert published.astimezone(UTC) == datetime(2025, 11, 2, 5, 30, tzinfo=UTC)  # 01:30 EDT
-    # 01:15 EST (fold=1) is 06:15Z, 45 minutes after publication, though its wall clock reads
-    # earlier than 01:30.
-    later = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=1)
-    assert flat_file_published(date(2025, 11, 1), now=later, zone=UTC, cutoff=cutoff)
-    earlier = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=0)
-    assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=UTC, cutoff=cutoff)
+    # 20:00 New York on March 3 is March 4 in UTC, and the futures session of March 4 (it
+    # opened at 17:00 Chicago).
+    evening = datetime(2025, 3, 3, 20, tzinfo=NEW_YORK)
+    assert current_partition(STOCK_TRADES, now=evening) == date(2025, 3, 3)
+    assert current_partition(FOREX_BARS, now=evening) == date(2025, 3, 4)
+    assert current_partition(FUTURES_TRADES, now=evening) == date(2025, 3, 4)
+    monkeypatch.setattr(history_source, "_now", lambda: evening)
+    assert current_partition(STOCK_TRADES) == date(2025, 3, 3)

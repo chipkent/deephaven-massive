@@ -52,6 +52,7 @@ from deephaven_massive._tables.background_read import BACKGROUND_NOTE
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher
+from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.stream import FakeStreamTransport
@@ -219,6 +220,27 @@ class Recorder:
         return self._record("history", spec, request, window=window, dates=dates, **extra)
 
 
+class FlatFiles:
+    # Stands in for the flat-file transport: a recorder's table, and the first day whose file
+    # is not published yet (None: every file was read).
+    def __init__(self, recorder: Recorder, unpublished: date | None = None) -> None:
+        self.recorder = recorder
+        self.unpublished = unpublished
+
+    def history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        dates: Sequence[date],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> FlatFileRead:
+        table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
+        return FlatFileRead(table, self.unpublished)
+
+
 @pytest.fixture
 def rest(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
     recorder = Recorder(massive_session._core.catalog)
@@ -229,7 +251,7 @@ def rest(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) ->
 @pytest.fixture
 def flat(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> Recorder:
     recorder = Recorder(massive_session._core.catalog)
-    monkeypatch.setattr(massive_session._core, "flat_file_transport", lambda: recorder)
+    monkeypatch.setattr(massive_session._core, "flat_file_transport", lambda: FlatFiles(recorder))
     return recorder
 
 
@@ -614,7 +636,7 @@ def test_a_history_call_through_flat_files_passes_its_id(
     *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     flat = Recorder(s3_session._core.catalog)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
@@ -743,7 +765,7 @@ def test_history_dispatches_by_the_source_choice(
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
@@ -1175,7 +1197,7 @@ def test_every_static_verb_is_described(
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     cases = [
@@ -1418,7 +1440,7 @@ def faked_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession
     transport = EmptyTransport(session)
     streams = FakeStreamTransport(session._core)
     monkeypatch.setattr(session._core, "rest_transport", lambda: transport)
-    monkeypatch.setattr(session._core, "flat_file_transport", lambda: transport)
+    monkeypatch.setattr(session._core, "flat_file_transport", lambda: FlatFiles(transport))
     monkeypatch.setattr(session._core, "stream_transport", lambda: streams)
     yield session
     transport.pollers.close()
@@ -1491,7 +1513,7 @@ def test_a_history_table_names_its_source(
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     days = ("2025-03-03", "2025-03-04")
     ticks = trades(s3_session).history(*days)
     forced = trades(s3_session).history(*days, source=HistorySource.REST)
@@ -1524,7 +1546,7 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(q, HistoryQuery)
     instant = datetime(2025, 3, 3, 15, tzinfo=UTC)
@@ -1541,35 +1563,46 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
     assert caplog.messages == [warning]
 
 
-def test_auto_warns_that_an_unpublished_file_changes_the_source_the_next_day(
+def test_auto_reads_the_days_not_published_yet_from_rest(
     *,
     s3_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # The flat files hold March 3 but not yet March 4: AUTO reads March 4 from REST and
+    # returns the whole range; FLAT_FILES raises; so does AUTO where REST cannot serve.
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
-    # 10:00 New York on March 4: March 3's files land at 11:30.
-    monkeypatch.setattr(history_source, "_now", lambda: datetime(2025, 3, 4, 15, tzinfo=UTC))
-    many = make(s3_session, FUTURES_FILES_SPEC, symbols=_futures(60))
-    few = make(s3_session, FUTURES_FILES_SPEC, symbols=_futures(2))
+    files = FlatFiles(flat, date(2025, 3, 4))
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: files)
+    many = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(many, HistoryQuery)
-    assert isinstance(few, HistoryQuery)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
-        few.history("2025-03-03", "2025-03-03")  # stays on REST once published: no warning
-        assert caplog.messages == []
-        many.history("2025-03-03", "2025-03-03")
-    [message] = caplog.messages
-    assert message.startswith(
-        "futures.trades history: AUTO read REST (flat files cannot serve it: "
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
+        many.history("2025-03-03", "2025-03-04")
+    [(verb, _, request, extra)] = rest.calls
+    assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
+    assert extra["window"].span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
+    assert (
+        "stocks.trades history: the flat file for 2025-03-04 is not published yet; reading "
+        "2025-03-04 on from REST"
+    ) in caplog.messages
+    note = (
+        "stocks.trades: the flat file for 2025-03-04 is not published yet. Massive usually "
+        "publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
     )
-    assert message.endswith(
-        "the read leaves Correction, Exchange null, which the other source, flat files, "
-        "fills: the same call reads them once the file lands, the next day (logged once per "
-        "session)"
+    with pytest.raises(dm.MassiveError) as forced:
+        many.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert str(forced.value) == note + (
+        "Retry later, or read REST with source=dm.HistorySource.REST"
     )
-    assert [c[0] for c in rest.calls] == ["history", "history"]
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    with pytest.raises(dm.MassiveError) as unserved:
+        values.history("2025-03-03", "2025-03-04")
+    assert str(unserved.value) == note.replace("stocks.trades", "indices.values") + (
+        "Retry later; REST cannot serve this read: indices.values has no REST history"
+    )
+    assert len(rest.calls) == 1
 
 
 def _futures(count: int) -> list[str]:
@@ -1670,7 +1703,7 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     instant = datetime(2025, 3, 3, 15, tzinfo=UTC)  # equal instants: no row lies between
@@ -1695,12 +1728,15 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     _released(s3_session, files, forced, landed)
 
 
-def test_a_refused_flat_file_read_names_rest_when_rest_can_serve_it(
-    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
-    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: FlatFiles(flat))
 
     def refused(*_: object, **__: object) -> Table:
         raise dm.EntitlementError("the plan does not include these flat files", status=403)
@@ -1708,17 +1744,24 @@ def test_a_refused_flat_file_read_names_rest_when_rest_can_serve_it(
     monkeypatch.setattr(flat, "history", refused)
     q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(q, HistoryQuery)
-    # AUTO chose the flat files (60 symbols), and raises rather than switch columns silently.
-    for source in (HistorySource.AUTO, HistorySource.FLAT_FILES):
-        with pytest.raises(dm.EntitlementError) as info:
-            q.history("2025-03-03", "2025-03-03", source=source)
-        assert str(info.value) == (
-            "the plan does not include these flat files; REST serves this read too: pass "
-            "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
-            "shows which)"
-        )
-        assert info.value.status == 403
+    # FLAT_FILES raises, naming REST.
+    with pytest.raises(dm.EntitlementError) as info:
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert str(info.value) == (
+        "the plan does not include these flat files; REST serves this read too: pass "
+        "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
+        "shows which)"
+    )
+    assert info.value.status == 403
     assert rest.calls == []
+    # AUTO chose the flat files (60 symbols), and serves the read from REST instead, warning.
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        q.history("2025-03-03", "2025-03-03")
+    assert [c[0] for c in rest.calls] == ["history"]
+    assert caplog.messages[-1] == (
+        "stocks.trades history: the plan does not include the flat files this read needs (the "
+        "plan does not include these flat files); reading REST instead"
+    )
     # Where REST cannot serve the read, the refusal is raised as it came.
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)

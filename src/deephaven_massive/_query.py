@@ -29,7 +29,8 @@ The verbs delegate the transport work to three interfaces, one per transport, de
 `poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and
 `FlatFileTransport` (flat-file `history`).
 `history()` chooses its source itself (`choose_source` in `_datasets/history_source.py`) and
-then calls one transport, so the transports only do I/O.
+then calls one transport, so the transports only do I/O; under `AUTO` a flat-file read whose
+last days are not published yet reads those days from REST too.
 Each static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id from the
 session's stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows>
 rows in <s> s` or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their
@@ -61,9 +62,10 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar, cast
 
 from deephaven import arrow as dh_arrow
+from deephaven import merge
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
@@ -71,8 +73,9 @@ from deephaven_massive._config import require_positive_int, require_positive_num
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._datasets.dates import bounds, parse_date_like
+from deephaven_massive._datasets.dates import DaySpan, bounds, day_start, parse_date_like
 from deephaven_massive._datasets.history_source import (
+    PUBLICATION_NOTE,
     Alternative,
     SourceChoice,
     choose_source,
@@ -1309,9 +1312,11 @@ class HistoryQuery(QueryBase):
         and has ended, so the current day's, week's, or month's bar never is. Each row carries
         `Timestamp` (a bar `TimestampStart` and `TimestampEnd`), its trading day `Date`, and
         `TimestampInsert`, when it was downloaded. The rows come from REST or from Massive's
-        flat files, never both in one call: `source=dm.HistorySource.AUTO` picks flat files
-        for many symbols, or when only they can serve the request, and REST otherwise; the
-        table's description names the source and why. Split-adjusted bars (`adjusted=True`,
+        flat files: `source=dm.HistorySource.AUTO` picks flat files for many symbols, or when
+        only they can serve the request, and REST otherwise; the table's description names the
+        source and why. A day's flat file appears the next morning, usually by about 11:00 New
+        York time, but the time varies: under `AUTO` the days whose files are not out yet are
+        read from REST, so the whole range is returned. Split-adjusted bars (`adjusted=True`,
         the default of stock and option bars) come only from REST. It blocks until the whole
         range is read: requests run on the calling thread, flat files on up to
         `max_concurrency` reader threads that end before it returns. With `wait=False` it
@@ -1372,28 +1377,29 @@ class HistoryQuery(QueryBase):
                 futures trades or quotes named by session dates on a query that also filters
                 `session_end_date` in any form; a source that cannot serve the request
                 (`REST` without REST history, or with `dm.ALL` and no grouped-daily endpoint;
-                `FLAT_FILES` without S3 credentials, without files for the request, or with a
-                day's file not yet published; `AUTO` when neither can, with every violated
-                condition listed); or a call on a Deephaven update-graph thread.
+                `FLAT_FILES` without S3 credentials or without files for the request; `AUTO`
+                when neither can, with every violated condition listed); or a call on a
+                Deephaven update-graph thread.
             AuthenticationError: If Massive rejects the API key, or S3 the flat-file
                 credentials. With `wait=False` this and every other error that needs a request
                 fails the table instead of raising.
             EntitlementError: If the plan does not include the data (HTTP 403, or S3's 403
                 for flat files). For futures flat files the message names the venue and the
-                `venues=` parameter; for a refused flat-file read that REST could serve, it
-                names `source=dm.HistorySource.REST`, also under `AUTO`, which never switches
-                source silently.
+                `venues=` parameter. Under `AUTO`, a flat-file refusal is no error when REST
+                can serve the read: it is read from REST, with one WARNING naming the refusal.
+                Under `FLAT_FILES`, a refused read that REST could serve names
+                `source=dm.HistorySource.REST`.
             MassiveError: If the session is closed; a request fails otherwise; a page of
                 adjusted bars echoes another basis than the request; a symbol's later page
                 answers HTTP 404, its data cut short (a symbol with no data at all simply
-                returns no rows); the flat file of the last requested day is missing within a
-                day after its publication time ("... is not yet published (flat files land
-                ~11:00 ET next day), or was a market holiday"; after that the day is skipped
-                with a WARNING, as a holiday); a futures range named by instants ends on a
-                holiday and the next session's file, which holds the holiday's hours, is not
-                published yet or does not exist within 7 days. A bar of a day or longer
-                stamped at a time of day, or on a day, Massive is not known to use for its
-                class (a crypto 1-day bar at midnight New York time, or a week bar on a
+                returns no rows); a trading day's flat file is missing and no later day's file
+                exists, so it may not be published yet, under `FLAT_FILES` or when REST cannot
+                serve the read (`"<dataset>: the flat file for <date> is not published yet.
+                Massive usually publishes a day's flat files by about 11:00 ET the next day,
+                but the time varies. Retry later, ..."`); a missing day's file with a later
+                day's file after it is a day without trading, skipped with a WARNING. A bar of
+                a day or longer stamped at a time of day, or on a day, Massive is not known to
+                use for its class (a crypto 1-day bar at midnight New York time, or a week bar on a
                 Monday) raises nothing: it is returned, labelled by the day its stamp falls
                 on, and logs one WARNING per dataset and timespan per session.
 
@@ -1466,7 +1472,7 @@ class HistoryQuery(QueryBase):
             note = "Read from REST: requested with source=dm.HistorySource.REST."
             return self._rest_history(call, request, window, wait=wait, note=note)
         dates = partition_dates(spec, window)
-        choice = choose_source(spec, request, dates, requested=chosen, config=self._core.config)
+        choice = choose_source(spec, request, requested=chosen, config=self._core.config)
         label = TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]]
         if chosen is HistorySource.AUTO:
             logger.info(
@@ -1480,6 +1486,7 @@ class HistoryQuery(QueryBase):
         if choice.source is HistorySource.REST:
             return self._rest_history(call, request, window, wait=wait, note=note)
         files = self._core.flat_file_transport()
+        forced = chosen is HistorySource.FLAT_FILES
         return self._result(
             call,
             request,
@@ -1490,7 +1497,7 @@ class HistoryQuery(QueryBase):
                 self._empty_rows()
                 if window.empty
                 else self._read_flat_files(
-                    files, request, window, dates=dates, call=call, stop=stop
+                    files, request, window, dates=dates, call=call, stop=stop, forced=forced
                 )
             ),
         )
@@ -1504,8 +1511,20 @@ class HistoryQuery(QueryBase):
         dates: Sequence[date],
         call: int,
         stop: threading.Event | None,
+        forced: bool,
     ) -> Table:
-        """Read `history()` from the flat files, naming REST when the plan refuses them.
+        """Read `history()` from the flat files, and from REST the days not published yet.
+
+        When S3 refuses the flat files (the plan lacks them) under `AUTO` and REST can serve
+        the request, the whole call is read from REST, with one WARNING naming the refusal;
+        `AUTO` serves from whichever source can and fails only when none can. The flat-file
+        read returns the first day whose file is not there yet, if any
+        (`FlatFileRead.unpublished`: a missing trading day's file with no later day's file).
+        Under `AUTO`, when REST can serve the request, that day and every later one are read
+        from REST, with the same request from that day's start, so the call returns the whole
+        range; the rows REST adds may leave null a column only flat files fill. Under
+        `FLAT_FILES`, or when REST cannot serve the request, the call raises instead of
+        returning a short table.
 
         Args:
             files: The flat-file transport.
@@ -1514,23 +1533,70 @@ class HistoryQuery(QueryBase):
             dates: The partition dates of the files the window needs.
             call: The call id.
             stop: A background read's stop token, or None for a blocking read.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
 
         Returns:
-            The static table of the files' rows.
+            The static table of the files' rows, then REST's rows of the days not published.
 
         Raises:
-            EntitlementError: The refusal of `_refused_flat_files`, from the transport's own.
+            EntitlementError: The refusal of `_refused_flat_files`, from the transport's own,
+                under `FLAT_FILES` or when REST cannot serve the request.
+            MassiveError: If a day's file is not published yet and the call may not or cannot
+                read it from REST: `"<dataset>: the flat file for <date> is not published
+                yet. Massive usually publishes ..., but the time varies. Retry later, ..."`.
         """
+        spec = self._spec
+        problem = rest_history_problem(spec, request)
+        rest = self._core.rest_transport
         try:
-            return files.history(self._spec, request, window, dates=dates, call=call, stop=stop)
+            read = files.history(spec, request, window, dates=dates, call=call, stop=stop)
         except EntitlementError as error:
-            raise self._refused_flat_files(error, request) from error
+            if forced or problem is not None:
+                raise self._refused_flat_files(error, request) from error
+            logger.warning(
+                "%s history: the plan does not include the flat files this read needs (%s); "
+                "reading REST instead",
+                spec.name,
+                error,
+            )
+            return rest().history(spec, request, window, call=call, stop=stop)
+        day = read.unpublished
+        if day is None:
+            return read.table
+        if forced or problem is not None:
+            remedy = (
+                "Retry later, or read REST with source=dm.HistorySource.REST"
+                if problem is None
+                else f"Retry later; REST cannot serve this read: {problem}"
+            )
+            raise MassiveError(
+                f"{spec.name}: the flat file for {day.isoformat()} is not published yet. "
+                f"{PUBLICATION_NOTE}. {remedy}"
+            )
+        # The same request from the day's start: a whole day of a range of days, or the day's
+        # first instant (for futures, its session's open) within a range of instants.
+        first: date | datetime = (
+            day
+            if isinstance(window.span, DaySpan)
+            else max(cast("datetime", request.start), day_start(spec.asset_class, day))
+        )
+        tail = replace(request, start=first)
+        tail_window = history_window(spec, tail, start=first, end=tail.end)
+        logger.info(
+            "%s history: the flat file for %s is not published yet; reading %s on from REST",
+            spec.name,
+            day.isoformat(),
+            day.isoformat(),
+        )
+        rows = rest().history(spec, tail, tail_window, call=call, stop=stop)
+        with entered(self._core.exec_ctx):
+            return merge([read.table, rows])
 
     def _refused_flat_files(self, error: EntitlementError, request: Request) -> EntitlementError:
         """Name REST as the other transport when the plan refuses the flat files a read needs.
 
-        Under `AUTO` too the refusal is raised, never answered by switching to REST: the two
-        sources fill different columns, so a silent switch would change the table's columns.
+        Used under `FLAT_FILES`, and under `AUTO` when REST cannot serve the read either (then
+        the refusal is returned as it is); `AUTO` otherwise reads REST instead.
 
         Args:
             error: The flat-file refusal, which names the files and Massive's text.
@@ -1585,18 +1651,15 @@ class HistoryQuery(QueryBase):
     def _warn_unfilled(self, choice: SourceChoice) -> None:
         """Warn when `AUTO` chose a source that leaves columns null which the other one fills.
 
-        Under `AUTO` the source changes with the symbol count and with the time of day (a
-        day's flat file is published the next morning), so the same call could fill a column
-        one hour and leave it null the next. The columns each source fills come from the
-        generated schemas (`Catalog.history_columns`). The WARNING names the columns the chosen
-        source leaves null, the choice and its reason, and what fills them: the `source=` of
-        the other source when it can serve the request now (`Alternative.AVAILABLE`), or, when
-        only an unpublished file holds flat files back and the same call will read them once
-        it lands (`Alternative.AFTER_PUBLICATION`), that it changes source the next day. It is
-        logged once per session, dataset, and set of columns. When the other source can never
-        serve the call (`Alternative.UNAVAILABLE`), the result cannot change and nothing is
-        logged: the table description says which source it was. The caller skips it for a
-        range no row can lie in, which reads nothing.
+        Under `AUTO` the source changes with the symbol count, so the same query could fill a
+        column for many symbols and leave it null for few. The columns each source fills come
+        from the generated schemas (`Catalog.history_columns`). The WARNING names the columns
+        the chosen source leaves null, the choice and its reason, and what fills them: the
+        `source=` of the other source (`Alternative.AVAILABLE`). It is logged once per session,
+        dataset, and set of columns. When the other source can never serve the call
+        (`Alternative.UNAVAILABLE`), the result cannot change and nothing is logged: the table
+        description says which source it was. The caller skips it for a range no row can lie
+        in, which reads nothing.
 
         Args:
             choice: The `AUTO` choice.
@@ -1614,11 +1677,7 @@ class HistoryQuery(QueryBase):
         if not missing:
             return
         columns = ", ".join(sorted(missing))
-        remedy = (
-            f"pass source=dm.HistorySource.{other.name} to get them"
-            if choice.alternative is Alternative.AVAILABLE
-            else "the same call reads them once the file lands, the next day"
-        )
+        remedy = f"pass source=dm.HistorySource.{other.name} to get them"
         self._core.warnings.log(
             f"history source {spec.name} {choice.source.name}: {columns}",
             "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "

@@ -90,14 +90,17 @@ the stamps it expected. Please report it on the
 
 ## Where the rows come from
 
-`history()` reads from one of two sources, and one call never mixes them.
+`history()` reads from one of two sources. The default picks one and uses the other only to
+fill in what the first cannot serve, so a call returns your data whenever either source has
+it.
 
 - **REST** serves a dataset that has a REST history endpoint, for explicit symbols. For
   `dm.ALL` it serves only daily bars, through Massive's grouped daily endpoint.
 - **Flat files** are Massive's daily files on S3. They serve a request when you have set S3
-  credentials, the dataset has files for the request, and every day's file has been published.
-  Bars come in files only as 1-minute and 1-day bars (and 1-session bars for futures), and only
-  unadjusted. A day's file appears the next morning, from about 11:00 New York time.
+  credentials and the dataset has files for the request. Bars come in files only as 1-minute and
+  1-day bars (and 1-session bars for futures), and only unadjusted. Massive usually publishes a
+  day's files by about 11:00 New York time the next day, but the time varies: Friday's files
+  can arrive late on Saturday morning.
 
 The default, `source=dm.HistorySource.AUTO`, picks flat files when only they can serve the
 request, or when both can and the request has many symbols (`flat_file_symbol_threshold` or
@@ -109,14 +112,25 @@ flat-file trades do not. When `AUTO`'s choice leaves columns empty that the othe
 the library logs one WARNING that names them and the `source=` that fills them. Every result's
 description, its `TableDescription` attribute, names the source it came from and why.
 
-If your plan does not include the flat files a read needs, the read fails with
-`EntitlementError`. When REST can serve the same read, the message says to pass
-`source=dm.HistorySource.REST`. `AUTO` reports the refusal too, rather than quietly switch to
-REST and change which columns are filled.
+With `AUTO`, if a day's flat file is not out yet, that day and the ones after it are read from
+REST, so you get the whole range; those rows may leave empty a column only the flat files fill.
+If REST cannot serve the read (every symbol of a dataset with no REST endpoint for that, for
+example), the call fails with an error that says the file is not published yet and to retry
+later. With `source=dm.HistorySource.FLAT_FILES`, a file that is not out yet is always an
+error, which also suggests `source=dm.HistorySource.REST`.
 
-Flat-file reads skip a missing weekend file silently and a missing weekday file (a holiday)
-with a WARNING. A missing file for the last day within a day of its publication time is an
-error instead, since the file may simply not be published yet.
+If your plan does not include the flat files a read needs, `AUTO` reads REST instead when REST
+can serve the read, and logs a WARNING that names the refusal. With
+`source=dm.HistorySource.FLAT_FILES`, or when REST cannot serve the read, the call fails with
+`EntitlementError`; when REST could have served it, the message says to pass
+`source=dm.HistorySource.REST`.
+
+Split-adjusted bars come only from REST, which reads bars one symbol at a time (every symbol at
+once only for 1-day bars). So split-adjusted minute bars of every symbol have no source: pass
+`adjusted=False` to read the as-traded flat files, or name the symbols.
+
+Flat-file reads skip a missing weekend file silently. A missing weekday file with a later day's
+file after it was a holiday: it is skipped with a WARNING.
 
 ## Split adjustment
 

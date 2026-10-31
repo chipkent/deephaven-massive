@@ -811,7 +811,7 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
             "Vwap null, which the other source, REST, fills: pass "
             "source=dm.HistorySource.REST to get them (logged once per session)"
         ),
-        "stocks.bars history: source=S3 files=1 skipped=none",
+        "stocks.bars history: source=S3 files=1 skipped=none unpublished_from=none",
     ]
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=LOGGER):
@@ -883,6 +883,33 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
     assert len(converted) < blocks  # ... but into far fewer tables than blocks
 
 
+def holiday_warning(spec: str, key: str, day: str) -> str:
+    return (
+        f"{spec}: {key} does not exist, though a later day's file does; skipping {day}, a day "
+        "without trading (a holiday?)"
+    )
+
+
+def s3_line(spec: str, files: int, skipped: str) -> str:
+    return f"{spec} history: source=S3 files={files} skipped={skipped} unpublished_from=none"
+
+
+def not_published(spec: str, day: str, remedy: str) -> str:
+    return (
+        f"{spec}: the flat file for {day} is not published yet. Massive usually publishes a "
+        f"day's flat files by about 11:00 ET the next day, but the time varies. {remedy}"
+    )
+
+
+READ_REST = "Retry later, or read REST with source=dm.HistorySource.REST"
+NO_REST = (
+    "Retry later; REST cannot serve this read: futures.trades history over REST needs explicit "
+    "symbols"
+)
+MANY = [f"S{n:02d}" for n in range(49)] + ["AAPL"]
+"""Fifty symbols: enough for `AUTO` to read flat files, and explicit, so REST can serve them."""
+
+
 def test_a_range_with_a_missing_weekday_warns_and_skips_it(
     *,
     session: dm.MassiveSession,
@@ -899,36 +926,41 @@ def test_a_range_with_a_missing_weekday_warns_and_skips_it(
     assert pick(t, "Id") == [("1",), ("2",), ("3",), ("9",), ("10",)]
     assert sorted(fake_s3.keys()) == [TRADES_0303, TRADES_0304, TRADES_0305]
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.WARNING,
-            f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
-        ),
-        (logging.INFO, "stocks.trades history: source=S3 files=2 skipped=2025-03-04"),
+        (logging.WARNING, holiday_warning("stocks.trades", TRADES_0304, "2025-03-04")),
+        (logging.INFO, s3_line("stocks.trades", 2, "2025-03-04")),
     ]
 
 
-def test_a_missing_friday_warns(
+def test_a_missing_last_weekday_with_a_later_file_is_a_day_without_trading(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
+    clock: Callable[[datetime], None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Friday 03-07 is missing; the look after the range skips the weekend and finds Monday's
+    # file, so Friday was a day without trading. Monday's file is only opened, never read.
+    clock(datetime(2025, 3, 12, 16, tzinfo=UTC))
     thursday = epoch_ns(datetime(2025, 3, 6, 15, tzinfo=UTC))
     fake_s3.put(TRADES_KEY.format(6), make_csv_gz(TRADE_HEADER + trade(1, thursday)))
+    fake_s3.put(TRADES_KEY.format(10), make_csv_gz(TRADE_HEADER + trade(2, thursday)))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-06", "2025-03-08", source=HistorySource.FLAT_FILES)
-    assert t.size == 1
+    assert pick(t, "Id") == [("1",)]
+    assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (6, 7, 8, 10)]
+    assert TRADES_KEY.format(10) in fake_s3.closed_bodies
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
-            logging.WARNING,
+            logging.INFO,
             (
-                f"stocks.trades: {TRADES_KEY.format(7)} does not exist; skipping 2025-03-07 "
-                "(a market holiday?)"
+                f"stocks.trades: {TRADES_KEY.format(7)} is missing and {TRADES_KEY.format(10)} "
+                "exists, so it was a day without trading"
             ),
         ),
-        (logging.INFO, "stocks.trades history: source=S3 files=1 skipped=2025-03-07,2025-03-08"),
+        (logging.WARNING, holiday_warning("stocks.trades", TRADES_KEY.format(7), "2025-03-07")),
+        (logging.INFO, s3_line("stocks.trades", 1, "2025-03-07,2025-03-08")),
     ]
 
 
@@ -948,7 +980,7 @@ def test_missing_weekend_files_are_skipped_silently(
             "stocks.trades history: AUTO chose FLAT_FILES (REST cannot serve it: stocks.trades "
             "history over REST needs explicit symbols)"
         ),
-        "stocks.trades history: source=S3 files=1 skipped=2025-03-01,2025-03-02",
+        s3_line("stocks.trades", 1, "2025-03-01,2025-03-02"),
     ]
 
 
@@ -967,7 +999,7 @@ def test_a_missing_last_weekend_date_is_skipped_too(
         t = q.history("2025-03-05", "2025-03-08", source=HistorySource.FLAT_FILES)
     assert pick(t, "Id") == [("5",), ("6",), ("7",)]
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "stocks.trades history: source=S3 files=3 skipped=2025-03-08")
+        (logging.INFO, s3_line("stocks.trades", 3, "2025-03-08"))
     ]
 
 
@@ -979,99 +1011,136 @@ def test_a_weekend_only_range_is_an_empty_table(
         t = q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     assert t.size == 0
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
-    assert caplog.messages == [
-        "stocks.trades history: source=S3 files=0 skipped=2025-03-01,2025-03-02"
-    ]
+    assert caplog.messages == [s3_line("stocks.trades", 0, "2025-03-01,2025-03-02")]
 
 
-def test_a_missing_last_date_within_a_day_of_publication_names_both_causes(
+def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     *,
     session: dm.MassiveSession,
     put: Callable[[str, str], None],
-    clock: Callable[[datetime], None],
+    fake_s3: FakeS3,
 ) -> None:
-    # March 4's file counts as published from 11:30 New York time on March 5; for a day after
-    # that, a missing file may still just be late.
+    # On Monday 03-10 no file after 03-04 exists, so 03-04 may simply not be out yet. The
+    # look stops before today, whose file cannot exist.
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    clock(datetime(2025, 3, 6, 11, 29, tzinfo=NEW_YORK))
-    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     with pytest.raises(
         dm.MassiveError,
-        match=re.escape(
-            f"stocks.trades: {TRADES_0304} does not exist: 2025-03-04 is not yet published (flat "
-            "files land ~11:00 ET next day), or was a market holiday"
-        ),
+        match=re.escape(not_published("stocks.trades", "2025-03-04", READ_REST)) + "$",
+    ):
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
+
+
+def test_a_refused_look_for_a_later_file_raises(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None], fake_s3: FakeS3
+) -> None:
+    # The look after a missing last day fails as any read does: here S3 refuses the key.
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.refuse(TRADES_0305, status=403, code="AccessDenied", message="Access Denied")
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
+    with pytest.raises(dm.EntitlementError, match=re.escape(TRADES_0305)):
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+
+
+def test_a_missing_day_rest_cannot_serve_raises_under_auto(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None]
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    remedy = (
+        "Retry later; REST cannot serve this read: stocks.trades history over REST needs "
+        "explicit symbols"
+    )
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(not_published("stocks.trades", "2025-03-04", remedy)) + "$",
     ):
         q.history("2025-03-03", "2025-03-04")
 
 
-@pytest.mark.parametrize(
-    "now",
-    [
-        pytest.param(datetime(2025, 3, 6, 11, 30, tzinfo=NEW_YORK), id="when-the-day-ends"),
-        pytest.param(NOW, id="days-later"),
-    ],
-)
-def test_a_missing_last_date_after_a_day_is_skipped_as_a_holiday(
+def test_auto_reads_the_days_not_published_yet_from_rest(
     *,
     session: dm.MassiveSession,
     put: Callable[[str, str], None],
-    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    now: datetime,
 ) -> None:
+    # Flat files serve 03-03; 03-04 has no file and no later one, so REST reads it, and the
+    # call returns the whole range: the file's AAPL rows, then REST's.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    clock(now)
-    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    q = query(session, STOCK_TRADES, symbols=MANY)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
-    assert pick(t, "Id") == [("1",), ("2",), ("3",), ("4",)]  # the rest of the range
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.WARNING,
-            f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
-        ),
-        (logging.INFO, "stocks.trades history: source=S3 files=1 skipped=2025-03-04"),
-    ]
+        t = q.history("2025-03-03", "2025-03-04")
+    assert pick(t, "Symbol") == [("AAPL",), ("AAPL",), ("from REST",)]
+    ((spec, req, window),) = rest.calls
+    assert spec is STOCK_TRADES
+    assert (req.start, req.end) == (date(2025, 3, 4), date(2025, 3, 4))
+    assert req.symbols == tuple(sorted(MANY))
+    assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
+    assert (
+        "stocks.trades history: the flat file for 2025-03-04 is not published yet; reading "
+        "2025-03-04 on from REST"
+    ) in caplog.messages
+
+
+def test_auto_reads_rest_from_the_unpublished_days_start_within_instants(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=MANY)
+    start = datetime(2025, 3, 3, 9, tzinfo=NEW_YORK)
+    end = datetime(2025, 3, 4, 12, tzinfo=NEW_YORK)
+    q.history(start, end)
+    ((_, req, window),) = rest.calls
+    # The day's first instant, not the call's start: the earlier hours came from the file.
+    assert (req.start, req.end) == (datetime(2025, 3, 4, tzinfo=NEW_YORK), end)
+    assert window.span == TimeRange(datetime(2025, 3, 4, tzinfo=NEW_YORK), end)
 
 
 def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
-    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Forex trades from Sunday evening UTC, so its weekend day is a trading day like crypto's:
-    # a missing Sunday file is reported as a possible holiday, never skipped silently.
-    transport = session._core.flat_file_transport()
-    assert isinstance(transport, flatfiles.FlatFileHistory)
+    # Forex trades from Sunday evening UTC, so its Sunday is a trading day like crypto's: a
+    # missing Sunday file before Monday's is reported as a day without trading, while its
+    # Saturday, a day without trading, is skipped silently.
     forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
-    key = "global_forex/trades_v1/2025/03/2025-03-02.csv.gz"
-    sunday = flatfiles._Key(key, date(2025, 3, 2), None)
-    stocks = replace(forex, name="stocks.trades", asset_class=AssetClass.STOCKS)
+    key = "global_crypto/trades_v1/2025/03/2025-03-{:02d}.csv.gz"
+    put(key.format(3), "global_crypto_trades_v1_2025-03-01.csv")
+    q = query(session, forex, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        transport._skip_missing(forex, [sunday], last=date(2025, 3, 3))
-        transport._skip_missing(stocks, [sunday], last=date(2025, 3, 3))
-    assert caplog.messages == [
-        f"forex.trades: {key} does not exist; skipping 2025-03-02 (a market holiday?)"
-    ]
+        q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert caplog.messages == [holiday_warning("forex.trades", key.format(2), "2025-03-02")]
 
 
 def test_a_missing_forex_saturday_file_is_skipped_silently_even_as_the_last_day(
     *,
     session: dm.MassiveSession,
+    put: Callable[[str, str], None],
     clock: Callable[[datetime], None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Forex does not trade on a UTC Saturday, so its file need not exist: no WARNING, and no
-    # "not yet published" error while the Saturday is still within its publication grace.
-    transport = session._core.flat_file_transport()
-    assert isinstance(transport, flatfiles.FlatFileHistory)
+    # Forex does not trade on a UTC Saturday, so its file need not exist: no WARNING, and the
+    # day is never taken for one not published yet, even before any later file can exist.
     forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
-    saturday = date(2025, 3, 1)
-    key = flatfiles._Key("global_forex/trades_v1/2025/03/2025-03-01.csv.gz", saturday, None)
+    put(
+        "global_crypto/trades_v1/2025/02/2025-02-28.csv.gz",
+        "global_crypto_trades_v1_2025-03-01.csv",
+    )
     clock(datetime(2025, 3, 2, 12, tzinfo=NEW_YORK))
-    cutoff = session._core.config.flat_file_publish_cutoff
-    assert history_source.within_publication_grace(forex, saturday, cutoff=cutoff)
+    q = query(session, forex, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        transport._skip_missing(forex, [key], last=saturday)
+        q.history("2025-02-28", "2025-03-01", source=HistorySource.FLAT_FILES)
     assert caplog.messages == []
 
 
@@ -1089,14 +1158,14 @@ def test_crypto_trades_every_day(
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
     ]
-    # A missing Sunday file is no weekend for crypto: within a day after its publication time
-    # (11:30 New York on March 3) it may be late ...
+    # A missing Sunday file is no weekend for crypto: with no later file yet, it may not be
+    # out yet ...
     clock(datetime(2025, 3, 3, 12, tzinfo=NEW_YORK))
-    with pytest.raises(dm.MassiveError, match=r"2025-03-02 is not yet published .*holiday"):
+    with pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-02 is not published"):
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     clock(NOW)
     caplog.clear()
-    # ... or if that weekend day was a holiday, which warns like a missing weekday.
+    # ... and a missing day before an existing one was a day without trading, which warns.
     put(
         "global_crypto/trades_v1/2025/03/2025-03-02.csv.gz",
         "global_crypto_trades_v1_2025-03-01.csv",
@@ -1104,9 +1173,8 @@ def test_crypto_trades_every_day(
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         q.history("2025-02-28", "2025-03-02", source=HistorySource.FLAT_FILES)
     assert caplog.messages == [
-        (
-            "crypto.trades: global_crypto/trades_v1/2025/02/2025-02-28.csv.gz does not exist; "
-            "skipping 2025-02-28 (a market holiday?)"
+        holiday_warning(
+            "crypto.trades", "global_crypto/trades_v1/2025/02/2025-02-28.csv.gz", "2025-02-28"
         )
     ]
 
@@ -1285,7 +1353,7 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
         )
     assert pick(t, "Timestamp") == [(sunday,)]  # the range keeps only its own instants
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20)), key]
-    assert "for the hours a holiday moved into it" in caplog.text
+    assert "read for the hours a holiday moved into it" in caplog.text
 
 
 def test_a_stopped_read_stops_its_roll_forward(
@@ -1304,15 +1372,15 @@ def test_a_stopped_read_stops_its_roll_forward(
     rolled = FUTURES_KEY.format("cme", date(2025, 1, 21))
     fake_s3.put(rolled, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-21,ESH5,{tuesday}\n"))
     stop = _massive.Cancel()
-    skip_missing = flatfiles.FlatFileHistory._skip_missing
+    warn = flatfiles._warn_if_none_exist
 
     def released_as_the_pool_ends(
-        self: flatfiles.FlatFileHistory, spec: DatasetSpec, missing: list[Any], *, last: date
+        spec: DatasetSpec, keys: Sequence[flatfiles._Key], missing: Sequence[flatfiles._Key]
     ) -> None:
         stop.set()
-        skip_missing(self, spec, missing, last=last)
+        warn(spec, keys, missing)
 
-    monkeypatch.setattr(flatfiles.FlatFileHistory, "_skip_missing", released_as_the_pool_ends)
+    monkeypatch.setattr(flatfiles, "_warn_if_none_exist", released_as_the_pool_ends)
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
@@ -1325,7 +1393,27 @@ def test_a_stopped_read_stops_its_roll_forward(
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
-def test_a_roll_forward_gives_up_loudly_after_a_week(
+def test_a_venue_not_out_yet_sends_the_day_of_every_venue_to_rest(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CME's file of 03-04 exists, CBOT's does not and no later one does: REST reads 03-04 for
+    # every venue, so CME's rows of that day are dropped rather than returned twice.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    put(FUTURES_KEY.format("cme", date(2025, 3, 4)), "us_futures_trades_v1_2025-03-04.csv")
+    venues = {FuturesVenue.CME, FuturesVenue.CBOT}
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = query(session, FUTURES_TRADES, symbols=contracts, venues=venues)
+    t = q.history("2025-03-04", "2025-03-04")
+    assert pick(t, "Symbol") == [("from REST",)]
+    ((_, req, _),) = rest.calls
+    assert req.start == date(2025, 3, 4)
+
+
+def test_a_futures_range_with_no_later_session_within_a_week_raises(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -1335,64 +1423,61 @@ def test_a_roll_forward_gives_up_loudly_after_a_week(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
-        # The message names the run's first missing weekday, Monday 01-20.
-        match=r"2025-01-20\.csv\.gz does not exist and no session file follows within 7 days",
+        # The run's first missing trading day, Monday 01-20, may not be out yet.
+        match=re.escape(not_published("futures.trades", "2025-01-20", NO_REST)),
     ):
         q.history(
             datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
             datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
         )
-    # The trailing run of missing files starts on 01-18, so the roll tries the days after
-    # the range up to a week past that day, and no further.
-    days = [date(2025, 1, 18) + timedelta(days=n) for n in range(8)]
-    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", day) for day in days]
+    # The look tries the weekdays after the range up to a week past Monday, and no further.
+    looked = [date(2025, 1, d) for d in (18, 19, 20, 21, 22, 23, 24, 27)]
+    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", day) for day in looked]
     assert timedelta(days=7) == flatfiles.ROLL_LIMIT
 
 
-def test_a_roll_forward_to_an_unpublished_session_raises(
+def test_a_futures_range_ending_on_a_holiday_before_the_next_session_is_out_raises(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
 ) -> None:
-    # Good Friday 2024, asked for on Easter Monday morning: the files of 03-29 and 03-30 count
-    # as published (and do not exist), but the next session's are not out yet.
+    # Good Friday 2024, asked for on Easter Monday morning: the next session, 04-01's, is the
+    # current one, whose file cannot exist yet, so it is not looked for.
     clock(datetime(2024, 4, 1, 12, tzinfo=UTC))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
-        dm.MassiveError,
-        match=r"the range's last hours may lie in the next session's file, "
-        r"us_futures_cme/trades_v1/2024/03/2024-03-31\.csv\.gz, which is not yet published",
+        dm.MassiveError, match=re.escape(not_published("futures.trades", "2024-03-29", NO_REST))
     ):
         q.history(
             datetime(2024, 3, 29, 8, tzinfo=CHICAGO),
             datetime(2024, 3, 30, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
         )
-    # No request is made for a file that cannot exist yet.
     assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", date(2024, 3, d)) for d in (29, 30)]
 
 
-def test_a_roll_forward_to_a_late_session_raises(
+def test_a_futures_holiday_whose_next_session_is_not_out_reads_rest_under_auto(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Martin Luther King Day: the 01-21 file is past its publication time but within a day
-    # of it, so its absence may only mean it is late.
+    # Martin Luther King Day: on 01-22 the 01-21 file is not out yet, so the holiday's hours,
+    # which lie in it, are read from REST from the range's start inside the session.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
     clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"2025-01-21\.csv\.gz, does not exist either: 2025-01-21 is not yet published",
-    ):
-        q.history(
-            datetime(2025, 1, 20, 8, tzinfo=CHICAGO),
-            datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
-            source=HistorySource.FLAT_FILES,
-        )
+    q = query(session, FUTURES_TRADES, symbols=MANY, venues={FuturesVenue.CME})
+    start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
+    end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
+    t = q.history(start, end)
+    assert pick(t, "Symbol") == [("from REST",)]
+    ((_, req, _),) = rest.calls
+    assert (req.start, req.end) == (start, end)
+    assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", date(2025, 1, d)) for d in (20, 21)]
 
 
 def test_a_holiday_before_a_weekend_end_rolls_forward(
@@ -1418,7 +1503,8 @@ def test_a_holiday_before_a_weekend_end_rolls_forward(
         source=HistorySource.FLAT_FILES,
     )
     assert pick(t, "Timestamp") == [(friday,)]
-    read = [FUTURES_KEY.format("cme", date(2024, 3, d)) for d in (29, 30, 31)] + [key]
+    # The look after the range passes over Sunday 03-31, a day without a session.
+    read = [FUTURES_KEY.format("cme", date(2024, 3, d)) for d in (29, 30)] + [key]
     assert sorted(fake_s3.keys()) == sorted(read)
 
 
@@ -1449,13 +1535,19 @@ def test_futures_dates_do_not_roll_forward(
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
 ) -> None:
-    # A date names its own session exactly: a holiday's hours belong to another session.
+    # A date names its own session exactly: a holiday's hours belong to another session, so
+    # the next session's file is only opened, to tell the holiday from a file not out yet.
     clock(datetime(2025, 2, 10, tzinfo=UTC))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    later = FUTURES_KEY.format("cme", date(2025, 1, 21))
+    fake_s3.put(later, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-21,ESH5,{tuesday}\n"))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
     assert t.size == 0
-    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
+    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20)), later]
+    assert later in fake_s3.closed_bodies
 
 
 def test_mixed_futures_bounds_are_refused_before_any_read(
@@ -1794,35 +1886,37 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     )
 
 
-def test_a_range_without_any_file_is_an_empty_table(
+def test_a_range_without_any_file_raises(
     *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # No data is no data, whatever the reason: each missing weekday is logged, nothing raises.
+    # With no file at all, and none after the range, the days may not be out yet, or the
+    # address is wrong: the call raises rather than return no rows, and the log says both.
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=LOGGER):
-        t = q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES)
-    assert t.size == 0
-    assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
+    with (
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+        pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-03 is not published"),
+    ):
+        q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert caplog.messages == [
         (
             "stocks.trades: 0 of 2 trading days' files exist (2025-03-03..2025-03-04, first "
             f"looked for at {TRADES_0303}); the bucket, prefix, or venue may be wrong"
-        ),
-        f"stocks.trades: {TRADES_0303} does not exist; skipping 2025-03-03 (a market holiday?)",
-        f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
+        )
     ]
 
 
 def test_one_missing_trading_day_is_only_a_holiday(
-    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Saturday, Sunday, and one Monday: a single missing trading day says nothing of the address.
+    put(TRADES_0304, "us_stocks_sip_trades_v1_2025-03-05.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
-    assert caplog.messages == [
-        f"stocks.trades: {TRADES_0303} does not exist; skipping 2025-03-03 (a market holiday?)"
-    ]
+    assert caplog.messages == [holiday_warning("stocks.trades", TRADES_0303, "2025-03-03")]
 
 
 def test_a_crypto_weekend_without_files_warns_about_the_address(
@@ -1830,17 +1924,14 @@ def test_a_crypto_weekend_without_files_warns_about_the_address(
 ) -> None:
     # Crypto trades every day, so a Saturday and a Sunday are two trading days.
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
-    sunday = "global_crypto/trades_v1/2025/03/2025-03-02.csv.gz"
     q = query(session, CRYPTO_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=LOGGER):
+    with caplog.at_level(logging.WARNING, logger=LOGGER), pytest.raises(dm.MassiveError):
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     assert caplog.messages == [
         (
             "crypto.trades: 0 of 2 trading days' files exist (2025-03-01..2025-03-02, first "
             f"looked for at {saturday}); the bucket, prefix, or venue may be wrong"
-        ),
-        f"crypto.trades: {saturday} does not exist; skipping 2025-03-01 (a market holiday?)",
-        f"crypto.trades: {sunday} does not exist; skipping 2025-03-02 (a market holiday?)",
+        )
     ]
 
 
