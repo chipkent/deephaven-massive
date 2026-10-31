@@ -867,8 +867,8 @@ class _SettingsLoader(yaml.BaseLoader):
             The node.
 
         Raises:
-            _SettingsFileError: If the node is an alias (`*name`), defines an anchor (`&name`), or
-                carries an explicit tag (`!name`, `!!python/object`, ...).
+            _SettingsFileError: If the node is an alias (`*name`), defines an anchor
+                (`&name`), or carries an explicit tag (`!name`, `!!python/object`, ...).
         """
         peek: Callable[[], yaml.Event] = self.peek_event  # PyYAML's stubs leave it untyped
         event = peek()
@@ -898,8 +898,8 @@ def _compose(text: str) -> yaml.MappingNode:
         The top-level mapping.
 
     Raises:
-        _SettingsFileError: If the text holds no document, more than one, or a top level that is not
-            a mapping, or `_SettingsLoader` refuses a node.
+        _SettingsFileError: If the text holds no document, more than one, or a top level that
+            is not a mapping, or `_SettingsLoader` refuses a node.
         yaml.YAMLError: If the text is not valid YAML.
     """
     loader = _SettingsLoader(text)
