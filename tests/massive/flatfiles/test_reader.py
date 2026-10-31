@@ -257,11 +257,12 @@ def python_lines(call: Callable[[], object]) -> int:
         lines += event == "line"
         return trace
 
+    previous = sys.gettrace()  # coverage's tracer, which must survive the count
     sys.settrace(trace)
     try:
         call()
     finally:
-        sys.settrace(None)
+        sys.settrace(previous)
     return lines
 
 
