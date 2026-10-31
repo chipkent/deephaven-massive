@@ -172,7 +172,8 @@ first dropped row's reason. A published row starts the count again. Each symbol 
 run of its own, which other symbols' rows do not end: once this many of one symbol's rows in a
 row have been dropped, with none of its rows published, the streams that name that symbol
 fail, so a symbol Massive stopped sending readably never freezes them without an error. A
-`dm.ALL` stream is never failed for one symbol.
+`dm.ALL` stream is never failed for one symbol; its `Error` names the symbol as possibly stale,
+without failing the stream, until a row of the symbol is published again.
 """
 
 SYMBOL_CACHE_LIMIT: Final = 100_000
@@ -285,6 +286,34 @@ class Converted:
     null_symbols: bool = False
     misses: tuple[tuple[str, str], ...] = ()
     dropped_symbols: Mapping[str, int] = dataclasses.field(default_factory=dict)
+
+
+STALE_SYMBOLS_SHOWN: Final = 3
+"""How many stale symbols a `dm.ALL` stream's `Error` names before it only counts the rest."""
+
+
+def _stale_text(stale: Mapping[str, str]) -> str:
+    """Word a `dm.ALL` stream's warning about the symbols whose rows are being dropped.
+
+    Args:
+        stale: Each such symbol, in the order found, with the first dropped row's reason.
+
+    Returns:
+        `"rows for ESH5 are being dropped (<reason>); its last values may be stale"`, or for
+        several the first `STALE_SYMBOLS_SHOWN` and how many more; `""` for none.
+    """
+    if not stale:
+        return ""
+    symbols = list(stale)
+    shown = ", ".join(symbols[:STALE_SYMBOLS_SHOWN])
+    more = len(symbols) - STALE_SYMBOLS_SHOWN
+    if more > 0:
+        shown += f" and {more} more"
+    whose = "its" if len(symbols) == 1 else "their"
+    return (
+        f"rows for {shown} are being dropped ({stale[symbols[0]]}); {whose} last values may "
+        "be stale"
+    )
 
 
 def _counted_symbols(symbols: pa.Array, rows: pa.Array | None) -> dict[str, int]:
@@ -768,6 +797,12 @@ class StreamSink:
                 self.rows_published += added
             return added
 
+    @property
+    def receives_all(self) -> bool:
+        """True for a `dm.ALL` stream, which receives every symbol of its channel."""
+        with self._lock:
+            return self._symbols is None
+
     def holds(self, symbol: str) -> bool:
         """Tell whether the stream names `symbol` among its symbols. Any thread; never blocks.
 
@@ -1075,9 +1110,11 @@ class Flusher:
         "_final",
         "_flush_lock",
         "_interval",
+        "_noted",
         "_runs",
         "_sessions",
         "_shown",
+        "_stale",
         "_stop",
         "_symbol_runs",
         "_symbols",
@@ -1116,6 +1153,10 @@ class Flusher:
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
         self._shown: dict[int, str] = {}
+        # Flush-lock state: per `dm.ALL` stream, the symbols whose rows are being dropped, with
+        # the first reason, which its `Error` names; and the `Error` text last written.
+        self._stale: dict[int, dict[str, str]] = {}
+        self._noted: dict[int, str] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
@@ -1325,9 +1366,13 @@ class Flusher:
         Args:
             routed: The streams the flush routed.
         """
+        live = {sink.stream_id for sink in routed}
         if self._shown:  # the misses of streams no longer routed
-            live = {sink.stream_id for sink in routed}
             self._shown = {i: m for i, m in self._shown.items() if i in live}
+        if self._stale:  # and their stale symbols and warnings
+            self._stale = {i: m for i, m in self._stale.items() if i in live}
+        if self._noted:
+            self._noted = {i: m for i, m in self._noted.items() if i in live}
         plans = {sink.plan for sink in routed}
         if self._symbols:  # the spellings of datasets no longer routed
             self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
@@ -1431,10 +1476,7 @@ class Flusher:
             for sink in readers:
                 if sink.receives(symbol):
                     missed.add(sink.stream_id)
-                    if self._shown.get(sink.stream_id) != message:
-                        self._shown[sink.stream_id] = message
-                        found = updates.get(sink, StreamUpdate())
-                        updates[sink] = replace(found, error=message)
+                    self._shown[sink.stream_id] = message
         if converted.unreadable:  # a spelling the library cannot read is its own defect
             failure = MassiveError(converted.unreadable, cause=ErrorCause.LIBRARY_DEFECT)
             self._fail_each(readers, failure)
@@ -1445,8 +1487,30 @@ class Flusher:
         self._counted_symbols(plan, converted, batch=batch, readers=readers)
         if self._counted(plan, converted, lost=batch.lost, readers=readers):
             return
-        if not converted.batch.num_rows:
-            return
+        if converted.batch.num_rows:
+            self._publish_batch(plan, converted, readers=readers, missed=missed, updates=updates)
+        self._write_notes(readers, updates)
+
+    def _publish_batch(
+        self,
+        plan: ChannelPlan,
+        converted: Converted,
+        *,
+        readers: list[StreamSink],
+        missed: set[int],
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Add a converted batch to the dataset's streams, and record their row totals.
+
+        A stream whose published rows all place clears its futures session miss.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            converted: The flush's conversion, with rows.
+            readers: The dataset's streams on the channel.
+            missed: The streams that received a row the schedules could not place.
+            updates: Receives each stream's new published-row total.
+        """
         splits = (
             converted.batch.num_rows >= SPLIT_MIN_ROWS
             and sum(sink.takes_one_symbol(converted) for sink in readers) >= SPLIT_MIN_STREAMS
@@ -1456,13 +1520,36 @@ class Flusher:
         )
         for sink in readers:
             if sink.publish(shared):
+                if sink.stream_id not in missed:
+                    self._shown.pop(sink.stream_id, None)
                 found = updates.get(sink, StreamUpdate())
-                cleared = sink.stream_id not in missed and sink.stream_id in self._shown
-                if cleared:
-                    del self._shown[sink.stream_id]
-                updates[sink] = replace(
-                    found, rows_published=sink.rows_published, clear_error=cleared
-                )
+                updates[sink] = replace(found, rows_published=sink.rows_published)
+
+    def _write_notes(
+        self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
+    ) -> None:
+        """Write each stream's warning into its `Error` when it changed, or clear it.
+
+        A stream's warning joins its futures session miss and, for a `dm.ALL` stream, the
+        symbols whose rows are being dropped (`_stale_text`); neither fails the stream.
+
+        Args:
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new `Error`, or its clearing.
+        """
+        for sink in readers:
+            key = sink.stream_id
+            parts = [self._shown.get(key), _stale_text(self._stale.get(key, {}))]
+            text = "; ".join(part for part in parts if part)
+            if text == self._noted.get(key, ""):
+                continue
+            found = updates.get(sink, StreamUpdate())
+            if text:
+                self._noted[key] = text
+                updates[sink] = replace(found, error=text)
+            else:
+                del self._noted[key]
+                updates[sink] = replace(found, clear_error=True)
 
     def _counted(
         self,
@@ -1501,7 +1588,7 @@ class Flusher:
         if count < DROPPED_RUN_LIMIT:
             self._runs[plan] = (count, reason)
             return False
-        del self._runs[plan]
+        self._runs.pop(plan, None)
         failure = MassiveError(
             library_bug(
                 f"{plan.dataset}: the last {count} rows of channel {plan.channel} were dropped "
@@ -1529,8 +1616,9 @@ class Flusher:
         `DROPPED_RUN_LIMIT` of its rows in a row have been dropped, every stream that holds the
         symbol by name fails with a `MassiveError` naming it, the run's length, and its first
         row's reason (`ErrorCause.LIBRARY_DEFECT`), and the run starts over. A `dm.ALL` stream
-        is never failed for one symbol: it serves every other symbol, and the dataset's
-        WARNING and running count already name the drops.
+        is never failed for one symbol, since it serves every other symbol; instead its
+        `Error` names the symbol as possibly stale (`_write_notes`) until a row of the symbol
+        is published again.
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1541,6 +1629,12 @@ class Flusher:
         runs = self._symbol_runs.setdefault(plan, {})
         for symbol in converted.symbols:
             runs.pop(symbol, None)
+        everyone = [s for s in readers if s.receives_all]
+        for sink in everyone:  # a symbol published again is no longer stale
+            stale = self._stale.get(sink.stream_id)
+            if stale is not None:
+                for symbol in converted.symbols & stale.keys():
+                    del stale[symbol]
         dropped = Counter(converted.dropped_symbols)
         dropped.update(batch.lost_symbols)
         reason = batch.lost.dropped_reason or converted.drift.dropped_reason
@@ -1553,7 +1647,7 @@ class Flusher:
             if count < DROPPED_RUN_LIMIT:
                 runs[symbol] = (count, first)
                 continue
-            del runs[symbol]
+            runs.pop(symbol, None)
             failure = MassiveError(
                 library_bug(
                     f"{plan.dataset}: the last {count} rows of {symbol} on channel "
@@ -1563,6 +1657,8 @@ class Flusher:
                 cause=ErrorCause.LIBRARY_DEFECT,
             )
             self._fail_each([s for s in readers if s.holds(symbol)], failure)
+            for sink in everyone:
+                self._stale.setdefault(sink.stream_id, {})[symbol] = first
 
     def _convert(
         self, plan: ChannelPlan, rows: list[dict[str, object]], *, arrived: list[int]

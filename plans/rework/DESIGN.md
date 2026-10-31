@@ -5931,8 +5931,10 @@ serving it would quietly return an empty table. So a loud failure, a defect of t
   own (`Flusher._counted_symbols`), which other symbols' published rows do not end: after
   `DROPPED_RUN_LIMIT` of one symbol's rows in a row are dropped with none of its rows
   published, the streams that name that symbol fail, so it never freezes them without an
-  error. A `dm.ALL` stream is never failed for one symbol; the dataset's WARNING and count
-  name the drops.
+  error. A `dm.ALL` stream is never failed for one symbol: its `m.streams()` `Error` says,
+  without failing it, `rows for ESH5 are being dropped (<first reason>); its last values may
+  be stale` (the first three such symbols and a count of the rest), and the note goes once a
+  row of the symbol is published again, so a trader never sees a frozen row without a mark.
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire` or `RowDataError`; `poll()` fails its table through

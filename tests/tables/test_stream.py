@@ -262,7 +262,11 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
 
 
 def make_sink(
-    core: SessionCore, symbols: NormalizedSymbols, plan: ChannelPlan | None = None
+    core: SessionCore,
+    symbols: NormalizedSymbols,
+    plan: ChannelPlan | None = None,
+    *,
+    stream_id: int = 1,
 ) -> tuple[StreamSink, Table]:
     # A trades stream; streams given one `plan` share each flush's batch, as one dataset's do.
     if plan is None:
@@ -272,7 +276,7 @@ def make_sink(
         core.catalog.dataset_schema(TRADES, raw_symbol=False),
         symbols,
         core=core,
-        stream_id=1,
+        stream_id=stream_id,
         host="socket.test",
         evidence="test host",
         path="/stocks",
@@ -1037,6 +1041,52 @@ def test_a_symbol_whose_every_row_is_dropped_fails_its_streams_while_others_publ
     assert "the first: timestamp unit mismatch for test.trades.Timestamp" in error
 
 
+def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A dm.ALL stream is never failed for one symbol, but its last values for the symbol
+    # freeze: its Error says so, without failing it, and clears once the symbol is back.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan, stream_id=7)
+    flusher.routes.add("T", every)
+    written: list[StreamUpdate] = []
+    monkeypatch.setattr(core, "update_streams", lambda changes: written.extend(changes.values()))
+    reason = "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
+    limit = stream.DROPPED_RUN_LIMIT
+    for symbol in ("ILLQ", "AAA", "BBB", "CCC"):
+        flusher.rows("T", [trade("AAPL"), *[trade(symbol, SipTimestamp=5)] * limit])
+        flusher.flush()
+    assert not every.failed
+    errors = [u.error for u in written if u.error is not None]
+    assert errors == [
+        f"rows for ILLQ are being dropped ({reason}); its last values may be stale",
+        f"rows for ILLQ, AAA are being dropped ({reason}); their last values may be stale",
+        f"rows for ILLQ, AAA, BBB are being dropped ({reason}); their last values may be stale",
+        (
+            f"rows for ILLQ, AAA, BBB and 1 more are being dropped ({reason}); their last values "
+            "may be stale"
+        ),
+    ]
+    written.clear()
+    flusher.rows("T", [trade(symbol) for symbol in ("ILLQ", "AAA", "BBB")])
+    flusher.flush()
+    assert [u.error for u in written] == [
+        f"rows for CCC are being dropped ({reason}); its last values may be stale"
+    ]
+    written.clear()
+    flusher.rows("T", [trade("CCC")])
+    flusher.flush()
+    assert [(u.error, u.clear_error) for u in written] == [(None, True)]
+    written.clear()
+    flusher.rows("T", [trade("CCC")])
+    flusher.flush()
+    assert [u.clear_error for u in written] == [False]  # nothing left to clear
+    flusher.routes.remove(7)
+    flusher.flush()
+    assert (flusher._stale, flusher._noted) == ({}, {})
+
+
 def test_a_published_row_of_a_symbol_ends_its_run(
     massive_session: dm.MassiveSession, flusher: Flusher
 ) -> None:
@@ -1052,6 +1102,19 @@ def test_a_published_row_of_a_symbol_ends_its_run(
     flusher.routes.remove(1)
     flusher.flush()
     assert flusher._symbol_runs == {}
+
+
+def test_one_flush_of_dropped_rows_at_the_limit_fails_the_streams_by_the_run_rule(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    every, _ = make_sink(massive_session._core, ALL)
+    flusher.routes.add("T", every)
+    with caplog.at_level(logging.ERROR):
+        flusher.rows("T", [trade("AAPL", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT)
+        flusher.flush()
+    assert every.failed
+    assert "could not publish" not in caplog.text
+    assert f"the last {stream.DROPPED_RUN_LIMIT} rows of channel T were dropped" in caplog.text
 
 
 def test_a_flush_forgets_the_run_of_a_dataset_no_longer_routed(
