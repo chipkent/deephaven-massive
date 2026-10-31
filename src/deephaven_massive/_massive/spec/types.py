@@ -184,6 +184,11 @@ class WireUnit(StrEnum):
     """Microseconds."""
     NS = "ns"
     """Nanoseconds."""
+    MS_OR_NS = "ms|ns"
+    """Milliseconds or nanoseconds, told apart value by value: a count of at least 10**17 is
+    nanoseconds (any instant after 1973), a smaller one milliseconds (any instant before the
+    year 3,170,000). For a field whose documentation and samples disagree on the two; never a
+    parameter's unit."""
 
 
 class ParamKind(StrEnum):
@@ -245,8 +250,9 @@ class Conversion(StrEnum):
     MIDNIGHT_UTC_DATE = "midnight-utc-date"
     """A date also sent as an ISO-8601 instant at exactly midnight with offset `Z` or `+00:00`
     (`date` to `date`)."""
-    DATE_AS_EPOCH = "date-as-epoch"
-    """A date sent as an integer epoch count in the field's unit (`date` to `epoch`)."""
+    CHICAGO_MIDNIGHT_DATE = "chicago-midnight-date"
+    """A date also sent as an integer count of nanoseconds since the epoch at exactly midnight
+    in Chicago, giving that Chicago date (`date` to `date`)."""
     INTEGER_AS_NUMBER = "integer-as-number"
     """A quantity declared an integer whose values carry a fraction, such as a crypto volume
     `951.6112` (`long` to `double`); any number is accepted."""
@@ -290,7 +296,7 @@ _CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool
             Conversion.NUMBER_LABEL: (frozenset({WireType.DOUBLE}), WireType.STRING, True),
             Conversion.CODE_LIST_TEXT: (frozenset({WireType.LONG}), WireType.LONG_ARRAY, True),
             Conversion.MIDNIGHT_UTC_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
-            Conversion.DATE_AS_EPOCH: (frozenset({WireType.DATE}), WireType.EPOCH, True),
+            Conversion.CHICAGO_MIDNIGHT_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
             Conversion.INTEGER_AS_NUMBER: (frozenset({WireType.LONG}), WireType.DOUBLE, True),
         }
     )

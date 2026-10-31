@@ -619,7 +619,9 @@ class ChannelPlan:
             mask of the rows to drop, or None when no row is dropped.
         """
         sent = column.combine_chunks()
-        values, failed = masked_instants(unit, sent, time_column=name == self.time_name)
+        values, failed = masked_instants(
+            unit, sent, time_column=name == self.time_name, label=f"{self.dataset}.{name}"
+        )
         first = first_failure(sent, failed)
         if first is None:
             return values, None

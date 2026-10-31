@@ -202,7 +202,7 @@
    "fields": [
     {"column": "Value", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "value"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "timestamp"}
+    {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "timestamp"}
    ],
    "memberships": [
     {"group": "indices", "kind": "values", "position": 1, "projection": null}

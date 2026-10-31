@@ -3,8 +3,8 @@
 Massive sends epoch timestamps in seconds, milliseconds, microseconds, or nanoseconds. The unit
 of a field is a fact about its wire format, verified by hand and written onto each generated
 field (`Field.unit` in the wire package's generated schemas); `time_unit` reads it for one
-field of one source, applying the FMV magnitude rule below, and the routine converts values by
-it. No unit is declared, guessed, or inferred here.
+field of one source, and the routine converts values by it. No unit is declared, guessed, or
+inferred here: even the magnitude rule below is a unit the spec refresh writes onto a field.
 
 **The timestamp routine** (`masked_instants`) turns one column of epoch integers into epoch
 nanoseconds, in this order:
@@ -24,12 +24,13 @@ steps 2 and 3 catch every unit confusion: milliseconds read as nanoseconds land 
 1970, and nanoseconds read as milliseconds overflow. `first_failure` picks the first failing
 value as Massive sent it, and `mismatch_message` names it, the field, and its unit.
 
-**The FMV magnitude rule.** The WebSocket `FMV` channel's `t` field is documented as
-nanoseconds but the documentation sample is in milliseconds, so `time_unit` gives it
-`TimeUnit.FMV_MAGNITUDE`: a value `>= 10**17` is nanoseconds, anything smaller is milliseconds.
-Every nanosecond value after 1973-03-03 is at least 10**17 and a millisecond value reaches
-10**17 only in the year 3,170,000, so the rule cannot misclassify. The unit is picked per value
-before step 2, and the detected unit is logged once at INFO.
+**The magnitude rule.** A field whose documentation and samples disagree on milliseconds and
+nanoseconds (the WebSocket `FMV` and `LULD` `t`, the `us_indices/values_v1` `timestamp`) has
+the unit `TimeUnit.MS_OR_NS`: a value `>= 10**17` is nanoseconds, anything smaller is
+milliseconds. Every nanosecond value after 1973-03-03 is at least 10**17 and a millisecond
+value reaches 10**17 only in the year 3,170,000, so the rule cannot misclassify. The unit is
+picked per value before step 2, and the unit each such column was found in is logged once per
+column at INFO.
 
 The bound applies to epoch integers only, never to ISO-8601 text, so a pre-1990 date written as
 text stays valid. The module is pure: it makes no Deephaven or network call, and its only state
@@ -48,7 +49,6 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._log_limits import log_once
-from deephaven_massive._massive import Transport
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Field, Source
 
 __all__ = [
-    "FMV_NS_THRESHOLD",
+    "MAGNITUDE_NS_THRESHOLD",
     "MAX_INSTANT_NS",
     "MIN_INSTANT_NS",
     "TimeUnit",
@@ -68,8 +68,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-FMV_NS_THRESHOLD: Final = 10**17
-"""FMV `t` values at or above this are nanoseconds; smaller values are milliseconds."""
+MAGNITUDE_NS_THRESHOLD: Final = 10**17
+"""A `TimeUnit.MS_OR_NS` value at or above this is nanoseconds; a smaller one is milliseconds."""
 
 MIN_INSTANT_NS: Final = epoch_ns(datetime(1990, 1, 1, tzinfo=UTC))
 """The earliest instant a timestamp may convert to: 1990-01-01T00:00Z, in epoch nanoseconds."""
@@ -78,24 +78,20 @@ MAX_INSTANT_NS: Final = epoch_ns(datetime(2101, 1, 1, tzinfo=UTC))
 
 _INT64_MAX: Final = 2**63 - 1
 
-_FMV_CHANNEL: Final = "FMV"
-"""The WebSocket channel, on every cluster, whose time field takes the FMV magnitude rule."""
-
 
 class TimeUnit(StrEnum):
     """The unit an epoch timestamp field counts in.
 
-    The four fixed units share the values of the wire package's `WireUnit`, so
-    `TimeUnit(field.unit.value)` converts one; `time_unit` does that for a field, applying the
-    FMV rule.
+    Every unit shares its value with the wire package's `WireUnit`, so
+    `TimeUnit(field.unit.value)` converts one; `time_unit` does that for a field.
     """
 
     SECONDS = "s"
     MILLISECONDS = "ms"
     MICROSECONDS = "us"
     NANOSECONDS = "ns"
-    FMV_MAGNITUDE = "ms|ns"
-    """Milliseconds below `FMV_NS_THRESHOLD`, nanoseconds at or above it (FMV `t` only)."""
+    MS_OR_NS = "ms|ns"
+    """Milliseconds below `MAGNITUDE_NS_THRESHOLD`, nanoseconds at or above it, value by value."""
 
 
 _NS_PER: Final[Mapping[TimeUnit, int]] = {
@@ -107,20 +103,26 @@ _NS_PER: Final[Mapping[TimeUnit, int]] = {
 """Nanoseconds per unit, for every fixed unit."""
 
 
-def _log_fmv_unit(unit: TimeUnit) -> None:
-    """Log, once per process, which unit the FMV magnitude rule detected.
+def _log_magnitude_unit(label: str, unit: TimeUnit) -> None:
+    """Log, once per process and column, which unit the magnitude rule found a column in.
 
     Args:
-        unit: The unit the first classified FMV value was found to be in.
+        label: The column, as `<dataset>.<column>`.
+        unit: Nanoseconds when any of the first classified values was, else milliseconds.
     """
-    log_once(logger, "fmv-unit", "FMV timestamps detected in %s (magnitude rule)", unit.value)
+    log_once(
+        logger,
+        f"magnitude-unit\0{label}",
+        "%s: timestamps read by magnitude (milliseconds or nanoseconds) arrived in %s",
+        label,
+        unit.value,
+    )
 
 
 def time_unit(source: Source, field: Field) -> TimeUnit:
     """Return the unit one epoch field of one source counts in.
 
-    The field's generated unit, except on the WebSocket `FMV` channel of every cluster, whose
-    time field takes the FMV magnitude rule (see the module docstring).
+    The field's generated unit, `TimeUnit.MS_OR_NS` included (see the module docstring).
 
     Args:
         source: The generated source the field belongs to.
@@ -135,8 +137,6 @@ def time_unit(source: Source, field: Field) -> TimeUnit:
     """
     if field.unit is None:
         raise ValueError(f"{source.key} field {field.wire_key!r} is not an epoch timestamp")
-    if source.transport is Transport.WS and source.key.rpartition("/")[2] == _FMV_CHANNEL:
-        return TimeUnit.FMV_MAGNITUDE
     return TimeUnit(field.unit.value)
 
 
@@ -158,7 +158,7 @@ def first_failure(values: pa.Array, failed: pa.Array) -> int | None:
 
 
 def masked_instants(
-    unit: TimeUnit, values: pa.Array, *, time_column: bool
+    unit: TimeUnit, values: pa.Array, *, time_column: bool, label: str
 ) -> tuple[pa.Array, pa.Array]:
     """Run the timestamp routine on one column: failing values become null and are masked.
 
@@ -174,6 +174,8 @@ def masked_instants(
         values: An integer Arrow array of epoch values as Massive sent them.
         time_column: True for the dataset's time column, whose `0` is kept and so fails the
             bound; False for every other `Instant` column, whose `0` becomes null.
+        label: The column, as `<dataset>.<column>`, for the once-only log line that says which
+            unit a `MS_OR_NS` column arrived in.
 
     Returns:
         `(nanos, failed)`: an `int64` array of nanoseconds since the Unix epoch, null where
@@ -184,11 +186,11 @@ def masked_instants(
         sent = pc.call_function(
             "if_else", [pc.call_function("equal", [sent, 0]), pa.scalar(None, pa.int64()), sent]
         )
-    if unit is TimeUnit.FMV_MAGNITUDE:
-        is_ns = pc.call_function("greater_equal", [sent, FMV_NS_THRESHOLD])
+    if unit is TimeUnit.MS_OR_NS:
+        is_ns = pc.call_function("greater_equal", [sent, MAGNITUDE_NS_THRESHOLD])
         any_ns = pc.call_function("any", [is_ns]).as_py()
         if any_ns is not None:  # None: every value was null, so nothing was classified
-            _log_fmv_unit(TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
+            _log_magnitude_unit(label, TimeUnit.NANOSECONDS if any_ns else TimeUnit.MILLISECONDS)
         millis = _NS_PER[TimeUnit.MILLISECONDS]
         factor = pc.call_function("if_else", [is_ns, 1, millis])
         limit = pc.call_function("if_else", [is_ns, _INT64_MAX, _INT64_MAX // millis])
@@ -246,26 +248,26 @@ def mismatch_message(label: str, unit: TimeUnit, value: int) -> str:
 
 
 def _fixed(unit: TimeUnit, value: int) -> TimeUnit:
-    """Return the fixed unit one value counts in: the FMV magnitude rule picks one per value.
+    """Return the fixed unit one value counts in: the magnitude rule picks one per value.
 
     Args:
         unit: The field's unit.
         value: The epoch integer.
 
     Returns:
-        `unit` itself, or for `FMV_MAGNITUDE` nanoseconds at or above `FMV_NS_THRESHOLD` and
+        `unit` itself, or for `MS_OR_NS` nanoseconds at or above `MAGNITUDE_NS_THRESHOLD` and
         milliseconds below it.
     """
-    if unit is not TimeUnit.FMV_MAGNITUDE:
+    if unit is not TimeUnit.MS_OR_NS:
         return unit
-    return TimeUnit.NANOSECONDS if value >= FMV_NS_THRESHOLD else TimeUnit.MILLISECONDS
+    return TimeUnit.NANOSECONDS if value >= MAGNITUDE_NS_THRESHOLD else TimeUnit.MILLISECONDS
 
 
 def _overflows(unit: TimeUnit, value: int) -> bool:
     """Tell whether one epoch value overflows 64-bit nanoseconds in its unit.
 
     Args:
-        unit: The value's unit; for `FMV_MAGNITUDE`, the magnitude picks nanoseconds or
+        unit: The value's unit; for `MS_OR_NS`, the magnitude picks nanoseconds or
             milliseconds as `masked_instants` does.
         value: The epoch integer.
 

@@ -228,7 +228,10 @@ class RowConverter:
                 if source.unit is not None:
                     sent = values
                     values, failed = masked_instants(
-                        source.unit, sent, time_column=name == self.time_name
+                        source.unit,
+                        sent,
+                        time_column=name == self.time_name,
+                        label=f"{self.dataset}.{name}",
                     )
                     first = first_failure(sent, failed)
                     if first is not None and name == self.time_name:
