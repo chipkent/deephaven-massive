@@ -58,8 +58,15 @@ A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per ses
 and kind of refusal, and each later `poll()` table refused the same way logs at DEBUG: every
 poll makes its own requests and gets its own error, so twenty polls of a dataset the plan
 does not include would otherwise log twenty WARNINGs for one cause. Any
-other error, also one while publishing, is shown in the row's `Error`; the table keeps its rows
-and the next cycle runs as scheduled, and clears the `Error` once it succeeds. The first failing
+other error, also one while publishing, is shown in the row's `Error` with the time of the last
+good cycle (or, before one, of the poll's start); the table keeps its rows and the next cycle
+runs as scheduled, and clears the `Error` once it succeeds. A run of failing cycles fails the
+table, in every mode and naming the last good cycle, once one of its failures comes
+`MassiveConfig.max_outage` seconds or more after its first: the rows since then may be missing,
+and a table that kept running would show stale data as if it were current. The count starts at
+the run's first failure, so one failure of an hourly poll, or of one slowed by rate-limit
+pauses, never fails it. A cycle that succeeds with no new row is a good cycle, so a quiet
+dataset never fails. The first failing
 cycle of a run of failures logs one WARNING (an expected cause) or ERROR (a defect, with its
 trace), later ones log at DEBUG, and the first cycle that succeeds again logs the recovery at
 INFO.
@@ -118,11 +125,13 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
+    NotePart,
     StreamKind,
     StreamRow,
     StreamUpdate,
     describe_symbols,
     shown_query,
+    utc_text,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
@@ -195,6 +204,10 @@ class PollClock(Protocol):
         """Return a monotonic time in seconds."""
         ...
 
+    def time(self) -> float:
+        """Return the wall-clock time in seconds since the epoch."""
+        ...
+
     def wait(self, event: threading.Event, seconds: float) -> bool:
         """Wait up to `seconds`, or until `event` is set.
 
@@ -209,12 +222,17 @@ class PollClock(Protocol):
 
 
 class _SystemClock:
-    """The real clock: `time.monotonic` and `threading.Event.wait`."""
+    """The real clock: `time.monotonic`, `time.time`, and `threading.Event.wait`."""
 
     @staticmethod
     def monotonic() -> float:
         """Return `time.monotonic()`."""
         return time.monotonic()
+
+    @staticmethod
+    def time() -> float:
+        """Return `time.time()`."""
+        return time.time()
 
     @staticmethod
     def wait(event: threading.Event, seconds: float) -> bool:
@@ -347,12 +365,16 @@ class Poller:
         "_exec_ctx",
         "_failed",
         "_failing",
+        "_failing_at",
+        "_failing_since",
+        "_good_at",
         "_interval",
         "_key_names",
         "_keys",
         "_late",
         "_list_keys",
         "_max_concurrency",
+        "_max_outage",
         "_mode",
         "_pollers",
         "_publish_lock",
@@ -366,6 +388,7 @@ class Poller:
         "_spec",
         "_stop",
         "_stream_id",
+        "_succeeded",
         "_thread",
         "_thread_name",
     )
@@ -407,6 +430,7 @@ class Poller:
         # The poller thread's name; its fan-out pool's threads add " rest_<n>".
         self._thread_name = f"{core.thread_prefix} poll-{stream_id}"
         self._max_concurrency = core.config.max_concurrency
+        self._max_outage = core.config.max_outage
         self._schema = core.dataset_schema(spec)
         self._spec = spec
         self._key_names = key_columns(spec, self._schema)
@@ -427,6 +451,13 @@ class Poller:
         # one), and whether cycles run late.
         self._failing: ErrorCause | None = None
         self._late = False
+        # The last good cycle's start (wall-clock, for the text), or the poll's start before
+        # one; and when the current run of failing cycles began (monotonic, and wall-clock),
+        # or None outside one. Only the poller thread touches them.
+        self._good_at = clock.time()
+        self._succeeded = False
+        self._failing_since: float | None = None
+        self._failing_at = 0.0
         self._keys: set[tuple[Hashable, ...]] = set()
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
@@ -627,6 +658,7 @@ class Poller:
             False if the poller was stopped while it read, so nothing was published.
         """
         began = self._clock.monotonic()
+        began_at = self._clock.time()
         symbols, skipped = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
         table, requests, patience = self._read(
@@ -652,11 +684,12 @@ class Poller:
             rows_published=self._published,
             requests_per_cycle=requests,
             symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
-            clear_error=True,
+            notes={NotePart.POLL_CYCLE: None},
             skipped=skipped_rows_text(skipped) if skipped else None,
             clear_skipped=not skipped,
         )
         core.update_streams({self._stream_id: update})
+        self._good_at, self._succeeded, self._failing_since = began_at, True, None
         if self._failing is not None:
             self._failing = None
             logger.info(
@@ -688,7 +721,14 @@ class Poller:
             )
 
     def _carry_on(self, core: SessionCore, error: Exception) -> bool:
-        """Show a cycle's error in the table's row; the table keeps its rows.
+        """Show a cycle's error in the table's row, or fail the table once it is too late.
+
+        The table keeps its rows, and its `Error` names the cycle's error and the last good
+        cycle's time. A failure that comes `MassiveConfig.max_outage` seconds or more after the
+        first failure of the run (the first since the last good cycle) fails the table instead
+        (`_outage_failure`), in every mode, and the poller ends. Counting from the run's first
+        failure, not from the last good cycle, keeps one transient failure from failing an
+        hourly poll, or a poll slowed by rate-limit pauses.
 
         The first failure of a run is logged once, by its text, which names the HTTP status,
         the path, and the request id: a `MassiveError` with an expected cause at WARNING, and a
@@ -702,9 +742,17 @@ class Poller:
             error: The cycle's error.
 
         Returns:
-            Whether the poller carries on: False once it has been stopped.
+            Whether the poller carries on: False once it has been stopped, or once the table
+            failed.
         """
         if self._stop.is_set():
+            return False
+        now = self._clock.monotonic()
+        if self._failing_since is None:  # a run of failing cycles begins
+            self._failing_since, self._failing_at = now, self._clock.time()
+        down = now - self._failing_since
+        if down >= self._max_outage:
+            self._fail_fatal(core, self._outage_failure(error, down))
             return False
         cause = cause_of(error)
         if self._failing is cause:
@@ -719,8 +767,46 @@ class Poller:
                 failure_text(error),
             )
         self._failing = cause
-        core.update_streams({self._stream_id: StreamUpdate(error=str(error))})
+        note = f"{error}; {self._good_text()}"
+        core.update_streams({self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})})
         return True
+
+    def _good_text(self) -> str:
+        """Name the last good cycle's time, or the poll's start before one.
+
+        Returns:
+            The text, such as `"last good cycle at 2026-10-30T14:03:05Z"`.
+        """
+        at = utc_text(self._good_at)
+        if self._succeeded:
+            return f"last good cycle at {at}"
+        return f"no good cycle since the poll started at {at}"
+
+    def _outage_failure(self, error: Exception, down: float) -> MassiveError:
+        """Return the error the table fails with: its cycles have failed for `max_outage`.
+
+        Args:
+            error: The latest cycle's error, quoted in the message; its cause is the failure's.
+            down: Seconds since the run of failing cycles began.
+
+        Returns:
+            The error, naming the last good cycle, the limit, and what to do.
+        """
+        logger.debug(
+            "%s poll() stream %d: cycles have failed for %.0f s, max_outage is %g s; failing it",
+            self._spec.name,
+            self._stream_id,
+            down,
+            self._max_outage,
+        )
+        return MassiveError(
+            f"{self._spec.name} poll(): {self._good_text()}; every cycle since "
+            f"{utc_text(self._failing_at)} has failed, for {down:.0f} s, longer than "
+            f"MassiveConfig.max_outage ({self._max_outage:g} s); the rows since then may be "
+            "missing, so this table stopped; call the verb again for a new live table. The "
+            f"latest error: {error}",
+            cause=cause_of(error),
+        )
 
     def _publish(self, table: pa.Table) -> int:
         """Publish one cycle's rows as the mode shapes them.

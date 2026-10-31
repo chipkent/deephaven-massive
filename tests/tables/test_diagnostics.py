@@ -34,6 +34,7 @@ from deephaven_massive._tables.diagnostics import (
     Diagnostics,
     DriftRegistry,
     LimitSource,
+    NotePart,
     RateLimitRow,
     RateLimitState,
     StreamKind,
@@ -146,33 +147,52 @@ def test_column_sets() -> None:
 
 
 def test_stream_updates_set_only_the_given_fields() -> None:
-    row = _stream(host="socket.massive.com", rows_published=3, error="old")
+    row = _stream(host="socket.massive.com", rows_published=3)
     assert StreamUpdate().apply(row) == row
     updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5, path="/stocks").apply(row)
     assert (updated.rows_published, updated.deferred, updated.symbol_count) == (10, 2, 5)
-    assert (updated.host, updated.path, updated.error) == ("socket.massive.com", "/stocks", "old")
-    assert StreamUpdate(host="delayed.massive.com", error="slow").apply(row).error == "slow"
+    assert (updated.host, updated.path) == ("socket.massive.com", "/stocks")
+    slow = StreamUpdate(host="delayed.massive.com", notes={NotePart.QUIET: "slow"}).apply(row)
+    assert (slow.host, as_row(slow)["Error"]) == ("delayed.massive.com", "slow")
 
 
-def test_stream_updates_can_clear_a_warning() -> None:
-    # The options contract cap no longer defers anything: the warning goes back to null.
-    row = _stream(deferred=234, error="over capacity: 1234/1000; 234 deferred")
-    cleared = StreamUpdate(deferred=0, clear_error=True).apply(row)
-    assert (cleared.deferred, cleared.error, cleared.state) == (0, None, StreamState.RUNNING)
-    assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
+def test_warnings_of_several_sources_coexist_and_clear_alone() -> None:
+    # The connection's outage and options-cap notes and the flush thread's stale symbols are
+    # three writers of one Error: each sets or clears only its own part, shown in NotePart
+    # order, so no source ever replaces or clears another's warning.
+    row = _stream(deferred=2)
+    stale = StreamUpdate(notes={NotePart.STALE_SYMBOLS: "rows for ESH5 are being dropped"})
+    cap = StreamUpdate(notes={NotePart.CAP: "over capacity: 1002/1000; 2 deferred"})
+    down = StreamUpdate(notes={NotePart.OUTAGE: "connection down since T; no data"})
+    three = down.apply(cap.apply(stale.apply(row)))
+    assert as_row(three)["Error"] == (
+        "connection down since T; no data; over capacity: 1002/1000; 2 deferred; rows for ESH5 "
+        "are being dropped"
+    )
+    back = StreamUpdate(notes={NotePart.OUTAGE: None}).apply(three)  # the feed is back
+    assert as_row(back)["Error"] == (
+        "over capacity: 1002/1000; 2 deferred; rows for ESH5 are being dropped"
+    )
+    freed = StreamUpdate(deferred=0, notes={NotePart.CAP: None}).apply(back)  # the cap frees up
+    assert as_row(freed)["Error"] == "rows for ESH5 are being dropped"
+    cleared = StreamUpdate(notes={NotePart.STALE_SYMBOLS: None, NotePart.QUIET: None})
+    assert as_row(cleared.apply(freed))["Error"] is None  # clearing an absent part is harmless
+    again = StreamUpdate(notes={NotePart.STALE_SYMBOLS: "rows for NQH5 are being dropped"})
+    assert str(as_row(again.apply(three))["Error"]).endswith("rows for NQH5 are being dropped")
 
 
 def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_other() -> None:
-    row = _stream(deferred=2, error="over capacity: 1002/1000; 2 deferred")
+    cap = StreamUpdate(notes={NotePart.CAP: "over capacity: 1002/1000; 2 deferred"})
+    row = cap.apply(_stream(deferred=2))
     both = StreamUpdate(skipped="skipping 1 value").apply(row)
     assert as_row(both)["Error"] == "over capacity: 1002/1000; 2 deferred; skipping 1 value"
-    alone = StreamUpdate(deferred=0, clear_error=True).apply(both)  # the cap frees up
+    alone = StreamUpdate(deferred=0, notes={NotePart.CAP: None}).apply(both)  # the cap frees up
     assert as_row(alone)["Error"] == "skipping 1 value"
     assert StreamUpdate(rows_published=1).apply(alone).skipped == "skipping 1 value"
-    back = StreamUpdate(error="waiting for a slot").apply(alone)
+    back = StreamUpdate(notes={NotePart.OUTAGE: "waiting for a slot"}).apply(alone)
     fixed = StreamUpdate(clear_skipped=True, skipped="ignored").apply(back)  # the row is fixed
     assert as_row(fixed)["Error"] == "waiting for a slot"
-    assert as_row(StreamUpdate(clear_error=True).apply(fixed))["Error"] is None
+    assert as_row(StreamUpdate(notes={NotePart.OUTAGE: None}).apply(fixed))["Error"] is None
     stopped = dataclasses.replace(both, state=StreamState.FAILED, error="the cause")
     assert as_row(stopped)["Error"] == "the cause"  # a stop shows only its cause
 
@@ -181,9 +201,13 @@ def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_o
 def test_stream_updates_keep_the_cause_of_a_stop(state: StreamState) -> None:
     # A flush or a poll cycle that races a failure or the close never replaces its cause.
     row = _stream(state=state, error="the cause")
-    for update in (StreamUpdate(error="a warning"), StreamUpdate(clear_error=True)):
-        updated = update.apply(row)
-        assert (updated.state, updated.error) == (state, "the cause")
+    for text in ("a warning", None):
+        updated = StreamUpdate(notes={NotePart.POLL_CYCLE: text}).apply(row)
+        assert (updated.state, updated.error, as_row(updated)["Error"]) == (
+            state,
+            "the cause",
+            "the cause",
+        )
     assert StreamUpdate(rows_published=7).apply(row).rows_published == 7  # counts still move
 
 
@@ -489,7 +513,7 @@ def test_stream_updates_keep_schema_drift() -> None:
     row = _stream(schema_drift="WS:x+")
     assert StreamUpdate(rows_published=1).apply(row).schema_drift == "WS:x+"
     # Clearing the error never clears the drift: drift is not a failure.
-    assert StreamUpdate(clear_error=True).apply(row).schema_drift == "WS:x+"
+    assert StreamUpdate(notes={NotePart.CAP: None}).apply(row).schema_drift == "WS:x+"
 
 
 def test_schema_drift_reaches_both_tables(

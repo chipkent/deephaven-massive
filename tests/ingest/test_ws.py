@@ -179,6 +179,14 @@ def settle(ws_session: WsSession) -> None:
             assert done.wait(TIMEOUT)
 
 
+STALL = (
+    r"connection down since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ; no data; waiting for a WebSocket "
+    r"slot on socket\.test/options: another connection with this API key, perhaps from another "
+    r"process, holds it; the plan allows one connection per cluster"
+)
+"""A pattern of the `Error` of an options stream whose connection waits for a slot."""
+
+
 def streams_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
@@ -1269,22 +1277,28 @@ def test_a_stream_waiting_for_a_slot_says_so(
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
-    stall = (
-        "waiting for a WebSocket slot on socket.test/options: another connection with this "
-        "API key, perhaps from another process, holds it; the plan allows one connection "
-        "per cluster"
-    )
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == stall)
-    every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
-    wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [stall] * 2)
-    # A contract added during the wait is counted, while the wait stays the `Error`.
-    watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
-    wait_for(
-        lambda: (
-            [(r["Deferred"], r["Error"]) for r in streams_of(ws_session, dh_to_pylist)]
-            == [(2, stall), (0, stall)]
+
+    # The stall and the options cap are two parts of the Error: both show, the stall first.
+    capped_stall = f"{STALL}; {re.escape(cap)}"
+
+    def stalled(*patterns: str) -> bool:
+        errors = [r["Error"] or "" for r in streams_of(ws_session, dh_to_pylist)]
+        return len(errors) == len(patterns) and all(
+            re.fullmatch(p, e) for p, e in zip(patterns, errors, strict=True)
         )
-    )
+
+    wait_for(lambda: stalled(capped_stall))
+    every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
+    wait_for(lambda: stalled(capped_stall, STALL))
+    # A contract added during the wait is counted, and its cap note follows beside the wait.
+    watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
+    more = f"{STALL}; {re.escape('over capacity: 3/1; 2 deferred')}"
+
+    def counted() -> bool:
+        deferred = [r["Deferred"] for r in streams_of(ws_session, dh_to_pylist)]
+        return deferred == [2, 0] and stalled(more, STALL)
+
+    wait_for(counted)
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
     cap = "over capacity: 3/1; 2 deferred"
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
@@ -1322,16 +1336,17 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
-    stall = (
-        "waiting for a WebSocket slot on socket.test/options: another connection with this "
-        "API key, perhaps from another process, holds it; the plan allows one connection "
-        "per cluster"
-    )
-    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")  # the stall keeps the skipped row
+    skipped = f"; {re.escape(SKIPPED_SPY)}"
+
+    def stalled(suffix: str) -> bool:
+        pattern = f"{STALL}; {re.escape(cap)}{suffix}"  # each source keeps its own part
+        return re.fullmatch(pattern, cast("str", error() or "")) is not None
+
+    wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == stall)  # fixing the row keeps the stall
+    wait_for(lambda: stalled(""))  # fixing the row keeps the stall
     watchlist.add(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")
+    wait_for(lambda: stalled(skipped))
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     del capped

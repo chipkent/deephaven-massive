@@ -47,6 +47,7 @@ from deephaven_massive._tables.diagnostics import (
     QUERY_SHOWN,
     ConnectionRow,
     Diagnostics,
+    NotePart,
     StreamRow,
     StreamUpdate,
 )
@@ -1361,7 +1362,9 @@ def test_update_streams_reaches_every_stream_still_registered(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     core.update_streams(
         {
-            1: StreamUpdate(rows_published=5, host="socket.other", error="slow consumer"),
+            1: StreamUpdate(
+                rows_published=5, host="socket.other", notes={NotePart.QUIET: "slow consumer"}
+            ),
             99: StreamUpdate(rows_published=1),  # left the registry: ignored
         }
     )

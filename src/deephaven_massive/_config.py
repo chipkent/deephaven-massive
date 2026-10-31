@@ -203,6 +203,17 @@ class MassiveConfig:
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
             max_reconnect_backoff]`. Defaults to 120 seconds.
+        max_outage: Seconds of outage a live table survives. While a WebSocket connection is
+            down or reconnecting, each stream on it says so in its `m.streams()` `Error`
+            ("connection down since <time>; no data", the time of its last message) until its
+            own data flows again: Massive confirms its subscriptions, or sends it rows. A
+            stream still down this long after the drop fails, naming when the gap began: its
+            rows from then on are missing, so a table that kept running would show stale data
+            as if it were current. Call the verb again for a new live table. A `poll()` table
+            fails the same way once its cycles have kept failing for this long, counted from
+            the first failure since its last good cycle, which it names. `0` fails at the
+            first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
+            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -257,6 +268,7 @@ class MassiveConfig:
     ack_timeout: float = 5.0
     reconnect_backoff: float = 30.0
     max_reconnect_backoff: float = 120.0
+    max_outage: float = 300.0
     flat_file_symbol_threshold: int = 50
     max_concurrency: int = 8
     rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
@@ -275,13 +287,14 @@ class MassiveConfig:
         `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` that is not a
         set of `dm.Subscription`, or a numeric field of a non-numeric type also raises
         `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
-        `require_positive_int`).
+        `require_positive_int`); `max_outage` may also be zero.
 
         Raises:
             TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
             ValueError: If `reconnect_backoff` is below `MIN_RECONNECT_BACKOFF`,
-                `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
+                `max_reconnect_backoff` is below `reconnect_backoff`, `max_outage` is
+                negative or not finite, a timeout,
                 backoff, interval, or count is not positive, only one of the two S3
                 credentials is set, `api_key` or an S3 credential has leading or trailing
                 whitespace (or an S3 credential is blank), a `ws_hosts` value is not a bare
@@ -318,6 +331,7 @@ class MassiveConfig:
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
+        object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
@@ -422,6 +436,35 @@ def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
             )
         _require_enum(item, Subscription, "each rest_basic_subscriptions member")
     return frozenset(value)
+
+
+def _check_max_outage(value: object) -> float:
+    """Return `max_outage` as a `float` after checking that it is a finite, non-negative number.
+
+    Zero is valid, unlike the other durations: it fails live tables at the first disconnect.
+
+    Args:
+        value: The value passed as `MassiveConfig.max_outage`.
+
+    Returns:
+        The seconds, as a `float`.
+
+    Raises:
+        TypeError: If `value` is not an `int` or `float` (a `bool` is not accepted).
+        ValueError: If `value` is negative, not finite, or an `int` too large for a `float`.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"max_outage must be a number of seconds, not {type(value).__name__}")
+    try:
+        seconds = float(value)
+    except OverflowError:  # an int beyond the float range
+        raise ValueError("max_outage must be finite, got an int too large for a float") from None
+    if not (math.isfinite(seconds) and seconds >= 0):
+        raise ValueError(
+            f"max_outage must be zero or more seconds, got {value!r}; 0 fails live tables at "
+            "the first disconnect"
+        )
+    return seconds
 
 
 def _check_s3_credential(name: str, value: str | None) -> None:

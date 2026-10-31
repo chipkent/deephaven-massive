@@ -116,6 +116,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.ack_timeout == 5.0
     assert base.reconnect_backoff == 30.0
     assert base.max_reconnect_backoff == 120.0
+    assert base.max_outage == 300.0
     assert base.flat_file_symbol_threshold == 50
     assert base.max_concurrency == 8
     assert base.rest_basic_subscriptions == frozenset()
@@ -164,6 +165,27 @@ def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
         _replace(base, reconnect_backoff=14.99)
     with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
         _replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
+
+
+def test_max_outage_may_be_zero_but_not_negative(base: MassiveConfig) -> None:
+    # Zero means "fail at the first disconnect", so it is a valid limit; an int becomes a float.
+    zero = _replace(base, max_outage=0).max_outage
+    assert (zero, type(zero)) == (0.0, float)
+    for bad in (-1, float("inf"), float("nan")):
+        with pytest.raises(
+            ValueError,
+            match=r"max_outage must be zero or more seconds, got .*; 0 fails live tables at the "
+            "first disconnect",
+        ):
+            _replace(base, max_outage=bad)
+    with pytest.raises(ValueError, match="max_outage must be finite, got an int too large"):
+        _replace(base, max_outage=10**400)
+
+
+@pytest.mark.parametrize("value", ["300", True, None])
+def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
+    with pytest.raises(TypeError, match="max_outage must be a number of seconds, not "):
+        _replace(base, max_outage=value)
 
 
 @pytest.mark.parametrize(
