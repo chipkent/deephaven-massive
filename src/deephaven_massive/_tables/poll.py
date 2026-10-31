@@ -1025,8 +1025,8 @@ def build_table(
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
         and for `REPLACE` that `last_by` without its tombstones and their hidden column) and
-        the publisher. Every schema ends with `TimestampInsert`, which no dataset keys on, so
-        `last_by` always has a column to aggregate.
+        the publisher. Every schema ends with `TimestampInsert`, which the catalog refuses as a
+        poll key, so `last_by` always has a column to aggregate.
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE

@@ -263,7 +263,7 @@ class _Indicators(Namespace):
             end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
                 README.md#sort-order-limit.
-            limit: The most rows for each symbol, not in total. See README.md#sort-order-limit.
+            limit: The most rows for each symbol. See README.md#sort-order-limit.
             filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
@@ -328,7 +328,7 @@ class _Indicators(Namespace):
             end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
                 README.md#sort-order-limit.
-            limit: The most rows for each symbol, not in total. See README.md#sort-order-limit.
+            limit: The most rows for each symbol. See README.md#sort-order-limit.
             filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
@@ -393,7 +393,7 @@ class _Indicators(Namespace):
             end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
                 README.md#sort-order-limit.
-            limit: The most rows for each symbol, not in total. See README.md#sort-order-limit.
+            limit: The most rows for each symbol. See README.md#sort-order-limit.
             filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
@@ -462,7 +462,7 @@ class _Indicators(Namespace):
             end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
                 README.md#sort-order-limit.
-            limit: The most rows for each symbol, not in total. See README.md#sort-order-limit.
+            limit: The most rows for each symbol. See README.md#sort-order-limit.
             filters: Further endpoint parameters. See README.md#filters.
 
         Returns:

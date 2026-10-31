@@ -1181,6 +1181,11 @@ def test_poll_keys_gate() -> None:
     )
 
 
+def test_the_arrival_time_is_never_a_poll_key() -> None:
+    with pytest.raises(ValueError, match="poll_keys cannot hold TimestampInsert"):
+        change(EXCHANGES, poll_keys=("Id", "TimestampInsert"))
+
+
 def test_nullable_poll_keys_are_poll_keys_with_a_reason() -> None:
     with pytest.raises(ValueError, match=r"nullable_poll_keys \['Name'\] are not poll_keys"):
         change(EXCHANGES, nullable_poll_keys={"Name": "a reason"})

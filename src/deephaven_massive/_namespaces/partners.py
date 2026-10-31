@@ -408,7 +408,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"smart_score"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"firm_name": "Wedbush"}`. See README.md#filters.
 
         Returns:
@@ -459,7 +459,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -511,7 +511,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"rating_action": "upgrades"}`. See README.md#filters.
 
         Returns:
@@ -602,7 +602,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"last_updated"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"last_updated_gte": "2025-06-01"}`. See README.md#filters.
 
         Returns:
@@ -654,7 +654,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"positioning": "primary"}`. See README.md#filters.
 
         Returns:
@@ -706,7 +706,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"importance_gte": 3}`. See README.md#filters.
 
         Returns:
@@ -754,7 +754,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"name"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`. See README.md#filters.
 
         Returns:
@@ -810,7 +810,7 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"published"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"channels_any_of": ["earnings"]}`. See README.md#filters.
 
         Returns:
@@ -893,7 +893,7 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -944,7 +944,7 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"effective_date": "2025-09-18"}`. See README.md#filters.
 
         Returns:
@@ -996,7 +996,7 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1047,7 +1047,7 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1097,7 +1097,7 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1179,7 +1179,7 @@ class _Tmx(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"type": "earnings"}`. See README.md#filters.
 
         Returns:
@@ -1265,7 +1265,7 @@ class _Fable(Namespace):
             sort: The wire field to sort by, such as `"transaction_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"parent_name": "Amazon Inc"}`. See README.md#filters.
 
         Returns:
@@ -1317,7 +1317,7 @@ class _Fable(Namespace):
             sort: The wire field to sort by, such as `"lookup_name"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"listing_status": "public"}`. See README.md#filters.
 
         Returns:

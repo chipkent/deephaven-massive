@@ -471,7 +471,7 @@ class _Futures(Namespace):
                 for every product.
             sort: Such as `"ticker"`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"ticker_gte": "ES"}`. See README.md#filters.
 
         Returns:
@@ -527,7 +527,7 @@ class _Futures(Namespace):
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
                 README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. See
                 README.md#filters.
 
@@ -588,7 +588,7 @@ class _Futures(Namespace):
             as_of: The day whose specifications to list; None for today. See README.md#as-of.
             sort: Such as `"name"`; the endpoint sorts by `date`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`. See
                 README.md#filters.
 
@@ -630,7 +630,7 @@ class _Futures(Namespace):
         neither has this method. It takes no symbols and has no `Symbol` column.
 
         Args:
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.exchanges.md.
@@ -663,7 +663,7 @@ class _Futures(Namespace):
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
@@ -710,7 +710,7 @@ class _Futures(Namespace):
             end: The last session, inclusive; None also returns future sessions.
             sort: The endpoint sorts by `product_code`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"trading_venue": "XCME"}`; never `session_end_date`, which `start`
                 and `end` set. See README.md#filters.
 
