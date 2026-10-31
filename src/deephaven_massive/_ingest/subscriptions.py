@@ -19,6 +19,7 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol
 
+from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import StatusKind
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Status
 
 __all__ = [
-    "NO_ACK_RESEND",
     "Sender",
     "Subscriptions",
     "Timer",
@@ -46,12 +46,6 @@ _WILDCARD: Final = "*"
 
 _NO_ACK_ATTEMPT: Final = 2
 """The watchdog attempt that marks a topic `NO_ACK`; attempt 1 re-sends it once alone."""
-
-NO_ACK_RESEND: Final = 60.0
-"""Seconds between rounds of re-sends of the `NO_ACK` topics' subscribes, until each is
-acknowledged or no longer wanted. A round sends every such topic in one subscribe frame on the
-open socket, so it costs the other streams nothing; one a minute stays well above the 15 s
-Massive asks between reconnects."""
 
 
 def wildcard(channel: str) -> str:
@@ -177,12 +171,11 @@ class Subscriptions:
     awaits its answer (for `ack_timeout`). An acknowledgement naming no topic is credited to
     the step in flight, else to the round awaiting its answer, else to the latest step's
     `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming no topic
-    fails streams, so it is credited only to the step in flight or to a round of one topic;
-    any other is logged and fails nothing. An acknowledgement that arrives later clears
-    `NO_ACK`. The connection is never
-    reconnected for it: a reconnect would cut every other stream on the connection over one
-    late answer. A watchdog whose topic has left the wire or whose generation has ended does
-    nothing more.
+    fails streams, so it is credited only when exactly one topic on the connection awaits an
+    answer (`_refuse_status`); any other is logged and fails nothing. An acknowledgement that
+    arrives later clears `NO_ACK`. The connection is never reconnected for it: a reconnect
+    would cut every other stream on the connection over one late answer. A watchdog whose
+    topic has left the wire or whose generation has ended does nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused, and `on_change()`
@@ -469,12 +462,15 @@ class Subscriptions:
                 self._resend_resolved(topic)
 
     def _refuse_status(self, status: Status) -> None:
-        """Apply a refusal: of the topics it names, or else of the subscription it surely answers.
+        """Apply a refusal: of the topics it names, or else of the one topic it surely answers.
 
         A refusal fails streams, so one naming no topic is credited only where it cannot be
-        wrong: to the unresolved topics of the step in flight, or to a re-send awaiting its
-        answer that holds a single topic. Any other is logged at INFO and fails nothing: a late
-        answer, or one to a re-send of several topics, could fail a healthy stream.
+        wrong: when exactly one topic on the connection awaits an answer, a single unresolved
+        topic of the step in flight, with no topic in `NO_ACK` and no re-send round
+        outstanding. Any other is logged at INFO and fails nothing: a late answer to an old
+        topic could otherwise fail a healthy stream. The unanswered topics keep their notes,
+        and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
+        goes unmarked.
 
         Args:
             status: A `REFUSED` status.
@@ -482,19 +478,19 @@ class Subscriptions:
         if status.topics:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
             return
-        if self._pending:
-            topics = tuple(sorted(self._pending))
-        elif len(self._resend) == 1:
-            topics = tuple(self._resend)
-        else:
+        awaiting = len(self._pending) + len(self._noack) + len(self._resend)
+        if len(self._pending) != 1 or awaiting != 1:
             logger.info(
-                "a refusal named no topic and no single subscription awaits an answer (%d "
-                "topics re-sent together); it fails nothing: %s",
+                "a refusal named no topic while %d topics await an answer (%d in flight, %d "
+                "never acknowledged, %d re-sent); it fails nothing: %s",
+                awaiting,
+                len(self._pending),
+                len(self._noack),
                 len(self._resend),
                 status.message,
             )
             return
-        self._refuse(tuple(t for t in topics if t in self._refs), status.message)
+        self._refuse(tuple(self._pending), status.message)
 
     def _unanswered(self) -> tuple[str, ...]:
         """Return the topics an acknowledgement naming no topic is credited to, sorted.
@@ -636,7 +632,8 @@ class Subscriptions:
         """Re-send every `NO_ACK` topic still on the wire, together in one subscribe frame.
 
         Runs every `NO_ACK_RESEND` seconds while any topic is in `NO_ACK`. While a step is in
-        flight the round waits `ack_timeout` and tries again, so the two never await answers
+        flight, or the previous round still awaits its answer, the round waits `ack_timeout`
+        and tries again, so the two never await answers
         together. A sent round awaits its answer for `ack_timeout` (`_resend_unanswered`),
         during which no step goes out, and makes the latest step's topics no longer the
         target of a late acknowledgement naming no topic.
@@ -651,10 +648,10 @@ class Subscriptions:
         due = sorted(t for t in self._noack if t in wire)
         if not due:
             return
-        if self._pending:
+        if self._pending or self._resend:
             logger.debug(
-                "generation %d: the re-send of %d NO_ACK topics waits; a subscription step is "
-                "in flight",
+                "generation %d: the re-send of %d NO_ACK topics waits; a subscription step or "
+                "the previous round awaits an answer",
                 generation,
                 len(due),
             )

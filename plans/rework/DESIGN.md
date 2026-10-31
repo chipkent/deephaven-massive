@@ -645,7 +645,7 @@ defined in exactly one place: the field defaults of this class.
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`, and so does a credential passed as blank text or with surrounding whitespace (None means absent). |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. A bare lower-case hostname, taken exactly as written: a scheme, port, path, upper-case letter, or surrounding whitespace raises `ValueError`. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
-| `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
+| `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic, and how long a round of re-sends awaits its answer. Must be below `NO_ACK_RESEND` (60 s), the spacing of those rounds; a larger value raises `ValueError`. |
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be at least 15 s, else `ValueError` naming Massive's guidance: a shorter wait can be refused for holding the allowance the dropped connection still holds, and on an individual plan that wastes the one slot there is. Tests never need a shorter value: they drive `WsClient` directly, with its backoff as constructor arguments and an injected clock. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
 | `max_outage: float` | `300.0` seconds | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long (from its last frame, or 40 s before the drop when that is later, or from the drop when no frame ever arrived), each stream on it that has not recovered fails, so no live table keeps showing rows as current while the rows since the outage began are missing. A `poll()` table whose cycles have failed this long, from the last progress of the first failed cycle since its last good cycle, or whose late cycle has received no page this long, fails the same way ([section 13.4](#134-rest)). `0` fails at the first disconnect or failed cycle. Zero is allowed, unlike the other durations; a negative or non-finite value raises `ValueError`, and a non-number `TypeError`. No environment variable: no duration setting reads one. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
@@ -3419,11 +3419,13 @@ Status(ACK, no topics: the message could not be parsed)
 Status(REFUSED, topic)
    -> that topic's streams fail with EntitlementError (publish_failure); the topic leaves D
 Status(REFUSED, no topic)
-   -> applies to the in-flight step's unresolved topics, or to a re-send round awaiting its
-      answer that holds exactly one topic: answers come in the order of the frames they
-      answer, and a step and a round never await answers together. Any other (a late answer,
-      or one to a round of several topics) is logged at INFO and fails nothing, since it
-      could fail a healthy stream. See "Refusals name the feed" below.
+   -> fails a stream only when exactly one topic on the connection awaits an answer: one
+      unresolved topic in the in-flight step, no topic in NO_ACK, and no re-send round
+      outstanding; that topic is refused. Every other case (a step of several topics, or any
+      NO_ACK topic or round whose late answer it may be) is logged at INFO and fails nothing,
+      since it could fail a healthy stream. The unanswered topics keep their notes, and a
+      stream with rows still fails at max_outage after a reconnect, so nothing stale goes
+      unmarked. See "Refusals name the feed" below.
 Status(MAX_CONNECTIONS) after authentication
    -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
@@ -3436,8 +3438,8 @@ still none after another ack_timeout, same check
       WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
       stays desired and subscribed. Every 60 s (NO_ACK_RESEND) one round re-sends all NO_ACK
       topics on the wire together, in one subscribe frame, until each is acknowledged, leaves
-      the wire, or the generation ends. A round due while a step is in flight waits
-      ack_timeout and tries again; a sent round awaits its answer for ack_timeout, and no
+      the wire, or the generation ends. A round due while a step is in flight, or while the
+      previous round still awaits its answer, waits ack_timeout and tries again; a sent round awaits its answer for ack_timeout, and no
       step goes out meanwhile. A
       late acknowledgement or a new generation clears the state and the streams' Error.
       Streams never fail on it, and the connection is never reconnected for it: a reconnect
