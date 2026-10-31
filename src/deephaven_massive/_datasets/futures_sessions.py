@@ -20,17 +20,18 @@ Every function is pure and thread-safe.
 from __future__ import annotations
 
 import calendar
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from deephaven_massive._datasets.epoch import DAY_NS
+
 __all__ = [
     "CHICAGO",
     "FUTURES_HOLIDAY_MARGIN",
-    "FUTURES_SESSION_END",
     "FUTURES_SESSION_ROLL",
     "add_weekdays",
     "futures_session",
@@ -63,17 +64,9 @@ FUTURES_SESSION_ROLL: Final = timedelta(hours=7)
 the one constant of the 17:00 Chicago session rule, which `futures_session` applies to an
 instant and `session_days` to a column of them."""
 
-FUTURES_SESSION_END: Final = time(17)
-"""The Chicago wall-clock time a futures session is over by: the next session opens then, and the
-session's own trading closes by 16:00 (the hour between is the daily maintenance break)."""
-
 _ONE_DAY: Final = timedelta(days=1)
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
-
-_SATURDAY: Final = 5
-
-_DAY_NS: Final = 86_400 * 10**9
 
 _ROLL_NS: Final = FUTURES_SESSION_ROLL // timedelta(microseconds=1) * 1000
 """`FUTURES_SESSION_ROLL` in nanoseconds, for the column form of the session rule."""
@@ -85,9 +78,10 @@ _EPOCH_WEEKDAY: Final = calendar.THURSDAY
 def futures_session_end(session: date) -> datetime:
     """Return the instant by which a futures session is over: 17:00 Chicago on its date.
 
-    The session's trading closes by 16:00 Chicago time and the next session opens at 17:00, so
-    17:00 is the first instant no part of the session can still be open, whatever its products'
-    own closes. It is a futures session bar's `TimestampEnd`.
+    The session's trading closes by 16:00 Chicago time (the hour after is the daily maintenance
+    break) and the next session opens at 17:00, so the next session's open is the first instant
+    no part of this one can still be open, whatever its products' own closes. It is a futures
+    session bar's `TimestampEnd`.
 
     Args:
         session: The session's `session_end_date`.
@@ -95,7 +89,7 @@ def futures_session_end(session: date) -> datetime:
     Returns:
         The aware instant, in Chicago time.
     """
-    return datetime.combine(session, FUTURES_SESSION_END, tzinfo=CHICAGO)
+    return futures_session_open(session + _ONE_DAY)
 
 
 def add_weekdays(day: date, count: int) -> date:
@@ -116,7 +110,7 @@ def add_weekdays(day: date, count: int) -> date:
     moved = day
     for _ in range(abs(count)):
         moved += step
-        while moved.weekday() >= _SATURDAY:
+        while moved.weekday() >= calendar.SATURDAY:
             moved += step
     return moved
 
@@ -134,7 +128,7 @@ def weekday_on_or_after(day: date) -> date:
     Returns:
         A weekday.
     """
-    while day.weekday() >= _SATURDAY:
+    while day.weekday() >= calendar.SATURDAY:
         day += _ONE_DAY
     return day
 
@@ -151,7 +145,7 @@ def weekday_on_or_before(day: date) -> date:
     Returns:
         A weekday.
     """
-    while day.weekday() >= _SATURDAY:
+    while day.weekday() >= calendar.SATURDAY:
         day -= _ONE_DAY
     return day
 
@@ -221,7 +215,7 @@ def session_days(chicago: pa.Array) -> pa.Array:
     Returns:
         The session dates, days since the epoch, `int64`.
     """
-    return pc.divide(pc.add(chicago, _ROLL_NS), _DAY_NS)
+    return pc.divide(pc.add(chicago, _ROLL_NS), DAY_NS)
 
 
 def weekday_sessions(days: pa.Array) -> pa.Array:

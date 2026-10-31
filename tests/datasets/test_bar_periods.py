@@ -385,7 +385,7 @@ def test_bar_days_cover_each_period_s_window() -> None:
     )
     assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.DAY, multiplier=3) == (
         monday,
-        date(2025, 3, 7),
+        date(2025, 3, 6),
     )
     # June 2024 starts on a Saturday: its stock window starts Monday the 3rd and ends Friday
     # the 28th; forex keeps the whole month.
@@ -402,6 +402,44 @@ def test_bar_days_cover_each_period_s_window() -> None:
         date(2025, 1, 1),
         date(2026, 1, 1),
     )
+
+
+def test_an_index_month_keeps_its_weekend_days() -> None:
+    # An index can update at weekends: June 2024, which starts on a Saturday, is whole.
+    june = date(2024, 6, 1)
+    assert bar_days(AssetClass.INDICES, june, timespan=Timespan.MONTH, multiplier=1) == (
+        june,
+        date(2024, 7, 1),
+    )
+
+
+def test_an_index_week_bar_needs_its_whole_calendar_week() -> None:
+    # Monday to Friday holds a stock week but not an index week, which runs Sunday to Saturday.
+    weekdays = TimeRange(
+        datetime(2025, 3, 3, tzinfo=NEW_YORK), datetime(2025, 3, 8, tzinfo=NEW_YORK)
+    )
+    whole = TimeRange(datetime(2025, 3, 2, tzinfo=NEW_YORK), datetime(2025, 3, 9, tzinfo=NEW_YORK))
+    week = Timespan.WEEK
+    assert not bar_starts(AssetClass.STOCKS, weekdays, timespan=week, multiplier=1).empty
+    assert bar_starts(AssetClass.INDICES, weekdays, timespan=week, multiplier=1).empty
+    assert not bar_starts(AssetClass.INDICES, whole, timespan=week, multiplier=1).empty
+
+
+@pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES])
+def test_bars_of_several_days_span_calendar_days_weekends_included(asset_class: AssetClass) -> None:
+    # Massive stamps 2-day stock bars on Friday 2026-10-16, Sunday the 18th, and Tuesday the
+    # 20th, each holding its two calendar days: Friday's bar holds Friday's trading alone.
+    stamps = [date(2026, 10, 16), date(2026, 10, 18), date(2026, 10, 20)]
+    for day in stamps:
+        covered = bar_days(asset_class, day, timespan=Timespan.DAY, multiplier=2)
+        assert covered == (day, day + timedelta(days=2))
+    # Friday to Wednesday holds all three whole; Friday to Tuesday only the first two.
+    span = DaySpan(date(2026, 10, 16), date(2026, 10, 21)).instants(NEW_YORK)
+    starts = bar_starts(asset_class, span, timespan=Timespan.DAY, multiplier=2)
+    assert [kept(starts, ny(day)) for day in stamps] == [True, True, True]
+    short = DaySpan(date(2026, 10, 16), date(2026, 10, 20)).instants(NEW_YORK)
+    starts = bar_starts(asset_class, short, timespan=Timespan.DAY, multiplier=2)
+    assert [kept(starts, ny(day)) for day in stamps] == [True, True, False]
 
 
 def test_futures_period_last_takes_the_later_reading() -> None:

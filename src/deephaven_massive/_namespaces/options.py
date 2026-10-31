@@ -583,13 +583,13 @@ class _Options(Namespace):
         after its start. A bar of a day or longer runs from 00:00 New York time of its
         window's first day to 00:00 after its last, whatever the source: the range and the
         day files stamp a 1-day bar at the day's start. A week runs Monday to Friday and a
-        longer period from its first to its last weekday. A bar of several days counts
-        trading days, ending as late as holidays could push it (one weekday more, and one
-        more for every five further days), since there is no holiday calendar. A longer bar
-        must be stamped at 00:00 on the day its period starts: a week on its Sunday, where
-        Massive starts it, a month, quarter, or year on its 1st. Any other stamp
-        fails the call with `MassiveError` naming the source, since the bar may cover other
-        days than its label. `Date` is null for a bar that spans more than one date.
+        longer period from its first to its last weekday. A bar of several days spans
+        that many calendar days, weekends included, as Massive counts them: a 2-day bar
+        stamped on a Friday holds Friday's trading alone. A longer bar must be stamped at
+        00:00 on the day its period starts: a week on its Sunday, where Massive starts it, a
+        month, quarter, or year on its 1st. Any other stamp fails the call with
+        `MassiveError` naming the source, since the bar may cover other days than its label.
+        `Date` is null for a bar that spans more than one date.
 
         Prices and volumes are adjusted for splits of the underlying only when `adjusted` is
         True, the default, and only REST serves adjusted bars; Massive never adjusts for cash
