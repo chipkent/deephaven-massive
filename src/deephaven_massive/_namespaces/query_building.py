@@ -54,6 +54,7 @@ from deephaven_massive._datasets.dates import (
 from deephaven_massive._datasets.filters import (
     check_filters,
     filter_key,
+    param_base,
     param_family,
     symbol_family,
     takes_instants,
@@ -594,7 +595,7 @@ def _calendar_axis(core: SessionCore, spec: DatasetSpec) -> str | None:
             and param.kind is ParamKind.DATE
             and not takes_instants(rest_path, name, param.kind)
         ):
-            return name.partition(".")[0]
+            return param_base(name)
     return None
 
 

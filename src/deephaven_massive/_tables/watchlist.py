@@ -506,13 +506,15 @@ class _SymbolCounter(TableListener):
         A table made by `canonicalize_symbols` under `OnError.RAISE` fails on a later row it
         cannot convert; following it no further would leave the stream on stale symbols, so the
         failure reaches `on_invalid`, whose owner fails the stream. It is a defect of the
-        caller's table, so it is logged at ERROR naming the table and what to fix.
+        caller's table, which the stream's failure logs once at ERROR, naming the table and
+        what to fix (`StreamSink.fail`); the watch logs it only at DEBUG, so it is not
+        reported twice.
 
         Args:
             e: What Deephaven reported.
         """
         message = _FAILED_TABLE.format(dataset=self._rule.dataset, cause=e)
-        logger.error("%s", message)
+        logger.debug("%s stream %d: %s", self._rule.dataset, self._stream_id, message)
         self._on_invalid(message)
 
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:

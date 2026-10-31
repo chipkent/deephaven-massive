@@ -62,6 +62,7 @@ from deephaven_massive._datasets.column_descriptions import (
     column_description,
     with_sentence,
 )
+from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.row_times import DATE, END, INSERT, START, TIMESTAMP, RowTimes
 from deephaven_massive._datasets.source_columns import key_column, kind_position, rename
 from deephaven_massive._enums import AssetClass
@@ -86,7 +87,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _ISO_FRACTION: Final = re.compile(r"\.(\d+)")
-_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class ColumnType(StrEnum):
@@ -240,9 +240,7 @@ def _iso_to_epoch_ns(text: str) -> int:
     moment = datetime.fromisoformat(whole)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    delta = moment - _EPOCH
-    seconds = delta.days * 86_400 + delta.seconds
-    return seconds * 10**9 + int(fraction[:9].ljust(9, "0"))
+    return epoch_ns(moment) + int(fraction[:9].ljust(9, "0"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -666,7 +664,7 @@ def dataset_schema(
         for name in types
         if name not in leading and name != INSERT and (name in own or name in described)
     ]
-    order = [*leading, *rest, *((INSERT,) if INSERT in types else ())]
+    order = [*leading, *rest, INSERT]  # the library fills TimestampInsert on every dataset
     transports = tuple(t for t in TRANSPORT_ORDER if any(d is t for d, _ in spec.sources))
     columns = [
         replace(

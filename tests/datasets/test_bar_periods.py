@@ -404,6 +404,27 @@ def test_bar_days_cover_each_period_s_window() -> None:
     )
 
 
+def test_an_index_month_keeps_its_weekend_days() -> None:
+    # An index can update at weekends: June 2024, which starts on a Saturday, is whole.
+    june = date(2024, 6, 1)
+    assert bar_days(AssetClass.INDICES, june, timespan=Timespan.MONTH, multiplier=1) == (
+        june,
+        date(2024, 7, 1),
+    )
+
+
+def test_an_index_week_bar_needs_its_whole_calendar_week() -> None:
+    # Monday to Friday holds a stock week but not an index week, which runs Sunday to Saturday.
+    weekdays = TimeRange(
+        datetime(2025, 3, 3, tzinfo=NEW_YORK), datetime(2025, 3, 8, tzinfo=NEW_YORK)
+    )
+    whole = TimeRange(datetime(2025, 3, 2, tzinfo=NEW_YORK), datetime(2025, 3, 9, tzinfo=NEW_YORK))
+    week = Timespan.WEEK
+    assert not bar_starts(AssetClass.STOCKS, weekdays, timespan=week, multiplier=1).empty
+    assert bar_starts(AssetClass.INDICES, weekdays, timespan=week, multiplier=1).empty
+    assert not bar_starts(AssetClass.INDICES, whole, timespan=week, multiplier=1).empty
+
+
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES])
 def test_bars_of_several_days_span_calendar_days_weekends_included(asset_class: AssetClass) -> None:
     # Massive stamps 2-day stock bars on Friday 2026-10-16, Sunday the 18th, and Tuesday the

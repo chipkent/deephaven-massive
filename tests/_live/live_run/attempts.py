@@ -108,8 +108,9 @@ def run_child(
     Returns:
         Whether the program stopped the child at `until`.
 
-    Whatever interrupts the wait (Control-C, a hang-up, an error) stops the child, marks the
-    attempt interrupted, and goes on.
+    Whatever interrupts the run once the child has started (Control-C, a hang-up, an error),
+    even while its pid is being saved, stops the child, marks the attempt interrupted, and goes
+    on.
     """
     child = children.start(
         argv,
@@ -119,11 +120,13 @@ def run_child(
         secrets_filter=ctx.secrets,
         echo=lambda line: None if is_startup_noise(line) else ctx.echo(f"  | {line[:96]}"),
     )
-    attempt.pid = child.process.pid
-    run_state.save(ctx.out, state)
     try:
+        attempt.pid = child.process.pid
+        run_state.save(ctx.out, state)
         code, stopped = children.wait(child, deadline=until, now=ctx.now, grace=ctx.stop_grace)
     except BaseException:
+        if child.process.poll() is None:  # interrupted before the wait, which stops it itself
+            children.stop(child, grace=ctx.stop_grace)
         attempt.status, attempt.ended = "interrupted", ctx.now().isoformat()
         raise
     attempt.exit_code, attempt.ended, attempt.status = code, ctx.now().isoformat(), "finished"

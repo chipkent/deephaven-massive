@@ -351,8 +351,8 @@ class HostDecisionCache:
         A failed decision is removed before its future fails, but this check reads the future
         under the lock and looks at it after: its maker may forget and fail it in between. So
         only a decision counts; a failed future gives None, and the caller then claims or
-        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
-        and an abandoned decision as a retry.
+        waits as usual (`RestEndpoints.resolve_host`). The failed decision is forgotten by
+        then, so the caller claims a fresh one and makes the decision itself.
 
         Args:
             key: The asset class and channel family.

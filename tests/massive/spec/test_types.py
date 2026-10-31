@@ -259,6 +259,16 @@ def test_a_source_in_several_kinds_is_accepted() -> None:
     assert source.memberships == memberships
 
 
+def test_a_source_finds_its_membership_by_kind_and_group() -> None:
+    stocks = Membership(kind="trades", group="stocks", position=0)
+    crypto = Membership(kind="trades", group="crypto", position=2)
+    source = Source(key="T", transport=Transport.WS, fields=(), memberships=(stocks, crypto))
+    assert source.membership("trades", "crypto") is crypto
+    assert source.membership("trades", "stocks") is stocks
+    assert source.membership("quotes", "stocks") is None
+    assert source.membership(None, None) is None  # a dataset in no kind
+
+
 def test_a_websocket_key_names_the_cluster_and_channel() -> None:
     stocks = Source(key="stocks/T", transport=Transport.WS, fields=(_price(),))
     options = Source(key="options/T", transport=Transport.WS, fields=(_price(),))

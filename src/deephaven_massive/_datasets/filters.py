@@ -27,7 +27,8 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
-from deephaven_massive._massive import ParamKind, WireType, encode_value
+from deephaven_massive._datasets.source_columns import INSTANT_WIRE_TYPES
+from deephaven_massive._massive import ParamKind, encode_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -40,6 +41,7 @@ __all__ = [
     "check_filters",
     "filter_key",
     "filter_keys",
+    "param_base",
     "param_family",
     "symbol_family",
     "takes_instants",
@@ -61,8 +63,17 @@ _FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 _EQUALITY_SUFFIXES: Final = ("any_of", "all_of")
 """The suffixes that, like the base name, select rows by equal values (`tickers.any_of`)."""
 
-_INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
-"""Wire types of a row field that holds an instant rather than a calendar date."""
+
+def param_base(name: str) -> str:
+    """Return a wire parameter's base name: the text before its first dot.
+
+    Args:
+        name: A wire parameter name, such as `"timestamp.gte"`, `"ticker.any_of"`, or `"date"`.
+
+    Returns:
+        The base, such as `"timestamp"`, `"ticker"`, or `"date"`.
+    """
+    return name.partition(".")[0]
 
 
 def param_family(name: str) -> frozenset[str]:
@@ -78,7 +89,7 @@ def param_family(name: str) -> frozenset[str]:
         The base (`"timestamp"`) and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and
         `.all_of` forms.
     """
-    base = name.split(".", 1)[0]
+    base = param_base(name)
     return frozenset({base, *(f"{base}.{suffix}" for suffix in _FILTER_SUFFIXES)})
 
 
@@ -94,7 +105,7 @@ def symbol_family(name: str) -> frozenset[str]:
     Returns:
         The base (`"ticker"`) and its `.any_of` and `.all_of` forms.
     """
-    base = name.split(".", 1)[0]
+    base = param_base(name)
     return frozenset({base, *(f"{base}.{suffix}" for suffix in _EQUALITY_SUFFIXES)})
 
 
@@ -132,8 +143,8 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
         return True
     if kind is not ParamKind.DATE:
         return False
-    base = name.partition(".")[0]
-    return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
+    base = param_base(name)
+    return any(f.wire_key == base and f.wire_type in INSTANT_WIRE_TYPES for f in rest_path.fields)
 
 
 def _list_items(
@@ -172,7 +183,7 @@ def _list_items(
         value = (value,)
     if not isinstance(value, tuple):
         return value
-    stem = name.rpartition(".")[0]
+    stem = param_base(name)
     base = next((p for p in rest_path.params if p.name == stem), None)
     kind = None if base is None else base.kind
     texts: list[str] = []

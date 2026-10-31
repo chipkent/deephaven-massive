@@ -903,6 +903,16 @@ def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
     ]
 
 
+def test_a_table_row_before_a_page_s_first_heading_belongs_to_no_dataset() -> None:
+    first = "# `m.a.x`\n\n## Columns\n\n| Column | Deephaven type |\n| `Keep` | long |\n"
+    second = (
+        "# B\n\n## Columns\n\n| `Stray` | String |\n\n# `m.b.y`\n\n## Columns\n\n"
+        "| `Only` | String |\n"
+    )
+    report = column_changes({"a.md": first, "b.md": second}, {"a.md": first})
+    assert report == ["m.b.y: dataset removed"]  # m.a.x did not gain Stray
+
+
 def test_the_merge_recipe_and_the_grid_are_on_the_index() -> None:
     pages = rendered()
     assert "To merge them" in pages[INDEX]
