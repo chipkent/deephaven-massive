@@ -19,6 +19,7 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol
 
+from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import StatusKind
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Status
 
 __all__ = [
-    "NO_ACK_RESEND",
     "Sender",
     "Subscriptions",
     "Timer",
@@ -45,13 +45,7 @@ logger = logging.getLogger(__name__)
 _WILDCARD: Final = "*"
 
 _NO_ACK_ATTEMPT: Final = 2
-"""The watchdog attempt that marks a topic `NO_ACK`: 1 re-sends it once, 3 and on re-send it
-every `NO_ACK_RESEND` seconds."""
-
-NO_ACK_RESEND: Final = 60.0
-"""Seconds between re-sends of a `NO_ACK` topic's subscribe, until it is acknowledged or no
-longer wanted. Each re-send is that topic alone, on the open socket, so it costs the other
-streams nothing; one a minute stays well above the 15 s Massive asks between reconnects."""
+"""The watchdog attempt that marks a topic `NO_ACK`; attempt 1 re-sends it once alone."""
 
 
 def wildcard(channel: str) -> str:
@@ -170,13 +164,18 @@ class Subscriptions:
     an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`
     (the topic's data may be missing; `no_ack` lists them, and the connection shows them in
     its streams' `Error`). Once the step in flight has resolved, one WARNING per step counts
-    its `NO_ACK` topics. The topic stays wanted and on the wire, and its subscribe is re-sent,
-    alone, every `NO_ACK_RESEND` seconds until it is acknowledged, leaves the wire, or the
-    generation ends, but never while a step is in flight, so a status naming no topic is
-    always the step's; an acknowledgement that arrives later clears it. The connection is never
-    reconnected for it: a reconnect would cut every other stream on the connection over one
-    late answer. A watchdog whose topic has left the wire or whose generation has ended does
-    nothing more.
+    its `NO_ACK` topics. The topic stays wanted and on the wire, and every `NO_ACK_RESEND`
+    seconds one round re-sends all `NO_ACK` topics together in one subscribe frame, until each
+    is acknowledged, leaves the wire, or the generation ends. A step and a round never await
+    answers together: a round waits while a step is in flight, and a step waits while a round
+    awaits its answer (for `ack_timeout`). An acknowledgement naming no topic is credited to
+    the step in flight, else to the round awaiting its answer, else to the latest step's
+    `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming no topic
+    fails streams, so it is credited only when exactly one topic on the connection awaits an
+    answer (`_refuse_status`); any other is logged and fails nothing. An acknowledgement that
+    arrives later clears `NO_ACK`. The connection is never reconnected for it: a reconnect
+    would cut every other stream on the connection over one late answer. A watchdog whose
+    topic has left the wire or whose generation has ended does nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused, and `on_change()`
@@ -236,6 +235,14 @@ class Subscriptions:
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
         self._pending: set[str] = set()
+        # The topics of the latest step, which a late acknowledgement naming no topic is
+        # credited to once the step has resolved, until a re-send goes out; the `NO_ACK` topics
+        # of the re-send that awaits an answer, with the timer that ends the wait after
+        # `ack_timeout`; and the timer of the next round of re-sends.
+        self._step: frozenset[str] = frozenset()
+        self._resend: frozenset[str] = frozenset()
+        self._resend_timer: Timer | None = None
+        self._round: Timer | None = None
         self._watchdogs: dict[str, Timer] = {}
         self._warned_unparsed = False
 
@@ -280,6 +287,7 @@ class Subscriptions:
             self._refused.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+            self._resend_resolved(topic)
         self._admission_stale = True
 
     @property
@@ -346,6 +354,11 @@ class Subscriptions:
         self._noack.clear()
         self._unreported.clear()
         self._pending.clear()
+        self._step = frozenset()
+        self._resend_resolved(*self._resend)
+        if self._round is not None:
+            self._round.cancel()
+            self._round = None
 
     # --- the reconcile loop --------------------------------------------------------------------
 
@@ -367,7 +380,7 @@ class Subscriptions:
             self._defer()
         if self._unreported and not self._pending:
             self._report_no_ack()
-        if self.generation is not None and not self._pending:
+        if self.generation is not None and not self._pending and not self._resend:
             self._send_step(self.generation)
         self._on_change()
 
@@ -397,6 +410,7 @@ class Subscriptions:
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
             self._pending = set(adds)
+            self._step = frozenset(adds)
             for topic in ordered:
                 self._arm(topic, generation, attempt=1)
         if removes:
@@ -410,10 +424,10 @@ class Subscriptions:
     def status(self, status: Status) -> None:
         """Apply one status object of the current generation, then reconcile.
 
-        An acknowledgement resolves its topics (one that could not be parsed resolves the whole
-        step in flight, with a WARNING once); a refusal naming topics refuses them; a refusal
-        naming none applies to every unresolved topic of the step in flight. Other statuses
-        change nothing.
+        An acknowledgement resolves its topics; a refusal naming topics refuses them. An
+        acknowledgement naming no topic (its message could not be parsed; a WARNING once) is
+        credited to the topics it most likely answers (`_unanswered`); a refusal naming none
+        only to topics it surely answers (`_refuse_status`). Other statuses change nothing.
 
         Args:
             status: The decoded status.
@@ -427,6 +441,10 @@ class Subscriptions:
     def _acknowledge(self, topics: tuple[str, ...]) -> None:
         """Mark topics acknowledged in the current generation.
 
+        Topics in `NO_ACK` that are acknowledged now, late, are logged at INFO, the recovery
+        of the WARNING `_report_no_ack` logged for them; one whose WARNING is still waiting for
+        its step to resolve leaves that WARNING instead, so it is never reported as missing.
+
         Args:
             topics: The topics the status names; empty when its message could not be parsed,
                 which acknowledges the whole step in flight.
@@ -438,16 +456,36 @@ class Subscriptions:
                     "an acknowledgement named no topic; treating it as acknowledging the "
                     "whole subscription in flight"
                 )
-            topics = tuple(self._pending)
+            topics = self._unanswered()
+        late = []  # topics in `NO_ACK` that Massive acknowledges after all
         for topic in topics:
             if topic in self._sent:
+                if topic in self._unreported:  # its WARNING was not logged yet: none is due
+                    self._unreported.remove(topic)
+                elif topic in self._noack:
+                    late.append(topic)
                 self._acked.add(topic)
                 self._noack.discard(topic)
                 self._pending.discard(topic)
                 self._cancel(topic)
+                self._resend_resolved(topic)
+        if late:
+            logger.info(
+                "generation %d: Massive acknowledged %s after all; they leave NoAckTopics",
+                self.generation,
+                bounded_list(sorted(late)),
+            )
 
     def _refuse_status(self, status: Status) -> None:
-        """Apply a refusal: of the topics it names, or else of every unresolved topic in flight.
+        """Apply a refusal: of the topics it names, or else of the one topic it surely answers.
+
+        A refusal fails streams, so one naming no topic is credited only where it cannot be
+        wrong: when exactly one topic on the connection awaits an answer, a single unresolved
+        topic of the step in flight, with no topic in `NO_ACK` and no re-send round
+        outstanding. Any other is logged at INFO and fails nothing: a late answer to an old
+        topic could otherwise fail a healthy stream. The unanswered topics keep their notes,
+        and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
+        goes unmarked.
 
         Args:
             status: A `REFUSED` status.
@@ -455,12 +493,37 @@ class Subscriptions:
         if status.topics:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
             return
-        if not self._pending:
+        awaiting = len(self._pending) + len(self._noack) + len(self._resend)
+        if len(self._pending) != 1 or awaiting != 1:
             logger.info(
-                "a refusal named no topic and no subscription was in flight: %s", status.message
+                "a refusal named no topic while %d topics await an answer (%d in flight, %d "
+                "never acknowledged, %d re-sent); it fails nothing: %s",
+                awaiting,
+                len(self._pending),
+                len(self._noack),
+                len(self._resend),
+                status.message,
             )
             return
-        self._refuse(tuple(sorted(self._pending)), status.message)
+        self._refuse(tuple(self._pending), status.message)
+
+    def _unanswered(self) -> tuple[str, ...]:
+        """Return the topics an acknowledgement naming no topic is credited to, sorted.
+
+        Answers come in the order of the frames they answer, and a step and a re-send never
+        await answers together, so such an acknowledgement is for, in turn: the step in flight
+        (its unresolved topics); else the `NO_ACK` topics of the re-send awaiting its answer;
+        else the latest step's topics now in `NO_ACK`, an answer that came after their
+        watchdogs gave up. A wrong credit only clears a `NO_ACK` note early.
+
+        Returns:
+            The topics; empty when nothing awaits an answer.
+        """
+        if self._pending:
+            return tuple(sorted(self._pending))
+        if self._resend:
+            return tuple(sorted(self._resend))
+        return tuple(sorted(self._step & self._noack))
 
     def _refuse(self, topics: tuple[str, ...], message: str) -> None:
         """Take refused topics out of D and report them.
@@ -476,6 +539,7 @@ class Subscriptions:
             self._noack.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+            self._resend_resolved(topic)
         if topics:
             self._admission_stale = True
             self._on_refused(topics, message)
@@ -529,17 +593,17 @@ class Subscriptions:
     # --- watchdogs -----------------------------------------------------------------------------
 
     def _arm(self, topic: str, generation: int, *, attempt: int) -> None:
-        """Start a topic's watchdog.
+        """Start a topic's watchdog, which fires after `ack_timeout`.
 
         Args:
             topic: The topic just sent.
             generation: The generation it was sent in.
-            attempt: 1 after the step's send, 2 after the single-topic re-send, 3 and on
-                after each re-send of a `NO_ACK` topic.
+            attempt: 1 after the step's send, 2 after the single-topic re-send.
         """
         self._cancel(topic)
-        delay = self._ack_timeout if attempt <= _NO_ACK_ATTEMPT else NO_ACK_RESEND
-        self._watchdogs[topic] = self._call_later(delay, self._fire, topic, generation, attempt)
+        self._watchdogs[topic] = self._call_later(
+            self._ack_timeout, self._fire, topic, generation, attempt
+        )
 
     def _cancel(self, topic: str) -> None:
         """Cancel a topic's watchdog, if it has one.
@@ -552,48 +616,95 @@ class Subscriptions:
             timer.cancel()
 
     def _fire(self, topic: str, generation: int, attempt: int) -> None:
-        """A topic's acknowledgement is overdue: re-send it, mark it `NO_ACK`, keep re-sending.
+        """A topic's acknowledgement is overdue: re-send it alone, then mark it `NO_ACK`.
 
-        The first timeout re-sends the topic alone; the second marks it `NO_ACK` and starts
-        its periodic re-send; each later one re-sends it again. Nothing reconnects (see the
-        class).
+        The first timeout re-sends the topic alone, while its step is still in flight; the
+        second marks it `NO_ACK` and makes sure a round of re-sends is scheduled
+        (`_resend_round`). Nothing reconnects (see the class).
 
         Args:
             topic: The topic.
             generation: The generation the watchdog is bound to.
-            attempt: 1 for the first timeout, 2 for the second, 3 and on for a `NO_ACK`
-                topic's re-sends.
+            attempt: 1 for the first timeout, 2 for the second.
         """
         self._watchdogs.pop(topic, None)
         if generation != self.generation or topic not in self._sent or topic not in self._wire():
             self._pending.discard(topic)  # it left the wire: nothing to escalate
             self.reconcile()
             return
-        if attempt > _NO_ACK_ATTEMPT and self._pending:
-            # A step is in flight: a status naming no topic would be credited to it, so the
-            # re-send waits for the next round.
-            logger.debug(
-                "generation %d: the re-send of %s waits; a subscription step is in flight",
-                generation,
-                topic,
-            )
-            self._arm(topic, generation, attempt=attempt)
-            return
-        if attempt != _NO_ACK_ATTEMPT:
-            if attempt > _NO_ACK_ATTEMPT:
-                logger.debug(
-                    "generation %d: re-sending the subscribe of %s, still unacknowledged",
-                    generation,
-                    topic,
-                )
+        if attempt < _NO_ACK_ATTEMPT:
             self._sender.subscribe(generation, [topic])
             self._arm(topic, generation, attempt=attempt + 1)
             return
         self._pending.discard(topic)
         self._noack.add(topic)
         self._unreported.append(topic)
-        self._arm(topic, generation, attempt=_NO_ACK_ATTEMPT + 1)
+        if self._round is None:
+            self._round = self._call_later(NO_ACK_RESEND, self._resend_round, generation)
         self.reconcile()
+
+    def _resend_round(self, generation: int) -> None:
+        """Re-send every `NO_ACK` topic still on the wire, together in one subscribe frame.
+
+        Runs every `NO_ACK_RESEND` seconds while any topic is in `NO_ACK`. While a step is in
+        flight, or the previous round still awaits its answer, the round waits `ack_timeout`
+        and tries again, so the two never await answers
+        together. A sent round awaits its answer for `ack_timeout` (`_resend_unanswered`),
+        during which no step goes out, and makes the latest step's topics no longer the
+        target of a late acknowledgement naming no topic.
+
+        Args:
+            generation: The generation the round is bound to; a later one ignores it.
+        """
+        self._round = None
+        if generation != self.generation:
+            return
+        wire = self._wire()
+        due = sorted(t for t in self._noack if t in wire)
+        if not due:
+            return
+        if self._pending or self._resend:
+            logger.debug(
+                "generation %d: the re-send of %d NO_ACK topics waits; a subscription step or "
+                "the previous round awaits an answer",
+                generation,
+                len(due),
+            )
+            self._round = self._call_later(self._ack_timeout, self._resend_round, generation)
+            return
+        logger.debug(
+            "generation %d: re-sending the subscribe of %s, still unacknowledged",
+            generation,
+            bounded_list(due),
+        )
+        self._sender.subscribe(generation, due)
+        self._step = frozenset()
+        self._resend = frozenset(due)
+        self._resend_timer = self._call_later(self._ack_timeout, self._resend_unanswered)
+        self._round = self._call_later(NO_ACK_RESEND, self._resend_round, generation)
+
+    def _resend_unanswered(self) -> None:
+        """A round of re-sends got no complete answer within `ack_timeout`: stop awaiting one.
+
+        Any answer that resolves the round's last topic cancels this timer, so it runs only
+        while the round still awaits one. A step held back meanwhile goes out now.
+        """
+        self._resend_timer = None
+        self._resend = frozenset()
+        self.reconcile()
+
+    def _resend_resolved(self, *topics: str) -> None:
+        """Stop awaiting an answer for topics of the current round; its timer ends with its last.
+
+        Args:
+            topics: Topics acknowledged, refused, or no longer wanted.
+        """
+        if not self._resend:
+            return
+        self._resend = self._resend.difference(topics)
+        if not self._resend and self._resend_timer is not None:
+            self._resend_timer.cancel()
+            self._resend_timer = None
 
     def _report_no_ack(self) -> None:
         """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""

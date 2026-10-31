@@ -142,6 +142,15 @@ def test_the_base_url_names_only_an_origin(base_url: str) -> None:
         RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
 
 
+@pytest.mark.parametrize(
+    "base_url", ["https://u:hunter2@api.massive.com", "ftp://u:hunter2@api.massive.com"]
+)
+def test_a_refused_base_url_never_shows_its_password(base_url: str) -> None:
+    with pytest.raises(ValueError, match=r"\*\*\*@api\.massive\.com") as info:
+        RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
+    assert "hunter2" not in str(info.value)
+
+
 def test_the_base_url_is_http_or_https() -> None:
     with pytest.raises(ValueError, match="is not an absolute http or https URL"):
         RestClient(_KEY, base_url="ftp://api.massive.com", max_concurrency=1, governor=_governor())

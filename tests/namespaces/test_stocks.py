@@ -1468,6 +1468,14 @@ STREAM_CASES: list[
         },
     ),
     (
+        # Documented in milliseconds while the sample is nanoseconds: either is read.
+        "luld.milliseconds",
+        lambda s: s.luld("MSFT"),
+        "LULD.MSFT",
+        {"ev": "LULD", "T": "MSFT", "h": 492.99, "l": 446.04, "t": 1764086430905, "q": 1},
+        {"Symbol": "MSFT", "Timestamp": 1764086430905 * 10**6, "HighPrice": 492.99},
+    ),
+    (
         "imbalances",
         lambda s: s.imbalances("MSFT"),
         "NOI.MSFT",

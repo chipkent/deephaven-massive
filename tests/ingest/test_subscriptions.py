@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest import subscriptions
 from deephaven_massive._ingest.subscriptions import (
@@ -65,7 +66,7 @@ class FakeTimers:
     timers: list[FakeTimer] = field(default_factory=list)
 
     def call_later(self, delay: float, callback: Callable[..., None], *args: object) -> FakeTimer:
-        assert delay in {5.0, subscriptions.NO_ACK_RESEND}  # the ack timeout, or a re-send
+        assert delay in {5.0, NO_ACK_RESEND}  # the ack timeout, or a re-send
         timer = FakeTimer(callback, args, delay)
         self.timers.append(timer)
         return timer
@@ -294,60 +295,228 @@ def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconne
     )
 
 
-def test_a_no_ack_topic_is_resent_periodically_until_acknowledged() -> None:
+def no_ack(*topics: str) -> Loop:
+    # A loop whose first step's topics all went `NO_ACK`, with what it sent taken.
     loop = make_loop()
-    loop.subs.add(["T.AAPL"])
+    loop.subs.add(topics)
     loop.subs.opened(1)
-    loop.timers.fire()
-    loop.timers.fire()
+    loop.timers.fire()  # each topic re-sent alone
+    loop.timers.fire()  # each marked NO_ACK; one round of re-sends is scheduled
     loop.sender.take()
-    # Each re-send waits `NO_ACK_RESEND`, sends the topic alone, and never reconnects.
+    assert loop.subs.no_ack == frozenset(topics)
+    return loop
+
+
+def delays(loop: Loop) -> list[float]:
+    return sorted(t.delay for t in loop.timers.live())
+
+
+def test_a_no_ack_topic_is_resent_periodically_until_acknowledged() -> None:
+    loop = no_ack("T.AAPL")
+    # Each round waits `NO_ACK_RESEND`, sends the topic, awaits an answer for the ack timeout,
+    # and never reconnects.
+    assert delays(loop) == [NO_ACK_RESEND]
     for _ in range(3):
-        assert [t.delay for t in loop.timers.live()] == [subscriptions.NO_ACK_RESEND]
         loop.timers.fire()
         assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+        assert delays(loop) == [5.0, NO_ACK_RESEND]
     loop.subs.status(ack("T.AAPL"))
-    assert loop.timers.live() == []
+    assert delays(loop) == [NO_ACK_RESEND]  # the answer ends the wait
     assert loop.subs.no_ack == frozenset()
+    loop.timers.fire()  # the next round finds nothing to re-send, and stops
+    assert loop.sender.take() == []
+    assert loop.timers.live() == []
 
 
-def test_a_no_ack_topic_is_not_resent_while_a_step_is_in_flight() -> None:
-    # A status naming no topic is credited to the step in flight, so a re-send never overlaps
-    # one: it waits for the next round.
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.timers.fire()
+def test_every_no_ack_topic_is_resent_in_one_frame_each_round() -> None:
+    loop = no_ack("T.AAPL", "T.IBM", "T.MSFT")
+    for _ in range(3):
+        loop.timers.fire()
+        assert loop.sender.take() == [("subscribe", 1, ("T.AAPL", "T.IBM", "T.MSFT"))]
+
+
+def test_a_round_waits_while_a_step_is_in_flight() -> None:
+    # An answer naming no topic is credited to the step in flight, so a round never overlaps
+    # one: it tries again after the ack timeout.
+    loop = no_ack("T.AAPL")
+    loop.subs.add(["T.MSFT"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+    [round_] = [t for t in loop.timers.live() if t.delay == NO_ACK_RESEND]
+    loop.timers.timers.remove(round_)
+    round_.callback(*round_.args)
+    assert loop.sender.take() == []
+    loop.subs.status(ack("T.MSFT"))  # the step resolves
+    [retry] = [t for t in loop.timers.live() if t.args == round_.args]
+    assert retry.delay == 5.0
+    loop.timers.timers.remove(retry)
+    retry.callback(*retry.args)
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+
+
+def test_a_step_waits_while_a_round_awaits_its_answer() -> None:
+    loop = no_ack("T.AAPL", "T.IBM")
     loop.timers.fire()
     loop.sender.take()
     loop.subs.add(["T.MSFT"])
     loop.subs.reconcile()
+    assert loop.sender.take() == []  # an answer naming no topic would have two owners
+    loop.subs.status(ack())  # credited to the round, which resolves
+    assert loop.subs.no_ack == frozenset()
     assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
-    resend = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
-    for timer in resend:
-        loop.timers.timers.remove(timer)
-        timer.callback(*timer.args)
+
+
+def test_a_round_whose_answer_never_comes_lets_the_held_step_go() -> None:
+    loop = no_ack("T.AAPL")
+    loop.timers.fire()
+    loop.sender.take()
+    loop.subs.add(["T.MSFT"])
+    loop.subs.reconcile()
     assert loop.sender.take() == []
-    [waiting] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
-    assert waiting.delay == subscriptions.NO_ACK_RESEND
-    loop.subs.status(ack("T.MSFT"))  # the step resolves
-    loop.timers.timers.remove(waiting)
-    waiting.callback(*waiting.args)
+    [wait] = [t for t in loop.timers.live() if t.delay == 5.0]
+    loop.timers.timers.remove(wait)
+    wait.callback(*wait.args)
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+
+
+def refused_nothing(loop: Loop, caplog: pytest.LogCaptureFixture, awaiting: str) -> None:
+    # A refusal naming no topic, logged at INFO with what awaits an answer, and failing nothing.
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.subscriptions"):
+        loop.subs.status(refusal(message="huh"))
+    assert loop.refused == []
+    assert f"a refusal named no topic while {awaiting}; it fails nothing: huh" in (caplog.messages)
+
+
+def test_a_refusal_naming_no_topic_after_a_round_fails_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Even a round of one topic: the refusal may answer an older subscribe of that topic.
+    loop = no_ack("T.AAPL")
+    loop.timers.fire()
+    refused_nothing(
+        loop, caplog, "2 topics await an answer (0 in flight, 1 never acknowledged, 1 re-sent)"
+    )
+    assert loop.subs.no_ack == frozenset({"T.AAPL"})  # it keeps its note
+
+
+def test_a_late_refusal_of_an_old_topic_never_fails_a_new_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # T.AAPL never got an answer; a watchlist adds T.MSFT, whose step is in flight alone when
+    # a refusal naming no topic arrives. It may be T.AAPL's, so it fails neither.
+    loop = no_ack("T.AAPL")
+    loop.subs.add(["T.MSFT"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+    refused_nothing(
+        loop, caplog, "2 topics await an answer (1 in flight, 1 never acknowledged, 0 re-sent)"
+    )
+    loop.subs.status(ack("T.MSFT"))
+    assert loop.subs.acknowledged == frozenset({"T.MSFT"})
+
+
+def test_a_round_waits_while_the_previous_round_awaits_its_answer() -> None:
+    loop = no_ack("T.AAPL")
+    loop.timers.fire()
+    loop.sender.take()
+    [round_] = [t for t in loop.timers.live() if t.delay == NO_ACK_RESEND]
+    [wait] = [t for t in loop.timers.live() if t.delay == 5.0]
+    loop.timers.timers.remove(round_)
+    round_.callback(*round_.args)  # due before the previous round's wait ended
+    assert loop.sender.take() == []
+    assert not wait.cancelled
+    [retry] = [t for t in loop.timers.live() if t.args == round_.args]
+    assert retry.delay == 5.0
+    loop.timers.timers.remove(wait)
+    wait.callback(*wait.args)  # the previous round stops awaiting its answer
+    loop.timers.timers.remove(retry)
+    retry.callback(*retry.args)
     assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
 
 
+def test_an_unparsed_acknowledgement_after_a_round_acknowledges_its_topics() -> None:
+    loop = no_ack("T.AAPL", "T.MSFT")
+    loop.timers.fire()
+    loop.subs.status(ack())
+    assert loop.subs.acknowledged == frozenset({"T.AAPL", "T.MSFT"})
+    assert loop.subs.no_ack == frozenset()
+
+
+def test_a_late_answer_naming_no_topic_acknowledges_but_never_refuses_the_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A large first step outlasts its watchdogs: its topics are `NO_ACK` and nothing is in
+    # flight when its answer, naming no topic, finally comes. A refusal could be anyone's
+    # and fails nothing; an acknowledgement clears the step's `NO_ACK` topics.
+    loop = no_ack("T.AAPL", "T.MSFT")
+    refused_nothing(
+        loop, caplog, "2 topics await an answer (0 in flight, 2 never acknowledged, 0 re-sent)"
+    )
+    loop.subs.status(ack())
+    assert loop.subs.acknowledged == frozenset({"T.AAPL", "T.MSFT"})
+
+
+def test_an_answer_crossing_a_finished_round_is_credited_to_nothing() -> None:
+    # The round went out (so the step is no longer an answer's target), its wait ended, and
+    # then an answer naming no topic arrives: it has no owner.
+    loop = no_ack("T.AAPL")
+    loop.timers.fire()
+    [wait] = [t for t in loop.timers.live() if t.delay == 5.0]
+    loop.timers.timers.remove(wait)
+    wait.callback(*wait.args)
+    loop.subs.status(ack())
+    loop.subs.status(refusal(message="late"))
+    assert loop.subs.no_ack == frozenset({"T.AAPL"})
+    assert loop.refused == []
+
+
+def test_releasing_a_resent_topic_stops_awaiting_its_answer() -> None:
+    loop = no_ack("T.AAPL")
+    loop.timers.fire()
+    loop.subs.remove(["T.AAPL"])
+    loop.subs.reconcile()
+    assert delays(loop) == [NO_ACK_RESEND]
+
+
 def test_a_no_ack_topic_no_longer_wanted_is_not_resent() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.timers.fire()
-    loop.timers.fire()
-    loop.sender.take()
+    loop = no_ack("T.AAPL")
     loop.subs.remove(["T.AAPL"])
     loop.subs.reconcile()
     assert loop.sender.take() == [("unsubscribe", 1, ("T.AAPL",))]
-    assert loop.timers.live() == []
     assert loop.subs.no_ack == frozenset()
+    loop.timers.fire()
+    assert loop.sender.take() == []
+
+
+def test_a_round_of_an_ended_generation_does_nothing() -> None:
+    loop = no_ack("T.AAPL")
+    [round_] = loop.timers.live()
+    loop.subs.ended()
+    assert round_.cancelled
+    loop.subs.opened(2)
+    loop.sender.take()
+    round_.callback(*round_.args)  # a round that ran despite its cancellation
+    assert loop.sender.take() == []
+
+
+def test_a_no_ack_topic_acknowledged_before_its_warning_is_never_reported_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.timers.fire()  # both are re-sent once
+    [timer] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    with caplog.at_level(logging.INFO, logger=subscriptions.__name__):
+        # T.AAPL turns NO_ACK while T.MSFT keeps the step in flight, so its WARNING waits.
+        loop.timers.timers.remove(timer)
+        timer.callback(*timer.args)
+        assert loop.subs.no_ack == {"T.AAPL"}
+        loop.subs.status(ack("T.AAPL"))
+        loop.subs.status(ack("T.MSFT"))  # the step resolves
+    assert loop.subs.no_ack == frozenset()
+    # Neither a WARNING that T.AAPL went unacknowledged nor a recovery from one.
+    assert caplog.records == []
 
 
 def test_a_new_generation_clears_the_no_acks() -> None:
@@ -363,16 +532,26 @@ def test_a_new_generation_clears_the_no_acks() -> None:
     assert loop.subs.no_ack == frozenset()
 
 
-def test_a_late_acknowledgement_clears_a_no_ack() -> None:
+def test_a_late_acknowledgement_clears_a_no_ack(caplog: pytest.LogCaptureFixture) -> None:
     loop = make_loop()
-    loop.subs.add(["T.AAPL"])
+    loop.subs.add(["T.AAPL", "T.MSFT"])
     loop.subs.opened(1)
+    loop.subs.status(ack("T.MSFT"))
     loop.timers.fire()
     loop.timers.fire()
-    assert loop.subs.counts() == (1, 0, 0, 1)
-    loop.subs.status(ack("T.AAPL"))
-    assert loop.subs.counts() == (1, 1, 0, 0)
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",)), ("subscribe", 1, ("T.AAPL",))]
+    assert loop.subs.counts() == (2, 1, 0, 1)
+    with caplog.at_level(logging.INFO, logger=subscriptions.__name__):
+        loop.subs.status(ack("T.AAPL"))
+        loop.subs.status(ack("T.MSFT"))  # acknowledged already: no recovery to log
+    assert loop.subs.counts() == (2, 2, 0, 0)
+    # The recovery of the NO_ACK WARNING, at INFO.
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
+        "generation 1: Massive acknowledged 1 [T.AAPL] after all; they leave NoAckTopics"
+    ]
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.AAPL", "T.MSFT")),
+        ("subscribe", 1, ("T.AAPL",)),
+    ]
 
 
 def test_a_watchdog_of_an_ended_generation_does_not_escalate() -> None:
@@ -416,15 +595,26 @@ def test_a_refused_topic_leaves_d_until_a_stream_wants_it_again() -> None:
     assert loop.sender.take()[-1] == ("subscribe", 1, ("Q.AAPL",))
 
 
-def test_a_refusal_naming_no_topic_refuses_the_step_in_flight() -> None:
+def test_a_refusal_naming_no_topic_refuses_the_one_topic_awaiting_an_answer() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL", "T.MSFT"])
     loop.subs.opened(1)
     loop.subs.status(ack("T.AAPL", "T.MSFT"))
-    loop.subs.add(["Q.AAPL", "Q.MSFT"])
+    loop.subs.add(["Q.AAPL"])
     loop.subs.reconcile()
     loop.subs.status(refusal())
-    assert loop.refused == [(("Q.AAPL", "Q.MSFT"), "not authorized")]
+    assert loop.refused == [(("Q.AAPL",), "not authorized")]
+
+
+def test_a_refusal_naming_no_topic_of_a_step_of_several_fails_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["Q.AAPL", "Q.MSFT"])
+    loop.subs.opened(1)
+    refused_nothing(
+        loop, caplog, "2 topics await an answer (2 in flight, 0 never acknowledged, 0 re-sent)"
+    )
 
 
 def test_a_refusal_naming_no_topic_skips_the_resolved_topics() -> None:
@@ -446,7 +636,10 @@ def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptu
     assert loop.refused == []
     [record] = caplog.records
     assert record.levelno == logging.INFO  # nothing failed, so nothing to act on
-    assert "no subscription was in flight: huh" in record.getMessage()
+    assert record.getMessage() == (
+        "a refusal named no topic while 0 topics await an answer (0 in flight, 0 never "
+        "acknowledged, 0 re-sent); it fails nothing: huh"
+    )
 
 
 def test_other_statuses_change_nothing() -> None:

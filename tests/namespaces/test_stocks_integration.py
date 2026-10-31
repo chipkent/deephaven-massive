@@ -11,6 +11,7 @@ client, because the library filters the very bars in question. How to run these 
 from __future__ import annotations
 
 import dataclasses
+import logging
 import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
@@ -138,19 +139,21 @@ def test_luld_frames_convert_to_a_current_instant(
     instant_text: Text,
     evidence: Evidence,
     table_rows: TableRows,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Whether a WebSocket `LULD` frame's `t` converts to the current instant.
 
-    `LULD` `t` is documented in milliseconds while the sample has 19 digits; the library reads
-    nanoseconds and fails loudly (a failed stream) on a mismatch. Streams the bands of every
-    ticker (`LULD.*`), so some band changes within seconds while the regular session is open,
-    and asserts that Massive acknowledged the topic. Bands exist only in the regular session,
-    so when `/v1/marketstatus/now` does not say `open` the test skips after the
-    acknowledgement. Passes when the first row's instant is within a day of now; a failed
-    stream naming the bound means milliseconds, and the test fails quoting the error; a
-    refused stream (a Business plan without the trades and quotes expansion has no LULD)
-    skips, naming the plan.
+    `LULD` `t` is documented in milliseconds while the sample has 19 digits, so the library
+    reads each value by its magnitude and logs once which unit the column arrived in; the
+    recorded log line settles the unit. Streams the bands of every ticker (`LULD.*`), so some
+    band changes within seconds while the regular session is open, and asserts that Massive
+    acknowledged the topic. Bands exist only in the regular session, so when
+    `/v1/marketstatus/now` does not say `open` the test skips after the acknowledgement.
+    Passes when the first row's instant is within a day of now; a failed stream fails the
+    test, quoting the error; a refused stream (a Business plan without the trades and quotes
+    expansion has no LULD) skips, naming the plan.
     """
+    caplog.set_level(logging.INFO, logger="deephaven_massive")
     table = live_session.stocks.luld(dm.ALL).append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
     status = market_status("stocks")
@@ -170,6 +173,8 @@ def test_luld_frames_convert_to_a_current_instant(
     assert acked, "Massive acknowledged no LULD topic"
     if status != "open":
         pytest.skip(f"the stock market is {status}: LULD bands change only in the regular session")
+    detected = [r.getMessage() for r in caplog.records if "read by magnitude" in r.message]
+    evidence(f"magnitude rule log: {detected}")
     now = time.time_ns()
     for row in rows[:3]:
         stamp = int(row["Timestamp"])
@@ -904,7 +909,7 @@ def test_day_file_before_a_split_is_as_traded(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.verifies("72")
+@pytest.mark.verifies("73")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_past_stock_data_is_served_with_the_default_config(

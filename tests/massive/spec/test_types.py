@@ -65,7 +65,7 @@ def test_wire_type_values_are_the_generated_spellings() -> None:
 
 
 def test_wire_unit_values() -> None:
-    assert [u.value for u in WireUnit] == ["s", "ms", "us", "ns"]
+    assert [u.value for u in WireUnit] == ["s", "ms", "us", "ns", "ms|ns"]
 
 
 def test_param_kind_values() -> None:

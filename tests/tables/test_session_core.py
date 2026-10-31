@@ -1937,3 +1937,35 @@ def test_a_thread_of_a_freed_session_dies_quietly() -> None:
 
     ref = weakref.ref(_Gone())  # already dead
     _core.SessionCore._thread_died(cast("weakref.ref[SessionCore]", ref), "reaper", _Fatal())
+
+
+def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+
+    def refuse() -> None:
+        raise ValueError("start must come before end")
+
+    with (
+        caplog.at_level(logging.DEBUG, logger=_core.__name__),
+        pytest.raises(ValueError, match=r"^start must come before end$"),
+    ):
+        core.run_verb("m.stocks.trades('AAPL').history()", refuse)
+    massive_session.close()
+    with (
+        caplog.at_level(logging.DEBUG, logger=_core.__name__),
+        pytest.raises(dm.MassiveError, match=r"is closed$"),
+    ):
+        core.run_verb("m.stocks.trades('AAPL').fetch()", refuse)
+    # The guard's refusal too: every exception that escapes a verb.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.DEBUG,
+            "m.stocks.trades('AAPL').history() raised ValueError: start must come before end",
+        ),
+        (
+            logging.DEBUG,
+            f"m.stocks.trades('AAPL').fetch() raised MassiveError: {core.label} is closed",
+        ),
+    ]

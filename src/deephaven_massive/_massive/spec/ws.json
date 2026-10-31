@@ -99,7 +99,7 @@
     {"column": "LowPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "l"},
     {"column": "Indicators", "conversion": null, "required": false, "type": "long-array", "unit": null, "wire_key": "i"},
     {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"},
-    {"column": "UnixTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"},
+    {"column": "UnixTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "t"},
     {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "q"}
    ],
    "memberships": [
@@ -128,7 +128,7 @@
    "fields": [
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
-    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"}
+    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "t"}
    ],
    "memberships": [
     {"group": "stocks", "kind": "fmv", "position": 0, "projection": null}
@@ -213,7 +213,7 @@
    "fields": [
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
-    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"}
+    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "t"}
    ],
    "memberships": [
     {"group": "options", "kind": "fmv", "position": 0, "projection": null}
@@ -269,7 +269,7 @@
    "fields": [
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
-    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"}
+    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "t"}
    ],
    "memberships": [
     {"group": "forex", "kind": "fmv", "position": 0, "projection": null}
@@ -348,7 +348,7 @@
    "fields": [
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
-    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"}
+    {"column": "FmvLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "t"}
    ],
    "memberships": [
     {"group": "crypto", "kind": "fmv", "position": 0, "projection": null}

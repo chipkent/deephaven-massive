@@ -754,6 +754,24 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
     assert converted == [0]  # only the empty schema table: no table of an empty block
 
 
+def test_each_file_logs_its_rows_after_each_step(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
+    with caplog.at_level(logging.DEBUG, logger=flatfiles.__name__):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    # The empty table is explained: the file held rows, none of the requested symbol.
+    (line,) = [r.getMessage() for r in caplog.records if "rows read" in r.getMessage()]
+    assert line.startswith(f"stocks.trades: s3://flatfiles/{TRADES_0303} at ")
+    assert line.endswith(
+        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 kept as whole bars"
+    )
+
+
 def test_instant_bounds_are_half_open(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
@@ -1066,6 +1084,36 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
 
 
+def test_a_long_run_of_missing_files_well_before_today_has_no_file_at_all(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+) -> None:
+    # Nine trading days are missing at the end of a range read three weeks later. The look
+    # runs a week past the range's end, not past the run's first day, and with no file there
+    # either the days have no file at all: retrying later would never help.
+    clock(datetime(2025, 4, 7, 16, tzinfo=UTC))
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
+    missing = [d for d in range(4, 15) if date(2025, 3, d).weekday() < 5]
+    days = ", ".join(f"2025-03-{d:02d}" for d in missing)
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(
+            f"stocks.trades: no flat file exists for {days}, nor for any later day up to a "
+            "week after the range; Massive publishes a day's file the next day, so these files "
+            "will not appear. To read them, read REST with source=dm.HistorySource.REST, or end "
+            "the range before them"
+        )
+        + "$",
+    ):
+        q.history("2025-03-03", "2025-03-14", source=HistorySource.FLAT_FILES)
+    looked = [17, 18, 19, 20, 21]  # the weekdays of the week after the range
+    assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in [*range(3, 15), *looked]]
+
+
 def test_a_refused_look_for_a_later_file_raises(
     *, session: dm.MassiveSession, put: Callable[[str, str], None], fake_s3: FakeS3
 ) -> None:
@@ -1115,7 +1163,8 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert req.symbols == tuple(sorted(MANY))
     assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1].startswith(
-        "stocks.trades history: AUTO read REST because the flat files for 2025-03-04 are missing"
+        "stocks.trades history: AUTO read REST because the flat files are missing for these "
+        "days: 1 [2025-03-04]"
     )
     assert t.attributes()["TableDescription"].endswith(
         "Read from flat files, and from REST for 2025-03-04, whose files are missing."
@@ -1573,6 +1622,7 @@ class DayBars:
     # window, and records each call's request and window.
     def __init__(self) -> None:
         self.calls: list[tuple[Request, HistoryWindow]] = []
+        self.days: list[Sequence[date] | None] = []
 
     def history(
         self,
@@ -1582,9 +1632,11 @@ class DayBars:
         *,
         call: int,
         stop: threading.Event | None = None,
+        days: Sequence[date] | None = None,
     ) -> Table:
         del call, stop
         self.calls.append((request, window))
+        self.days.append(days)
         rows = [
             {
                 "Symbol": "from REST",
@@ -1621,6 +1673,7 @@ def test_rest_serves_day_bars_by_their_date_within_a_range_of_instants(
     ((request, window),) = day_bars.calls
     assert (request.start, request.end) == (start, end)
     assert window.span == TimeRange(start, end)
+    assert day_bars.days == [(date(2025, 3, 4),)]  # an all-symbol read requests only that day
 
 
 def test_a_futures_range_with_no_later_session_within_a_week_raises(
@@ -1633,8 +1686,14 @@ def test_a_futures_range_with_no_later_session_within_a_week_raises(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
-        # The run's first missing trading day, Monday 01-20, may not be out yet.
-        match=re.escape(not_published("futures.trades", "2025-01-20", NO_REST)),
+        # The run's only missing trading day, Monday 01-20, lies three weeks before today and
+        # no session file followed it within a week: it has no file at all.
+        match=re.escape(
+            "futures.trades: no flat file exists for 2025-01-20, nor for any later day up to a "
+            "week after the range; Massive publishes a day's file the next day, so these files "
+            "will not appear. To read them, end the range before them; REST cannot serve this "
+            "read: futures.trades history over REST needs explicit symbols"
+        ),
     ):
         q.history(
             datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
@@ -1689,6 +1748,79 @@ def test_a_futures_holiday_whose_next_session_is_not_out_reads_rest_under_auto(
     ((_, req, _),) = rest.calls
     assert (req.start, req.end) == (start, end)
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
+
+
+def test_auto_keeps_a_sessions_row_from_the_next_days_file_when_no_day_is_missing(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The 01-15 file holds a late row of the 01-14 session. No day is read from REST, so no
+    # file is trimmed to its own session: the row is inside the range and is kept.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
+    tuesday = epoch_ns(datetime(2025, 1, 14, 9, tzinfo=CHICAGO))
+    late = epoch_ns(datetime(2025, 1, 14, 15, tzinfo=CHICAGO))
+    wednesday = epoch_ns(datetime(2025, 1, 15, 9, tzinfo=CHICAGO))
+    row = ",1.0,1,1,1,1,{},ESH5,{}\n"
+    fake_s3.put(
+        FUTURES_KEY.format("cme", date(2025, 1, 14)),
+        make_csv_gz(FUTURES_HEADER + row.format("2025-01-14", tuesday)),
+    )
+    fake_s3.put(
+        FUTURES_KEY.format("cme", date(2025, 1, 15)),
+        make_csv_gz(
+            FUTURES_HEADER + row.format("2025-01-14", late) + row.format("2025-01-15", wednesday)
+        ),
+    )
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
+    t = q.history(
+        datetime(2025, 1, 14, 8, tzinfo=CHICAGO), datetime(2025, 1, 15, 12, tzinfo=CHICAGO)
+    )
+    assert pick(t, "Timestamp", "Date") == [
+        (tuesday, "2025-01-14"),
+        (late, "2025-01-14"),
+        (wednesday, "2025-01-15"),
+    ]
+    assert rest.calls == []
+
+
+def test_auto_drops_a_files_rows_inside_a_day_rest_reads(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The 01-14 file is missing, so REST reads that session's hours; the 01-15 file's late
+    # 01-14 row lies in them and is dropped, so no row comes twice.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
+    late = epoch_ns(datetime(2025, 1, 14, 15, tzinfo=CHICAGO))
+    wednesday = epoch_ns(datetime(2025, 1, 15, 9, tzinfo=CHICAGO))
+    row = ",1.0,1,1,1,1,{},ESH5,{}\n"
+    fake_s3.put(
+        FUTURES_KEY.format("cme", date(2025, 1, 15)),
+        make_csv_gz(
+            FUTURES_HEADER + row.format("2025-01-14", late) + row.format("2025-01-15", wednesday)
+        ),
+    )
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
+    t = q.history(
+        datetime(2025, 1, 14, 8, tzinfo=CHICAGO), datetime(2025, 1, 15, 12, tzinfo=CHICAGO)
+    )
+    assert ("ESH5", late) not in pick(t, "Symbol", "Timestamp")
+    assert ("ESH5", wednesday) in pick(t, "Symbol", "Timestamp")
+    assert ("from REST",) in pick(t, "Symbol")
+    assert len(rest.calls) == 1
 
 
 def test_a_holiday_before_a_weekend_end_rolls_forward(

@@ -12,7 +12,8 @@ WebSocket, and flat-file clients all build on it:
 - `net.cancel`: `Cancel`, the token that ends a request's waits, which follows other tokens.
 - `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.
 - `net.redaction`: `Redactor` and `redact`, which replace a client's secrets with `***` in
-  whatever it receives, however JSON spells them, before it is decoded, quoted, or logged.
+  whatever it receives, however JSON spells them, before it is decoded, quoted, or logged;
+  and `without_userinfo`, which hides the user and password of a URL a client was given.
 - `net.capture`: `set_reply_capture` and `CapturedReply`, the optional process-wide sink the
   REST and WebSocket clients hand every cleaned reply to.
 
