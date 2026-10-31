@@ -3020,10 +3020,14 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     # of gathered rows. Small blocks, in chunks of four, give a file of about 310 blocks, cheap
     # to build and read, in which that window fills within the first third. Each block costs
     # the same to read whatever its size, so the block count sets the test's time; at this
-    # count every regression named below still lands well past its slack.
+    # count every regression named below still lands well past its slack. One parse thread:
+    # with several, how many parsed chunks coexist depends on how the threads happen to run
+    # (they truly run together without the GIL), which moves Arrow's peak by a few chunks from
+    # one read to the next, more than the slack below.
     block = 16 * 1024
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
     monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 4)
+    monkeypatch.setattr(flatfiles, "PARSE_THREADS", 1)
     window = (flatfiles.PARSE_THREADS + 1) * 4 + flatfiles._TABLE_BLOCKS
     rows = 64_000
     text = synthetic_trades(rows)
