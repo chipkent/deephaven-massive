@@ -1561,6 +1561,38 @@ def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSessi
     ws_session.session.release(result)
 
 
+def test_a_futures_stream_loads_its_schedules_before_it_subscribes(
+    ws_session: WsSession,
+) -> None:
+    # The verb waits for the contract's product and schedule, so the first rows are dated.
+    ws_session.rows["/futures/v1/contracts"] = [{"ticker": "ESZ5", "product_code": "ES"}]
+    ws_session.rows["/futures/v1/schedules"] = [
+        {
+            "product_code": "ES",
+            "session_end_date": "2025-12-01",
+            "timestamp": "2025-11-30T23:00:00+00:00",
+        }
+    ]
+    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert ws_session.connections.futures_calendar().wait_loaded(["ESZ5"], 0)
+    ws_session.session.release(result)
+
+
+def test_a_futures_stream_whose_schedules_are_slow_says_so_once(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", lambda *_: False)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"):
+        result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "futures stream 1: the schedules of 1 [ESZ5] did not load within 15 s; their rows "
+            "get a null Date until they do"
+        )
+    ]
+    ws_session.session.release(result)
+
+
 def test_a_futures_watchlist_looks_up_the_contracts_it_adds(ws_session: WsSession) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))

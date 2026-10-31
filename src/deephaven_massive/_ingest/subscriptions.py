@@ -172,7 +172,8 @@ class Subscriptions:
     its streams' `Error`). Once the step in flight has resolved, one WARNING per step counts
     its `NO_ACK` topics. The topic stays wanted and on the wire, and its subscribe is re-sent,
     alone, every `NO_ACK_RESEND` seconds until it is acknowledged, leaves the wire, or the
-    generation ends; an acknowledgement that arrives later clears it. The connection is never
+    generation ends, but never while a step is in flight, so a status naming no topic is
+    always the step's; an acknowledgement that arrives later clears it. The connection is never
     reconnected for it: a reconnect would cut every other stream on the connection over one
     late answer. A watchdog whose topic has left the wire or whose generation has ended does
     nothing more.
@@ -584,6 +585,16 @@ class Subscriptions:
         if generation != self.generation or topic not in self._sent or topic not in self._wire():
             self._pending.discard(topic)  # it left the wire: nothing to escalate
             self.reconcile()
+            return
+        if attempt > _NO_ACK_ATTEMPT and self._pending:
+            # A step is in flight: a status naming no topic would be credited to it, so the
+            # re-send waits for the next round.
+            logger.debug(
+                "generation %d: the re-send of %s waits; a subscription step is in flight",
+                generation,
+                topic,
+            )
+            self._arm(topic, generation, attempt=attempt)
             return
         if attempt != _NO_ACK_ATTEMPT:
             if attempt > _NO_ACK_ATTEMPT:

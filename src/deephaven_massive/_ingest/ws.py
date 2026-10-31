@@ -80,7 +80,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionGroup,
     ConnectionStream,
 )
-from deephaven_massive._log_limits import mark_failure_logged
+from deephaven_massive._log_limits import bounded_list, mark_failure_logged
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "JOIN_TIMEOUT",
+    "SCHEDULE_WAIT",
     "WsConnections",
     "WsTransport",
 ]
@@ -107,6 +108,12 @@ logger = logging.getLogger(__name__)
 
 JOIN_TIMEOUT: Final = 5.0
 """Seconds `m.close()` waits for each connection's threads before it logs a WARNING."""
+
+SCHEDULE_WAIT: Final = 15.0
+"""Seconds a futures stream's verb waits for its contracts' products and schedules before it
+subscribes, so its first rows are dated by the schedules. Bounded, since the verb may run on a
+console command that holds the update graph's lock; a lookup still running then dates its rows
+once it ends, and they have a null `Date` meanwhile."""
 
 
 def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
@@ -359,7 +366,7 @@ class WsConnections:
             if verdict is decision:  # the group's verdict decided the host
                 self._take_verdict(asset_class, spec.family, verdict)
             if asset_class is AssetClass.FUTURES and wanted:
-                self.futures_calendar().watch(wanted)
+                self._load_schedules(wanted, stream_id=stream_id)
             if created:
                 connection.start()
             opened = open_stream_tables(
@@ -392,6 +399,35 @@ class WsConnections:
             self._abandon(connection, stream_id)
             raise
         return opened.handle
+
+    def _load_schedules(self, contracts: frozenset[str], *, stream_id: int) -> None:
+        """Load a futures stream's schedules before it subscribes, waiting `SCHEDULE_WAIT`.
+
+        Runs on the verb's thread, with no lock held. It waits only on the calendar's worker,
+        which makes no Deephaven call, so a console command holding the update graph's lock
+        may run it. A lookup that does not end in time is logged at WARNING once; its rows get
+        a null `Date` until it ends. A failed lookup logs its own WARNING.
+
+        Args:
+            contracts: The stream's canonical futures symbols; spreads are never looked up.
+            stream_id: The stream, for the log.
+        """
+        calendar = self.futures_calendar()
+        calendar.watch(contracts)
+        if not calendar.wait_loaded(contracts, SCHEDULE_WAIT):
+            logger.warning(
+                "futures stream %d: the schedules of %s did not load within %.0f s; their rows "
+                "get a null Date until they do",
+                stream_id,
+                bounded_list(sorted(contracts)),
+                SCHEDULE_WAIT,
+            )
+        else:
+            logger.debug(
+                "futures stream %d: schedules loaded for %s",
+                stream_id,
+                bounded_list(sorted(contracts)),
+            )
 
     def _decide(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Return the host of a (class, family): the group's verdict, or the session's decision.

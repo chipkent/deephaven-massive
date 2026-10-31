@@ -2961,9 +2961,8 @@ pre-open starts before 17:00 Chicago time (16:45 on CBOT). The calendar looks up
 product (`/futures/v1/contracts`, `ticker.any_of`) and each product's sessions from a week back
 to ten days ahead (`/futures/v1/schedules`, on every futures plan, records from 2025-03-17): one
 session per `session_end_date`, open from its first event (a pre-open or the open) to its last
-(the close). A row inside the session the rule gave it keeps it; a row the schedules place in
-another session moves there; a row between a close and the next session's first event keeps the
-rule's date. The calendar belongs to the connection group, since its connections serve every
+(the close). A row inside a loaded session gets its date; a row between a close and the next
+loaded session's first event gets that next session's date. The calendar belongs to the connection group, since its connections serve every
 session of the group: it is created with the group's first futures connection and lives until
 the group's last session leaves. One worker thread makes every request, through the REST client
 of any session of the group still open (the contracts and schedules are the same for every
@@ -2979,9 +2978,16 @@ rate-limited lookup), one past the loaded sessions, one of a contract Massive's 
 not list, or one whose lookup failed. A miss gets a null `Date`: without the schedule the
 rule's date can be wrong on any weekday, since a holiday folds its trading into the next
 session and the library has no holiday calendar to rule that out, and a wrong date is worse
-than none. Its `Timestamp` and every other column are kept, the miss is logged at WARNING once
-per product (or contract) and rule date, and the streams' `Error` is not touched: the stream
-is healthy. An
+than none. Its `Timestamp` and every other column are kept, and the streams' `Error` is not
+touched: the stream is healthy. A miss whose lookup is still running logs at DEBUG; any other
+logs at WARNING once per product (or contract) and rule date. So that a stream's first rows
+are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
+asks for them and waits, before it subscribes, until their products and schedules are loaded
+or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
+no Deephaven call, so a console command holding the update graph's lock may run it. A wait
+that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
+the gap between one loaded session's close and the next one's first event gets the next
+session's date; the 17:00 rule's date is never kept. An
 answer the calendar cannot read, or any other failure of a lookup, is a miss of its contracts'
 rows too, and the worker carries on. A miss past the loaded sessions asks for a reload of its
 product, at most once per 10 minutes (`RELOAD_SPACING`, so a stream of misses never spends a
@@ -3391,7 +3397,9 @@ still none after another ack_timeout, same check
       in its Error without failing (the options cap's text wins when both apply). One
       WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
       stays desired and subscribed, and its subscribe is re-sent alone every 60 s
-      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends. A
+      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends, but
+      never while a step is in flight (that round waits for the next), so a status naming
+      no topic is always the step's. A
       late acknowledgement or a new generation clears the state and the streams' Error.
       Streams never fail on it, and the connection is never reconnected for it: a reconnect
       would cut every other stream on the shared connection over one late answer
@@ -6570,10 +6578,10 @@ document already reflects them.
     stores one shared string per distinct date, so a date costs a reference per row; one type
     lets every date join and compare. Forex and crypto use Massive's UTC day; futures use
     `session_end_date`, or on the WebSocket the 17:00 Chicago rule corrected by
-    `/futures/v1/schedules`, a row the schedules cannot place keeping the rule's date with a
-    WARNING and its miss shown in `m.streams()`, never failing the stream and never refusing a subscription; a
-    contract or product still loading a minute after it was asked for is such a miss, and a
-    spread is never looked up. The ends are conservative where Massive's labels are not
+    `/futures/v1/schedules`, a row the schedules cannot place (a spread, which is never looked
+    up, a lookup still running or failed, a row outside the loaded sessions) getting a null
+    `Date`, never failing the stream and never refusing a subscription; a futures stream verb
+    waits up to 15 s for its contracts' schedules before it subscribes. The ends are conservative where Massive's labels are not
     verified: an index bar of a day or longer ends at 01:00 New York time, and an index week or
     longer after its calendar period, weekend included; a bar of several futures sessions
     (revised 2026-10-30: a stock, option, or index bar of several days counts calendar days,
@@ -7029,7 +7037,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 55 | That Massive never adjusts for cash dividends: COST's special dividend (ex-date 2023-12-27) | The documentation says splits only; nothing adjusts for dividends | none (documentation) | `tests/namespaces/test_stocks_integration.py`: COST day bars around 2023-12-27 with `adjusted=true` and `adjusted=false`; record whether any price differs |
 | 56 | Whether `adjusted=true` applies `stock_dividend` events of the splits dataset | Documented as unknown: the README's recipe applies every factor the splits dataset lists | none (documentation) | `tests/namespaces/test_stocks_integration.py`: one ticker with a `stock_dividend` event; compare both bases across its execution date |
 | 57 | Whether option bars are adjusted for splits of the underlying in full (`adjusted=true`) | Options take `adjusted` like stocks, with the same guarantee | `tests/namespaces/test_options.py`: the parameter is sent and its echo checked | `tests/namespaces/test_options_integration.py`: a contract of NVDA across 2024-06-10 under both bases; record the prices |
-| 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place keeps the rule's date with a WARNING and its miss in `m.streams()` | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
+| 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place gets a null `Date` with a WARNING; a row between sessions gets the next session's date | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
 | 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
 | 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served, labelled by the day it falls on, with a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |

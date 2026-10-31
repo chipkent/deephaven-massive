@@ -775,6 +775,7 @@ this section) and look at what the library did.
 | `ValueError` naming a symbol | Not Massive's spelling. See [`symbols`](#symbols) for the converters. |
 | `AttributeError` naming a verb | The dataset cannot serve that verb; the message names the one that can. |
 | `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the class, or read the class over REST only. Stream bars instead of trades, or read `history()` or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. |
+| `AuthenticationError` on a live table, ending `can also mean the ... plan includes no WebSocket streams` | Massive's live connection gives one answer for a wrong key and, possibly, for a plan without streams of that asset class. If `fetch()` or `history()` works with the same key, the key is right: read the data with `history()` or `poll()`, or check which streams your plan includes on its [reference page](docs/datasets/README.md). |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |
 | `the plan does not include these flat files` | Pass `source=dm.HistorySource.REST`; the message says when REST can serve the read. |

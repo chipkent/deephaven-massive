@@ -319,6 +319,31 @@ def test_a_no_ack_topic_is_resent_periodically_until_acknowledged() -> None:
     assert loop.subs.no_ack == frozenset()
 
 
+def test_a_no_ack_topic_is_not_resent_while_a_step_is_in_flight() -> None:
+    # A status naming no topic is credited to the step in flight, so a re-send never overlaps
+    # one: it waits for the next round.
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    loop.sender.take()
+    loop.subs.add(["T.MSFT"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+    resend = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    for timer in resend:
+        loop.timers.timers.remove(timer)
+        timer.callback(*timer.args)
+    assert loop.sender.take() == []
+    [waiting] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    assert waiting.delay == subscriptions.NO_ACK_RESEND
+    loop.subs.status(ack("T.MSFT"))  # the step resolves
+    loop.timers.timers.remove(waiting)
+    waiting.callback(*waiting.args)
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+
+
 def test_a_no_ack_topic_no_longer_wanted_is_not_resent() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL"])

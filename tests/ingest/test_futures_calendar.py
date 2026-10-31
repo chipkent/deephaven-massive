@@ -298,13 +298,15 @@ def test_a_pre_open_before_the_roll_moves_to_the_next_session(calendar: FuturesC
     assert dates == ["2024-03-28"]
 
 
-def test_a_row_between_sessions_keeps_the_rule_date(
+def test_a_row_between_sessions_gets_the_next_sessions_date(
     calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # After Thursday's close, before the folded Monday session opens: never the rule's guess
+    # (Thursday), but the next session the schedule knows.
     watched(calendar, "ESM4")
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [("ESM4", "2024-03-28T21:30:00", "2024-03-28")])
-    assert (dates, misses) == (["2024-03-28"], [])
+    assert (dates, misses) == (["2024-04-01"], [])
     assert not caplog.records
 
 
@@ -324,11 +326,35 @@ def test_an_unknown_contract_has_no_date_until_it_is_looked_up(
     calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     dates, misses = correct(calendar, [FOLDED])
-    assert dates == [None]
-    assert [symbol for symbol, _ in misses] == ["ESM4"]
+    assert (dates, misses) == ([None], [])  # still loading: no date, and only DEBUG
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_wait_loaded_returns_once_the_schedules_load(
+    calendar: FuturesCalendar, fetch: FakeFetch
+) -> None:
+    fetch.hold(SCHEDULES_PATH)
+    calendar.watch(["ESM4", "ZCK4-ZCN4"])  # the spread is never looked up, nor waited for
+    assert not calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], 0.05)
+    fetch.release.set()
+    assert calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], TIMEOUT)
+    assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_wait_loaded_returns_once_the_lookups_fail_or_find_nothing(
+    calendar: FuturesCalendar, fetch: FakeFetch
+) -> None:
+    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 429")
+    calendar.watch(["ESM4", "NOPZ5"])
+    assert calendar.wait_loaded(["ESM4", "NOPZ5"], TIMEOUT)
+
+
+def test_wait_loaded_returns_once_closed(fetch: FakeFetch, clock: Clock) -> None:
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
+    calendar.close()
+    assert calendar.wait_loaded(["ESM4"], 0)
 
 
 @pytest.mark.parametrize(
@@ -347,18 +373,19 @@ def test_a_row_whose_lookup_is_still_loading_is_a_miss(
     why: str,
 ) -> None:
     # The request is in flight: the rule's date may be wrong without the schedule, so the rows
-    # get none, logged once per product (or contract) and rule date.
+    # get none. A lookup still running is no news, so it logs at DEBUG only, not as a WARNING
+    # at every stream's start.
     fetch.hold(path)
     calendar.watch(["ESM4"])
     fetch.wait(1 if path == CONTRACTS_PATH else 2)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.futures_calendar"):
         dates, misses = correct(calendar, [FOLDED, FOLDED])
         again = correct(calendar, [FOLDED])
-    assert dates == [None, None]
-    assert misses == [("ESM4", null_date("ESM4", why, "2024-03-29"))]
-    assert again == ([None], [])
-    # The stream keeps running with every other column: something to know, not a failure.
-    assert {r.levelno for r in caplog.records} == {logging.WARNING}
+    assert (dates, misses, again) == ([None, None], [], ([None], []))
+    # Once per contract (or product), rule date, and reason, however many batches.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, f"test: futures session of ESM4: {why}; its rows get a null Date")
+    ]
     # Once it loads, the rows place again.
     fetch.release.set()
     idle(calendar)
