@@ -747,8 +747,8 @@ def test_closing_a_session_keeps_the_connection_it_shares(ws_session: WsSession)
 
 
 def _group_of(session: dm.MassiveSession) -> ws_connection.ConnectionGroup:
-    transport = cast("ws.WsTransport", session._core.stream_transport())
-    return transport._connections.group
+    transport = cast("ws.WsConnections", session._core.stream_transport())
+    return transport.group
 
 
 def test_sessions_with_equal_settings_share_one_group() -> None:

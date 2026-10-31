@@ -46,9 +46,11 @@ from deephaven_massive._enums import Recency
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.schema import Schema
+    from deephaven_massive._enums import Subscription
 
 __all__ = [
     "COLUMN_TABLE_DESCRIPTIONS",
@@ -479,17 +481,27 @@ def recency_note(recency: Recency, *, host: str) -> str:
     return f"Live data from {host}, a pinned host whose recency the library does not know."
 
 
-def rest_recency_note(*, listed: bool) -> str:
-    """Return the sentence a REST table of current data adds to its description about recency.
+def rest_recency_note(
+    spec: DatasetSpec, delayed_subscriptions: AbstractSet[Subscription]
+) -> str | None:
+    """Return the sentence a REST table's description adds about its recency.
+
+    `fetch()` and `poll()` tables of one dataset carry the same sentence.
 
     Args:
-        listed: True when `MassiveConfig.delayed_subscriptions` lists the data's subscription,
-            so its labels are not checked.
+        spec: The dataset.
+        delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
 
     Returns:
-        The sentence. Neither claims real-time data: REST says so only through its labels.
+        For the current data of one subscription (`DatasetSpec.current_subscription`): when
+        it is listed, that Massive's labels are not checked; otherwise, that a response
+        labelled `DELAYED` fails the table. None for any other dataset. Neither sentence
+        claims real-time data: REST says so only through its labels.
     """
-    if listed:
+    subscription = spec.current_subscription
+    if subscription is None:
+        return None
+    if subscription in delayed_subscriptions:
         return (
             "Data as the plan serves it, real-time or delayed: "
             "MassiveConfig.delayed_subscriptions lists its subscription, so Massive's DELAYED "

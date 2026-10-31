@@ -12,7 +12,6 @@ from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
 from deephaven_massive._ingest.host_decision import (
     SNAPSHOT_PROBES,
-    HostDecisionCache,
     SnapshotAnswer,
     SnapshotProbe,
     decide,
@@ -216,14 +215,15 @@ def test_real_time_beside_an_undocumented_timeframe_is_unconfirmed() -> None:
     assert "END-OF-DAY" in decision.evidence
 
 
-def test_a_business_key_without_trades_streams_from_business(
-    snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS])
+def test_a_business_key_without_trades_streams_real_time(
+    snapshot: Callable[[str], Snapshot], asset_class: AssetClass
 ) -> None:
-    with caplog.at_level(logging.WARNING, LOGGER):
-        decision = run(AssetClass.OPTIONS, snapshot("stocks_fmv_only.json"))
-    assert (decision.host, decision.recency) == (BUSINESS_HOST, Recency.REALTIME)
-    assert "UNVERIFIED host" in decision.evidence
-    assert BUSINESS_HOST in caplog.text
+    # No host is guessed from the fmv field: no timeframe means the real-time host.
+    decision = run(asset_class, snapshot("stocks_fmv_only.json"))
+    assert decision == HostDecision(
+        REALTIME_HOST, Recency.REALTIME, f"no timeframe in the {asset_class} snapshot"
+    )
 
 
 def test_no_trades_or_quotes_streams_real_time(snapshot: Callable[[str], Snapshot]) -> None:
@@ -305,50 +305,19 @@ def test_other_errors_propagate_unchanged() -> None:
     ],
 )
 def test_a_listed_subscription_streams_from_the_delayed_feed(
-    snapshot: Callable[[str], Snapshot], asset_class: AssetClass, subscription: Subscription
+    asset_class: AssetClass, subscription: Subscription, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fetch = snapshot("stocks_delayed.json")
-    decision = run(asset_class, fetch, delayed=frozenset({subscription}))
+    fetch = Snapshot()
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        decision = run(asset_class, fetch, delayed=frozenset({subscription}))
     assert decision == HostDecision(
         DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions"
     )
-    assert fetch.probes == [SNAPSHOT_PROBES[asset_class]]
-
-
-def test_a_listed_subscription_on_a_real_time_plan_warns_once(
-    snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture
-) -> None:
-    delayed = frozenset({Subscription.STOCKS})
-    with caplog.at_level(logging.WARNING, LOGGER):
-        first = run(AssetClass.STOCKS, snapshot("stocks_real_time.json"), delayed=delayed)
-        run(AssetClass.STOCKS, snapshot("stocks_real_time.json"), delayed=delayed)
-    # Still the delayed feed: the user asked for it.
-    assert first.host == DELAYED_HOST
-    (record,) = caplog.records
-    assert record.getMessage().startswith("your plan streams stocks real-time")
-    assert "remove it from delayed_subscriptions to get real-time data" in record.getMessage()
-
-
-def test_a_listed_subscription_ignores_a_refused_snapshot(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    def refuse(probe: SnapshotProbe) -> SnapshotAnswer:
-        raise dm.EntitlementError("HTTP 403", status=403)
-
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        decision = run(AssetClass.OPTIONS, refuse, delayed=frozenset({Subscription.OPTIONS}))
-    assert decision.host == DELAYED_HOST
-    # Nothing to warn of; the refusal is kept at DEBUG, and the decision at INFO.
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.DEBUG,
-            "options snapshot refused, so the delayed feed is used unchecked: HTTP 403",
-        ),
-        (
-            logging.INFO,
-            "options WebSocket host: delayed.massive.com (MassiveConfig.delayed_subscriptions)",
-        ),
-    ]
+    # The user chose the delayed feed: no request is made, so none can fail the stream.
+    assert fetch.probes == []
+    source = "MassiveConfig.delayed_subscriptions"
+    message = f"{asset_class.value} WebSocket host: {DELAYED_HOST} ({source})"
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.INFO, message)]
 
 
 def test_mixed_tiers_real_time_stocks_and_delayed_options(
@@ -359,27 +328,3 @@ def test_mixed_tiers_real_time_stocks_and_delayed_options(
     options = run(AssetClass.OPTIONS, snapshot("stocks_delayed.json"), delayed=delayed)
     assert (stocks.host, stocks.recency) == (REALTIME_HOST, Recency.REALTIME)
     assert (options.host, options.recency) == (DELAYED_HOST, Recency.DELAYED)
-
-
-def test_forgetting_keeps_a_newer_decision() -> None:
-    cache = HostDecisionCache()
-    key = (AssetClass.STOCKS, ChannelFamily.TICK)
-    old, _ = cache.host_future(key)
-    cache.forget_host(key, old)
-    new, created = cache.host_future(key)
-    assert created
-    cache.forget_host(key, old)  # not the current one: kept
-    assert cache.host_future(key) == (new, False)
-
-
-@pytest.mark.parametrize("fixture", ["stocks_delayed.json", "stocks_conflict.json"])
-def test_a_listed_subscription_on_a_delayed_plan_does_not_warn(
-    snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture, fixture: str
-) -> None:
-    # A snapshot with any delayed label is a delayed plan, even beside a real-time label.
-    with caplog.at_level(logging.WARNING, LOGGER):
-        decision = run(
-            AssetClass.STOCKS, snapshot(fixture), delayed=frozenset({Subscription.STOCKS})
-        )
-    assert decision.host == DELAYED_HOST
-    assert caplog.records == []

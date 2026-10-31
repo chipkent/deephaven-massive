@@ -24,8 +24,10 @@ from deephaven.table_factory import ring_table
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
-from deephaven_massive._enums import AssetClass, NotBars, Recency
+from deephaven_massive._enums import AssetClass, NotBars, Recency, Subscription
 from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces import indices
+from deephaven_massive._namespaces.snapshots import SNAPSHOTS
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
@@ -539,6 +541,13 @@ def test_the_recency_note_of_an_unknown_host_never_claims_real_time() -> None:
     ],
 )
 def test_the_rest_recency_note_never_claims_real_time(listed: bool, note: str) -> None:
-    text = rest_recency_note(listed=listed)
+    delayed = frozenset({Subscription.INDICES}) if listed else frozenset()
+    text = rest_recency_note(indices.SNAPSHOTS, delayed)
+    assert text is not None
     assert text.startswith(note)
     assert "Real-time data" not in text
+
+
+def test_only_current_data_of_one_subscription_has_a_rest_recency_note() -> None:
+    assert rest_recency_note(indices.PREVIOUS_DAY_BAR, frozenset()) is None  # past data
+    assert rest_recency_note(SNAPSHOTS, frozenset()) is None  # several classes

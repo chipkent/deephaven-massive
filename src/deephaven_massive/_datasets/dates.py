@@ -31,7 +31,8 @@ instant, and a futures session's first instant moves with the holiday calendar, 
 library does not have. An `end` before `start` raises. An `end` of None means "through now":
 the current instant for a datetime `start`, and for a date `start` the current day in the
 day zone (for futures, the session the current instant belongs to). `bounds` applies these
-rules to a dataset's `history()` arguments.
+rules to a dataset's `history()` arguments, and `reaches_now` tells whether a window reaches
+the present.
 
 `day_start` and `instant_bound` turn a date sent to a REST parameter that compares instants
 into its instant, and `day_end` gives the instant a day is over by. Like `midnight`, they
@@ -93,6 +94,7 @@ __all__ = [
     "is_trading_day",
     "midnight",
     "parse_date_like",
+    "reaches_now",
     "require_aware",
     "trades_at_weekends",
 ]
@@ -629,6 +631,29 @@ def bounds(
     if isinstance(first, datetime) and isinstance(last, datetime):
         return TimeRange(first.astimezone(UTC), last.astimezone(UTC))
     return DaySpan(first, last)
+
+
+def reaches_now(
+    end: date | datetime | None, asset_class: AssetClass | ClassFromPrefix, *, now: datetime
+) -> bool:
+    """Tell whether a request's window reaches the present, so its latest rows are current.
+
+    Args:
+        end: The request's upper bound: an aware instant (excluded), a last day (included),
+            or None for an open window, which reads through now.
+        asset_class: The class whose day zone dates `now` for a day bound (`day_zone`: New
+            York without one, which is never later than a UTC day).
+        now: The current instant, aware.
+
+    Returns:
+        True for an open window, an instant after `now`, or a day on or after the current
+        day in the class's day zone; False for a window that ends in the past.
+    """
+    if end is None:
+        return True
+    if isinstance(end, datetime):
+        return end > now
+    return end >= now.astimezone(day_zone(asset_class)).date()
 
 
 def is_trading_day(asset_class: AssetClass | ClassFromPrefix, day: date) -> bool:

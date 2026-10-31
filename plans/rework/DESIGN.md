@@ -366,7 +366,8 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
   row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
                          TimestampInsert; RowTimes, TimeRule, and the bar-stamp rule (section 12)
   history_source.py      the history window, partition dates, the current partition, REST
-                         capability, the AUTO choice (section 16)
+                         capability, the AUTO choice and its unfilled-columns WARNING
+                         (section 16)
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
   session_core.py        SessionCore, registry_lock, the registries, closers, stream ids, the
@@ -405,7 +406,10 @@ _ingest/                 the only holder of wire clients
   rest_rows.py           page rows to dataset batches, renamed and converted; error rows; the
                          history window's keep
   host_decision.py       host resolution from configuration and REST evidence (section 13.2):
-                         the host rule, its probes, HostDecisionCache (single-flight)
+                         the host rule and its probes
+  shared_lookup.py       SharedLookup: a session's lookups one caller makes while the others
+                         wait, each within its own patience (the host decisions, the crypto
+                         ticker list)
   recency_labels.py      the DELAYED and REAL-TIME labels of a REST response (envelope status,
                          timeframe fields) and the refusal of delayed data not asked for
                          (sections 13.2 and 13.4)
@@ -414,11 +418,13 @@ _ingest/                 the only holder of wire clients
                          download notice, the poll() pace WARNING (section 13.4)
   flatfiles.py           flat-file transport: read plans, reader pool, cancellation, conversion,
                          merge to tables, missing-file policy, drift routing (section 16)
+  history_reads.py       a flat-file history() call's fallback to REST: the days and refused
+                         files REST serves under AUTO, the errors otherwise (section 16)
   futures_calendar.py    the futures schedule calendar that dates streamed futures rows by
                          their trading session (section 12)
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
                          watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
-  ws.py                  WsConnections and WsTransport: the session's connections over
+  ws.py                  WsConnections, the session's stream transport: its connections over
                          WsClient, leases, refusals, rejects and drift routing, the
                          options cap's verb check (section 13.3)
   ws_connection.py       Connection and its client factories; ConnectionGroup, which shares
@@ -3213,10 +3219,8 @@ TICK family:
      construction)
        -> that host, the host's recency, evidence="ws_hosts"
   2. subscription listed in MassiveConfig.delayed_subscriptions
-       -> delayed.massive.com, DELAYED, evidence="MassiveConfig.delayed_subscriptions", after
-          the snapshot of step 4 (a refused one is ignored): when it shows REAL-TIME (rule 5d), one WARNING
-          says the plan streams the class real-time and that removing the subscription from
-          MassiveConfig.delayed_subscriptions gets real-time data
+       -> delayed.massive.com, DELAYED, evidence="MassiveConfig.delayed_subscriptions"
+          (no REST call: the user chose the delayed feed, so no answer changes the host)
   3. FOREX, CRYPTO
        -> socket.massive.com, REALTIME,
           evidence="single documented host; Starter is real-time"      (no REST call)
@@ -3250,15 +3254,9 @@ TICK family:
           -> socket.massive.com, REALTIME, evidence="<field>='<value>', neither DELAYED nor
              REAL-TIME, in the snapshot"; WARNING naming the field and the value
      d. A REAL-TIME timeframe -> socket.massive.com, REALTIME, evidence="<field>=REAL-TIME"
-     e. No timeframe found:
-          STOCKS, OPTIONS with a top-level "fmv" field (Business key without a trades/quotes
-          expansion)
-              -> business.massive.com, REALTIME,
-                 evidence="Business key without trades/quotes; base plan streams FMV-based
-                 aggregates (UNVERIFIED host)"; WARNING once
-          every other class
-              -> socket.massive.com, REALTIME, evidence="no timeframe in the <class>
-                 snapshot"; INFO (WARNING for indices, whose field is documented)
+     e. No timeframe found
+          -> socket.massive.com, REALTIME, evidence="no timeframe in the <class> snapshot";
+             INFO (WARNING for indices, whose field is documented)
      f. Transport error or rejected key -> MassiveError or AuthenticationError; nothing
         cached; the verb raises it
   6. Record the decision in m.connections().
@@ -3285,11 +3283,11 @@ Massive then fails the refused streams with its text and the same fix. A listed 
 always streams from the delayed feed, even on a real-time plan; whether Massive accepts a
 real-time key there is **UNVERIFIED** (a live check records it), and a refusal says so.
 
-**Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
-to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
-either refuses the topic (an explicit `error` that fails that stream and names
-`ws_hosts[AssetClass.STOCKS]`) or serves what the plan includes. A live integration test
-(`tests/ingest/test_host_decision_integration.py`, skipped without a key) verifies the host.
+**Base Business key, TICK family.** A Business key without a trades/quotes expansion has no
+`timeframe` in its snapshot, so it streams from `socket.massive.com` like any unlabelled
+snapshot (rule 5e); no host is guessed from the snapshot's `fmv` field. If Massive serves that
+plan's TICK channels elsewhere, the server refuses the topic (an explicit `error` that fails
+that stream and names `ws_hosts[AssetClass.STOCKS]`), and the user pins the host there.
 
 **Indices `V`.** The Value page lists only `wss://business.massive.com/indices`, while its plan
 table says Starter delayed and Advanced real-time, and the indices `A`/`AM` pages list
@@ -3578,9 +3576,13 @@ sees:
   snapshots for its last trade or last quote.
 - **Delayed data on a real-time subscription.** A `fetch()` or `poll()` of a dataset of current
   data (`DatasetSpec.serves_current_data`: the snapshots, the last trade and quote, the movers,
-  the option chain, the unified snapshot, the forex conversion) is checked; datasets of past
-  data (`previous_day_bar`, a `daily_open_close`, indicators, dividends, splits) are not, since
-  Massive labels them `DELAYED` on a Basic or Starter key though their rows are final. Each
+  the option chain, the unified snapshot, the forex conversion) is checked. So is an
+  indicator's latest value, which Massive computes from the latest bars
+  (`DatasetSpec.latest_is_current`): its `poll()`, and a `fetch()` whose window reaches the
+  present (no `end`, or an `end` on or after the current day or instant), are checked; a
+  `fetch()` of a past range is not. Datasets of past data (`previous_day_bar`, a
+  `daily_open_close`, dividends, splits) are not checked, since Massive labels them `DELAYED`
+  on a Basic or Starter key though their rows are final. Each
   label Massive puts on current data is held against the subscription of the data it labels. A
   page charged to a subscription (its rate-limit bucket names one) is that subscription's
   data. A page of the `other` bucket that is not a reference endpoint, such as the unified
@@ -3601,7 +3603,8 @@ sees:
   the plan serves, which the table's description says. Nothing is shown as real-time without
   proof: a `poll()` table's `Recency` is `UNKNOWN` (null for data of no single subscription)
   until a cycle's page carries a label, then `REALTIME` or `DELAYED` (section 17), and no
-  description claims real-time data. `history()` reads past data and is never checked.
+  description claims real-time data. A `fetch()` and a `poll()` table of the same current data
+  carry the same recency sentence in their descriptions. `history()` reads past data and is never checked.
   Futures snapshots document no `timeframe`, so their envelope status is the evidence
   (**UNVERIFIED**, item 69 of [section 23](#23-open-verification-items)), and so is that of an
   option chain on a delayed plan (item 71).
@@ -6446,9 +6449,9 @@ import deephaven_massive as dm
 m = dm.MassiveSession()
 fmv = m.stocks.fmv(dm.ALL).last_by()                        # FMV family -> business.massive.com/stocks
 bars = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
-    # TICK family: a base Business key -> business.massive.com with a WARNING (UNVERIFIED host).
-    # With a Full Market expansion the snapshot carries last_trade.timeframe=REAL-TIME
-    # -> socket.massive.com.
+    # TICK family: socket.massive.com. With a Full Market expansion the snapshot carries
+    # last_trade.timeframe=REAL-TIME; without one it carries no timeframe, and a refusal from
+    # Massive names ws_hosts.
 xfmv = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).append_only() # business.massive.com/crypto
 es = m.futures.quotes(["ESZ5"]).last_by()                   # /futures; per-venue plans receive
                                                             # their venue on the same path
@@ -7266,7 +7269,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | The magnitude rule (unit `MS_OR_NS`, written by the spec refresh), as for items 21 and 22; the unit found is logged once per column | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_host_decision.py`: both replies | `tests/ingest/test_host_decision_integration.py`: subscribe `V.I:SPX` on the resolved host |
-| 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_host_decision.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_host_decision_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
+| 6 | TICK host for a base Business key | `socket.massive.com`, as for any snapshot without a `timeframe`; no host is guessed from the `fmv` field, and a refusal names `ws_hosts` | `tests/ingest/test_host_decision.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `socket.` | `tests/ingest/test_host_decision_integration.py` (Business key): `AM.AAPL` is acknowledged on `socket.massive.com` |
 | 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.`; the envelope status `DELAYED` (item 69) is the futures evidence of a delayed plan | `tests/ingest/test_host_decision.py`: with and without the fields | `tests/ingest/test_host_decision_integration.py`: record which fields the live payload carries |
 | 8 | What Massive says when a delayed plan subscribes on the real-time feed `socket.massive.com` | Read as any refusal: the refused streams fail with Massive's text and the `MassiveConfig.delayed_subscriptions` fix, unless the snapshot labelled the class's data `REAL-TIME` (a real-time key refused an add-on or a higher tier), when the message says the plan or an add-on may not include the data; nothing parses the text | `tests/ingest/test_ws_connection.py`: a refusal on the real-time feed names the fix | `docs/live-tests.md` (delayed key, the subscription not listed): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |

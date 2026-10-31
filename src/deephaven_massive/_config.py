@@ -33,6 +33,7 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import AuthenticationError
+from deephaven_massive._massive import without_userinfo
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -179,7 +180,7 @@ def _env_unreadable_symbols() -> OnError:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MassiveConfig:
-    """Everything a `MassiveSession` needs to know: credentials, hosts, timeouts, and limits.
+    """Everything a `MassiveSession` needs to know: credentials, plan, hosts, timeouts, limits.
 
     Construct it with keyword arguments; any field left out takes its default, and the
     credentials default to the environment. The object is frozen and validated at
@@ -208,6 +209,40 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
+        delayed_subscriptions: The Massive subscriptions whose live data you want from
+            Massive's delayed feed, such as `{dm.Subscription.OPTIONS}`: their streams always
+            use `delayed.massive.com` (15 minutes behind, 10 for futures), even when the plan
+            is real-time. Every subscription not listed always uses the real-time feed and
+            fails loudly when the plan cannot serve it: a stream verb raises
+            `EntitlementError` when Massive's snapshot shows the plan's data is delayed,
+            Massive's refusal fails the refused streams, and `fetch()` or `poll()` of current
+            data (snapshots, last trade and quote, movers, the option chain, and an
+            indicator's latest values) fails when Massive labels a response or row `DELAYED`;
+            each message names the evidence and the setting to add. Past data, such as the
+            previous day's bar, a day's open and close, an indicator over a past range, and
+            dividends, is served as it is, though Massive labels it `DELAYED` on such plans.
+            REST cannot
+            ask for delayed data, so a listed subscription's `fetch()` and `poll()` return
+            whatever the plan serves, unchecked. Reference,
+            economy, and partner data are never checked, and `history()`, which reads past
+            data, is not affected. No stream ever moves between the feeds. Forex and crypto
+            (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
+            them. Fair-market-value (FMV) streams are real-time only, so an FMV stream of a
+            listed subscription raises `ValueError`. A `ws_hosts` pin of a delayed feed (a host
+            whose name starts with `delayed.`) needs its subscription listed, and a listed
+            subscription may pin no other host; either mismatch raises `ValueError`. Defaults to
+            an empty set: every subscription is real-time. See README.md#real-time-or-delayed.
+        rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
+            free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
+            per subscription: Basic allows 5 requests per minute, and every paid tier has no
+            limit. The REST requests of a declared subscription are paced at 5 per minute
+            from the first one, shared with every other session of the process that uses the
+            same key. Any other subscription is unpaced until Massive refuses one of its
+            requests with HTTP 429: then its requests pause and resume, and when the refusal
+            says the per-minute maximum was exceeded, the library learns the subscription is
+            Basic and paces it from then on. Forex and crypto are one subscription,
+            `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
+            Defaults to an empty set: every subscription is unpaced until a refusal.
         ws_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
             for example `{dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}`, instead of
             letting the library decide from REST evidence. A pin must agree with
@@ -253,39 +288,6 @@ class MassiveConfig:
         max_concurrency: Maximum parallel REST requests of one `poll()` or `fetch()` fan-out,
             and of the whole session at once, however many fan-outs overlap; and the most
             flat files the session reads at once. A count of requests. Defaults to 8.
-        rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
-            free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
-            per subscription: Basic allows 5 requests per minute, and every paid tier has no
-            limit. The REST requests of a declared subscription are paced at 5 per minute
-            from the first one, shared with every other session of the process that uses the
-            same key. Any other subscription is unpaced until Massive refuses one of its
-            requests with HTTP 429: then its requests pause and resume, and when the refusal
-            says the per-minute maximum was exceeded, the library learns the subscription is
-            Basic and paces it from then on. Forex and crypto are one subscription,
-            `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
-            Defaults to an empty set: every subscription is unpaced until a refusal.
-        delayed_subscriptions: The Massive subscriptions whose live data you want from
-            Massive's delayed feed, such as `{dm.Subscription.OPTIONS}`: their streams always
-            use `delayed.massive.com` (15 minutes behind, 10 for futures), even when the plan
-            is real-time, and one WARNING says so when Massive shows the plan is real-time.
-            Every subscription not listed always uses the real-time feed and fails loudly
-            when the plan cannot serve it: a stream verb raises `EntitlementError` when
-            Massive's snapshot shows the plan's data is delayed, Massive's refusal fails the
-            refused streams, and `fetch()` or `poll()` of current data (snapshots, last trade
-            and quote, movers, the option chain) fails when Massive labels a response or row
-            `DELAYED`; each message names the evidence and the setting to add. Past data, such
-            as the previous day's bar, a day's open and close, indicators, and dividends, is
-            served as it is, though Massive labels it `DELAYED` on such plans. REST cannot
-            ask for delayed data, so a listed subscription's `fetch()` and `poll()` return
-            whatever the plan serves, unchecked. Reference,
-            economy, and partner data are never checked, and `history()`, which reads past
-            data, is not affected. No stream ever moves between the feeds. Forex and crypto
-            (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
-            them. Fair-market-value (FMV) streams are real-time only, so an FMV stream of a
-            listed subscription raises `ValueError`. A `ws_hosts` pin of a delayed feed (a host
-            whose name starts with `delayed.`) needs its subscription listed, and a listed
-            subscription may pin no other host; either mismatch raises `ValueError`. Defaults to
-            an empty set: every subscription is real-time. See README.md#real-time-or-delayed.
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
             Defaults to 0.05 seconds (50 ms).
         rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
@@ -432,31 +434,6 @@ _URL_SETTINGS: Final = frozenset({"rest_base_url", "s3_endpoint_url"})
 """The `MassiveConfig` fields that hold a URL, which a user may write with credentials."""
 
 
-def _without_userinfo(url: str) -> str:
-    """Return a URL or host with the user and password before its host replaced by `***`.
-
-    A URL a user configures can carry credentials (`https://user:password@host`); every
-    setting the library logs or puts in a message goes through here first. The text before
-    the host's last `@` is replaced, so a password holding `@` is hidden too. The wire
-    clients clean what they are given the same way, with their own copy of this rule
-    (`_massive/net/redaction.py`), since the wire package imports nothing of the library.
-
-    Args:
-        url: The URL, or a bare host such as `user:password@host`.
-
-    Returns:
-        The text with `***@` in place of its user information, such as
-        `"https://***@files.massive.com"`; `url` itself when it has none.
-    """
-    prefix, scheme_mark, rest = url.partition("://")
-    if not scheme_mark:
-        prefix, rest = "", url
-    authority, slash, tail = rest.partition("/")
-    if "@" not in authority:
-        return url
-    return f"{prefix}{scheme_mark}***@{authority.rpartition('@')[2]}{slash}{tail}"
-
-
 def shown_setting(name: str, value: object) -> str:
     """Return the text a log line or `repr` shows for one `MassiveConfig` setting.
 
@@ -466,10 +443,10 @@ def shown_setting(name: str, value: object) -> str:
 
     Returns:
         The value's `repr`; for a URL setting, with `***@` in place of a user and password
-        (`_without_userinfo`).
+        (`without_userinfo`).
     """
     if name in _URL_SETTINGS and isinstance(value, str):
-        return repr(_without_userinfo(value))
+        return repr(without_userinfo(value))
     return repr(value)
 
 
@@ -716,7 +693,7 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
         if not _HOSTNAME.match(value):
             raise ValueError(
                 f"ws_hosts[{asset_class}] must be a bare hostname such as "
-                f"'delayed.massive.com', got {_without_userinfo(value)!r}"
+                f"'delayed.massive.com', got {without_userinfo(value)!r}"
             )
         hosts[asset_class] = value
     return HostMap(hosts)

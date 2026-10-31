@@ -1553,8 +1553,9 @@ def test_the_current_subscription_is_the_classes_unless_past_or_cross_class(
     [(None, "/v3/trades/{t}"), ("/v3/reference/options/contracts", None)],
     ids=["no fetch path", "reference"],
 )
+@pytest.mark.parametrize("latest", [False, True], ids=["current", "latest-is-current"])
 def test_only_a_market_fetch_path_serves_current_data(
-    fetch_path: str | None, history_path: str | None
+    fetch_path: str | None, history_path: str | None, latest: bool
 ) -> None:
     with pytest.raises(ValueError, match=r"^x\.y: only a dataset with a fetch path that is no"):
         DatasetSpec(
@@ -1563,8 +1564,26 @@ def test_only_a_market_fetch_path_serves_current_data(
             asset_class=AssetClass.OPTIONS,
             fetch_path=fetch_path,
             history_path=history_path,
-            serves_current_data=True,
+            serves_current_data=not latest,
+            latest_is_current=latest,
         )
+
+
+def test_a_dataset_serves_current_data_or_computes_from_it_not_both() -> None:
+    with pytest.raises(ValueError, match=r"^x\.y: a dataset serves current data or computes"):
+        DatasetSpec(
+            name="x.y",
+            summary="A test dataset.",
+            asset_class=AssetClass.STOCKS,
+            fetch_path="/v1/indicators/sma/{stockTicker}",
+            serves_current_data=True,
+            latest_is_current=True,
+        )
+
+
+def test_the_indicators_latest_values_are_checked_as_current_data() -> None:
+    latest = {spec.name for spec in CATALOG.by_name.values() if spec.latest_is_current}
+    assert latest == {"indicators.ema", "indicators.macd", "indicators.rsi", "indicators.sma"}
 
 
 def test_only_datasets_of_current_data_are_checked_for_delayed_labels() -> None:

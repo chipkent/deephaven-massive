@@ -31,7 +31,7 @@ equal connection settings (`CONNECTION_SETTINGS`, and the same Deephaven update 
 to one group, so their streams ride the same connections, and a connection is leased per
 stream. The group also holds the shared futures calendar.
 Each session's own registry of streams and leases, and its `StreamTransport`, are `ws.py`'s
-(`WsConnections`, `WsTransport`); a `ClientFactory` builds each connection's client.
+(`WsConnections`); a `ClientFactory` builds each connection's client.
 
 **Threads and locks.** A connection's subscription state is confined to its client's loop
 thread; other threads reach it only through `Connection.post`. The group's lock is a leaf lock,
@@ -317,16 +317,13 @@ class _Episodes:
     `MassiveConfig.max_outage` for a stream fails it (`down`).
 
     Attributes:
-        lost_at: When the socket was lost (seconds since the epoch), or None while connected.
-        lost_warned: Whether the outage's WARNING was logged (only when the connection had
-            live tables), so its reconnect logs the recovery.
         slot_warned: Whether the outage has logged its WARNING for waiting on a free
             connection slot, which its first `WAITING_SLOT` logs even when the outage began as
             a reconnect.
         down_since: When the outage began: the last frame before it (seconds since the
-            epoch), or None outside one. Unlike `lost_at`, it lasts until every stream has
-            recovered on a reconnected socket, so a reconnect that drops again before that
-            keeps it.
+            epoch), or None outside one. It lasts until every stream has recovered on a
+            reconnected socket, so a reconnect that drops again before that keeps it, and the
+            outage warns once.
         down: The streams the outage holds down, each with the loop timer that fails it at
             `max_outage`, by id.
         published_at_open: Each down stream's `StreamSink.rows_published` when the current
@@ -343,8 +340,6 @@ class _Episodes:
         expired: The streams an outage has failed, which no later outage holds down again.
     """
 
-    lost_at: float | None = None
-    lost_warned: bool = False
     slot_warned: bool = False
     down_since: float | None = None
     down: dict[int, asyncio.TimerHandle] = field(default_factory=dict)
@@ -762,16 +757,12 @@ class Connection:
         if generation > 1:
             self._reconnects += 1
         episodes = self._episodes
-        if episodes.lost_at is not None:
-            if episodes.lost_warned:
-                logger.info(
-                    "%s: reconnected after %.0f s; re-subscribing",
-                    self.url,
-                    time.time() - episodes.lost_at,
-                )
-            episodes.lost_at = None
-            episodes.lost_warned = False
-            episodes.slot_warned = False
+        if episodes.down_since is not None and self._streams:  # the recovery of its WARNING
+            logger.info(
+                "%s: reconnected after %.0f s; re-subscribing",
+                self.url,
+                time.time() - episodes.down_since,
+            )
         episodes.last_frame_at = time.time_ns()
         if self._summary is None:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
@@ -947,7 +938,7 @@ class Connection:
         self._show_outage_notes(list(self._streams))
 
     def _warn_down(self, *, waiting_slot: bool, at: float) -> None:
-        """Date a lost socket's outage, and warn once of it and once of a wait for a slot.
+        """Warn once of a lost socket's outage, and once of a wait for a slot.
 
         The first `RECONNECTING` or `WAITING_SLOT` of an outage logs one WARNING when the
         connection carries live tables, since they get no data until it reconnects. The first
@@ -960,16 +951,12 @@ class Connection:
             at: The next attempt's time, seconds since the epoch.
         """
         episodes = self._episodes
-        warn = False
-        if episodes.lost_at is None:
-            episodes.lost_at = time.time()
-            warn = bool(self._streams)
+        warn = episodes.down_since is None and bool(self._streams)  # the outage's first attempt
         if waiting_slot and not episodes.slot_warned and self._streams:
             episodes.slot_warned = True
             warn = True
         if not warn:
             return
-        episodes.lost_warned = True  # so the reconnect logs the recovery
         logger.warning(
             "%s: the connection is down (%s); its %d live tables get no data until it "
             "reconnects, next attempt in %.0f s; m.connections() shows its state",
@@ -1349,6 +1336,7 @@ class Connection:
             len(self._streams),
         )
         episodes.down_since = None
+        episodes.slot_warned = False
         episodes.down_note = None
         episodes.failure = None
 

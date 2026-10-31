@@ -93,11 +93,9 @@ def test_every_stream_transport_shares_the_sessions_connections(
 ) -> None:
     first = session._core.stream_transport()
     second = session._core.stream_transport()
-    assert isinstance(first, ws.WsTransport)
-    assert isinstance(second, ws.WsTransport)
-    assert first is not second
-    assert first._connections is second._connections is clients_of(session)._streams
-    assert first._core is session._core  # the transport holds the core for its verb
+    assert isinstance(first, ws.WsConnections)
+    assert first is second is clients_of(session)._streams
+    assert first.core() is session._core
 
 
 def test_the_connections_close_with_the_session(fake_s3: FakeS3) -> None:
@@ -249,9 +247,8 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
 
     monkeypatch.setattr(clients, "WsConnections", factory)
     transport = session._core.stream_transport()
-    assert isinstance(transport, ws.WsTransport)
     assert len(built) == 2
-    assert transport._connections is built[1]
+    assert transport is built[1]
     assert built[0]._closed  # the loser closed at once
     assert built[0] not in built[0].group.sessions
 

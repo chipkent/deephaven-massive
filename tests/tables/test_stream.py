@@ -335,7 +335,7 @@ def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.Massiv
     batch = shared_batch(plan, [trade("AAPL"), trade("MSFT"), trade("IBM")])
     every, _ = make_sink(core, ALL)
     assert every._select(batch) is batch.table
-    assert every.receives(None)
+    assert every.receives_all
     disjoint, _ = make_sink(core, ("SPY",))
     assert disjoint._select(batch) is None  # no filter: it holds no batch symbol
     superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT", "SPY"))
@@ -348,8 +348,8 @@ def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.Massiv
     cached = some._filter
     assert some._select(batch) is not None
     assert some._filter is cached  # the symbols did not change: the filter is reused
-    assert some.receives("AAPL")
-    assert not some.receives(None)
+    assert some.holds("AAPL")
+    assert not some.receives_all
     some.set_symbols(frozenset({"AAPL", "MSFT", "IBM"}))
     assert some._select(batch) is batch.table
     some.set_symbols(frozenset())
@@ -591,7 +591,8 @@ def test_open_stream_tables_releases_its_scope_when_interrupted_at_the_end(
 def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSession) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     sink, _ = make_sink(massive_session._core, SymbolTable(watchlist))
-    assert not sink.receives("AAPL")
+    assert not sink.holds("AAPL")
+    assert not sink.receives_all
 
 
 def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSession) -> None:

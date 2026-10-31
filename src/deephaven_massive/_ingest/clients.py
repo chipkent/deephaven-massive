@@ -31,7 +31,7 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
-from deephaven_massive._ingest.ws import WsConnections, WsTransport
+from deephaven_massive._ingest.ws import WsConnections
 from deephaven_massive._ingest.ws_connection import CONNECTION_SETTINGS
 
 if TYPE_CHECKING:
@@ -166,14 +166,13 @@ class SessionClients:
         return RestEndpoints(core, state)
 
     def streams(self) -> StreamTransport:
-        """Return a WebSocket transport over the session's connections.
+        """Return the session's WebSocket transport, its one `WsConnections`.
 
-        Each call gets a new, lightweight `WsTransport` bound to the session's core and to the
-        session's one `WsConnections`. The first call creates the `WsConnections` outside every
-        lock (its constructor joins the connection group of the session's key and settings,
-        which other sessions of the process may share, under the group's lock, and opens no
-        connection) and installs it under the core's `registry_lock`, unless a racing call
-        installed one first, whose loser leaves its group at once. The winner's `close` is
+        The first call creates the `WsConnections` outside every lock (its constructor joins
+        the connection group of the session's key and settings, which other sessions of the
+        process may share, under the group's lock, and opens no connection) and installs it
+        under the core's `registry_lock`, unless a racing call installed one first, whose loser
+        leaves its group at once. The winner's `close` is
         registered with `SessionCore.on_close` after the lock is released, so the session's
         streams leave their connections, and the connections no other session uses close,
         with the session, or at once if the session closed meanwhile. The `WsConnections`
@@ -206,7 +205,7 @@ class SessionClients:
                 core.on_close(connections.close)
             else:  # a racing first call installed its own: leave the group again
                 candidate.close()
-        return WsTransport(core, connections)
+        return connections
 
     def _resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Decide the WebSocket host of a (class, family) through the session's REST transport.

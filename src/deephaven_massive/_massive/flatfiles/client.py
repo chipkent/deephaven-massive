@@ -278,13 +278,16 @@ class _Body:
     def close(self) -> None:
         """Close the body, which returns or drops its connection, and give its slot back.
 
-        Idempotent: the slot is given back by the first call only.
+        Idempotent: the slot is given back by the first call only, even when closing the body
+        raises, which then propagates.
         """
-        self._body.close()
-        with self._lock:
-            slots, self._slots = self._slots, None
-        if slots is not None:
-            slots.release()
+        try:
+            self._body.close()
+        finally:
+            with self._lock:
+                slots, self._slots = self._slots, None
+            if slots is not None:
+                slots.release()
 
 
 class FlatFileClient:

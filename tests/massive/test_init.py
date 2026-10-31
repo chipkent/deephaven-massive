@@ -57,6 +57,7 @@ EXPECTED_INTERFACE = [
     "source",
     "sources",
     "to_batch",
+    "without_userinfo",
 ]
 
 

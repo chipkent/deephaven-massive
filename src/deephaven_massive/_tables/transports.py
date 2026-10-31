@@ -383,9 +383,50 @@ class FlatFileRead:
 class FlatFileTransport(Protocol):
     """The flat-file transport, from `SessionCore.flat_file_transport()` (`IngestPorts.flat_files`).
 
-    It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
-    (`choose_source` in `_datasets/history_source.py`).
+    `HistoryQuery.history()` has already chosen flat files as the source (`choose_source` in
+    `_datasets/history_source.py`). `read_history` serves the call, reading from REST under
+    `AUTO` what the files cannot serve; `history` reads only the files.
     """
+
+    def read_history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> tuple[Table, str | None]:
+        """Return a `history()` call's rows from the flat files, and from REST what they lack.
+
+        Under `AUTO`, when REST can serve the request, the trading days whose files are
+        missing are read from REST, and a refusal of the flat files reads the whole call from
+        REST, each with a WARNING; under `FLAT_FILES`, or when REST cannot serve the request,
+        holidays are inferred and a missing file raises.
+
+        Args:
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window, which holds rows.
+            dates: The partition dates to read (`partition_dates`).
+            call: The verb call's id.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
+            stop: A background read's stop token, or None for a blocking read.
+
+        Returns:
+            The static table, and the description's source sentence when REST served any of
+            it or a session may be incomplete; None when only the flat files did, in full.
+
+        Raises:
+            AuthenticationError: If S3 rejects the credentials and REST may not serve the call.
+            EntitlementError: If the plan does not include the files and REST may not serve
+                the call; the message names REST when it could.
+            MassiveError: If a day's file is not published yet, or has no file at all, and
+                REST may not serve it, or a read fails in any other way.
+        """
+        ...
 
     def history(
         self,

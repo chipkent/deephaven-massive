@@ -816,9 +816,7 @@ def test_a_closed_transport_opens_nothing(ws_session: WsSession) -> None:
     request = ws_session.query(TRADES, ["AAPL"])._request
     ws_session.connections.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
-        ws_session.connections.open_stream(
-            ws_session.session._core, TRADES, request, channel="T", stream_id=99
-        )
+        ws_session.connections.open_stream(TRADES, request, "T", stream_id=99)
 
 
 def test_a_shutdown_after_the_connection_ended_is_logged(
@@ -1556,7 +1554,7 @@ def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSessi
     looked_up(ws_session, "ESZ5")
     calendar = ws_session.connections.futures_calendar()
     assert calendar is ws_session.connections.futures_calendar()
-    assert calendar.wait_idle(15.0)
+    assert calendar.wait_loaded(["ESZ5", "GCQ6-GCJ7"], 15.0)
     # A spread is not a contract: it is never looked up.
     sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
     assert sent == [("ESZ5",)]

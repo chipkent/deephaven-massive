@@ -389,10 +389,16 @@ class DatasetSpec:
             current state, such as a snapshot, the last trade or quote, the day's movers, or
             an option chain. Only such a dataset's REST answers are checked for Massive's
             `DELAYED` label against `MassiveConfig.delayed_subscriptions`. A dataset of past
-            data (the previous day's bar, a day's open and close, indicators, dividends) keeps
+            data (the previous day's bar, a day's open and close, dividends) keeps
             False, the default: Massive labels it `DELAYED` on plans whose current data is
             delayed, yet its rows are final. Only a dataset with a `fetch_path` that is no
             reference endpoint (`REFERENCE_PATH`) may set it.
+        latest_is_current: True for a dataset of past values whose latest one Massive computes
+            from the market's current data, such as an indicator over the latest bars. Its
+            `poll()`, and a `fetch()` whose window reaches the present
+            (`dates.reaches_now`), are checked like current data; a `fetch()` of a past range
+            is not. False, the default, otherwise. Only a dataset with a `fetch_path` that is
+            no reference endpoint may set it, and never with `serves_current_data`.
         refused_alternative: The dataset to suggest when Massive refuses this dataset's REST
             requests (HTTP 403), such as `"stocks.snapshots"` for `stocks.last_trade`: one
             that serves the same data and that more plans include. None, the default,
@@ -430,6 +436,7 @@ class DatasetSpec:
     symbols_as_written: bool = False
     option_rows: bool = False
     serves_current_data: bool = False
+    latest_is_current: bool = False
     refused_alternative: str | None = None
 
     def __post_init__(self) -> None:
@@ -456,7 +463,7 @@ class DatasetSpec:
                 every futures file is checked); a dataset that keeps its symbols as written has
                 channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
                 dataset without a fetch path, or whose fetch path is a reference endpoint, sets
-                `serves_current_data`; or
+                `serves_current_data` or `latest_is_current`, or a dataset sets both; or
                 the transports match no query class (see the
                 class docstring and `_check_verbs`).
         """
@@ -485,13 +492,18 @@ class DatasetSpec:
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
-        if self.serves_current_data and (
+        if (self.serves_current_data or self.latest_is_current) and (
             self.fetch_path is None or REFERENCE_PATH.match(self.fetch_path)
         ):
             # Reference data is no market state, and Massive counts it in no subscription.
             raise ValueError(
                 f"{self.name}: only a dataset with a fetch path that is no reference endpoint "
                 "serves current data"
+            )
+        if self.serves_current_data and self.latest_is_current:
+            raise ValueError(
+                f"{self.name}: a dataset serves current data or computes its latest value from "
+                "it, not both"
             )
         self._check_keys()
         if self.times is RowTimes.DAY and self.asset_class not in DAY_ZONES:

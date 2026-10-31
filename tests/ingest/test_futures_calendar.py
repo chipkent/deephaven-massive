@@ -3,21 +3,25 @@
 The calendar's worker makes its requests through an injected `fetch`, here a scripted fake that
 records each call and can hold the requests of one path open, and reads the time from an
 injected clock, so every reload, spacing, and patience decision is deterministic. A test waits
-only on observable state: a recorded request, or the calendar's `wait_idle`, which returns once
-the worker has served every lookup queued so far.
+only on observable state: a recorded request, `wait_loaded`, or the calendar's work queue
+(`_WatchedQueue`, put in place of the module's), which tells when the worker has served every
+lookup queued so far and waits for more.
 """
 
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 import pytest
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
+from deephaven_massive._ingest import futures_calendar
 from deephaven_massive._ingest.futures_calendar import (
     RELOAD_SPACING,
     FuturesCalendar,
@@ -74,6 +78,46 @@ CONTRACTS: list[dict[str, object]] = [
     {"ticker": "UNASKED", "product_code": "XX"},  # not asked for: ignored
     {"ticker": "ESU4"},  # no product: ignored
 ]
+
+
+class _WatchedQueue:
+    """The worker's queue, which tells when the worker waits on it with nothing queued.
+
+    It stands in for `queue.SimpleQueue` with the three methods the calendar calls.
+    """
+
+    def __init__(self) -> None:
+        self.items: queue.SimpleQueue[object] = queue.SimpleQueue()
+        self.cond = threading.Condition()
+        self.waiting = False  # the worker waits in `get`, and nothing was put since
+
+    def put(self, item: object) -> None:
+        with self.cond:
+            self.waiting = False
+        self.items.put(item)
+
+    def get(self) -> object:
+        with self.cond:
+            self.waiting = True
+            self.cond.notify_all()
+        item = self.items.get()
+        with self.cond:
+            self.waiting = False
+        return item
+
+    def get_nowait(self) -> object:
+        return self.items.get_nowait()
+
+    def wait_idle(self) -> None:
+        with self.cond:
+            assert self.cond.wait_for(lambda: self.waiting and self.items.empty(), TIMEOUT)
+
+
+@pytest.fixture(autouse=True)
+def _watched_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every calendar of these tests gets a queue that tells when its worker is idle.
+    module = SimpleNamespace(SimpleQueue=_WatchedQueue, Empty=queue.Empty)
+    monkeypatch.setattr(futures_calendar, "queue", module)
 
 
 class Clock:
@@ -187,7 +231,7 @@ def null_date(symbol: str, why: str, day: str) -> str:
 
 
 def idle(calendar: FuturesCalendar) -> None:
-    assert calendar.wait_idle(TIMEOUT)
+    cast("_WatchedQueue", calendar._queue).wait_idle()
 
 
 def watched(calendar: FuturesCalendar, *symbols: str) -> None:
@@ -537,13 +581,12 @@ def test_close_stops_the_worker_once_and_queues_nothing_after(
     assert "test futures schedules" not in {t.name for t in threading.enumerate()}
     calendar.watch(["ESM4"])
     assert correct(calendar, [FOLDED])[0] == [None]
-    assert calendar.wait_idle(0)
     assert fetch.calls == []
 
 
 def test_closing_wakes_a_caller_waiting_for_the_worker(fetch: FakeFetch, clock: Clock) -> None:
-    # A lookup is on the wire, so the calendar is not idle; closing it must release a caller
-    # already waiting in `wait_idle` at once, not when the lookup finally returns.
+    # A lookup is on the wire, so nothing is loaded; closing the calendar must release a caller
+    # already waiting in `wait_loaded` at once, not when the lookup finally returns.
     calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     fetch.hold(CONTRACTS_PATH)
     calendar.watch(["ESM4"])
@@ -553,7 +596,7 @@ def test_closing_wakes_a_caller_waiting_for_the_worker(fetch: FakeFetch, clock: 
 
     def wait() -> None:
         waiting.set()
-        results.append(calendar.wait_idle(TIMEOUT))
+        results.append(calendar.wait_loaded(["ESM4"], TIMEOUT))
 
     waiter = threading.Thread(target=wait)
     waiter.start()
@@ -635,7 +678,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
     closing = threading.Thread(target=calendar.close)
     with caplog.at_level(logging.WARNING):
         closing.start()
-        assert calendar.wait_idle(TIMEOUT)  # closed
+        assert calendar.wait_loaded(["ESM4"], TIMEOUT)  # closed
         fetch.release.set()
         closing.join(TIMEOUT)
     assert not closing.is_alive()

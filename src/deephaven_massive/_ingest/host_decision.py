@@ -12,8 +12,8 @@ first connection, and never by opening a connection to try:
   delayed refuses it;
 - a TICK host pinned in `MassiveConfig.ws_hosts` is used as is (the configuration has checked
   it against `delayed_subscriptions`);
-- a listed subscription uses `delayed.massive.com`, and when its snapshot shows a real-time
-  plan, one WARNING says that removing it from `delayed_subscriptions` gets real-time data;
+- a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
+  delayed feed, so no answer from Massive changes the host;
 - forex and crypto have one documented host, `socket.massive.com`, real-time on every plan, so
   no request is made;
 - every other subscription uses the real-time feed. Its class's snapshot (`SNAPSHOT_PROBES`) is
@@ -30,18 +30,16 @@ as real-time.
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
 already become its public exception there. A decision that raises is not cached, so the next
-verb decides again and sees a plan upgraded meanwhile. `HostDecisionCache` holds a session's
-decisions, single-flight, behind a leaf lock of its own; the REST transport fills it and writes
-the `m.connections()` rows that record them. Nothing here starts a thread or calls Deephaven.
+verb decides again and sees a plan upgraded meanwhile. The REST transport holds a session's
+decisions, single-flight (`_ingest/shared_lookup.py`), and writes the `m.connections()` rows
+that record them. Nothing here starts a thread or calls Deephaven.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
 from deephaven_massive._enums import (
@@ -54,7 +52,6 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import EntitlementError
 from deephaven_massive._ingest.recency_labels import RecencyLabels, delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_rows import is_error_row
-from deephaven_massive._log_limits import log_once
 from deephaven_massive._tables.transports import HostDecision
 
 if TYPE_CHECKING:
@@ -63,12 +60,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SNAPSHOT_PROBES",
-    "HostDecisionCache",
     "SnapshotAnswer",
     "SnapshotProbe",
     "decide",
     "recency_of",
-    "succeeded_result",
 ]
 
 logger = logging.getLogger(__name__)
@@ -182,25 +177,19 @@ def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecisi
 
 
 def _from_labels(
-    asset_class: AssetClass,
-    *,
-    subscription: Subscription,
-    labels: RecencyLabels,
-    rows: Sequence[Mapping[str, object]],
+    asset_class: AssetClass, *, subscription: Subscription, labels: RecencyLabels
 ) -> HostDecision:
     """Decide the real-time feed of a subscription not listed as delayed, from its snapshot.
 
     Args:
         asset_class: The class (stocks, options, indices, or futures).
         subscription: Its subscription.
-        labels: The snapshot's recency labels.
-        rows: The snapshot's rows, without the per-ticker error rows.
+        labels: The snapshot's recency labels, read from its rows without the per-ticker error
+            rows.
 
     Returns:
         The real-time host, `REALTIME`, with the label as evidence; a WARNING when the label
-        is undocumented, or when an index snapshot has none. Stocks and options whose rows
-        have a top-level `fmv` field and no label (a Business key without a trades and quotes
-        expansion) get the Business host, real-time too, with one WARNING.
+        is undocumented, or when an index snapshot has none.
 
     Raises:
         EntitlementError: If a label says delayed (`recency_labels.delayed_refusal`).
@@ -217,75 +206,10 @@ def _from_labels(
         )
     if labels.real_time is not None:
         return _real_time(asset_class, labels.real_time)
-    if asset_class in (AssetClass.STOCKS, AssetClass.OPTIONS) and any("fmv" in r for r in rows):
-        log_once(
-            logger,
-            f"business-host:{asset_class.value}",
-            "%s WebSocket host: a Business key without trades and quotes; streaming from "
-            "%s (pin another with %s)",
-            asset_class.value,
-            BUSINESS_HOST,
-            _ws_hosts_hint(asset_class),
-            level=logging.WARNING,
-        )
-        return HostDecision(
-            BUSINESS_HOST,
-            Recency.REALTIME,
-            "Business key without trades/quotes; base plan streams FMV-based aggregates "
-            "(UNVERIFIED host)",
-        )
     evidence = f"no timeframe in the {asset_class} snapshot"
     if asset_class is AssetClass.INDICES:  # the field is documented: its absence is anomalous
         return _unconfirmed_real_time(asset_class, evidence)
     return _real_time(asset_class, evidence)
-
-
-def _delayed(
-    asset_class: AssetClass,
-    probe: SnapshotProbe,
-    fetch: Callable[[SnapshotProbe], SnapshotAnswer],
-) -> HostDecision:
-    """Decide the delayed feed of a listed subscription, warning when the plan is real-time.
-
-    Args:
-        asset_class: The class.
-        probe: Its snapshot request.
-        fetch: Makes the request.
-
-    Returns:
-        `delayed.massive.com`, `DELAYED`, evidence `"MassiveConfig.delayed_subscriptions"`.
-        A refused snapshot changes nothing (it logs at DEBUG); one labelled `REAL-TIME` and
-        nowhere `DELAYED` logs one WARNING per class and process.
-    """
-    try:
-        answer = fetch(probe)
-    except EntitlementError as error:
-        logger.debug(
-            "%s snapshot refused, so the delayed feed is used unchecked: %s",
-            asset_class.value,
-            error,
-        )
-        answer = SnapshotAnswer("", ())
-    labels = read_labels(answer.status, [r for r in answer.rows if not is_error_row(r)])
-    if labels.delayed is None and labels.real_time is not None:
-        log_once(
-            logger,
-            f"real-time-plan-on-delayed-feed:{asset_class.value}",
-            "your plan streams %s real-time (%s), but MassiveConfig.delayed_subscriptions "
-            "lists dm.Subscription.%s, so its streams use the delayed feed %s; remove it "
-            "from delayed_subscriptions to get real-time data",
-            asset_class.value,
-            labels.real_time,
-            subscription_of(asset_class).name,
-            DELAYED_HOST,
-            level=logging.WARNING,
-        )
-    logger.info(
-        "%s WebSocket host: %s (MassiveConfig.delayed_subscriptions)",
-        asset_class.value,
-        DELAYED_HOST,
-    )
-    return HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
 
 
 def decide(
@@ -300,7 +224,7 @@ def decide(
 
     The rules, in order: the FMV family is `business.massive.com`; a TICK host pinned in
     `ws_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
-    uses `delayed.massive.com` (`_delayed`); forex and crypto use `socket.massive.com` with no
+    uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
     drops the per-ticker rows that carry an `error` (a ticker the plan does not include counts
     as absent), and streams from the real-time feed unless a label says delayed
@@ -350,9 +274,14 @@ def decide(
         return HostDecision(
             REALTIME_HOST, Recency.REALTIME, "single documented host; Starter is real-time"
         )
-    probe = SNAPSHOT_PROBES[asset_class]
     if listed:
-        return _delayed(asset_class, probe, fetch)
+        logger.info(
+            "%s WebSocket host: %s (MassiveConfig.delayed_subscriptions)",
+            asset_class.value,
+            DELAYED_HOST,
+        )
+        return HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
+    probe = SNAPSHOT_PROBES[asset_class]
     try:
         answer = fetch(probe)
     except EntitlementError as error:
@@ -361,93 +290,4 @@ def decide(
         )
     entitled = [row for row in answer.rows if not is_error_row(row)]
     labels = read_labels(answer.status, entitled)
-    return _from_labels(asset_class, subscription=subscription, labels=labels, rows=entitled)
-
-
-class HostDecisionCache:
-    """The WebSocket host decisions of one session, by (asset class, channel family).
-
-    `RestState` holds one per session, and `RestEndpoints.resolve_host` reads and fills it,
-    single-flight: the first caller of a (class, family) claims the decision and makes it,
-    every concurrent caller waits on the decision's future, and a failed decision is forgotten
-    so that the next caller tries again. Thread-safe: the decisions sit behind one leaf lock,
-    held only to read or change them; every caller waits on a future outside it.
-    """
-
-    __slots__ = ("_hosts", "_lock")
-
-    def __init__(self) -> None:
-        """Start with no decision; nothing is requested."""
-        self._lock = threading.Lock()
-        self._hosts: dict[tuple[AssetClass, ChannelFamily], Future[HostDecision]] = {}
-
-    def host_future(
-        self, key: tuple[AssetClass, ChannelFamily]
-    ) -> tuple[Future[HostDecision], bool]:
-        """Return the decision of a (class, family), or claim it for the caller to make.
-
-        Args:
-            key: The asset class and channel family.
-
-        Returns:
-            The decision's future and whether the caller created it: the creator makes the
-            decision and completes the future; everyone else waits on it, outside every lock.
-        """
-        with self._lock:
-            future = self._hosts.get(key)
-            if future is not None:
-                return future, False
-            future = self._hosts[key] = Future()
-            return future, True
-
-    def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
-        """Return the decision of a (class, family) if one is made, without claiming it.
-
-        A failed decision is removed before its future fails, but this check reads the future
-        under the lock and looks at it after: its maker may forget and fail it in between. So
-        only a decision counts; a failed future gives None, and the caller then claims or
-        waits as usual (`RestEndpoints.resolve_host`). The failed decision is forgotten by
-        then, so the caller claims a fresh one and makes the decision itself.
-
-        Args:
-            key: The asset class and channel family.
-
-        Returns:
-            The decision, or None while none is made, one is being made, or the one being made
-            has just failed.
-        """
-        with self._lock:
-            future = self._hosts.get(key)
-        return succeeded_result(future)
-
-    def forget_host(
-        self, key: tuple[AssetClass, ChannelFamily], future: Future[HostDecision]
-    ) -> None:
-        """Remove a failed decision, so that the next caller tries again.
-
-        Args:
-            key: The asset class and channel family.
-            future: The failed decision's future; another one under the key is kept.
-        """
-        with self._lock:
-            if self._hosts.get(key) is future:
-                del self._hosts[key]
-
-
-T = TypeVar("T")
-"""The result type of a shared lookup's future."""
-
-
-def succeeded_result(future: Future[T] | None) -> T | None:
-    """Return a shared lookup's result once it has succeeded, and None in every other state.
-
-    Args:
-        future: The lookup's future, or None when no lookup is claimed.
-
-    Returns:
-        The result; None when the lookup is not claimed, still running, or failed (its
-        future then holds the error, which only the claim-or-wait path may act on).
-    """
-    if future is None or not future.done() or future.exception() is not None:
-        return None
-    return future.result()
+    return _from_labels(asset_class, subscription=subscription, labels=labels)
