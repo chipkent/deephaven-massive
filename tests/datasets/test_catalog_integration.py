@@ -136,7 +136,8 @@ def _params() -> list[Any]:
     """Return every (dataset, verb) pair as a test case with its plan and request count.
 
     A dataset of one class needs that class's Basic plan for REST and its Starter plan for a
-    stream (Basic has no WebSocket access); the `needs` marker skips it before any call when
+    stream (Basic has no WebSocket access), and its Business plan for a fair-market-value (FMV)
+    stream, which only Business serves; the `needs` marker skips it before any call when
     the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
     left on Basic, whose five requests a minute pace it.
 
@@ -150,6 +151,8 @@ def _params() -> list[Any]:
         marks = [pytest.mark.requests(_REQUESTS[verb])]
         if subscription is not None:
             plan = "starter" if verb == "stream" else "basic"
+            if name.endswith(".fmv") and verb == "stream":
+                plan = "business"
             marks.append(pytest.mark.needs(f"{subscription}:{plan}"))
         params.append(pytest.param(name, verb, marks=marks, id=f"{name}-{verb}"))
     return params
@@ -225,8 +228,9 @@ def _query(
 
     Every required argument gets a value (`_FIXED_ARGUMENTS`, `day` for a `date`); `symbols`
     gets the class's symbol even where it is optional, and `limit` 5 where the dataset takes
-    one. A bars dataset uses `Timespan.DAY` for `fetch()` and `poll()` (the previous day's bar)
-    and its default timespan otherwise.
+    one. A bars dataset, whose `timespan` is required, uses `Timespan.MINUTE` for a stream (the
+    one-minute channel every bars dataset offers) and `Timespan.DAY` for every other verb (the
+    previous day's bar for `fetch()` and `poll()`, one daily bar for `history()`).
 
     Returns:
         The query.
@@ -243,8 +247,8 @@ def _query(
     for parameter in inspect.signature(method).parameters.values():
         if parameter.name == "symbols":
             arguments["symbols"] = _symbol(name, spec, client, symbols=symbols)
-        elif parameter.name == "timespan" and verb in {"fetch", "poll"}:
-            arguments["timespan"] = dm.Timespan.DAY
+        elif parameter.name == "timespan":
+            arguments["timespan"] = dm.Timespan.MINUTE if verb == "stream" else dm.Timespan.DAY
         elif parameter.name == "limit" and verb in {"fetch", "poll"}:
             arguments["limit"] = _LIMIT
         elif parameter.default is not inspect.Parameter.empty:

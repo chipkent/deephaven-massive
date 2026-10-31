@@ -329,6 +329,14 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             ),
         ),
         (
+            # A key whose snapshot proved real-time data gains nothing from the delayed feed.
+            on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
+            (
+                "the futures subscription's plan is real-time (last_trade.timeframe=REAL-TIME) "
+                "but may not include this data; it may need a higher plan or an add-on"
+            ),
+        ),
+        (
             on_host(DELAYED_HOST, "MassiveConfig.delayed_subscriptions"),
             (
                 "MassiveConfig.delayed_subscriptions lists dm.Subscription.FUTURES, so its streams "

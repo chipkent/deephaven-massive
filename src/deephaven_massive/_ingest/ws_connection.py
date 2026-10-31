@@ -71,6 +71,7 @@ from deephaven_massive._errors import (
     wire_cause,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
+from deephaven_massive._ingest.recency_labels import shows_real_time
 from deephaven_massive._ingest.subscriptions import (
     Sender,
     Subscriptions,
@@ -1078,10 +1079,12 @@ class Connection:
         Returns:
             On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed,
             that the subscription is listed in `delayed_subscriptions` and that removing it
-            uses the real-time feed; on the real-time feed, how to use Massive's delayed feed
-            instead; for fair-market-value topics, that they need a Business plan; on another
-            host, that `ws_hosts` chooses it; and for index values, that they may need
-            `business.massive.com`.
+            uses the real-time feed; on the real-time feed of a key whose snapshot showed
+            real-time data, that its plan or an add-on may not include the data (such a key
+            has nothing to gain from the delayed feed); on the real-time feed otherwise, how
+            to use Massive's delayed feed instead; for fair-market-value topics, that they
+            need a Business plan; on another host, that `ws_hosts` chooses it; and for index
+            values, that they may need `business.massive.com`.
         """
         subscription = subscription_of(self.asset_class)
         if self.decision.evidence == "ws_hosts":
@@ -1095,6 +1098,12 @@ class Connection:
                 f"so its streams use Massive's delayed feed; whether Massive serves it to "
                 f"every plan is unverified; to use the real-time feed, remove "
                 f"dm.Subscription.{subscription.name} from delayed_subscriptions"
+            )
+        elif self.decision.host == REALTIME_HOST and shows_real_time(self.decision.evidence):
+            hint = (
+                f"the {subscription} subscription's plan is real-time "
+                f"({self.decision.evidence}) but may not include this data; it may need a "
+                "higher plan or an add-on"
             )
         elif self.decision.host == REALTIME_HOST:
             hint = (

@@ -4,7 +4,12 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._enums import Subscription
-from deephaven_massive._ingest.recency_labels import RecencyLabels, delayed_refusal, read_labels
+from deephaven_massive._ingest.recency_labels import (
+    RecencyLabels,
+    delayed_refusal,
+    read_labels,
+    shows_real_time,
+)
 
 
 def test_no_label_reads_as_none() -> None:
@@ -69,3 +74,17 @@ def test_a_rest_refusal_says_streams_move_too() -> None:
     assert "To accept delayed stocks data (its streams then use Massive's delayed feed too)" in (
         str(error)
     )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "real_time"),
+    [
+        ("last_trade.timeframe=REAL-TIME", True),
+        ("timeframe=REAL-TIME", True),
+        ("timeframe='END-OF-DAY', neither DELAYED nor REAL-TIME, in the snapshot", False),
+        ("no timeframe in the stocks snapshot", False),
+        ("underlying_asset.timeframe=REAL-TIME", False),
+    ],
+)
+def test_only_a_real_time_label_shows_real_time(evidence: str, *, real_time: bool) -> None:
+    assert shows_real_time(evidence) is real_time
