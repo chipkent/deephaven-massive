@@ -1177,6 +1177,111 @@ def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
     )
 
 
+def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itself(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The maker is a background read released while Massive pauses the list: it stops at
+    # once, and the caller waiting on it reads the list itself instead of failing with the
+    # maker's cancellation.
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
+    stop = Cancel()
+    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    caplog.set_level(logging.INFO, LOGGER)
+    try:
+        maker = _Caller(
+            m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
+        )
+        clock.wait_for_deadlines([60.0])  # the maker waits out Massive's pause
+        joiner = _Caller(m, _split_dot(m), console=False)
+        clock.wait_for_deadlines([60.0, math.inf])
+        stop.set()  # the maker's table is released
+        stopped = maker.join()
+        assert isinstance(stopped, dm.MassiveError)
+        assert "cancelled" in str(stopped)
+        clock.wait_for_deadlines([60.0])  # the joiner reads the list, after the same pause
+        clock.advance(60.0)
+        assert joiner.join() == ("DOT", "USD")
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 3  # the maker's paused page, then the joiner's two lists
+    assert any(
+        "the caller making the crypto ticker list stopped (its read was stopped:" in message
+        for message in caplog.messages
+    )
+
+
+def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The waiter is the background read released: it stops waiting at once, and the maker
+    # reads on.
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    listeners = _Listeners(monkeypatch)
+    fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
+    stop = Cancel()
+    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    try:
+        maker = _Caller(m, _split_dot(m), console=False)
+        clock.wait_for_deadlines([60.0])
+        joiner = _Caller(
+            m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
+        )
+        clock.wait_for_deadlines([60.0, math.inf])
+        stop.set()
+        stopped = joiner.join()
+        assert isinstance(stopped, dm.MassiveError)
+        assert str(stopped).endswith("waiting for the crypto ticker list: cancelled")
+        clock.advance(60.0)
+        assert maker.join() == ("DOT", "USD")
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 3
+    assert listeners.live == []  # the waiter's listeners are gone
+
+
+def test_a_stopped_fetch_reads_no_crypto_ticker_list(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Planning a crypto pair's requests listens to the read's stop token.
+    rest = session._core.rest_transport()
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
+    stop = Cancel()
+    stop.set()
+    with pytest.raises(dm.MassiveError, match="cancelled"):
+        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop)
+    assert fake_rest.requests == []
+
+
+def test_a_stopped_history_splits_its_pairs_with_its_stop_token(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A REST history's planning splits its crypto pairs with a lookup that listens to the
+    # read's stop token, so a released read reads no ticker list.
+    transport = session._core.rest_transport()
+    splits: list[Callable[[str], tuple[str, str]]] = []
+
+    def planned(*_: object, split: Callable[[str], tuple[str, str]], **__: object) -> None:
+        splits.append(split)
+        raise KeyboardInterrupt  # the plan is all this test needs
+
+    monkeypatch.setattr(rest, "_history_plan", planned)
+    q = query(session, CRYPTO_BARS, symbols=["X:DOTUSD"], timespan=Timespan.DAY)
+    day = date(2025, 3, 3)
+    request = dataclasses.replace(q._request, start=day, end=day)
+    window = history_window(CRYPTO_BARS, request, start=day, end=day, classes=())
+    stop = Cancel()
+    stop.set()
+    with pytest.raises(KeyboardInterrupt):
+        transport.history(CRYPTO_BARS, request, window, call=1, stop=stop)
+    (split,) = splits
+    with pytest.raises(dm.MassiveError, match="cancelled"):
+        split("X:DOTUSD")
+    assert fake_rest.requests == []
+
+
 @pytest.mark.parametrize("console", ["joiner", "maker"])
 def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     *,
@@ -1255,6 +1360,53 @@ def test_a_failed_lookup_is_never_returned_as_known(
         assert state.known_crypto() is None
     else:
         assert state.hosts.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        rest._AbandonedError("rate limited: the maker gave up"),
+        dm.MassiveError("the read failed: boom", status=500),
+    ],
+    ids=["abandoned", "failed"],
+)
+def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
+    *,
+    session: dm.MassiveSession,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    failure: Exception,
+) -> None:
+    # The late caller reads the claimed lookup under the lock; before it looks at it, the
+    # maker forgets the lookup and fails it. The late caller must make the lookup itself.
+    snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
+    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    key = (AssetClass.STOCKS, ChannelFamily.TICK)
+    claimed, created = _claim(session, kind)
+    assert created
+    succeeded = host_decision.succeeded_result
+
+    def maker_fails_meanwhile(future: Future[Any] | None) -> object:
+        if future is claimed and not claimed.done():
+            if kind == "crypto":
+                state.forget_crypto()
+            else:
+                state.hosts.forget_host(key, claimed)
+            claimed.set_exception(failure)
+        return succeeded(future)
+
+    monkeypatch.setattr(rest, "succeeded_result", maker_fails_meanwhile)
+    monkeypatch.setattr(host_decision, "succeeded_result", maker_fails_meanwhile)
+    result = _lookup(session, kind)()
+    assert claimed.done()  # the race really ran
+    if kind == "crypto":
+        assert result == ("DOT", "USD")
+    else:
+        assert isinstance(result, HostDecision)
+        assert result.host == "delayed.massive.com"
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])

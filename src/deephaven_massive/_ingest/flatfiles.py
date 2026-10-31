@@ -538,7 +538,7 @@ class _Transform:
 
 
 class _CancelledError(Exception):
-    """A read stopped because another read of the same call failed or was interrupted."""
+    """A read stopped: another read of its call failed or was interrupted, or the call stopped."""
 
 
 class FlatFileHistory:
@@ -711,7 +711,9 @@ class FlatFileHistory:
         tables = [table for part in parts if part is not None for table in part]
         if roll is not None:
             tables.extend(
-                self._roll_forward(spec, transform, keys=keys, missing=set(missing), prefix=roll)
+                self._roll_forward(
+                    spec, transform, keys=keys, missing=set(missing), prefix=roll, stop=stop
+                )
             )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
@@ -726,6 +728,7 @@ class FlatFileHistory:
         keys: Sequence[_Key],
         missing: set[_Key],
         prefix: str,
+        stop: Cancel | None,
     ) -> list[Table]:
         """Read, per venue, the first session file after a range's missing last files.
 
@@ -743,8 +746,9 @@ class FlatFileHistory:
         silently short table. The reads run on the caller thread, one at a time; the transform
         keeps only the rows inside the range. Each read checks the session before its request
         and after every block, as the pool's reads do, so a close stops it with
-        `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this runs,
-        so these reads take an event of their own.
+        `"MassiveSession #1 is closed"`. The pool's cancel event is already set when this runs,
+        so these reads listen to the background read's stop token instead, if there is one: a
+        read released meanwhile stops at its next block, and nothing after it is read.
 
         Args:
             spec: The dataset, for the log.
@@ -752,6 +756,8 @@ class FlatFileHistory:
             keys: The request's files, in date and then venue order.
             missing: The files of `keys` that do not exist.
             prefix: The futures prefix, with its `{venue}` placeholder.
+            stop: A background read's stop token, or None when only the session's close
+                should stop the reads.
 
         Returns:
             The tables of the files found, in venue order; empty when no run needs a roll.
@@ -759,9 +765,11 @@ class FlatFileHistory:
         Raises:
             MassiveError: If the next session's file is not published yet, or a missing
                 file may still be late, or no file exists within `ROLL_LIMIT` of the
-                run's first day. A failed read raises the public error `_read_key` raises
+                run's first day, or `"<dataset> history: the read was cancelled"` once `stop`
+                is set. A failed read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
+        cancel = threading.Event() if stop is None else stop
         tables: list[Table] = []
         cutoff = self._core.config.flat_file_publish_cutoff
         for venue in dict.fromkeys(key.venue for key in keys):
@@ -795,7 +803,11 @@ class FlatFileHistory:
                         f"{NOT_PUBLISHED}; retry once it is published, or read REST with "
                         "source=dm.HistorySource.REST"
                     )
-                part = self._read_key(transform, key, cancel=threading.Event())
+                try:
+                    part = self._read_key(transform, key, cancel=cancel)
+                except _CancelledError:
+                    logger.debug("%s history: stopped before reading %s", spec.name, key.key)
+                    raise MassiveError(f"{spec.name} history: the read was cancelled") from None
                 if part is not None:
                     logger.info(
                         "%s: %s is missing; reading %s for the hours a holiday moved into it",

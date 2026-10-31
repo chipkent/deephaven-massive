@@ -1288,6 +1288,43 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
     assert "for the hours a holiday moved into it" in caplog.text
 
 
+def test_a_stopped_read_stops_its_roll_forward(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Martin Luther King Day again: the pool has read the missing 01-20 file when the
+    # background read is released, so the roll forward reads nothing more and the call
+    # reports the cancellation.
+    clock(datetime(2025, 2, 10, tzinfo=UTC))
+    tuesday = epoch_ns(datetime(2025, 1, 21, 9, tzinfo=CHICAGO))
+    rolled = FUTURES_KEY.format("cme", date(2025, 1, 21))
+    fake_s3.put(rolled, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-21,ESH5,{tuesday}\n"))
+    stop = _massive.Cancel()
+    skip_missing = flatfiles.FlatFileHistory._skip_missing
+
+    def released_as_the_pool_ends(
+        self: flatfiles.FlatFileHistory, spec: DatasetSpec, missing: list[Any], *, last: date
+    ) -> None:
+        stop.set()
+        skip_missing(self, spec, missing, last=last)
+
+    monkeypatch.setattr(flatfiles.FlatFileHistory, "_skip_missing", released_as_the_pool_ends)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
+    start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
+    end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
+    window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
+    dates = history_source.partition_dates(FUTURES_TRADES, window)
+    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+        session._core.flat_file_transport().history(
+            FUTURES_TRADES, q._request, window, dates=dates, call=1, stop=stop
+        )
+    assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
+
+
 def test_a_roll_forward_gives_up_loudly_after_a_week(
     *,
     session: dm.MassiveSession,

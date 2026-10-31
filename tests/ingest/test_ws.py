@@ -560,20 +560,30 @@ def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
 
 
 def test_a_failing_upstream_watchlist_fails_the_stream(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A canonicalize_symbols table under RAISE fails on a bad row; the stream must fail with
-    # it rather than keep its old topics.
+    # it rather than keep its old topics, and the failure is one ERROR, the stream's.
     source = input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
     watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
-    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
-    wait_for(lambda: failed_after_flush(ws_session, result))
-    (row,) = streams_of(ws_session, dh_to_pylist)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+        wait_for(lambda: failed_after_flush(ws_session, result))
+        (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+    errors = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.ERROR and "failed upstream" in r.getMessage()
+    ]
+    assert len(errors) == 1
+    assert errors[0].startswith("test.trades stream 1 failed: the symbol table passed to")
 
 
 def stream_blink(ws_session: WsSession) -> Table:

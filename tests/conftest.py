@@ -393,6 +393,33 @@ def dh_exec_ctx() -> ExecutionContext:
 
 
 @pytest.fixture
+def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
+    """Return a function that asks the update graph for a cycle and returns once one has run.
+
+    For a test that needs the live tables to have updated between two steps, such as two
+    console commands that must count as two pauses. The function fails the test when no cycle
+    runs within 30 seconds; it must not be called while the thread holds the update graph's
+    lock, under which no cycle can run.
+
+    Returns:
+        The function.
+    """
+
+    def run() -> None:
+        graph = dh_exec_ctx.update_graph.j_update_graph
+        first = graph.clock().currentStep()
+        graph.requestRefresh()
+        pause = threading.Event()  # never set; only paces the loop
+        for _ in range(1500):
+            if graph.clock().currentStep() != first:
+                return
+            pause.wait(0.02)
+        pytest.fail("no update cycle ran within 30 s")
+
+    return run
+
+
+@pytest.fixture
 def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     """Return a function that snapshots a Deephaven table into a list of row dictionaries.
 
