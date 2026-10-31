@@ -218,9 +218,26 @@ class FlatFile:
             with client.open("us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz") as file:
                 for batch, drift in file.batches(plan):
                     ...
+
+    Attributes:
+        rows_read: The rows `batches()` has read from the file so far, every symbol's.
+        rows_of_symbols: Of those, the rows of the plan's symbols (all of them when the plan
+            names none).
+        rows_kept: Of those, the rows `batches()` yielded: a readable key, inside the plan's
+            window. The three tell a caller which step emptied a file; they are written by
+            the reader thread as it iterates and are final once `batches()` ends.
     """
 
-    __slots__ = ("_body", "_dropped", "_host", "_key", "_location")
+    __slots__ = (
+        "_body",
+        "_dropped",
+        "_host",
+        "_key",
+        "_location",
+        "rows_kept",
+        "rows_of_symbols",
+        "rows_read",
+    )
 
     def __init__(self, body: _Stream, key: str, *, location: str, host: str | None) -> None:
         """Wrap an object's body; nothing is read yet.
@@ -236,6 +253,9 @@ class FlatFile:
         self._location = location
         self._host = host
         self._dropped = threading.Event()
+        self.rows_read = 0
+        self.rows_of_symbols = 0
+        self.rows_kept = 0
 
     @property
     def dropped(self) -> bool:
@@ -358,7 +378,10 @@ class FlatFile:
             # Rows of the requested symbols the file held, and how many of them were dropped.
             held = dropped = 0
             reason = ""
-            for rows, drift, considered in self._blocks(text, plan, options):
+            for rows, drift, considered, read in self._blocks(text, plan, options):
+                self.rows_read += read
+                self.rows_of_symbols += considered
+                self.rows_kept += rows.num_rows
                 held += considered
                 dropped += drift.dropped_rows
                 reason = reason or drift.dropped_reason
@@ -389,7 +412,7 @@ class FlatFile:
         text: gzip.GzipFile,
         plan: ReadPlan,
         options: tuple[pacsv.ReadOptions, pacsv.ConvertOptions],
-    ) -> Generator[tuple[pa.RecordBatch, DriftReport, int], None, None]:
+    ) -> Generator[tuple[pa.RecordBatch, DriftReport, int, int], None, None]:
         """Parse and filter the file's rows chunk by chunk on a small pool, in file order.
 
         The calling thread decompresses the file and cuts the text after a line end into
@@ -406,7 +429,8 @@ class FlatFile:
             options: How Arrow reads the file's rows: its read and convert options.
 
         Yields:
-            What `_apply` returns for each block, in file order.
+            What `_apply` returns for each block, then the block's row count (every symbol's),
+            in file order.
 
         Raises:
             The errors of decompressing and parsing (`pyarrow.ArrowException`, `OSError`,
@@ -416,14 +440,14 @@ class FlatFile:
         """
         read_options, convert_options = options
 
-        def parse(chunk: bytes) -> list[tuple[pa.RecordBatch, DriftReport, int]]:
+        def parse(chunk: bytes) -> list[tuple[pa.RecordBatch, DriftReport, int, int]]:
             table = pacsv.read_csv(
                 pa.py_buffer(chunk), read_options=read_options, convert_options=convert_options
             )
-            return [self._apply(block, plan) for block in table.to_batches()]
+            return [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
 
         name = f"{threading.current_thread().name} parse"
-        pending: deque[Future[list[tuple[pa.RecordBatch, DriftReport, int]]]] = deque()
+        pending: deque[Future[list[tuple[pa.RecordBatch, DriftReport, int, int]]]] = deque()
         failed: Exception | None = None
         with ThreadPoolExecutor(plan.parse_threads, name) as pool:
             try:

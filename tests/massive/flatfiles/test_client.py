@@ -1825,3 +1825,31 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     assert symbols == [["AAPL", "MSFT", "AAPL", "SPY"]] * 4
     assert in_flight == 4
     assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []
+
+
+def test_an_endpoint_s_user_and_password_never_reach_a_message(
+    *, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    # botocore names the endpoint as configured when it cannot reach it.
+    endpoint = "https://reader:hunter2@files.massive.com"
+
+    def unreachable(_key: str) -> None:
+        raise EndpointConnectionError(endpoint_url=f"{endpoint}/flatfiles/{KEY}")
+
+    fake_s3.put(KEY, b"data")
+    fake_s3.before_answer = unreachable
+    flat_files = make_client(endpoint_url=endpoint, clock=clock)
+    try:
+        with pytest.raises(WireError) as info:
+            flat_files.open(KEY)
+    finally:
+        flat_files.close()
+    message = str(info.value)
+    assert message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://***@files.massive.com: "
+    )
+    assert "hunter2" not in message
+    assert "reader" not in message
+    assert "https://***@files.massive.com/flatfiles/" in message
+    with pytest.raises(WireError, match=r"^the flat-file client for https://\*\*\*@files"):
+        flat_files.open(KEY)

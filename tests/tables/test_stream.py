@@ -1114,6 +1114,103 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
     assert (flusher._stale, flusher._noted) == ({}, {})
 
 
+def test_a_stale_symbol_warns_once_when_it_starves_and_logs_its_return_at_info(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    for stream_id in (7, 8):
+        flusher.routes.add("T", make_sink(core, ALL, plan, stream_id=stream_id)[0])
+    reason = "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
+    limit = stream.DROPPED_RUN_LIMIT
+    with caplog.at_level(logging.INFO, logger=stream.__name__):
+        # Two runs of ILLQ: the second finds it stale already, so it warns once.
+        for _ in range(2):
+            flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]))
+            flusher.flush()
+        flusher.rows("T", frame([trade("ILLQ")]))
+        flusher.flush()
+    mine = [r for r in caplog.records if r.name == stream.__name__]
+    assert [(r.levelno, r.getMessage()) for r in mine] == [
+        (
+            logging.WARNING,
+            (
+                f"test.trades: every recent row of 1 [ILLQ] on channel T was dropped because a key "
+                f"could not be read (the first: {reason}), so the dm.ALL streams 2 [7, 8] may be "
+                "stale for them; they keep running and name the symbols in their Error until a "
+                "row is published"
+            ),
+        ),
+        (
+            logging.INFO,
+            (
+                "test.trades: rows of 1 [ILLQ] on channel T are published again; the dm.ALL "
+                "streams no longer name them as stale"
+            ),
+        ),
+    ]
+
+
+def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    flusher.routes.add("T", every)
+    limit = stream.DROPPED_RUN_LIMIT
+    flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]))
+    flusher.flush()
+    with caplog.at_level(logging.INFO, logger=stream.__name__):
+        # A spelling the library cannot read fails the stream before ILLQ's row could publish.
+        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]))
+        flusher.flush()
+    assert every.failed
+    assert "published again" not in caplog.text
+
+
+def test_a_dataset_whose_every_row_is_dropped_fails_its_streams_without_a_stale_warning(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    flusher.routes.add("T", every)
+    with caplog.at_level(logging.WARNING, logger=stream.__name__):
+        # The symbol's run and the dataset's reach the limit in one flush: the stream fails,
+        # so no WARNING says it keeps running.
+        flusher.rows("T", frame([trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT))
+        flusher.flush()
+    assert every.failed
+    assert "may be stale" not in caplog.text
+
+
+def test_a_flush_merges_its_frames_drift_and_reports_it_outside_the_flush_lock(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    flusher.routes.add("T", sink)
+    reports: list[tuple[DriftReport, str, bool]] = []
+
+    def report(_: object, drift: DriftReport, *, where: str) -> None:
+        reports.append((drift, where, flusher._flush_lock.locked()))
+
+    monkeypatch.setattr(Flusher, "_report_drift", staticmethod(report))
+    where = "wss://h/stocks channel T"
+    for reason in ("first", "second", "third"):
+        flusher.drift("T", DriftReport(dropped_rows=2, dropped_reason=reason), where=where)
+    flusher.flush()
+    # Three frames' drops are one report, with every row and the first reason, made once
+    # the flush lock is free.
+    assert reports == [(DriftReport(dropped_rows=6, dropped_reason="first"), where, False)]
+    flusher.flush()
+    assert len(reports) == 1  # each flush reports its own drift only
+
+
 def test_a_published_row_of_a_symbol_ends_its_run(
     massive_session: dm.MassiveSession, flusher: Flusher
 ) -> None:
@@ -1499,9 +1596,7 @@ def test_a_drift_report_that_raises_costs_the_flush_nothing(
     flusher.rows("T", frame([trade("AAPL")]))
     flusher.flush()
     assert [update[1].rows_published for update in reported] == [1]
-    assert "test-flush: could not report the drift of channel T (wss://h/stocks channel T)" in (
-        caplog.text
-    )
+    assert "test-flush: could not report the drift of wss://h/stocks channel T" in (caplog.text)
 
 
 class _BrokenFlusher(Flusher):

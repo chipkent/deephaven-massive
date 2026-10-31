@@ -71,7 +71,7 @@ import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Final, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import boto3
 import botocore.loaders
@@ -99,7 +99,7 @@ from deephaven_massive._massive.net.errors import (
     is_tls_failure,
 )
 from deephaven_massive._massive.net.http import ca_file, https_proxy, proxy_credentials
-from deephaven_massive._massive.net.redaction import redact
+from deephaven_massive._massive.net.redaction import redact, without_userinfo
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     SYSTEM_CLOCK,
@@ -328,6 +328,7 @@ class FlatFileClient:
         "_client",
         "_clock",
         "_closed",
+        "_endpoint_shown",
         "_endpoint_url",
         "_host",
         "_lock",
@@ -336,6 +337,7 @@ class FlatFileClient:
         "_rereads",
         "_secret_access_key",
         "_slots",
+        "_userinfo",
     )
 
     def __init__(
@@ -356,7 +358,10 @@ class FlatFileClient:
         Args:
             access_key_id: The S3 access key id.
             secret_access_key: The S3 secret access key.
-            endpoint_url: The S3 endpoint, such as `"https://files.massive.com"`.
+            endpoint_url: The S3 endpoint, such as `"https://files.massive.com"`. A user and
+                password in it (`https://user:password@host`) never appear in a message: the
+                messages name the endpoint as `https://***@host`, and botocore's own error
+                text is cleaned of them.
             bucket: The bucket, such as `"flatfiles"`.
             max_pool: The most connections the client keeps open, and the most objects it
                 has open at once: a further `open` waits for one to be closed.
@@ -366,6 +371,8 @@ class FlatFileClient:
         self._access_key_id = access_key_id
         self._secret_access_key = secret_access_key
         self._endpoint_url = endpoint_url
+        self._endpoint_shown = without_userinfo(endpoint_url)
+        self._userinfo = _userinfo(endpoint_url)
         self._host = urlsplit(endpoint_url).hostname
         self._bucket = bucket
         self._max_pool = max_pool
@@ -421,7 +428,7 @@ class FlatFileClient:
             `cancel` was set while the request waited to be sent (no request is made): a
             caller that cancels its reads finds them stopped by its own check.
         """
-        location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
+        location = f"s3://{self._bucket}/{key} at {self._endpoint_shown}"
 
         def get(client: S3Client) -> StreamingBody | None:
             try:
@@ -536,7 +543,7 @@ class FlatFileClient:
             WireError: For a truncated page without a new continuation token; the request
                 errors, described above, propagate from each page's request.
         """
-        location = f"s3://{self._bucket}/ at {self._endpoint_url}"
+        location = f"s3://{self._bucket}/ at {self._endpoint_shown}"
         found: list[str] = []
         token: str | None = None
         while True:
@@ -646,7 +653,7 @@ class FlatFileClient:
             if is_tls_failure(error):
                 raise WireError(
                     f"cannot {verb} {location}: TLS certificate verification failed for "
-                    f"{self._host} ({error}); if a proxy or private CA signs it, set "
+                    f"{self._host} ({self._clean(error)}); if a proxy or private CA signs it, set "
                     "SSL_CERT_FILE to a bundle that trusts it",
                     host=self._host,
                     path=key,
@@ -665,12 +672,14 @@ class FlatFileClient:
                 # Any other TLS failure (a protocol mismatch, a handshake the server ends) is
                 # a configuration problem a retry cannot fix either.
                 raise WireError(
-                    f"cannot {verb} {location}: TLS failed for {self._host} ({error})",
+                    f"cannot {verb} {location}: TLS failed for {self._host} ({self._clean(error)})",
                     host=self._host,
                     path=key,
                 ) from error
             failure = WireError(
-                f"cannot {verb} {location}: {_describe(error, proxy)}", host=self._host, path=key
+                f"cannot {verb} {location}: {self._clean(_describe(error, proxy))}",
+                host=self._host,
+                path=key,
             )
             if isinstance(error, _CONNECTION_ERRORS):
                 return _Retryable(failure, error)
@@ -678,7 +687,8 @@ class FlatFileClient:
         except _RESPONSE_CUT_SHORT as error:
             return _Retryable(
                 WireError(
-                    f"cannot {verb} {location}: the error response was cut short ({error})",
+                    f"cannot {verb} {location}: the error response was cut short "
+                    f"({self._clean(error)})",
                     host=self._host,
                     path=key,
                 ),
@@ -741,11 +751,26 @@ class FlatFileClient:
                     self._client = self._create(bundle, proxy)
                 except BotoCoreError as error:
                     raise WireError(
-                        f"cannot create the S3 client for {self._endpoint_url}: {error}",
+                        f"cannot create the S3 client for {self._endpoint_shown}: "
+                        f"{self._clean(error)}",
                         host=self._host,
                     ) from error
                 self._proxy = None if proxy is None else proxy_credentials(proxy)[0]
             return self._client, self._proxy
+
+    def _clean(self, error: object) -> str:
+        """Return an error's text without the endpoint's user and password.
+
+        botocore names the endpoint URL as configured in some of its errors (a connection it
+        could not make), so a user and password in it would reach the message.
+
+        Args:
+            error: The error, or text, to describe.
+
+        Returns:
+            Its text, each spelling of the endpoint's user information replaced by `***`.
+        """
+        return redact(str(error), *self._userinfo)
 
     def _refuse_if_closed(self, key: str) -> None:
         """Raise if `close()` has run; the caller holds the client's lock.
@@ -758,7 +783,7 @@ class FlatFileClient:
         """
         if self._closed.is_set():
             raise WireError(
-                f"the flat-file client for {self._endpoint_url} is closed",
+                f"the flat-file client for {self._endpoint_shown} is closed",
                 host=self._host,
                 path=key,
             )
@@ -876,6 +901,25 @@ def _status(error: ClientError) -> int | None:
     """
     status: int | None = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
     return status
+
+
+def _userinfo(url: str) -> tuple[str, ...]:
+    """Return each spelling of a URL's user information, longest first, for `redact`.
+
+    Args:
+        url: The endpoint URL.
+
+    Returns:
+        The `user:password` text, the password alone, and their percent-decoded forms; empty
+        when the URL names no user.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return ()
+    userinfo = parts.netloc.rpartition("@")[0]
+    password = userinfo.partition(":")[2]
+    spellings = {userinfo, unquote(userinfo), password, unquote(password)}
+    return tuple(sorted((s for s in spellings if s), key=len, reverse=True))
 
 
 def _describe(error: BotoCoreError, proxy: str | None) -> str:

@@ -391,6 +391,51 @@ def test_shapes_of_futures_contract_tickers(
     assert tickers
 
 
+_ES_SINGLE = re.compile(r"ES(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,2})")
+"""An ES single contract: the product code, a month letter, and a one- or two-digit year."""
+
+
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("72")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """Whether Massive writes a futures contract's year with one digit or two, and answers both.
+
+    Reads one page of up to 1,000 ES single contracts and records each distinct ticker with
+    its last trade date, grouped by the number of digits of its year. Then asks for the first
+    one-digit contract under its two-digit spelling (`ESZ6` as `ESZ26`), and the first
+    two-digit one under its one-digit spelling, and records how many rows each answer holds.
+    Reading it: the library never rewrites a year, so a caller who writes `ESZ25` for
+    Massive's `ESZ5` gets no rows; whether Massive answers the other spelling, and which
+    contracts it writes with two digits, decides whether the library should refuse or
+    rewrite it.
+    """
+    rows = _page(
+        live_rest, _CONTRACTS, query={"product_code": "ES", "type": "single", "limit": 1000}
+    )
+    expiries = sorted({(str(r.get("ticker")), str(r.get("last_trade_date"))) for r in rows})
+    by_digits: dict[int, list[tuple[str, str]]] = {}
+    for ticker, expiry in expiries:
+        shape = _ES_SINGLE.fullmatch(ticker)
+        by_digits.setdefault(0 if shape is None else len(shape["year"]), []).append(
+            (ticker, expiry)
+        )
+    for digits, contracts in sorted(by_digits.items()):
+        evidence(f"ES contracts with a {digits}-digit year (0: another shape): {contracts}")
+    for digits, contracts in sorted(by_digits.items()):
+        if digits == 0:
+            continue
+        ticker, expiry = contracts[0]
+        shape = _ES_SINGLE.fullmatch(ticker)
+        assert shape is not None
+        year = expiry[2:4] if digits == 1 else expiry[3]
+        other = f"ES{shape['month']}{year}"
+        answer = _page(live_rest, _CONTRACTS, query={"ticker": other, "limit": 10})
+        evidence(f"{ticker} (last trade {expiry}) asked for as {other}: {len(answer)} rows")
+    assert rows, "Massive listed no ES contract"
+
+
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("48")
 @pytest.mark.requests(5)

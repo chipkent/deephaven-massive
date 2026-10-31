@@ -254,12 +254,17 @@ def _delayed(
 
     Returns:
         `delayed.massive.com`, `DELAYED`, evidence `"MassiveConfig.delayed_subscriptions"`.
-        A refused snapshot changes nothing; one labelled `REAL-TIME` and nowhere `DELAYED`
-        logs one WARNING per class and process.
+        A refused snapshot changes nothing (it logs at DEBUG); one labelled `REAL-TIME` and
+        nowhere `DELAYED` logs one WARNING per class and process.
     """
     try:
         answer = fetch(probe)
-    except EntitlementError:
+    except EntitlementError as error:
+        logger.debug(
+            "%s snapshot refused, so the delayed feed is used unchecked: %s",
+            asset_class.value,
+            error,
+        )
         answer = SnapshotAnswer("", ())
     labels = read_labels(answer.status, [r for r in answer.rows if not is_error_row(r)])
     if labels.delayed is None and labels.real_time is not None:

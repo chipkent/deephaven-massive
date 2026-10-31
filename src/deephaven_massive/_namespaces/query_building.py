@@ -201,7 +201,9 @@ def shows_call(path: str) -> Callable[[_F], _F]:
     repr writes by position; the repr writes each argument from the query's normalized request
     where that holds it (`QueryCall.text`). Equality of queries is
     unchanged: the call is not part of it. `Namespace` applies it to every public method of
-    each namespace class, and `MassiveSession` to its own dataset method, `snapshots`.
+    each namespace class, and `MassiveSession` to its own dataset method, `snapshots`. An
+    exception the method raises, a refused argument's `TypeError` or `ValueError`, is logged
+    at DEBUG with the method's path and re-raised.
 
     Args:
         path: The method's owner as reached from a session, such as `"m.options"`.
@@ -223,7 +225,12 @@ def shows_call(path: str) -> Callable[[_F], _F]:
 
         @functools.wraps(method)
         def factory(*args: object, **kwargs: object) -> QueryBase:
-            query = method(*args, **kwargs)
+            try:
+                query = method(*args, **kwargs)
+            except Exception as error:
+                # The caller receives the refusal; the log keeps which method refused, and why.
+                logger.debug("%s refused: %s: %s", called, type(error).__name__, error)
+                raise
             given = signature.bind(*args, **kwargs).arguments
             arguments = tuple(
                 (name, _frozen(given[name]))

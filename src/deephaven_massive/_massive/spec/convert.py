@@ -37,12 +37,13 @@ converters above are never loosened:
 | `number-label` | text as sent, or a finite number as float text (`1` gives `"1.0"`) | `str` |
 | `code-list-text` | an integer, or comma-separated integers in text (`"12,37"`) | `list[int]` |
 | `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
-| `date-as-epoch` | an integer in the signed 64-bit range (a count in the field's unit) | `int` |
+| `chicago-midnight-date` | `YYYY-MM-DD`, or epoch nanoseconds of a midnight in Chicago | `date` |
 | `integer-as-number` | any number, as `double` accepts it | `float` |
 
 `text-or-integer-id` serves a field the specification declares either an integer or text
 (`Conversion.declarations`). A value the conversion cannot read (`"4.8"` for `quoted-integer`,
-`"12;37"` for `code-list-text`, a non-zero clock or another offset for `midnight-utc-date`)
+`"12;37"` for `code-list-text`, a non-zero clock or another offset for `midnight-utc-date`, an
+instant other than a Chicago midnight for `chicago-midnight-date`)
 raises `UnconvertibleError` like any other bad value.
 
 An `iso-instant` is computed as exact integer nanoseconds since the Unix epoch (UTC) from its
@@ -83,10 +84,11 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 from itertools import chain
 from types import MappingProxyType, NoneType
 from typing import TYPE_CHECKING, Final, TypeVar, cast
+from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive.spec.types import Conversion, WireType
 
@@ -426,6 +428,42 @@ def _midnight_date(value: object) -> date:
     return _date(match["date"])
 
 
+_CHICAGO = ZoneInfo("America/Chicago")
+"""The zone of the CME's calendar, at whose midnight the futures snapshot sends a settlement day."""
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _chicago_midnight_date(value: object) -> date:
+    """Return a date sent as `YYYY-MM-DD` or as the epoch nanoseconds of its Chicago midnight.
+
+    The futures snapshot sends a contract's settlement day as an instant, `1753851600000000000`
+    (2025-07-30 05:00 UTC, midnight of 2025-07-30 in Chicago). Only an instant at exactly
+    midnight in Chicago names a day without loss; any other instant would carry a time a
+    date drops, so it is refused rather than shifted.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        The Chicago calendar date of that midnight, or the date as written.
+
+    Raises:
+        UnconvertibleError: If `value` is neither form, is not a whole second, or is not
+            midnight in Chicago.
+    """
+    if isinstance(value, str):
+        return _date(value)
+    seconds, rest = divmod(_long(value), _NANOS_PER_SECOND)
+    if rest:
+        raise UnconvertibleError
+    # Every signed 64-bit count of nanoseconds lies in the years 1677 to 2262, which a
+    # `datetime` holds, so the arithmetic cannot overflow.
+    local = (_UNIX_EPOCH + timedelta(seconds=seconds)).astimezone(_CHICAGO)
+    if local.time() != time(0):
+        raise UnconvertibleError
+    return local.date()
+
+
 def _code_list(value: object) -> list[int]:
     """Return codes sent as one integer or as comma-separated integers in text.
 
@@ -456,7 +494,7 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
         Conversion.NUMBER_LABEL: _number_label,
         Conversion.CODE_LIST_TEXT: _code_list,
         Conversion.MIDNIGHT_UTC_DATE: _midnight_date,
-        Conversion.DATE_AS_EPOCH: _long,
+        Conversion.CHICAGO_MIDNIGHT_DATE: _chicago_midnight_date,
         Conversion.INTEGER_AS_NUMBER: _double,
     }
 )

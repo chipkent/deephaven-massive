@@ -3,7 +3,7 @@ import pytest
 from deephaven_massive._enums import AssetClass, FuturesVenue
 from deephaven_massive._massive.refresh import naming, overrides
 from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS
-from deephaven_massive._massive.spec.types import Conversion, WireType, WireUnit
+from deephaven_massive._massive.spec.types import Conversion, WireUnit
 
 
 def test_every_entry_has_a_reason() -> None:
@@ -151,17 +151,19 @@ def test_the_unverified_units_are_the_open_verification_items() -> None:
     }
 
 
-def test_every_flat_file_time_is_nanoseconds() -> None:
-    files = {key: entry for key, entry in overrides.UNITS.items() if "_v1" in key[0]}
-    assert files
-    assert {entry.unit for entry in files.values()} == {WireUnit.NS}
+def test_every_flat_file_time_is_nanoseconds_but_the_index_values() -> None:
+    # The index values file is documented in milliseconds while its example rows are
+    # nanoseconds, so it is read by magnitude until live data settles it.
+    files = {key: entry.unit for key, entry in overrides.UNITS.items() if "_v1" in key[0]}
+    values = ("us_indices/values_v1", "timestamp")
+    assert files.pop(values) is WireUnit.MS_OR_NS
+    assert set(files.values()) == {WireUnit.NS}
 
 
-def test_every_epoch_type_fix_has_its_unit() -> None:
-    # A conversion to an epoch takes its unit from UNITS, like every other epoch.
-    for key, fix in overrides.TYPE_FIXES.items():
-        if fix.conversion.wire_type is WireType.EPOCH:
-            assert overrides.UNITS[key].unit is not None, key
+def test_the_luld_and_fmv_times_are_read_by_magnitude() -> None:
+    # Their documentation and samples disagree on milliseconds and nanoseconds.
+    for channel in ("stocks/LULD", "stocks/FMV", "options/FMV", "forex/FMV", "crypto/FMV"):
+        assert overrides.UNITS[(channel, "t")].unit is WireUnit.MS_OR_NS
 
 
 def test_the_crypto_snapshot_trade_id_is_one_decision_for_its_group() -> None:

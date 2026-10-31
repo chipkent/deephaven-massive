@@ -23,7 +23,7 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact
+from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact, without_userinfo
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import Patience, RequestGovernor
@@ -498,3 +498,18 @@ def test_the_redactor_passes_on_a_body_whose_escapes_spell_no_whole_secret() -> 
     # The escape spells `P`, a character of the key, so the body is searched; nothing changes.
     data = b'{"text":"\\u0050ython"}'
     assert Redactor(PLANTED_KEY).received(data) is data
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://user:pw@files.massive.com", "https://***@files.massive.com"),
+        ("https://u:p@ss@h.example:9000/x?y=1", "https://***@h.example:9000/x?y=1"),
+        ("https://user@h.example", "https://***@h.example"),
+        ("user:pw@h.example", "***@h.example"),
+        ("https://h.example/a@b", "https://h.example/a@b"),
+        ("https://files.massive.com", "https://files.massive.com"),
+    ],
+)
+def test_without_userinfo_hides_the_user_and_password_of_a_url(url: str, shown: str) -> None:
+    assert without_userinfo(url) == shown

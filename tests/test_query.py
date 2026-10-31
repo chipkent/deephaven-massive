@@ -516,8 +516,9 @@ def test_a_feed_without_start_refuses_to_poll(
     ):
         news(massive_session).poll(30, mode=mode)
     assert rest.calls == []
-    # The error is the user's report; the log has only the decision, at DEBUG.
-    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+    # The error is the user's report; the log has the decision and the refusal, at DEBUG.
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG, logging.DEBUG]
+    assert caplog.messages[1] == f"m.economy.inflation().poll() raised ValueError: {message}"
     news(massive_session).fetch()  # fetch() reads the whole range, as asked
     assert [c[0] for c in rest.calls] == ["fetch"]
 
@@ -1614,7 +1615,8 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
     assert extra["window"].span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1] == (
-        "stocks.trades history: AUTO read REST because the flat files for 2025-03-04 are missing"
+        "stocks.trades history: AUTO read REST because the flat files are missing for these "
+        "days: 1 [2025-03-04]"
     )
     # Holidays are inferred only where no other source can serve the read.
     assert files.inferred == [False]

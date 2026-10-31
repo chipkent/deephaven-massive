@@ -1060,3 +1060,16 @@ def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> Non
         if (says_each, says_total) != (each, total):
             wrong.append(f"{spec.name}: each={each} total={total}: {text!r}")
     assert wrong == []
+
+
+def test_a_namespace_method_logs_the_input_it_refuses(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._namespaces"),
+        pytest.raises(TypeError),
+    ):
+        massive_session.stocks.trades(42)  # type: ignore[arg-type]  # a refused symbol type
+    refusals = [r for r in caplog.records if "m.stocks.trades refused" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [logging.DEBUG]
+    assert refusals[0].getMessage().startswith("m.stocks.trades refused: TypeError: ")

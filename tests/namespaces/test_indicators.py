@@ -298,6 +298,40 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
     }
 
 
+def test_a_range_of_dates_follows_each_symbols_class_days(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # A stock's days are New York days and a crypto pair's UTC days: each symbol's request
+    # follows its own class's days, so a New York range never cuts the pair's first UTC day.
+    def values(*moments: datetime) -> Reply:
+        rows = [{"timestamp": int(m.timestamp() * 1000), "value": 1.0} for m in moments]
+        return Reply(envelope({"values": rows}))
+
+    def millis(moment: datetime) -> list[str]:
+        return [str(int(moment.timestamp() * 1000))]
+
+    new_york = timedelta(hours=5)  # UTC-5 in January
+    first, after = datetime(2025, 1, 2, tzinfo=UTC), datetime(2025, 1, 4, tzinfo=UTC)
+    fake_rest.reply("/v1/indicators/sma/AAPL", values(first + new_york))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", values(first))
+    query = rest_session.indicators.sma(
+        ["AAPL", "X:BTCUSD"], 20, start=date(2025, 1, 2), end=date(2025, 1, 3)
+    )
+    out = dh_to_pylist(query.fetch())
+    assert sorted((r["Symbol"], r["Date"]) for r in out) == [
+        ("AAPL", "2025-01-02"),
+        ("X:BTCUSD", "2025-01-02"),
+    ]
+    sent = {path: (q["timestamp.gte"], q["timestamp.lt"]) for path, q in fake_rest.get_queries()}
+    assert sent == {
+        "/v1/indicators/sma/AAPL": (millis(first + new_york), millis(after + new_york)),
+        "/v1/indicators/sma/X:BTCUSD": (millis(first), millis(after)),
+    }
+
+
 def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
     return [

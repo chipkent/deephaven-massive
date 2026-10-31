@@ -102,6 +102,7 @@ from deephaven_massive._errors import (
     failure_text,
     raises_through,
 )
+from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -1367,8 +1368,8 @@ class HistoryQuery(QueryBase):
                 under `FLAT_FILES` or when REST cannot serve the read).
             MassiveError: If the session is closed; a request fails; adjusted bars echo the
                 other basis; a symbol's later page answers HTTP 404; or a day's flat file is not
-                published yet (no later day's file exists) under `FLAT_FILES` or when REST
-                cannot serve the read.
+                published yet (no later day's file exists), or a week or more old and absent,
+                under `FLAT_FILES` or when REST cannot serve the read.
 
         Example:
             ::
@@ -1550,7 +1551,10 @@ class HistoryQuery(QueryBase):
                 under `FLAT_FILES` or when REST cannot serve the request.
             MassiveError: If a day's file is not published yet and the call may not or cannot
                 read it from REST: `"<dataset>: the flat file for <date> is not published
-                yet. Massive usually publishes ..., but the time varies. Retry later, ..."`.
+                yet. Massive usually publishes ..., but the time varies. Retry later, ..."`;
+                or if the days at the range's end have no file and none follows them, a
+                week or more before today (`FlatFileRead.absent`): `"<dataset>: no flat file
+                exists for <dates>, ..."`.
         """
         spec = self._spec
         problem = rest_history_problem(spec, request)
@@ -1567,6 +1571,18 @@ class HistoryQuery(QueryBase):
             self._warn_rest_served(f"S3 refused the flat files ({error})")
             rows = self._core.rest_transport().history(spec, request, window, call=call, stop=stop)
             return rows, "Read from REST: AUTO chose flat files, which S3 refused."
+        if read.absent:
+            days = ", ".join(day.isoformat() for day in read.absent)
+            remedy = (
+                "read REST with source=dm.HistorySource.REST, or end the range before them"
+                if problem is None
+                else f"end the range before them; REST cannot serve this read: {problem}"
+            )
+            raise MassiveError(
+                f"{spec.name}: no flat file exists for {days}, nor for any later day up to "
+                f"a week after the range; Massive publishes a day's file the next day, so "
+                f"these files will not appear. To read them, {remedy}"
+            )
         if read.unread and infer:
             first = read.unread[0].isoformat()
             remedy = (
@@ -1589,7 +1605,8 @@ class HistoryQuery(QueryBase):
             merged = merge([read.empty, *(part for _, part in read.parts), *rest])
             table = merged.sort(time_column(spec.times))
         days = ", ".join(day.isoformat() for day in read.unread)
-        self._warn_rest_served(f"the flat files for {days} are missing")
+        missing = bounded_list(day.isoformat() for day in read.unread)
+        self._warn_rest_served(f"the flat files are missing for these days: {missing}")
         flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
         served = f"Read from {flat}, and from REST for {days}, whose files are missing."
         return table, served if doubt is None else f"{served} {doubt}"
@@ -1658,7 +1675,9 @@ class HistoryQuery(QueryBase):
         rest = self._core.rest_transport()
         timespan = request.timespan
         if spec.is_bars and timespan is not None and not intraday(timespan):
-            rows = rest.history(spec, request, window, call=call, stop=stop)
+            # The window keeps whole bars; `days` limits an all-symbol read to one grouped-daily
+            # request per missing day instead of one per day of the range.
+            rows = rest.history(spec, request, window, call=call, stop=stop, days=days)
             # A static key table, not a formula: a formula's query scope would capture this
             # frame, and with it the session.
             labels = pa.table({"Date": [day.isoformat() for day in days]})
@@ -1686,8 +1705,8 @@ class HistoryQuery(QueryBase):
         them. Logged on every such call: the days differ from call to call.
 
         Args:
-            why: Why REST served the read, such as `"the flat files for 2025-03-04 are
-                missing"`.
+            why: Why REST served the read, such as `"the flat files are missing for these days:
+                1 [2025-03-04]"`.
         """
         spec = self._spec
         catalog = self._core.catalog

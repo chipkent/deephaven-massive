@@ -168,6 +168,16 @@ def test_the_window_is_half_open_on_the_converted_time(trades: FlatFile) -> None
     assert converted == [4]
 
 
+def test_the_file_counts_its_rows_after_each_filter(trades: FlatFile) -> None:
+    # Four rows: three of AAPL and MSFT, of which the window keeps one.
+    symbols = pa.array(["AAPL", "MSFT"], pa.string())
+    window = (1741012200000002000, 1741035600000000000)
+    assert (trades.rows_read, trades.rows_of_symbols, trades.rows_kept) == (0, 0, 0)
+    result = table(trades, plan(symbols=symbols, window_ns=window))
+    assert result["Id"].to_pylist() == ["2", "3"]
+    assert (trades.rows_read, trades.rows_of_symbols, trades.rows_kept) == (4, 3, 2)
+
+
 def test_the_window_follows_the_symbol_filter(trades: FlatFile) -> None:
     converted: list[int] = []
 
