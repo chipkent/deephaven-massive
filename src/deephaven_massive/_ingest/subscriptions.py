@@ -172,8 +172,11 @@ class Subscriptions:
     its streams' `Error`). Once the step in flight has resolved, one WARNING per step counts
     its `NO_ACK` topics. The topic stays wanted and on the wire, and its subscribe is re-sent,
     alone, every `NO_ACK_RESEND` seconds until it is acknowledged, leaves the wire, or the
-    generation ends, but never while a step is in flight, so a status naming no topic is
-    always the step's; an acknowledgement that arrives later clears it. The connection is never
+    generation ends, but never while a step or another re-send awaits an answer (a re-send
+    awaits one for `ack_timeout`), so a status naming no topic is credited to the step in
+    flight, else to the re-send awaiting its answer, else to the latest step's `NO_ACK` topics,
+    whose answer came after their watchdogs gave up. An acknowledgement that arrives later
+    clears `NO_ACK`. The connection is never
     reconnected for it: a reconnect would cut every other stream on the connection over one
     late answer. A watchdog whose topic has left the wire or whose generation has ended does
     nothing more.
@@ -236,6 +239,12 @@ class Subscriptions:
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
         self._pending: set[str] = set()
+        # The topics of the latest step, which a late answer naming no topic is credited to
+        # once the step has resolved; and the `NO_ACK` topic whose re-send awaits an answer,
+        # with the timer that ends the wait after `ack_timeout`.
+        self._step: frozenset[str] = frozenset()
+        self._resend: str | None = None
+        self._resend_timer: Timer | None = None
         self._watchdogs: dict[str, Timer] = {}
         self._warned_unparsed = False
 
@@ -280,6 +289,8 @@ class Subscriptions:
             self._refused.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+            if topic == self._resend:
+                self._resend_answered()
         self._admission_stale = True
 
     @property
@@ -346,6 +357,8 @@ class Subscriptions:
         self._noack.clear()
         self._unreported.clear()
         self._pending.clear()
+        self._step = frozenset()
+        self._resend_answered()
 
     # --- the reconcile loop --------------------------------------------------------------------
 
@@ -397,6 +410,7 @@ class Subscriptions:
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
             self._pending = set(adds)
+            self._step = frozenset(adds)
             for topic in ordered:
                 self._arm(topic, generation, attempt=1)
         if removes:
@@ -410,10 +424,10 @@ class Subscriptions:
     def status(self, status: Status) -> None:
         """Apply one status object of the current generation, then reconcile.
 
-        An acknowledgement resolves its topics (one that could not be parsed resolves the whole
-        step in flight, with a WARNING once); a refusal naming topics refuses them; a refusal
-        naming none applies to every unresolved topic of the step in flight. Other statuses
-        change nothing.
+        An acknowledgement resolves its topics; a refusal naming topics refuses them. An answer
+        naming no topic (an acknowledgement that could not be parsed, logged at WARNING once,
+        or a refusal naming none) is credited to the topics it most likely answers
+        (`_unanswered`). Other statuses change nothing.
 
         Args:
             status: The decoded status.
@@ -438,13 +452,15 @@ class Subscriptions:
                     "an acknowledgement named no topic; treating it as acknowledging the "
                     "whole subscription in flight"
                 )
-            topics = tuple(self._pending)
+            topics = self._unanswered()
         for topic in topics:
             if topic in self._sent:
                 self._acked.add(topic)
                 self._noack.discard(topic)
                 self._pending.discard(topic)
                 self._cancel(topic)
+                if topic == self._resend:
+                    self._resend_answered()
 
     def _refuse_status(self, status: Status) -> None:
         """Apply a refusal: of the topics it names, or else of every unresolved topic in flight.
@@ -455,12 +471,32 @@ class Subscriptions:
         if status.topics:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
             return
-        if not self._pending:
+        topics = self._unanswered()
+        if not topics:
             logger.info(
-                "a refusal named no topic and no subscription was in flight: %s", status.message
+                "a refusal named no topic and no subscription awaits an answer: %s",
+                status.message,
             )
             return
-        self._refuse(tuple(sorted(self._pending)), status.message)
+        self._refuse(tuple(t for t in topics if t in self._refs), status.message)
+
+    def _unanswered(self) -> tuple[str, ...]:
+        """Return the topics an answer naming no topic is credited to, sorted.
+
+        Answers come in the order of the frames they answer, so such an answer is for, in
+        turn: the step in flight (its unresolved topics); else the `NO_ACK` topic whose re-send
+        is awaiting an answer, since re-sends go one at a time and never while a step is in
+        flight; else the latest step's topics now in `NO_ACK`, which answers that came after
+        their watchdogs gave up on them.
+
+        Returns:
+            The topics; empty when nothing awaits an answer.
+        """
+        if self._pending:
+            return tuple(sorted(self._pending))
+        if self._resend is not None:
+            return (self._resend,)
+        return tuple(sorted(self._step & self._noack))
 
     def _refuse(self, topics: tuple[str, ...], message: str) -> None:
         """Take refused topics out of D and report them.
@@ -476,6 +512,8 @@ class Subscriptions:
             self._noack.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+            if topic == self._resend:
+                self._resend_answered()
         if topics:
             self._admission_stale = True
             self._on_refused(topics, message)
@@ -569,11 +607,11 @@ class Subscriptions:
             self._pending.discard(topic)  # it left the wire: nothing to escalate
             self.reconcile()
             return
-        if attempt > _NO_ACK_ATTEMPT and self._pending:
-            # A step is in flight: a status naming no topic would be credited to it, so the
-            # re-send waits for the next round.
+        if attempt > _NO_ACK_ATTEMPT and (self._pending or self._resend is not None):
+            # A step or another re-send awaits an answer: a status naming no topic would be
+            # credited to it, so this re-send waits for the next round.
             logger.debug(
-                "generation %d: the re-send of %s waits; a subscription step is in flight",
+                "generation %d: the re-send of %s waits; another subscription awaits an answer",
                 generation,
                 topic,
             )
@@ -586,6 +624,8 @@ class Subscriptions:
                     generation,
                     topic,
                 )
+                self._resend = topic
+                self._resend_timer = self._call_later(self._ack_timeout, self._resend_unanswered)
             self._sender.subscribe(generation, [topic])
             self._arm(topic, generation, attempt=attempt + 1)
             return
@@ -594,6 +634,22 @@ class Subscriptions:
         self._unreported.append(topic)
         self._arm(topic, generation, attempt=_NO_ACK_ATTEMPT + 1)
         self.reconcile()
+
+    def _resend_unanswered(self) -> None:
+        """A `NO_ACK` topic's re-send got no answer within `ack_timeout`: stop awaiting one.
+
+        An answer cancels this timer (`_resend_answered`), so it runs only while the re-send
+        it was started for still awaits one.
+        """
+        self._resend_timer = None
+        self._resend = None
+
+    def _resend_answered(self) -> None:
+        """Stop awaiting an answer to the current re-send, if any; its timer is cancelled."""
+        if self._resend_timer is not None:
+            self._resend_timer.cancel()
+        self._resend_timer = None
+        self._resend = None
 
     def _report_no_ack(self) -> None:
         """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""

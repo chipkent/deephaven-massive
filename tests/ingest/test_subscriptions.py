@@ -301,9 +301,12 @@ def test_a_no_ack_topic_is_resent_periodically_until_acknowledged() -> None:
     loop.timers.fire()
     loop.timers.fire()
     loop.sender.take()
-    # Each re-send waits `NO_ACK_RESEND`, sends the topic alone, and never reconnects.
-    for _ in range(3):
-        assert [t.delay for t in loop.timers.live()] == [subscriptions.NO_ACK_RESEND]
+    # Each re-send waits `NO_ACK_RESEND`, sends the topic alone, and never reconnects; an
+    # answer to it is awaited for the ack timeout.
+    for attempt in range(3):
+        awaited = [5.0] if attempt else []
+        delays = sorted(t.delay for t in loop.timers.live())
+        assert delays == [*awaited, subscriptions.NO_ACK_RESEND]
         loop.timers.fire()
         assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
     loop.subs.status(ack("T.AAPL"))
@@ -334,6 +337,90 @@ def test_a_no_ack_topic_is_not_resent_while_a_step_is_in_flight() -> None:
     loop.timers.timers.remove(waiting)
     waiting.callback(*waiting.args)
     assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+
+
+def no_ack_resent(loop: Loop, topic: str) -> None:
+    # Marks the topic `NO_ACK`, then lets its first periodic re-send go out.
+    loop.timers.fire()
+    loop.timers.fire()
+    loop.timers.fire()
+    assert loop.sender.take()[-1] == ("subscribe", 1, (topic,))
+    assert topic in loop.subs.no_ack
+
+
+def test_a_refusal_naming_no_topic_after_a_resend_refuses_the_resent_topic() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    no_ack_resent(loop, "T.AAPL")
+    loop.subs.status(refusal(message="not authorized"))
+    assert loop.refused == [(("T.AAPL",), "not authorized")]
+    assert loop.timers.live() == []  # its watchdog and the wait for the answer both end
+
+
+def test_an_unparsed_acknowledgement_after_a_resend_acknowledges_the_resent_topic() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    no_ack_resent(loop, "T.AAPL")
+    loop.subs.status(ack())
+    assert loop.subs.acknowledged == frozenset({"T.AAPL"})
+    assert loop.subs.no_ack == frozenset()
+    assert loop.timers.live() == []
+
+
+def test_a_late_answer_naming_no_topic_counts_for_the_steps_no_ack_topics() -> None:
+    # A large first step outlasts its watchdogs: its topics are `NO_ACK` and nothing is in
+    # flight when its answer, naming no topic, finally comes.
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    assert loop.subs.no_ack == frozenset({"T.AAPL", "T.MSFT"})
+    loop.subs.status(ack())
+    assert loop.subs.acknowledged == frozenset({"T.AAPL", "T.MSFT"})
+    assert loop.subs.no_ack == frozenset()
+
+
+def test_a_resend_whose_answer_never_comes_stops_being_awaited() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.subs.status(ack("T.MSFT"))  # only T.AAPL goes `NO_ACK`
+    no_ack_resent(loop, "T.AAPL")
+    [awaiting] = [t for t in loop.timers.live() if t.delay == 5.0]
+    loop.timers.timers.remove(awaiting)
+    awaiting.callback(*awaiting.args)
+    # Nothing awaits an answer, so one naming no topic goes to the step's `NO_ACK` topic.
+    loop.subs.status(refusal(message="late"))
+    assert loop.refused == [(("T.AAPL",), "late")]
+
+
+def test_one_resend_awaits_its_answer_before_the_next_goes_out() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.timers.fire()
+    loop.timers.fire()
+    loop.sender.take()
+    # Both re-sends are due; the first goes out and the second waits for its answer.
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+    loop.subs.status(ack())  # credited to T.AAPL alone
+    assert loop.subs.no_ack == frozenset({"T.MSFT"})
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+
+
+def test_releasing_a_resent_topic_stops_awaiting_its_answer() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.opened(1)
+    no_ack_resent(loop, "T.AAPL")
+    loop.subs.remove(["T.AAPL"])
+    loop.subs.reconcile()
+    assert loop.timers.live() == []
 
 
 def test_a_no_ack_topic_no_longer_wanted_is_not_resent() -> None:
@@ -446,7 +533,7 @@ def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptu
     assert loop.refused == []
     [record] = caplog.records
     assert record.levelno == logging.INFO  # nothing failed, so nothing to act on
-    assert "no subscription was in flight: huh" in record.getMessage()
+    assert "no subscription awaits an answer: huh" in record.getMessage()
 
 
 def test_other_statuses_change_nothing() -> None:

@@ -87,6 +87,10 @@ class Script:
         # What each cycle's pages show about their recency, as the REST transport reports it.
         self.recency: tuple[Recency, ...] = ()
         self.took = 0.0  # how far each cycle's read moves the clock
+        self.late_page = False  # whether a page arrives once the read has moved the clock
+        # Whether each cycle keeps its page callback in `record`, which holds the session's
+        # core: a test that sets it deletes `record` before it ends.
+        self.keep_record = False
         self.clock: FakeClock | None = None
 
     def rows(self, *pairs: tuple[str, float]) -> None:
@@ -109,6 +113,8 @@ class Script:
     ) -> tuple[pa.Table, int, float]:
         self.symbols.append(symbols)
         self.cancel = cancel
+        if self.keep_record:  # a test calls it to deliver a page while the cycle runs
+            self.record = record
         if self.drift is not None:
             record(self.drift)
         for shown in self.recency:
@@ -116,6 +122,8 @@ class Script:
         outcome = self.outcomes.get(timeout=TIMEOUT)
         if self.clock is not None:
             self.clock.advance(self.took)
+        if self.late_page:
+            record(DriftReport())
         if isinstance(outcome, BaseException):
             raise outcome
         return cast("pa.Table", outcome), 3, 600.0
@@ -411,6 +419,7 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         next_cycle(clock)
     patience = "waiting out at most 600 s of pauses"
     assert caplog.messages == [
+        f"{massive_session._core.label}: started the poll watch thread",
         (
             f"{massive_session._core.label}: poll() stream 1 started: <Query test> every "
             "60.000 s, mode APPEND, symbols 2 [AAPL, MSFT]"
@@ -728,9 +737,10 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     interval: float,
     took: float,
 ) -> None:
-    # The last good cycle began well over max_outage before the failure, but the run of
-    # failures has just begun: the table keeps running, and the next good cycle clears it.
-    script.clock, script.took = clock, took
+    # The last good cycle began well over max_outage before the failure, but the failing cycle
+    # received a page just before it failed: the table keeps running, and the next good cycle
+    # clears it.
+    script.clock, script.took, script.late_page = clock, took, True
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=interval)
     error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
@@ -743,6 +753,159 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     assert not table.j_table.isFailed()
+
+
+def test_a_failed_cycle_that_received_no_page_counts_its_whole_run(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A cycle paused 400 s by rate limits, with no page, then failing: the run of failing
+    # cycles began at the cycle's start, so the table fails at once.
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=600.0)
+    clock.wait_for_sleepers(1)
+    script.clock, script.took = clock, 400.0
+    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    script.fail(error)
+    clock.advance(600.0)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert "every cycle since 2027-01-15T08:10:00Z has failed, for 400 s" in row["Error"]
+
+
+def _second_cycle_running(script: Script, clock: FakeClock) -> None:
+    # Ends the wait after the first cycle and returns once the second one is reading.
+    clock.wait_for_sleepers(1)
+    clock.advance(60.0)
+    until(lambda: len(script.symbols) == 2)
+
+
+def test_a_cycle_running_past_its_interval_is_marked_until_it_ends(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    _second_cycle_running(script, clock)
+    clock.advance(60.0)  # exactly its interval: not late yet
+    pollers.check_running()
+    assert stream_rows()[0]["Error"] is None
+    clock.advance(1.0)
+    pollers.check_running()
+    pollers.check_running()  # marked once
+    late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
+    assert stream_rows()[0]["Error"] == late
+    script.rows(("AAPL", 2.0))  # the cycle ends late, so the next one starts at once
+    until(lambda: len(script.symbols) == 3)
+    pollers.check_running()  # the second cycle has ended: nothing to mark
+    (row,) = stream_rows()
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert not table.j_table.isFailed()
+    script.rows()  # the third cycle ends, and the poller waits for the next
+    clock.wait_for_sleepers(1)
+
+
+def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    script.keep_record = True
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    _second_cycle_running(script, clock)
+    clock.advance(250.0)
+    script.record(DriftReport())  # a page: the paced cycle is making progress
+    del script.record  # it holds the session's core
+    clock.advance(300.0)  # 550 s into the cycle, 300 s after its page
+    pollers.check_running()
+    assert stream_rows()[0]["State"] == "RUNNING"
+    assert not script.cancel.is_set()
+    clock.advance(1.0)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        pollers.check_running()
+    assert script.cancel.is_set()  # the cycle's waits end
+    script.rows(("AAPL", 2.0))  # the read returns, and nothing is published
+    until(lambda: bool(table.j_table.isFailed()))
+    poller_of(pollers).thread.join(TIMEOUT)
+    (row,) = stream_rows()
+    failure = (
+        f"stocks.dividends poll(): {GOOD}; the cycle running since 2027-01-15T08:01:00Z has "
+        "received nothing for 301 s, longer than MassiveConfig.max_outage (300 s); the rows "
+        "since then may be missing, so this table stopped; call the verb again for a new live "
+        "table"
+    )
+    assert (row["State"], row["Error"]) == ("FAILED", failure)
+    assert (
+        "stocks.dividends poll() stream 1: no page for 301 s, max_outage is 300 s; failing it"
+        in caplog.messages
+    )
+
+
+def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(poll, "WATCH_INTERVAL", 0.01)
+    script.rows(("AAPL", 1.0))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        table = start(massive_session, script=script, pollers=pollers, clock=clock)
+        _second_cycle_running(script, clock)
+        clock.advance(61.0)
+        late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
+        until(lambda: stream_rows()[0]["Error"] == late)  # marked by the thread itself
+        script.rows(("AAPL", 2.0))
+        until(lambda: len(script.symbols) == 3)
+        poller = poller_of(pollers)
+        poller.stop()
+        script.rows()  # the third cycle's read returns, and the stopped poller ends
+        poller.thread.join(TIMEOUT)
+    label = massive_session._core.label
+    assert f"{label}: ending the poll watch thread: no poller is live" in caplog.messages
+    del table
+
+
+def test_a_failing_check_is_logged_and_the_others_still_run(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    start(massive_session, script=script, pollers=pollers, clock=clock)
+    checked: list[poll.Poller] = []
+
+    def broken(self: poll.Poller) -> None:
+        checked.append(self)
+        raise RuntimeError("broken check")
+
+    monkeypatch.setattr(poll.Poller, "check_running", broken)
+    with caplog.at_level(logging.ERROR, LOGGER):
+        pollers.check_running()
+    assert checked == [poller_of(pollers)]
+    assert any("checking a poll()'s running cycle failed" in m for m in caplog.messages)
 
 
 def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(

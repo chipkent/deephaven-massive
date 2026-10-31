@@ -228,7 +228,9 @@ class MassiveConfig:
             rows from then on are missing, so a table that kept running would show stale data
             as if it were current. Call the verb again for a new live table. A `poll()` table
             fails the same way once its cycles have kept failing for this long, counted from
-            the first failure since its last good cycle, which it names. `0` fails at the
+            the start of the first failed cycle since its last good cycle (or that cycle's
+            latest page), or once a cycle running past its interval has received no page for
+            this long; a slow cycle that keeps receiving pages never fails. `0` fails at the
             first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
             outlasts a reconnect or two (`reconnect_backoff`) but not a real outage.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both

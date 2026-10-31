@@ -62,18 +62,25 @@ other error, also one while publishing, is shown in the row's `Error` with the t
 good cycle (or, before one, of the poll's start); the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds. A run of failing cycles fails the
 table, in every mode and naming the last good cycle, once one of its failures comes
-`MassiveConfig.max_outage` seconds or more after its first: the rows since then may be missing,
-and a table that kept running would show stale data as if it were current. The count starts at
-the run's first failure, so one failure of an hourly poll, or of one slowed by rate-limit
-pauses, never fails it. A cycle that succeeds with no new row is a good cycle, so a quiet
-dataset never fails. The first failing
+`MassiveConfig.max_outage` seconds or more after its first failed cycle last made progress:
+the rows since then may be missing, and a table that kept running would show stale data as if
+it were current. The run starts at its first failed cycle's start, or at that cycle's latest
+page when it received one, so one failure of an hourly poll, or of a slow cycle that kept
+receiving pages, never fails it. A cycle that succeeds with no new row is a good cycle, so a
+quiet dataset never fails. The first failing
 cycle of a run of failures logs one WARNING (an expected cause) or ERROR (a defect, with its
 trace), later ones log at DEBUG, and the first cycle that succeeds again logs the recovery at
 INFO.
 
 **Late cycles.** A cycle that ends after its interval (its requests are paced, or held by a
 rate-limit pause) leaves the table late: the first one of a run logs one WARNING that names
-`m.rate_limits()`, and the first cycle that ends in time again logs at INFO.
+`m.rate_limits()`, and the first cycle that ends in time again logs at INFO. A cycle blocks its
+poller's thread, so the session's poll watch thread (`Pollers`) checks the running cycles every
+`WATCH_INTERVAL` seconds: once one runs past its interval, its row's `Error` reads "cycle running
+since <start>; last good cycle at <time>" until the cycle ends. A late cycle that has received
+no page for more than `max_outage` seconds (from its start, or from the start of the run of
+failing cycles it continues) fails the table the same way; one that keeps receiving pages,
+however slowly, never does.
 
 **Lifetime.** A poll keeps polling while its table is in use, by the result or by anything
 derived from it. Releasing the result (`m.release`, or garbage collection through the reaper)
@@ -286,19 +293,31 @@ class CycleReader(Protocol):
         ...
 
 
+WATCH_INTERVAL: Final = 1.0
+"""Seconds of real time between the running-cycle checks of a session's poll watch thread."""
+
+
 class Pollers:
     """The live pollers of one session, stopped together when the session closes.
 
     The session's REST state holds one (`RestState.pollers`) and its `close` runs as a session
     closer. Once closed it refuses new pollers, so a `poll()` that races `close()` fails
-    instead of starting a poller nothing would stop. Thread-safe: one leaf lock guards the set
-    and the flag, and pollers are stopped after it is released.
+    instead of starting a poller nothing would stop. Thread-safe: one leaf lock guards the set,
+    the flag, and the watch thread's handle; pollers are stopped, and the watch thread woken,
+    after it is released.
+
+    While any poller is live, one daemon *watch* thread, named after the session
+    (`"massive #1 poll watch"`), runs `check_running` every `WATCH_INTERVAL` seconds: a cycle
+    blocks its poller's thread (in paced requests or rate-limit pauses), so only another thread
+    can mark it late or fail it once it stops making progress. The first poller starts the
+    thread; the last one to leave, or `close`, ends it, and the next poller starts a new one.
+    Each thread waits on an event of its own, so one that is ending never stops its successor.
     """
 
-    __slots__ = ("_closed", "_label", "_live", "_lock")
+    __slots__ = ("_closed", "_label", "_live", "_lock", "_wake", "_watch")
 
     def __init__(self, label: str) -> None:
-        """Start with no poller.
+        """Start with no poller and no watch thread.
 
         Args:
             label: The session's label, for the closed-session error.
@@ -307,6 +326,8 @@ class Pollers:
         self._lock = threading.Lock()
         self._live: set[Poller] = set()
         self._closed = False
+        self._watch: threading.Thread | None = None
+        self._wake = threading.Event()  # set to end the current watch thread
 
     @property
     def closed(self) -> bool:
@@ -315,7 +336,7 @@ class Pollers:
             return self._closed
 
     def add(self, poller: Poller) -> None:
-        """Register a poller before it starts.
+        """Register a poller before it starts, starting the watch thread if none runs.
 
         Args:
             poller: The new poller.
@@ -327,24 +348,84 @@ class Pollers:
             if self._closed:
                 raise MassiveError(f"{self._label} is closed")
             self._live.add(poller)
+            watch = None
+            if self._watch is None:
+                self._wake = threading.Event()
+                watch = self._watch = threading.Thread(
+                    target=self._run_watch,
+                    args=(self._wake,),
+                    name=poller.watch_thread_name,
+                    daemon=True,
+                )
+        if watch is not None:
+            logger.debug("%s: started the poll watch thread", self._label)
+            watch.start()
 
     def discard(self, poller: Poller) -> None:
         """Forget a poller whose table was released; an unknown poller is ignored.
+
+        The last poller to leave ends the watch thread.
 
         Args:
             poller: The poller.
         """
         with self._lock:
             self._live.discard(poller)
+            end = not self._live and self._watch is not None
+            if end:
+                self._watch = None
+            wake = self._wake
+        if end:
+            self._end_watch(wake, "no poller is live")
 
     def close(self) -> None:
-        """Stop every live poller and refuse new ones; idempotent, and never waits."""
+        """Stop every live poller and the watch thread, and refuse new pollers; never waits."""
         with self._lock:
             self._closed = True
             live = tuple(self._live)
             self._live.clear()
+            end = self._watch is not None
+            self._watch = None
+            wake = self._wake
+        if end:
+            self._end_watch(wake, "the session closed")
         for poller in live:
             poller.stop()
+
+    def check_running(self) -> None:
+        """Check each live poller's running cycle (`Poller.check_running`) once.
+
+        The watch thread calls it every `WATCH_INTERVAL` seconds; a test calls it directly. A
+        check that raises is logged at ERROR as a defect, and the other pollers are checked.
+        """
+        with self._lock:
+            live = tuple(self._live)
+        for poller in live:
+            try:
+                poller.check_running()
+            except Exception:
+                logger.exception(
+                    "%s: checking a poll()'s running cycle failed. %s", self._label, LIBRARY_BUG
+                )
+
+    def _end_watch(self, wake: threading.Event, reason: str) -> None:
+        """End a watch thread; called once per thread, without the lock.
+
+        Args:
+            wake: The thread's event, read under the lock as the thread was given up.
+            reason: Why it ends, for the DEBUG log.
+        """
+        wake.set()
+        logger.debug("%s: ending the poll watch thread: %s", self._label, reason)
+
+    def _run_watch(self, wake: threading.Event) -> None:
+        """The watch thread: check the running cycles until its own event is set.
+
+        Args:
+            wake: Set when the thread should end.
+        """
+        while not wake.wait(WATCH_INTERVAL):
+            self.check_running()
 
 
 class _RecencySeen:
@@ -390,7 +471,8 @@ class Poller:
     the poller, and then starts its thread (`start`). The thread enters the session's execution
     context for its whole life, and leaves the session's `Pollers` when it ends. Every other
     method is safe from any thread: `stop` and `release` only set an event and update
-    registries, and `fail` fails the table. The key state of `REPLACE` and `APPEND` belongs to
+    registries, `fail` fails the table, and `check_running` (the watch thread's) marks or
+    fails a cycle that runs late. The key state of `REPLACE` and `APPEND` belongs to
     the thread alone, so it takes no lock; the publish lock, below which only `registry_lock`
     is taken (a cycle's rows are converted to a table before it), keeps a failure and an `add`
     from interleaving and makes the failure once-only.
@@ -398,6 +480,8 @@ class Poller:
 
     __slots__ = (
         "__weakref__",
+        "_began",
+        "_began_at",
         "_clock",
         "_core",
         "_cycles",
@@ -412,16 +496,19 @@ class Poller:
         "_keys",
         "_late",
         "_list_keys",
+        "_marked_late",
         "_max_concurrency",
         "_max_outage",
         "_mode",
         "_pollers",
+        "_progress_at",
         "_publish_lock",
         "_published",
         "_publisher",
         "_read",
         "_request",
         "_rule",
+        "_running",
         "_schema",
         "_seen",
         "_spec",
@@ -430,6 +517,9 @@ class Poller:
         "_succeeded",
         "_thread",
         "_thread_name",
+        "_watch_lock",
+        "_watch_name",
+        "_watched",
     )
 
     def __init__(
@@ -468,6 +558,7 @@ class Poller:
         self._exec_ctx = core.exec_ctx
         # The poller thread's name; its fan-out pool's threads add " rest_<n>".
         self._thread_name = f"{core.thread_prefix} poll-{stream_id}"
+        self._watch_name = f"{core.thread_prefix} poll watch"
         self._max_concurrency = core.config.max_concurrency
         self._max_outage = core.config.max_outage
         self._schema = core.dataset_schema(spec)
@@ -497,6 +588,20 @@ class Poller:
         self._succeeded = False
         self._failing_since: float | None = None
         self._failing_at = 0.0
+        # The current cycle's start (monotonic, and wall-clock); only the poller thread
+        # touches them.
+        self._began = 0.0
+        self._began_at = 0.0
+        # The watch's view of the running cycle, guarded by the watch lock, a leaf lock but for
+        # `registry_lock`, which `check_running` takes under it: whether a cycle runs; the
+        # monotonic time since which it has made no progress (its start, or the start of the
+        # run of failing cycles it continues, or its latest page); and whether it shows that
+        # it runs late.
+        self._watch_lock = threading.Lock()
+        self._running = False
+        self._progress_at = 0.0
+        self._marked_late = False
+        self._watched = (0.0, 0.0, "")  # the cycle's start (monotonic, wall) and good text
         self._keys: set[tuple[Hashable, ...]] = set()
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
@@ -508,6 +613,11 @@ class Poller:
     def thread(self) -> threading.Thread:
         """The poller's thread."""
         return self._thread
+
+    @property
+    def watch_thread_name(self) -> str:
+        """The name of its session's poll watch thread, such as `"massive #1 poll watch"`."""
+        return self._watch_name
 
     @property
     def stopped(self) -> bool:
@@ -562,7 +672,8 @@ class Poller:
                 ThreadPoolExecutor(self._max_concurrency, f"{self._thread_name} rest") as pool,
             ):
                 while not self._stop.is_set():
-                    began = self._clock.monotonic()
+                    began = self._began = self._clock.monotonic()
+                    self._began_at = self._clock.time()
                     self._cycles += 1
                     if not self._cycle(pool):
                         break
@@ -627,6 +738,106 @@ class Poller:
             )
         self._late = late
 
+    def _watch_begin(self) -> None:
+        """Show the watch thread that a cycle starts, with what its late mark names.
+
+        Until a page arrives, the cycle has made no progress since its start, or, when it
+        continues a run of failing cycles, since that run's first cycle started.
+        """
+        good = self._good_text()
+        since = self._began if self._failing_since is None else self._failing_since
+        with self._watch_lock:
+            self._running, self._marked_late = True, False
+            self._watched = (self._began, self._began_at, good)
+            self._progress_at = since
+
+    def _watch_end(self) -> float:
+        """Show the watch thread that the cycle has ended; idempotent.
+
+        Called before the cycle updates the table's row, so a late mark never lands after the
+        row's own update and outlives the cycle.
+
+        Returns:
+            The monotonic time of the cycle's last progress: its latest page, or else the
+            time `_watch_begin` started counting from.
+        """
+        with self._watch_lock:
+            self._running = False
+            return self._progress_at
+
+    def _page_received(self, core: SessionCore, drift: DriftReport) -> None:
+        """A page of the cycle arrived: count it as progress and record its drift.
+
+        The REST reader calls it for every page, on the poller's thread or a fan-out thread.
+
+        Args:
+            core: The session's core.
+            drift: The page's drift, recorded in the row's `SchemaDrift`.
+        """
+        now = self._clock.monotonic()
+        with self._watch_lock:
+            self._progress_at = max(self._progress_at, now)
+        core.record_stream_drift(self._stream_id, Transport.REST, drift)
+
+    def check_running(self) -> None:
+        """Mark a cycle that runs past its interval, and fail one that stopped making progress.
+
+        Called by the session's poll watch thread (`Pollers`), never by the poller's own
+        thread, which the cycle blocks. A running cycle that has passed its interval shows in
+        the row's `Error`: "cycle running since <start>; last good cycle at <time>", until the
+        cycle ends and updates the row. A cycle that has passed its interval and received no
+        page for more than `MassiveConfig.max_outage` seconds (counted from its start, or from
+        the start of the run of failing cycles it continues, until its first page) fails the
+        table with a `MassiveError` (`ErrorCause.EXPECTED`) and stops the poller: its rows may
+        be missing while the table looks current. A cycle that keeps receiving pages, however
+        slowly its requests are paced or paused, never fails here.
+        """
+        now = self._clock.monotonic()
+        with self._watch_lock:
+            if not self._running:
+                return
+            # The running cycle's frame holds the core (`_cycle`).
+            core = cast("SessionCore", self._core())
+            began, began_at, good = self._watched
+            if now - began <= self._interval:
+                return
+            stalled = now - self._progress_at
+            if stalled <= self._max_outage:
+                if not self._marked_late:
+                    self._marked_late = True
+                    note = f"cycle running since {utc_text(began_at)}; {good}"
+                    logger.debug(
+                        "%s poll() stream %d: the cycle started at %s runs past the %g s "
+                        "interval; marking its row",
+                        self._spec.name,
+                        self._stream_id,
+                        utc_text(began_at),
+                        self._interval,
+                    )
+                    # Under the watch lock, so the cycle's own update of the row follows it.
+                    core.update_streams(
+                        {self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})}
+                    )
+                return
+            self._running = False  # fails once
+        error = MassiveError(
+            f"{self._spec.name} poll(): {good}; the cycle running since {utc_text(began_at)} "
+            f"has received nothing for {stalled:.0f} s, longer than MassiveConfig.max_outage "
+            f"({self._max_outage:g} s); the rows since then may be missing, so this table "
+            "stopped; call the verb again for a new live table",
+            cause=ErrorCause.EXPECTED,
+        )
+        logger.debug(
+            "%s poll() stream %d: no page for %.0f s, max_outage is %g s; failing it",
+            self._spec.name,
+            self._stream_id,
+            stalled,
+            self._max_outage,
+        )
+        self._stop.set()  # the cycle's waits end, and it publishes nothing more
+        with entered(self._exec_ctx):
+            self._fail_fatal(core, error)
+
     def _symbols(self) -> tuple[NormalizedSymbols | None, tuple[str, ...]]:
         """Return the cycle's symbols, reading a reactive table once.
 
@@ -668,9 +879,11 @@ class Poller:
         core = self._core()
         if core is None:
             return False
+        self._watch_begin()  # while it runs, this frame holds the core for `check_running`
         try:
             return self._publish_cycle(core, pool)
         except _FATAL as error:
+            self._watch_end()
             if not self._stop.is_set():
                 self._fail_fatal(core, error)
             return False
@@ -685,6 +898,8 @@ class Poller:
                     LIBRARY_BUG,
                 )
             return self._carry_on(core, error)
+        finally:
+            self._watch_end()
 
     def _publish_cycle(self, core: SessionCore, pool: ThreadPoolExecutor) -> bool:
         """Read the cycle's rows, publish them, and update the table's row.
@@ -696,14 +911,13 @@ class Poller:
         Returns:
             False if the poller was stopped while it read, so nothing was published.
         """
-        began = self._clock.monotonic()
-        began_at = self._clock.time()
         symbols, skipped = self._symbols()
-        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
+        record = functools.partial(self._page_received, core)
         seen = _RecencySeen()
         table, requests, patience = self._read(
             symbols=symbols, record=record, on_recency=seen.add, executor=pool, cancel=self._stop
         )
+        self._watch_end()  # before the row's update, so no late mark can follow it
         if self._stop.is_set():
             return False
         published = self._publish(table)
@@ -716,7 +930,7 @@ class Poller:
             requests,
             table.num_rows,
             published,
-            self._clock.monotonic() - began,
+            self._clock.monotonic() - self._began,
             patience,
         )
         # A successful cycle clears an earlier cycle's error; the skipped rows are kept apart.
@@ -730,7 +944,7 @@ class Poller:
             recency=seen.shown(),
         )
         core.update_streams({self._stream_id: update})
-        self._good_at, self._succeeded, self._failing_since = began_at, True, None
+        self._good_at, self._succeeded, self._failing_since = self._began_at, True, None
         if self._failing is not None:
             self._failing = None
             logger.info(
@@ -766,10 +980,10 @@ class Poller:
 
         The table keeps its rows, and its `Error` names the cycle's error and the last good
         cycle's time. A failure that comes `MassiveConfig.max_outage` seconds or more after the
-        first failure of the run (the first since the last good cycle) fails the table instead
-        (`_outage_failure`), in every mode, and the poller ends. Counting from the run's first
-        failure, not from the last good cycle, keeps one transient failure from failing an
-        hourly poll, or a poll slowed by rate-limit pauses.
+        run's start fails the table instead (`_outage_failure`), in every mode, and the poller
+        ends. The run starts at its first failed cycle's last progress: the cycle's start, or
+        its latest page. Counting from there, not from the last good cycle, keeps one transient
+        failure from failing an hourly poll, or a slow cycle that kept receiving pages.
 
         The first failure of a run is logged once, by its text, which names the HTTP status,
         the path, and the request id: a `MassiveError` with an expected cause at WARNING, and a
@@ -786,12 +1000,14 @@ class Poller:
             Whether the poller carries on: False once it has been stopped, or once the table
             failed.
         """
+        progress = self._watch_end()  # before the row's update, so no late mark follows it
         if self._stop.is_set():
             return False
-        now = self._clock.monotonic()
-        if self._failing_since is None:  # a run of failing cycles begins
-            self._failing_since, self._failing_at = now, self._clock.time()
-        down = now - self._failing_since
+        if self._failing_since is None:  # a run of failing cycles begins with this cycle
+            # From its last progress: its start, or its latest page.
+            self._failing_since = progress
+            self._failing_at = self._began_at + (progress - self._began)
+        down = self._clock.monotonic() - self._failing_since
         if down >= self._max_outage:
             self._fail_fatal(core, self._outage_failure(error, down))
             return False
@@ -1380,6 +1596,8 @@ def open_poll(
             release_scope(core.exec_ctx, scope)
         raise
     if core.closed:  # close() failed the table meanwhile; never start its poller
+        poller.stop()
+        pollers.discard(poller)
         core.results.release(result)
         raise MassiveError(f"{core.label} is closed")
     logger.debug(
