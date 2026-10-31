@@ -1730,9 +1730,10 @@ class RestEndpoints:
 
         Errors, which the verb's call logs at the level their cause gives (DEBUG for an
         expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
-        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row that breaks
-        the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
-        limited: ..."`, a closed session as `"... is closed"`).
+        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
+        not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
+        `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other
+        failure (a rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
 
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.

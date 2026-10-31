@@ -3225,16 +3225,17 @@ TICK family:
              WARNING naming the evidence. A refused REST snapshot says nothing certain about
              the WebSocket plan; a refusal from Massive fails the refused streams with
              Massive's text (a Basic plan's streams fail that way)
-     b. Envelope status DELAYED, or a timeframe field DELAYED, read in this order, excluding
-        underlying_asset:
-          STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
-          INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
-          FUTURES:         last_trade.timeframe, last_quote.timeframe, last_minute.timeframe
-                           (in the OpenAPI spec; absent from the documentation page)
+     b. Envelope status DELAYED, or a timeframe field DELAYED, read in this order (the same
+        fields as the REST check of 13.4), never underlying_asset.timeframe:
+          timeframe              (indices, top level; documented DELAYED | REAL-TIME)
+          last_trade.timeframe, last_quote.timeframe   (stocks, options, futures)
+          last_minute.timeframe  (futures; in the OpenAPI spec, absent from the documentation
+                                 page)
           -> EntitlementError naming the evidence and the fix:
              "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED),
-             and dm.Subscription.OPTIONS is not in MassiveConfig.delayed_subscriptions. To use Massive's
-             delayed options feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})".
+             and dm.Subscription.OPTIONS is not in MassiveConfig.delayed_subscriptions, so the
+             library serves only real-time options data. To use Massive's delayed options feed:
+             dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})".
              Not cached.
      c. A timeframe value other than DELAYED or REAL-TIME
           -> socket.massive.com, REALTIME, evidence="<field>='<value>', neither DELAYED nor
