@@ -53,6 +53,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, fields, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
@@ -104,6 +105,7 @@ __all__ = [
     "describe_symbols",
     "pascal_case",
     "shown_query",
+    "utc_text",
 ]
 
 logger = logging.getLogger(__name__)
@@ -566,6 +568,18 @@ def shown_query(query: str) -> str:
         The text, or its first `QUERY_SHOWN - 1` characters and `…` when it is longer.
     """
     return query if len(query) <= QUERY_SHOWN else query[: QUERY_SHOWN - 1] + "…"
+
+
+def utc_text(seconds: float) -> str:
+    """Return an instant as the UTC text an `Error` note or a failure message shows.
+
+    Args:
+        seconds: The instant, in seconds since the epoch.
+
+    Returns:
+        The text, to the second, such as `"2026-10-30T14:03:05Z"`.
+    """
+    return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:

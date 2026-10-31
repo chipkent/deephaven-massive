@@ -466,9 +466,10 @@ class MassiveSession:
         is `RUNNING`; a read is `LOADING`, then `DONE`, or `FAILED` with the error. `Error` also
         shows warnings that do not stop a stream, such as deferred options contracts, a
         connection that is down (`connection down since <time>; no data`; an outage longer
-        than `MassiveConfig.max_outage` fails the stream), or one that has gone quiet during
-        market hours. Each call returns a new live view; after `close()` it keeps its
-        final rows. How to read it: README.md#diagnostics.
+        than `MassiveConfig.max_outage` fails the stream), one that has gone quiet during
+        market hours, or a `poll()` cycle's error with the last good cycle's time (cycles
+        failing for `max_outage` fail the table). Each call returns a new live view; after
+        `close()` it keeps its final rows. How to read it: README.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that

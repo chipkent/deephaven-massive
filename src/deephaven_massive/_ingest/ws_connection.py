@@ -85,6 +85,7 @@ from deephaven_massive._tables.diagnostics import (
     DriftRegistry,
     StreamUpdate,
     describe_symbols,
+    utc_text,
 )
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 from deephaven_massive._tables.transports import HostDecision
@@ -161,18 +162,6 @@ _group_numbers: Final = itertools.count(1)
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
-
-
-def _utc_text(seconds: float) -> str:
-    """Return an instant as the UTC text the streams' notes and errors show.
-
-    Args:
-        seconds: The instant, in seconds since the epoch.
-
-    Returns:
-        The text, such as `"2026-10-30T14:03:05Z"`.
-    """
-    return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class _Client(Sender, Protocol):
@@ -311,9 +300,13 @@ class _Episodes:
         lost_at: When the socket was lost (seconds since the epoch), or None while connected.
         lost_warned: Whether the outage's WARNING was logged (only when the connection had
             live tables), so its reconnect logs the recovery.
-        down_since: When the outage began (seconds since the epoch), or None outside one.
-            Unlike `lost_at`, it lasts until the reconnected socket's topics are confirmed
-            again, so a reconnect that drops again at once does not start a new outage.
+        down_since: When the outage began, the last frame before it (seconds since the
+            epoch), or None outside one. Unlike `lost_at`, it lasts until data flows on a
+            reconnected socket again, so a reconnect that drops again before that does not
+            start a new outage.
+        data_since_open: Whether a data frame arrived since the current socket opened.
+        expired: Whether the outage's timer fired and failed the streams then on it.
+        late_timers: The `max_outage` timer of each stream that opened after that, by id.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
         quiet_at: When the no-frames WARNING was logged (nanoseconds since the epoch), or
@@ -325,6 +318,9 @@ class _Episodes:
     lost_at: float | None = None
     lost_warned: bool = False
     down_since: float | None = None
+    data_since_open: bool = False
+    expired: bool = False
+    late_timers: dict[int, Timer] = field(default_factory=dict)
     last_frame_at: int = 0
     quiet_at: int | None = None
     note: str | None = None
@@ -642,6 +638,8 @@ class Connection:
         self._streams[stream.stream_id] = stream
         if self._episodes.note is not None:
             self._update_streams({stream.stream_id: StreamUpdate(error=self._episodes.note)})
+        if self._episodes.expired:
+            self._arm_late_timer(stream.stream_id)
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
             self._required[stream.channel] = keys
@@ -663,6 +661,9 @@ class Connection:
             return
         self.flusher.routes.remove(stream_id)
         self._deferred_shown.pop(stream_id, None)
+        late = self._episodes.late_timers.pop(stream_id, None)
+        if late is not None:
+            late.cancel()
         self.subscriptions.remove(stream.topics, static=stream.static)
         logger.debug(
             "stream %d shut down: its route is removed and %d topics released on %s",
@@ -902,6 +903,7 @@ class Connection:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
+        episodes.data_since_open = False
         self.subscriptions.opened(generation)
         self._check_recovered()  # with nothing to confirm, the outage ends now
 
@@ -935,6 +937,9 @@ class Connection:
         """
         now = time.time_ns()
         self._heard()
+        if self._episodes.down_since is not None:  # data flows again: the outage may be over
+            self._episodes.data_since_open = True
+            self._check_recovered()
         self._traffic.received(channel, len(rows), len(rejects), now=now)
         if rows:
             self.flusher.rows(channel, rows)
@@ -1038,7 +1043,7 @@ class Connection:
             len(self.subscriptions.acknowledged),
         )
         self._set_note(
-            f"no data since {_utc_text(last / 1e9)} during {self.asset_class.value} trading "
+            f"no data since {utc_text(last / 1e9)} during {self.asset_class.value} trading "
             "hours; quiet symbols or a market holiday may explain it"
         )
 
@@ -1094,7 +1099,7 @@ class Connection:
             # The client's last callback: the loop runs nothing that would release these, so
             # it lets them go now. A call posted later is dropped, or ignored (`_ended`).
             self._ended = True
-            self._cancel_outage_timer()
+            self._cancel_outage_timers()
             self._streams.clear()
             self._early.clear()
             self._deferred_shown.clear()
@@ -1238,10 +1243,13 @@ class Connection:
     def _outage(self, *, waiting_slot: bool) -> None:
         """Start or continue an outage: show it on every stream, and fail them at its limit.
 
-        The first `RECONNECTING` or `WAITING_SLOT` of an outage records its start and arms a
-        loop timer for `MassiveConfig.max_outage` (`_outage_expired`); a limit of zero fires
-        on the loop's next turn. Every attempt rewrites the streams' note, since a wait for
-        a slot and a plain reconnect read differently.
+        The first `RECONNECTING` or `WAITING_SLOT` of an outage dates its start at the last
+        frame the connection received (when the data stopped, which on a half-open socket is
+        well before the drop is noticed), or now if none ever arrived, and arms a loop timer
+        that fires `MassiveConfig.max_outage` seconds after that start (`_outage_expired`); a
+        limit of zero, or one already passed, fires on the loop's next turn. Every attempt
+        rewrites the streams' note, since a wait for a slot and a plain reconnect read
+        differently.
 
         Args:
             waiting_slot: True for `WAITING_SLOT`: the note says another connection holds the
@@ -1250,9 +1258,10 @@ class Connection:
         episodes = self._episodes
         started = episodes.down_since is None
         if started:
-            episodes.down_since = time.time()
+            last = max(episodes.last_frame_at, self._last_message_at or 0)
+            episodes.down_since = last / 1e9 if last else time.time()
             episodes.quiet_at = None  # the outage's note replaces the silence's
-        since = _utc_text(cast("float", episodes.down_since))
+        since = utc_text(cast("float", episodes.down_since))
         note = f"connection down since {since}; no data"
         if waiting_slot:
             note += (
@@ -1264,15 +1273,32 @@ class Connection:
         if not started:
             return
         limit = self._group.max_outage
+        left = max(limit - (time.time() - cast("float", episodes.down_since)), 0.0)
         logger.debug(
-            "%s: outage began at %s; its %d streams fail if it lasts %.0f s (max_outage)",
+            "%s: outage began at %s (the last frame); its %d streams fail in %.0f s if it "
+            "lasts max_outage, %g s",
             self.url,
             since,
             len(self._streams),
+            left,
             limit,
         )
-        # A limit of zero fires on the loop's next turn: at the first disconnect.
-        self._episodes.outage_timer = self._client.loop.call_later(limit, self._outage_expired)
+        episodes.outage_timer = self._client.loop.call_later(left, self._outage_expired)
+
+    def _outage_error(self) -> MassiveError:
+        """Return the error a stream fails with once the outage has lasted `max_outage`.
+
+        Returns:
+            The error, naming the outage's start, the limit, and what to do.
+        """
+        since = utc_text(cast("float", self._episodes.down_since))
+        return MassiveError(
+            f"the WebSocket connection to {self.decision.host}{self.path} has been down since "
+            f"{since}, longer than MassiveConfig.max_outage ({self._group.max_outage:g} s); the "
+            f"rows from {since} on are missing, so this table stopped; call the verb again for "
+            "a new live table",
+            cause=ErrorCause.EXPECTED,
+        )
 
     def _outage_expired(self) -> None:
         """Fail every stream on the connection: its outage has lasted `max_outage`.
@@ -1280,48 +1306,84 @@ class Connection:
         The streams' rows from the outage's start on are missing, so a table that kept
         running would show stale data as if it were current. Each fails through its flush
         thread's `publish_failure`, and a table derived from it fails with it. The connection
-        keeps reconnecting: a stream opened later waits for it with the outage's note.
+        keeps reconnecting, and a stream that opens on it while the outage lasts gets a timer
+        of its own (`_arm_late_timer`), so every stream on a down connection fails in time.
         """
-        self._episodes.outage_timer = None
-        since = _utc_text(cast("float", self._episodes.down_since))
-        limit = self._group.max_outage
-        error = MassiveError(
-            f"the WebSocket connection to {self.decision.host}{self.path} has been down since "
-            f"{since}, longer than MassiveConfig.max_outage ({limit:g} s); the rows from {since} "
-            "on are missing, so this table stopped; call the verb again for a new live table",
-            cause=ErrorCause.EXPECTED,
-        )
+        episodes = self._episodes
+        episodes.outage_timer = None
+        episodes.expired = True
         ids = list(self._streams)
         logger.debug("%s: the outage passed max_outage; failing streams %s", self.url, ids)
-        self.flusher.fail(ids, error)
+        self.flusher.fail(ids, self._outage_error())
+
+    def _arm_late_timer(self, stream_id: int) -> None:
+        """Give a stream that opened after the outage's timer fired a `max_outage` of its own.
+
+        Args:
+            stream_id: The stream, just registered on the down connection.
+        """
+        limit = self._group.max_outage
+        logger.debug(
+            "%s: stream %d opened during an outage that already failed the others; it fails "
+            "in %g s unless the connection recovers",
+            self.url,
+            stream_id,
+            limit,
+        )
+        self._episodes.late_timers[stream_id] = self._client.loop.call_later(
+            limit, self._late_expired, stream_id
+        )
+
+    def _late_expired(self, stream_id: int) -> None:
+        """Fail a stream that opened during the outage and has waited `max_outage` for it.
+
+        Args:
+            stream_id: The stream; still on the connection, since its release cancels this.
+        """
+        del self._episodes.late_timers[stream_id]
+        logger.debug(
+            "%s: stream %d waited max_outage for the outage to end; failing it", self.url, stream_id
+        )
+        self.flusher.fail([stream_id], self._outage_error())
 
     def _check_recovered(self) -> None:
-        """End the outage once the connection is back and none of its topics awaits a reply.
+        """End the outage once data flows again on the reconnected socket.
 
-        A topic counts as answered when it is acknowledged, refused, or `NO_ACK`. Ending the
-        outage cancels its timer and clears the streams' note.
+        The connection must be `CONNECTED`, and either a data frame has arrived since the
+        socket opened, or at least one topic is acknowledged and every other is acknowledged
+        or refused: none waits for a reply and none is `NO_ACK`. A server that authenticates
+        but never acknowledges (or sends) anything is still down, and so is a socket with no
+        topic to prove it, such as one whose streams the outage failed. Ending the outage
+        cancels its timers and clears the note.
         """
         episodes = self._episodes
         if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
             return
-        _, acked, pending, _ = self.subscriptions.counts()
-        if pending:
+        _, acked, pending, no_ack = self.subscriptions.counts()
+        if not episodes.data_since_open and (pending or no_ack or not acked):
             return
         logger.debug(
-            "%s: the outage that began at %s is over; %d topics are acknowledged again",
+            "%s: the outage that began at %s is over: %d topics acknowledged, data since the "
+            "socket opened: %s",
             self.url,
-            _utc_text(episodes.down_since),
+            utc_text(episodes.down_since),
             acked,
+            episodes.data_since_open,
         )
         episodes.down_since = None
-        self._cancel_outage_timer()
+        episodes.expired = False
+        self._cancel_outage_timers()
         self._set_note(None)
 
-    def _cancel_outage_timer(self) -> None:
-        """Cancel the outage's timer, if one is armed."""
-        if self._episodes.outage_timer is not None:
-            self._episodes.outage_timer.cancel()
-            self._episodes.outage_timer = None
+    def _cancel_outage_timers(self) -> None:
+        """Cancel the outage's timer and every late stream's, if any is armed."""
+        episodes = self._episodes
+        if episodes.outage_timer is not None:
+            episodes.outage_timer.cancel()
+            episodes.outage_timer = None
+        for timer in episodes.late_timers.values():
+            timer.cancel()
+        episodes.late_timers.clear()
 
     def _set_note(self, note: str | None) -> None:
         """Show a connection-wide note in every stream's `Error`, or clear it with None.
@@ -1712,7 +1774,7 @@ class ConnectionGroup:
                     ack_timeout=config.ack_timeout,
                     flush_interval=config.flush_interval,
                     reconnect_backoff=config.reconnect_backoff,
-                    max_outage=config.max_outage.total_seconds(),
+                    max_outage=config.max_outage,
                     pinned=frozenset(config.ws_hosts),
                 )
             with group.lock:

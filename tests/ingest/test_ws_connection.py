@@ -12,7 +12,6 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, TypeAlias, cast
 
@@ -1371,7 +1370,7 @@ OTHER_SETTINGS: dict[str, object] = {
     "ack_timeout": 7.0,
     "reconnect_backoff": 45.0,
     "max_reconnect_backoff": 300.0,
-    "max_outage": timedelta(minutes=1),
+    "max_outage": 60.0,
     "flush_interval": 0.2,
     "rest_base_url": "https://rest.example.com",
 }
@@ -1934,18 +1933,228 @@ def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: ToPylist,
 ) -> None:
-    custom_session = make_ws_session(max_outage=timedelta(0))
+    custom_session = make_ws_session(max_outage=0)
     result = custom_session.query(TRADES, ["AAPL"]).blink()
     custom_session.subscribed("T.AAPL")
     connection = custom_session.connection()
     fake_ws_server.close(1011)
     custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
+    # The zero-second timer fires on the loop's next turn, then the flush applies the failure.
+    wait_for(lambda: bool(custom_session.on_loop(connection, lambda: connection._episodes.expired)))
     custom_session.flush()
     wait_for(lambda: bool(result.j_table.isFailed()))
     [row] = streams_of(custom_session, dh_to_pylist)
     since = cast("re.Match[str]", re.search(r"since (\S+),", row["Error"])).group(1)
     assert (row["State"], row["Error"]) == ("FAILED", _outage_failure(since, "0"))
     assert custom_session.on_loop(connection, lambda: connection._episodes.outage_timer) is None
+
+
+def _down_since(ws_session: WsSession, connection: ws_connection.Connection) -> float | None:
+    # The outage's start as the connection's loop holds it.
+    return cast(
+        "float | None", ws_session.on_loop(connection, lambda: connection._episodes.down_since)
+    )
+
+
+def _acks(ws_session: WsSession) -> int:
+    return sum(status.kind is StatusKind.ACK for status in ws_session.statuses)
+
+
+@pytest.mark.parametrize(
+    "silent",
+    [{"T.AAPL", "T.MSFT"}, {"T.MSFT"}],
+    ids=["nothing acknowledged", "one topic NO_ACK"],
+)
+def test_a_server_that_never_acknowledges_stays_down_until_data_arrives(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    silent: set[str],
+) -> None:
+    custom_session = make_ws_session(ack_timeout=0.05)
+    # Each topic's first NO_ACK on the cluster is spent: none reconnects, so the socket stays
+    # as the server leaves it, authenticated and silent.
+    for topic in silent:
+        custom_session.connections.group.first_no_ack("/stocks", topic)
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    other = custom_session.query(TRADES, ["MSFT"]).blink()
+    custom_session.subscribed("T.AAPL", "T.MSFT")
+    custom_session.wait(lambda s: _acks(s) == 2)
+    connection = custom_session.connection()
+    fake_ws_server.silent = silent
+    fake_ws_server.close(1011)
+
+    def silent_but_connected() -> bool:
+        return bool(
+            custom_session.on_loop(
+                connection,
+                lambda: (
+                    connection._state is ConnectionState.CONNECTED
+                    and connection.subscriptions.counts()[3] == len(silent)
+                ),
+            )
+        )
+
+    wait_for(silent_but_connected)  # NO_ACK: nothing waits for a reply, yet nothing arrived
+    assert _down_since(custom_session, connection) is not None
+    assert custom_session.on_loop(connection, lambda: connection._episodes.outage_timer)
+    assert all(re.fullmatch(_DOWN, r["Error"]) for r in streams_of(custom_session, dh_to_pylist))
+    fake_ws_server.send(json.dumps([trade("AAPL")]))  # data: the feed is back
+    wait_for(lambda: [r["Error"] for r in streams_of(custom_session, dh_to_pylist)] == [None, None])
+    assert _down_since(custom_session, connection) is None
+    assert custom_session.on_loop(connection, lambda: connection._episodes.outage_timer) is None
+    custom_session.session.release(result)
+    custom_session.session.release(other)
+
+
+def test_the_gap_starts_at_the_last_frame(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    # A half-open socket is noticed late: the outage dates from when frames stopped, and its
+    # timer counts from there.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    ws_session.wait(lambda s: _acks(s) == 1)
+    connection = ws_session.connection()
+    stopped = time.time_ns() - 200 * 10**9
+
+    def frames_stopped_long_ago() -> None:
+        connection._episodes.last_frame_at = stopped
+        connection._last_message_at = None
+
+    fake_ws_server.silent = {"T.AAPL"}
+    ws_session.on_loop(connection, frames_stopped_long_ago)
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    assert _down_since(ws_session, connection) == stopped / 1e9
+    left = cast(
+        "float",
+        ws_session.on_loop(
+            connection,
+            lambda: (
+                cast("Any", connection._episodes.outage_timer).when()
+                - connection._client.loop.time()
+            ),
+        ),
+    )
+    assert 80.0 < left <= 100.0  # 300 s from the last frame, not from the drop
+    ws_session.session.release(result)
+
+
+def test_a_reconnect_that_drops_before_every_topic_is_acknowledged_keeps_the_outage(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    other = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    ws_session.wait(lambda s: _acks(s) == 2)
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.MSFT"}
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    ws_session.wait(lambda s: _acks(s) == 3)  # AAPL acknowledged again, MSFT not
+    first = _down_since(ws_session, connection)
+    assert first is not None
+    fake_ws_server.close(1011)  # drops again before MSFT's acknowledgement
+    ws_session.wait(lambda s: s.opens == 3)
+    assert _down_since(ws_session, connection) == first  # one outage, from the first gap
+    ws_session.session.release(result)
+    ws_session.session.release(other)
+
+
+def test_a_stream_opened_after_the_outage_failed_the_others_gets_its_own_limit(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL", "T.MSFT", "T.IBM"}
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+
+    def expire() -> None:
+        cast("Any", connection._episodes.outage_timer).cancel()
+        connection._outage_expired()
+
+    ws_session.on_loop(connection, expire)
+    ws_session.flush()
+    wait_for(lambda: bool(result.j_table.isFailed()))
+    late = ws_session.query(TRADES, ["MSFT"]).blink()  # stream 2, on the still-down connection
+
+    def armed(stream_id: int) -> bool:
+        return bool(
+            ws_session.on_loop(connection, lambda: stream_id in connection._episodes.late_timers)
+        )
+
+    wait_for(lambda: armed(2))
+    left = cast(
+        "float",
+        ws_session.on_loop(
+            connection,
+            lambda: (
+                cast("Any", connection._episodes.late_timers[2]).when()
+                - connection._client.loop.time()
+            ),
+        ),
+    )
+    assert 290.0 < left <= 300.0  # a full max_outage of its own
+    assert re.fullmatch(_DOWN, streams_of(ws_session, dh_to_pylist)[1]["Error"])
+    released = ws_session.query(TRADES, ["IBM"]).blink()  # stream 3: released before its limit
+    wait_for(
+        lambda: bool(ws_session.on_loop(connection, lambda: 3 in connection._episodes.late_timers))
+    )
+    ws_session.session.release(released)
+    del released
+    wait_for(
+        lambda: not ws_session.on_loop(connection, lambda: 3 in connection._episodes.late_timers)
+    )
+
+    def expire_late() -> None:
+        cast("Any", connection._episodes.late_timers[2]).cancel()
+        connection._late_expired(2)
+
+    ws_session.on_loop(connection, expire_late)
+    ws_session.flush()
+    wait_for(lambda: bool(late.j_table.isFailed()))
+    row = streams_of(ws_session, dh_to_pylist)[1]
+    since = cast("re.Match[str]", re.search(r"since (\S+),", row["Error"])).group(1)
+    assert (row["State"], row["Error"]) == ("FAILED", _outage_failure(since, "300"))
+
+
+def test_a_recovery_cancels_the_limit_of_a_stream_opened_late(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL", "T.MSFT"}
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+
+    def expire() -> None:
+        cast("Any", connection._episodes.outage_timer).cancel()
+        connection._outage_expired()
+
+    ws_session.on_loop(connection, expire)
+    ws_session.flush()
+    wait_for(lambda: bool(result.j_table.isFailed()))
+    # The failed stream's topic leaves; with no topic left, nothing proves the feed is back.
+    wait_for(lambda: not ws_session.on_loop(connection, lambda: 1 in connection._streams))
+    assert _down_since(ws_session, connection) is not None
+    late = ws_session.query(TRADES, ["MSFT"]).blink()
+    fake_ws_server.wait_for(lambda s: "T.MSFT" in s.connections[-1].topics)
+    fake_ws_server.send(_ack("T.MSFT"))  # the feed is back before the late stream's limit
+    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[1]["Error"] is None)
+    assert ws_session.on_loop(connection, lambda: dict(connection._episodes.late_timers)) == {}
+    assert streams_of(ws_session, dh_to_pylist)[1]["State"] == "RUNNING"
+    ws_session.session.release(late)
 
 
 def test_an_outage_without_live_tables_logs_nothing(

@@ -2,7 +2,6 @@
 
 import dataclasses
 import inspect
-from datetime import timedelta
 from typing import Any, cast
 
 import pytest
@@ -117,7 +116,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.ack_timeout == 5.0
     assert base.reconnect_backoff == 30.0
     assert base.max_reconnect_backoff == 120.0
-    assert base.max_outage == timedelta(minutes=5)
+    assert base.max_outage == 300.0
     assert base.flat_file_symbol_threshold == 50
     assert base.max_concurrency == 8
     assert base.rest_basic_subscriptions == frozenset()
@@ -169,22 +168,23 @@ def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
 
 
 def test_max_outage_may_be_zero_but_not_negative(base: MassiveConfig) -> None:
-    # Zero is the owner's "fail at the first disconnect", so it is a valid limit.
-    assert _replace(base, max_outage=timedelta(0)).max_outage == timedelta(0)
-    with pytest.raises(
-        ValueError,
-        match=r"max_outage must not be negative, got -1 day, 23:59:59; timedelta\(0\) fails "
-        "live tables at the first disconnect",
-    ):
-        _replace(base, max_outage=timedelta(seconds=-1))
+    # Zero means "fail at the first disconnect", so it is a valid limit; an int becomes a float.
+    zero = _replace(base, max_outage=0).max_outage
+    assert (zero, type(zero)) == (0.0, float)
+    for bad in (-1, float("inf"), float("nan")):
+        with pytest.raises(
+            ValueError,
+            match=r"max_outage must be zero or more seconds, got .*; 0 fails live tables at the "
+            "first disconnect",
+        ):
+            _replace(base, max_outage=bad)
+    with pytest.raises(ValueError, match="max_outage must be finite, got an int too large"):
+        _replace(base, max_outage=10**400)
 
 
-@pytest.mark.parametrize("value", [300, 300.0, "PT5M", None])
-def test_max_outage_is_a_timedelta(base: MassiveConfig, value: object) -> None:
-    with pytest.raises(
-        TypeError,
-        match=r"max_outage must be a datetime\.timedelta, such as timedelta\(minutes=5\), not ",
-    ):
+@pytest.mark.parametrize("value", ["300", True, None])
+def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
+    with pytest.raises(TypeError, match="max_outage must be a number of seconds, not "):
         _replace(base, max_outage=value)
 
 

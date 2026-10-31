@@ -643,7 +643,7 @@ defined in exactly one place: the field defaults of this class.
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. A bare lower-case hostname, taken exactly as written: a scheme, port, path, upper-case letter, or surrounding whitespace raises `ValueError`. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be at least 15 s, else `ValueError` naming Massive's guidance: a shorter wait can be refused for holding the allowance the dropped connection still holds, and on an individual plan that wastes the one slot there is. Tests never need a shorter value: they drive `WsClient` directly, with its backoff as constructor arguments and an injected clock. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
-| `max_outage: timedelta` | `timedelta(minutes=5)` | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long, every stream on it fails, so no live table keeps showing rows as current while the rows since the outage began are missing. `timedelta(0)` fails every stream at the first disconnect. A value that is not a `timedelta` raises `TypeError`; a negative one raises `ValueError`. No environment variable: no duration setting reads one. |
+| `max_outage: float` | `300.0` seconds | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long, counted from its last frame, every stream on it fails, so no live table keeps showing rows as current while the rows since the outage began are missing. A `poll()` table whose cycles have all failed this long, since its last good cycle began (or it started), fails the same way ([section 13.4](#134-rest)). `0` fails at the first disconnect or failed cycle. Zero is allowed, unlike the other durations; a negative or non-finite value raises `ValueError`, and a non-number `TypeError`. No environment variable: no duration setting reads one. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
@@ -3424,27 +3424,33 @@ just before the loop closes cannot leave a stream behind. The flush thread clear
 when it ends, after its final flush, which also lets go of the streams a verdict moved off the
 connection.
 
-**Outages.** An outage starts when a connection reports `RECONNECTING` or `WAITING_SLOT` and
-ends once the connection is `CONNECTED` again and no topic of its new generation awaits its
-acknowledgement (each is acknowledged, refused, or `NO_ACK`). A drop and a reconnect that drops
-again before its topics are acknowledged are one outage. Throughout it, every stream on the
-connection, including one that opens during it, shows in its `Error`: "connection down since
-<time>; no data", the time in UTC as `yyyy-MM-ddTHH:mm:ssZ`. While the connection is
-`WAITING_SLOT` the text goes on: "; waiting for a WebSocket slot on <host><path>: another
-connection with this API key, perhaps from another process, holds it; the plan allows one
-connection per cluster". Sessions in one process share connections, so the other holder is
-another process, or a session whose connection settings differ. The note is cleared, and an
-options-cap warning shown again, when the outage ends.
+**Outages.** An outage starts when a connection reports `RECONNECTING` or `WAITING_SLOT`. It
+dates from the last frame the connection received (when data stopped, which on a half-open
+socket is well before the drop is noticed), or from that report when none ever arrived. It
+ends once the connection is `CONNECTED` again and either a data frame has arrived on the new
+socket, or at least one topic is acknowledged and no topic awaits its acknowledgement or is
+`NO_ACK`. A server that authenticates but never acknowledges or sends anything is still down,
+and so is a socket with no topic to prove it. A drop and a reconnect that drops again before
+that are one outage, with one start. Throughout it, every stream on the connection, including
+one that opens during it, shows in its `Error`: "connection down since <time>; no data", the
+time in UTC as `yyyy-MM-ddTHH:mm:ssZ`. While the connection is `WAITING_SLOT` the text goes
+on: "; waiting for a WebSocket slot on <host><path>: another connection with this API key,
+perhaps from another process, holds it; the plan allows one connection per cluster". Sessions
+in one process share connections, so the other holder is another process, or a session whose
+connection settings differ. The note is cleared, and an options-cap warning shown again, when
+the outage ends.
 
-The outage's start arms a timer on the connection's loop for `max_outage`; its end cancels it.
-When the timer fires, every stream on the connection fails through `publish_failure`
-(`Flusher.fail`, so through `BlinkPublisher`) with a `MassiveError` (`ErrorCause.EXPECTED`):
-"the WebSocket connection to <host><path> has been down since <time>, longer than
-MassiveConfig.max_outage (<limit>); the rows from <time> on are missing, so this table stopped;
-call the verb again for a new live table". Tables derived from a stream fail with it, as with
-every stream failure. `max_outage=timedelta(0)` fails them at the outage's start: its timer
-fires on the loop's next turn. The connection itself keeps reconnecting: a stream that opens during the outage,
-after the failure, waits with the note, since it has no rows to be stale.
+The outage's start arms a timer on the connection's loop that fires `max_outage` seconds after
+the outage's start (at once when that has passed); its end cancels it. When the timer fires,
+every stream on the connection fails through `publish_failure` (`Flusher.fail`, so through
+`BlinkPublisher`) with a `MassiveError` (`ErrorCause.EXPECTED`): "the WebSocket connection to
+<host><path> has been down since <time>, longer than MassiveConfig.max_outage (<limit> s); the
+rows from <time> on are missing, so this table stopped; call the verb again for a new live
+table". Tables derived from a stream fail with it, as with every stream failure.
+`max_outage=0` fails them at the outage's start: the timer fires on the loop's next turn. The
+connection itself keeps reconnecting. A stream that opens on it after the timer fired, while
+the outage lasts, arms a `max_outage` timer of its own from its open, so every stream on a
+down connection fails in time; its release or the outage's end cancels it.
 
 **Silence.** A `CONNECTED` connection with acknowledged topics that receives no frame for
 `NO_FRAMES_WARNING` (5 minutes) during its asset class's regular trading hours logs its WARNING
@@ -3526,8 +3532,15 @@ sees:
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
   every path, with a reactive table the parameters against the dataset's fetch paths, at
   least one of which must take every one of them. An emptied symbol table plans no request.
-  Any other error sets the stream's `Error` in `m.streams()`, keeps the previous rows, and the
-  next cycle runs as scheduled. The first failing cycle of a run of failures logs one WARNING
+  Any other error sets the stream's `Error` in `m.streams()` to the error followed by "; last
+  good cycle at <time>" (or "; no good cycle since the poll started at <time>"), keeps the
+  previous rows, and the next cycle runs as scheduled. Once no cycle has succeeded for
+  `max_outage` seconds since the last good cycle began (or the poll started), the next failing
+  cycle fails the table instead, in every mode, with a `MassiveError` of the latest error's
+  cause: "<dataset> poll(): last good cycle at <time>, and every cycle has failed for <n> s
+  since, longer than MassiveConfig.max_outage (<limit> s); the rows since then may be missing,
+  so this table stopped; call the verb again for a new live table. The latest error: <error>".
+  A cycle that succeeds with no new row is a good cycle, so a quiet dataset never fails. The first failing cycle of a run of failures logs one WARNING
   (an expected cause) or ERROR (a defect, with its trace), later ones log at DEBUG, and the
   first cycle that succeeds again logs the recovery at INFO. A cycle that ends later than its
   interval, because its requests are paced or held by a rate-limit pause, logs one WARNING per
