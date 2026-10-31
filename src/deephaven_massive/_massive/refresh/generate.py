@@ -12,7 +12,8 @@ other modules and adds only the rule for writing:
    columns on two transports, the column order), and finally writes each source's memberships and
    orders its fields from its kind (`kinds.apply`);
 3. `render` writes the sources as the canonical text of `spec/rest.json`, `spec/ws.json`,
-   `spec/flatfiles.json`, and `spec/descriptions.json`; each file is replaced only when every
+   `spec/flatfiles.json`, and `spec/descriptions.json` (which also holds each documenting
+   page's plan tables, `plan_access`); each file is replaced only when every
    gate passed and its text changed, so a refresh that only rewords descriptions leaves the
    schema files untouched.
 
@@ -34,10 +35,11 @@ from deephaven_massive._massive.refresh.flat_file_sources import (
 )
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
+from deephaven_massive._massive.refresh.plan_access import plan_access
 from deephaven_massive._massive.refresh.rest_sources import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.refresh.ws_sources import WsCoverage, generate_ws
-from deephaven_massive._massive.spec.types import RestPath, Source, Transport
+from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -66,6 +68,8 @@ class Generated:
             that names it (for REST, every page whose endpoint line is its path; for the
             WebSocket, every page of its feed; for flat files, its dataset page, one per venue
             for a futures dataset).
+        plans: What each of those pages says about Massive's plans, by the page's URL
+            (`plan_access.plan_access`); a page without plan tables has no entry.
     """
 
     rest: tuple[RestPath, ...]
@@ -75,6 +79,7 @@ class Generated:
     ws_coverage: WsCoverage
     flat_file_coverage: FlatFileCoverage
     urls: Mapping[Transport, Mapping[str, list[str]]]
+    plans: Mapping[str, PlanAccess]
 
 
 def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
@@ -88,7 +93,12 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
         hand: The hand input; the real tables when omitted.
 
     Returns:
-        The generated sources, each with its memberships and its fields in its kind's order.
+        The generated sources, each with its memberships and its fields in its kind's order,
+        their pages' URLs, and those pages' plan tables.
+
+    Raises:
+        DocsError: If a page that documents a generated source has plan sections of an
+            unexpected shape (`plan_access.plan_access`).
     """
     hand = hand or HandInput()
     (paths, rest), (channels, ws), (files, flat) = _generate_each(snapshot, hand)
@@ -100,6 +110,16 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
         snapshot.websocket_page_urls,
         snapshot.flat_file_page_urls,
     )
+    plans: dict[str, PlanAccess] = {}
+    for texts, page_urls, by_key, keys in (
+        (snapshot.pages, rest_urls, rest.pages, [p.key for p in paths]),
+        (snapshot.websocket_pages, ws_urls, ws.pages, [c.key for c in channels]),
+        (snapshot.flat_file_pages, file_urls, flat.pages, [f.key for f in files]),
+    ):
+        for name in sorted({name for key in keys for name in by_key[key]}):
+            page = plan_access(texts[name])
+            if page is not None:
+                plans[page_urls[name]] = page
     return Generated(
         rest=tuple(kinds.apply(paths, found, orders)),
         ws=tuple(kinds.apply(channels, found, orders)),
@@ -112,6 +132,7 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
             Transport.WS: {c.key: [ws_urls[n] for n in ws.pages[c.key]] for c in channels},
             Transport.FLAT_FILES: {f.key: [file_urls[n] for n in flat.pages[f.key]] for f in files},
         },
+        plans=plans,
     )
 
 
@@ -251,6 +272,7 @@ def refresh(
             },
             fetched=snapshot.fetched,
             urls=generated.urls,
+            plans=generated.plans,
         ),
     }
     written: list[Path] = []

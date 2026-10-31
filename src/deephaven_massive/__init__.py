@@ -47,12 +47,15 @@ Status:
     open questions. The library is not on PyPI yet.
 
 Read next:
-    The README (https://github.com/chipkent/deephaven-massive): installing, first tables, and
-    split adjustment. `docs/getting-started/` walks through table shapes, watchlists, plans,
-    releasing tables, diagnostics, and troubleshooting; `docs/guides/` covers reading history,
-    following a schedule, and joining across asset classes; `docs/datasets/` lists every
-    dataset's columns. `help()` on any session, namespace, dataset method, or query shows its
-    full documentation.
+    The README, https://github.com/chipkent/deephaven-massive: installing, a first-tables
+    tutorial, how queries and verbs work, a "How do I..." table, the concepts (table shapes,
+    time, bars, history sources, split adjustment, live table lifetime, plans and errors,
+    diagnostics), every shared argument, and troubleshooting by error text. When a docstring
+    says `README.md#symbols`, it means that README's section of that name. The dataset finder,
+    `docs/datasets/README.md`, links one generated page per dataset, such as
+    `docs/datasets/stocks.bars.md`: its call, verbs, time axis, sort and filter keys, plan
+    access, and columns. `help()` on any session, namespace, dataset method, or query shows its own
+    documentation.
 
 Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
 and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, `datasets()`, the

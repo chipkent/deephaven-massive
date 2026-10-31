@@ -20,6 +20,7 @@ It imports the standard library and `spec.types` only.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         Field,
         Membership,
         Param,
+        PlanAccess,
         RestPath,
         Source,
         Transport,
@@ -170,6 +172,7 @@ def render_descriptions(
     *,
     fetched: dt.date,
     urls: Mapping[Transport, Mapping[str, Sequence[str]]],
+    plans: Mapping[str, PlanAccess],
 ) -> str:
     """Return the canonical text of `descriptions.json`.
 
@@ -185,12 +188,16 @@ def render_descriptions(
         urls: Per transport, the vendor URLs that document each source key: for REST, every
             documentation page that names the path (a path shared by several asset classes,
             such as `/v3/reference/tickers`, has one page per asset class).
+        plans: What each documenting page says about Massive's plans, by the page's URL;
+            written sorted by URL, each page's plans in their table order.
 
     Returns:
         The file's text: `{"generated_by", "fetched", "urls": {<transport>: {<source key>:
         [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}},
         "class_descriptions": {<transport>: {<source key>: {<wire key>: {<asset class>:
-        <text>}}}}}`, one line per URL and per description, ending in a newline.
+        <text>}}}}, "plans": {<page url>: {"title", "access", "recency", "history", "plans":
+        [{"plan", "access", "recency", "history"}, ...]}}}`, one line per URL and per
+        description, ending in a newline.
     """
     texts: dict[str, dict[str, dict[str, str]]] = {}
     by_class: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
@@ -214,6 +221,16 @@ def render_descriptions(
         },
         "descriptions": texts,
         "class_descriptions": by_class,
+        "plans": {
+            url: {
+                "title": page.title,
+                "access": page.access,
+                "recency": page.recency,
+                "history": page.history,
+                "plans": [dataclasses.asdict(terms) for terms in page.plans],
+            }
+            for url, page in sorted(plans.items())
+        },
     }
     return json.dumps(document, indent=1, ensure_ascii=False) + "\n"
 

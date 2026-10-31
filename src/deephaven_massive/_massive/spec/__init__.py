@@ -17,7 +17,8 @@ against the same description and no schema is written by hand:
   refresh. `descriptions.json`, generated beside them by the same command, holds each
   field's description (the vendor's, or the refresh's correction where the vendor's is clearly
   wrong, and for a source that serves several asset classes any per-class description), the
-  snapshot's fetch date, and each source's vendor URLs. The
+  snapshot's fetch date, each source's vendor URLs, and what each vendor page says about
+  Massive's plans. The
   descriptions are kept out of the schema files so that a refresh that only rewords them
   leaves those byte for byte unchanged. All ship in the wheel as package data, while the
   refresh that writes them does not.
@@ -32,7 +33,7 @@ against the same description and no schema is written by hand:
 - `source(transport, key)` and `sources(transport)` read a transport's generated file into
   those types the first time either is called, joining each field's descriptions from
   `descriptions.json` into `Field.description` and `Field.class_descriptions`, and return
-  the same values ever after. `provenance()` returns the fetch date and the URLs.
+  the same values ever after. `provenance()` returns the fetch date, the URLs, and the plans.
 
 Each file is read and parsed once, under one lock, so concurrent first calls from any number
 of threads (with or without the GIL) parse each file once and all receive the same objects.
@@ -233,7 +234,7 @@ def source(transport: Transport, key: str) -> Source:
 
 
 def provenance() -> Provenance:
-    """Return where the generated sources came from: the fetch date and each source's URLs.
+    """Return where the generated sources came from: the fetch date, URLs, and plan tables.
 
     A generated document cites it so a reader can check a column against the vendor's own
     documentation. The first call loads every transport the descriptions file gives URLs for,
@@ -242,8 +243,9 @@ def provenance() -> Provenance:
     `sources`, and the provenance stays unbuilt.
 
     Returns:
-        The snapshot's fetch date and, by `(transport, source key)`, the sorted vendor URLs of
-        every generated source: for REST, every documentation page that names the path.
+        The snapshot's fetch date; by `(transport, source key)`, the sorted vendor URLs of
+        every generated source (for REST, every documentation page that names the path); and,
+        by page URL, what each of those pages says about Massive's plans.
     """
     with _lock:
         found = _cache.provenance
@@ -253,6 +255,6 @@ def provenance() -> Provenance:
             for transport, by_key in described.urls.items():
                 _load(transport)  # checks this transport's URLs against its sources
                 urls.update({(transport, key): pages for key, pages in by_key.items()})
-            found = Provenance(fetched=described.fetched, urls=urls)
+            found = Provenance(fetched=described.fetched, urls=urls, plans=described.plans)
             _cache.provenance = found
     return found

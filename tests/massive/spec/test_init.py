@@ -265,6 +265,17 @@ def _descriptions(**change: object) -> str:
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},
         "class_descriptions": {"REST": {"/v1/x": {"price": {"options": "Per share."}}}},
+        "plans": {
+            _URL: {
+                "title": "X",
+                "access": "Included in all Stocks plans",
+                "recency": "Real-time",
+                "history": "",
+                "plans": [
+                    {"plan": "Stocks Basic", "access": "Included", "recency": None, "history": None}
+                ],
+            }
+        },
     }
     return json.dumps({**document, **change})
 
@@ -303,9 +314,13 @@ def test_the_loader_joins_and_checks_files_of_its_own(
 ) -> None:
     _serve(monkeypatch, {"rest.json": _SCHEMA, "descriptions.json": _descriptions()})
     assert spec.source(Transport.REST, "/v1/x").field("Price").description == "The price."
-    assert spec.provenance() == Provenance(
-        fetched=dt.date(2026, 10, 27), urls={(Transport.REST, "/v1/x"): (_URL,)}
+    found = spec.provenance()
+    assert found == Provenance(
+        fetched=dt.date(2026, 10, 27),
+        urls={(Transport.REST, "/v1/x"): (_URL,)},
+        plans={_URL: found.plans[_URL]},
     )
+    assert found.plans[_URL].plans[0].plan == "Stocks Basic"
 
 
 @pytest.mark.parametrize(

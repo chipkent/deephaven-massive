@@ -22,8 +22,9 @@ Interface:
       wrong) in `Field.description`, and any per-asset-class text through
       `Field.description_for`, and each source its places in the dataset kinds
       (`Source.memberships`).
-    - `provenance`, `Provenance`: the day the vendor sources were fetched and the vendor URL
-      of each source, for documents that cite them.
+    - `provenance`, `Provenance`: the day the vendor sources were fetched, the vendor URL
+      of each source, and what each vendor page says about Massive's plans
+      (`Provenance.plans`), for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
       `DriftReport`, `DriftSample`: the value types of that description, and a drift report
       with the first row that showed each drifted key. A `RestPath`'s parameters are

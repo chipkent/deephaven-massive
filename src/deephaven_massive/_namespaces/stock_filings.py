@@ -12,9 +12,9 @@ touches the network until a verb is called on the query. This module owns the na
 `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
 `_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
 the request (the 13-F holdings and the taxonomies take none), `dm.ALL` is refused in favour of
-`symbols=None`, `start` and `end` bound the filing date where the dataset has one, and the
-`sort`, `order`, `limit`, and `filters` block works as described in the package
-documentation. `m.stocks` (`stocks.py`) creates the namespace.
+`symbols=None`, `start` and `end` bound the filing date where the dataset has one, and
+`sort`, `order`, `limit`, and `filters` work as README.md#sort-order-limit and
+README.md#filters describe. `m.stocks` (`stocks.py`) creates the namespace.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -468,43 +468,30 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
-        Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
-        the document on EDGAR. A filing with several filers can have a row under each filer's
-        CIK, as EDGAR's own index lists it: a Form 4 under the issuer and each reporting owner,
-        a joint 10-K or 8-K under each co-registrant. Served by REST (`/stocks/filings/vX/index`)
-        through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not
-        seen before, telling rows apart by `Cik` and `AccessionNumber`, so every filer's row is
-        kept. A filing whose company has no ticker keeps a null `Symbol`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-index,
-        the web UI's column tooltips, or `columns()`.
+        Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and EDGAR URL.
+        A filing with several filers has a row under each filer's CIK, as EDGAR's index lists it.
+        `poll()` appends new rows, told apart by `Cik` and `AccessionNumber`, and needs a `start` or
+        a `limit`. A filing whose company has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every filer.
-            form_type: The SEC form type, such as `"10-K"` or `"8-K"`; None for every form.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"cik": "0000320193"}`; checked now.
+            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
+            form_type: The SEC form type, such as `"10-K"`; None, the default, for every form.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.index.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a non-`str` form type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -540,39 +527,28 @@ class _StockFilings(Namespace):
         """The text of sections of 10-K annual reports, one row per filing and section.
 
         Each row holds one section (the business description or the risk factors) of a company's
-        10-K, with its ticker, CIK, period end, and filing date. Served by REST
-        (`/stocks/filings/10-K/vX/sections`) through `fetch()` and `poll()`. By default `poll()`
-        appends only the rows it has not seen before, telling rows apart by the dataset's key
-        columns. A filing whose company has no ticker keeps a null `Symbol`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-sections_10k,
-        the web UI's column tooltips, or `columns()`.
+        10-K, with its ticker, CIK, period end, and filing date. `poll()` appends new rows, told
+        apart by the dataset's key columns, and needs a `start` or a `limit`. A filing whose company
+        has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"section": "risk_factors"}`; checked now.
+            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"section": "risk_factors"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.sections_10k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -606,41 +582,30 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The item text of 8-K current reports, one row per filing and filer.
 
-        Each row holds the text of the items a company reported on an 8-K (or an amendment), with
-        its ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants can have
-        a row under each filer's CIK. Served by REST (`/stocks/filings/8-K/vX/text`) through
-        `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen before,
-        telling rows apart by `Cik` and `AccessionNumber`, so every filer's row is kept. A
-        filing whose company has no ticker keeps a null `Symbol`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-text_8k,
-        the web UI's column tooltips, or `columns()`.
+        Each row holds the text of the items a company reported on an 8-K or an amendment, with its
+        ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants can have a
+        row under each filer's CIK. `poll()` appends new rows, told apart by `Cik` and
+        `AccessionNumber`, and needs a `start` or a `limit`. A filing whose company has no ticker
+        keeps a null `Symbol`.
 
         Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"form_type": "8-K/A"}`; checked now.
+            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.text_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -674,41 +639,32 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Disclosures in 8-K current reports, classified by category, one row per disclosure.
 
-        Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories,
-        the supporting text, and the filing's accession number and date. A filing can name several
-        share classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
-        tickers, and `symbols` only selects the filings that list any of them. Served by REST
-        (`/stocks/filings/8-K/vX/disclosures`) through `fetch()` and `poll()`. By default `poll()`
-        appends only the rows it has not seen before, telling rows apart by the dataset's key
-        columns.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosures_8k,
-        the web UI's column tooltips, or `columns()`.
+        Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories
+        (see `disclosure_taxonomy()`), the supporting text, and the filing's accession number and
+        date. A filing can name several share classes, so a row has no `Symbol`: its `Tickers`
+        column holds the filing's tickers, and `symbols` selects the filings that list any of them.
+        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
+        `limit`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"tertiary_category": "Dividends"}`; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.disclosures_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+                is before `start`, `order` is given without `sort`, or a filter is unknown,
+                reserved, or of the wrong kind.
 
         Example:
             ::
@@ -743,39 +699,28 @@ class _StockFilings(Namespace):
         """Risk factors disclosed in company filings, classified by category, one row each.
 
         Each row is one risk factor a company disclosed, with its primary, secondary, and tertiary
-        categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date. Served
-        by REST (`/stocks/filings/vX/risk-factors`) through `fetch()` and `poll()`. By default
-        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
-        key columns. A filing whose company has no ticker keeps a null `Symbol`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factors,
-        the web UI's column tooltips, or `columns()`.
+        categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date.
+        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
+        `limit`. A filing whose company has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"cik": "0000320193"}`; checked now.
+            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.risk_factors.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -812,45 +757,32 @@ class _StockFilings(Namespace):
         Each row is one security an institutional investment manager held at the end of a quarter:
         the issuer, CUSIP, share count, market value, and voting authority, with the filer's CIK
         (`FilerCik`) and the filing's accession number and date. Rows name a CUSIP, not a ticker, so
-        the dataset takes no `symbols`. Served by REST (`/stocks/filings/vX/13-F`) through `fetch()`
-        and `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
-        apart by the dataset's key columns.
-
-        `limit` caps the total number of rows across pages; the page size is internal. No
-        `symbols` means `dm.ALL` does not apply. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-institutional_holdings,
-        the web UI's column tooltips, or `columns()`.
+        the dataset takes no `symbols`. `poll()` appends new rows, told apart by the dataset's key
+        columns, and needs a `start` or a `limit`.
 
         Args:
-            filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
-                such as `"0001067983"` (sent as `filer_cik`), or a sequence of them for any of
-                several managers (sent as `filer_cik.any_of`); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now.
+            filer_cik: The filing manager's SEC CIK, as text with its leading zeros, such as
+                `"0001067983"`, or a sequence of them; None, the default, for every filer.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.institutional_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
             ValueError: If a CIK sequence is empty, a bound is not a date or ISO date, `end` is
-                before `start`, or a filter is unknown, reserved, or of the wrong kind.
+                before `start`, `order` is given without `sort`, or a filter is unknown, reserved,
+                or of the wrong kind.
 
         Example:
             ::
 
-                t = m.stocks.filings.institutional_holdings(
-                    filer_cik="0001067983", start="2025-01-01"
-                ).fetch()
+                t = m.stocks.filings.institutional_holdings(filer_cik="0001067983").fetch()
         """
         return list_query(
             self._core,
@@ -884,44 +816,31 @@ class _StockFilings(Namespace):
         Each row is a security an officer, director, or 10% owner held on becoming an insider: the
         issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
         filing can name several share classes, so a row has no `Symbol`: its `Tickers` column holds
-        the `String[]` of tickers, and `symbols` only selects the filings that list any of them.
-        Served by REST (`/stocks/filings/vX/form-3`) through `fetch()` and `poll()`. By default
-        `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
-        key columns.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-initial_insider_ownership,
-        the web UI's column tooltips, or `columns()`.
+        the filing's tickers, and `symbols` selects the filings that list any of them. `poll()`
+        appends new rows, told apart by the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            issuer_cik: The SEC CIK of the issuing company, as text with its leading zeros
-                (sent as `issuer_cik`), or a sequence of them for any of several issuers
-                (sent as `issuer_cik.any_of`); None for every issuer.
-            owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
-                way (`owner_cik` or `owner_cik.any_of`); None for every owner.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
+                of them; None, the default, for every issuer.
+            owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
+                default, for every owner.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.initial_insider_ownership.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
             ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -961,51 +880,38 @@ class _StockFilings(Namespace):
         Each row is a purchase, sale, grant, or exercise an officer, director, or 10% owner
         reported, or a holding reported beside them: the transaction code, date, shares, price, and
         the shares owned afterwards, with the issuer and owner. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and
-        `symbols` only selects the filings that list any of them. Served by REST
-        (`/stocks/filings/vX/form-4`) through `fetch()` and `poll()`. By default `poll()` appends
-        only the rows it has not seen before, telling rows apart by the dataset's key columns.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_transactions,
-        the web UI's column tooltips, or `columns()`.
+        classes, so a row has no `Symbol`: its `Tickers` column holds the filing's tickers, and
+        `symbols` selects the filings that list any of them. `poll()` appends new rows, told apart
+        by the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            issuer_cik: The SEC CIK of the issuing company, as text with its leading zeros
-                (sent as `issuer_cik`), or a sequence of them for any of several issuers
-                (sent as `issuer_cik.any_of`); None for every issuer.
-            owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
-                way (`owner_cik` or `owner_cik.any_of`); None for every owner.
-            start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses unless `limit` is set: it would re-read every filing
-                each cycle. A fixed start keeps widening the window of a long-running poll.
-            end: The last filing date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"transaction_code": "P"}`; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
+                of them; None, the default, for every issuer.
+            owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
+                default, for every owner.
+            start: The first filing date. See README.md#start-and-end.
+            end: The last filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"transaction_code": "P"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.insider_transactions.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
             ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
 
-                buys = m.stocks.filings.insider_transactions(
-                    "AAPL", filters={"transaction_code": "P"}
-                ).fetch()
+                buys = m.stocks.filings.insider_transactions("AAPL", start="2025-01-01").fetch()
         """
         return _insider_query(
             self._core,
@@ -1036,58 +942,38 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Open-market insider purchases and sales, summed per company and transaction day.
 
-        An insider is a company's director, officer, or holder of more than 10% of its shares;
-        the SEC requires each to report every trade in the company's stock on Form 4 (or, for
-        some late or exempt trades, Form 5). Massive sums the open-market purchases and sales of
-        every insider of one issuer on one transaction day into one row: how many purchases and
-        sales, by how many distinct insiders, the shares and US-dollar values bought and sold,
-        their net (`NetShares`, `NetValue`, negative for net selling), the part traded under a
-        Rule 10b5-1 trading plan (a sale or purchase scheduled in advance, so it says less about
-        the insider's view), and the date of the latest filing that reported one of the trades.
-        Use it to gauge net insider buying or selling over a window without reading individual
-        filings; `insider_transactions()` returns the Form 4 lines themselves.
-
-        A company can have several share classes, so a row has no `Symbol`: its `Tickers`
-        column holds the `String[]` of the issuer's tickers on the transaction day, the totals
-        cover the issuer rather than each ticker, and `symbols` only selects the issuers that
-        list any of them. Served by REST (`/stocks/insiders/vX/activity`) through `fetch()` and
-        `poll()`. By default `poll()` replaces its table each cycle, keyed by `IssuerCik` and
-        `TransactionDate`: a filing that arrives later for a day already shown revises that day's
-        totals in place. Massive updates the data daily.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_activity,
-        the web UI's column tooltips, or `columns()`.
+        Insiders (directors, officers, and holders of over 10%) report each trade on SEC Form 4 or
+        5. Massive sums one issuer's insider buys and sells of one day into one row: counts, shares
+        and dollar values, their net (`NetShares`, `NetValue`, negative for net selling), and the
+        part traded under a prearranged Rule 10b5-1 plan. `insider_transactions()` returns the Form
+        4 lines themselves. A company can have several share classes, so a row has no `Symbol`: its
+        `Tickers` column holds the issuer's tickers, and `symbols` selects the issuers that list any
+        of them. The totals cover the issuer, not each ticker. `poll()` replaces the table each
+        cycle, keyed by `IssuerCik` and `TransactionDate`, so a late filing revises its day in
+        place. Massive updates the data daily.
 
         Args:
-            symbols: Tickers whose issuers to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every issuer.
-            issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
-                its leading zeros, such as `"0001045810"` (sent as `issuer_cik`), or a
-                sequence of them for any of several issuers (sent as `issuer_cik.any_of`);
-                None for every issuer.
-            start: The first transaction date to include, inclusive; None for no lower bound.
-            end: The last transaction date to include, inclusive; None for no upper bound.
-            sort: The field to sort by, such as `"net_value"`; None for the server default,
-                the newest transaction date first.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now. The endpoint has no parameter left for it: the
-                arguments above reserve every form of the tickers, the CIKs, and the date
-                (`tickers.all_of` and the exclusive `.gt` and `.lt` bounds included), so
-                today any key raises `ValueError`.
+            symbols: Tickers whose issuers to return; None, the default, for every issuer. See
+                README.md#symbols.
+            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
+                of them; None, the default, for every issuer.
+            start: The first transaction date. See README.md#start-and-end.
+            end: The last transaction date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"net_value"`; the default is the newest transaction
+                date first. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Unused today: the arguments above reserve every endpoint parameter, so any key
+                raises `ValueError`.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.insider_activity.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
             ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -1125,66 +1011,41 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Each company's insiders and the shares each one holds now, one row per insider.
 
-        An insider is a company's director, officer, or holder of more than 10% of its shares,
-        who reports an initial position on SEC Form 3 and every later change on Forms 4 and 5.
-        Massive combines all of one insider's filings for one issuer into one current row: the
-        owner's name, CIK, roles (a `String[]` of `director`, `officer`, `ten_percent_owner`,
-        `other`), and officer title; the dates of the first and latest filing and their count;
-        the shares owned directly, indirectly (through trusts, LLCs, family members, and other
-        vehicles), and in total, as filed and not adjusted for splits, with no options or other
-        derivative securities; and that total as a percentage of the shares outstanding
-        (`OwnershipPct`, in percent, not a fraction: 0.0198 means 0.0198%).
-        `OldestPositionDate` far behind `LastFilingDate` warns that a summed position has not
-        been restated lately and may be stale. Use it to see who a company's insiders are and
-        how much they own, or, with `owner_cik`, every company one person is an insider of;
-        `initial_insider_ownership()` (Form 3) and `insider_transactions()` (Form 4) return the
-        filings themselves.
-
-        A company can have several share classes, so a row has no `Symbol`: its `Tickers`
-        column holds the `String[]` of the issuer's tickers, and `symbols` only selects the
-        issuers that list any of them. Served by REST (`/stocks/insiders/vX/holdings`) through
-        `fetch()` and `poll()`. By default `poll()` replaces its table each cycle, keyed by
-        `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row in place. Massive
-        updates the data daily.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_holdings,
-        the web UI's column tooltips, or `columns()`.
+        Massive combines one insider's Form 3, 4, and 5 filings for one issuer into one current row:
+        the owner, roles, and title; the first and latest filing dates; the shares owned directly,
+        indirectly, and in total, as filed (not split-adjusted, no derivatives); and `OwnershipPct`,
+        in percent (0.0198 means 0.0198%). `OldestPositionDate` far behind `LastFilingDate` warns
+        that a position may be stale. A company can have several share classes, so a row has no
+        `Symbol`: its `Tickers` column holds the issuer's tickers, and `symbols` selects the issuers
+        that list any of them. `poll()` replaces the table each cycle, keyed by `IssuerCik` and
+        `OwnerCik`, so a new filing updates its insider's row in place. Massive updates the data
+        daily.
 
         Args:
-            symbols: Tickers whose issuers' insiders to return (one `str`, a sequence, or a
-                `Table` with a `Symbol` column, re-read each `poll()` cycle); None for every
-                issuer.
-            issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
-                its leading zeros, such as `"0001045810"` (sent as `issuer_cik`), or a
-                sequence of them for any of several issuers (sent as `issuer_cik.any_of`);
-                None for every issuer.
-            owner_cik: The SEC CIK of the insider, as text with its leading zeros, such as
-                `"0001588670"`, the same for one person across every issuer; or a sequence
-                of them, sent as `owner_cik.any_of`. None for every insider.
-            start: The earliest latest-filing date (`LastFilingDate`) to include, inclusive;
-                an insider who has not filed since is left out. None for no lower bound.
-            end: The last latest-filing date to include, inclusive; None for no upper bound.
-            sort: The field to sort by, such as `"shares_owned"`; None for the server default,
-                the most recent latest-filing date first.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now. The endpoint has no parameter left for it: the
-                arguments above reserve every form of the tickers, the CIKs, and the date
-                (`tickers.all_of` and the exclusive `.gt` and `.lt` bounds included), so
-                today any key raises `ValueError`.
+            symbols: Tickers whose issuers' insiders to return; None, the default, for every issuer.
+                See README.md#symbols.
+            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
+                of them; None, the default, for every issuer.
+            owner_cik: The insider's SEC CIK, or a sequence of them, to list every company one
+                person is an insider of; None, the default, for every insider.
+            start: The earliest latest-filing date (`LastFilingDate`); an insider who has not filed
+                since is left out. See README.md#start-and-end.
+            end: The last latest-filing date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"shares_owned"`; the default is the most recent
+                latest-filing date first. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Unused today: the arguments above reserve every endpoint parameter, so any key
+                raises `ValueError`.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.insider_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
             ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
+                filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -1219,30 +1080,24 @@ class _StockFilings(Namespace):
 
         Each row is one tertiary category of the risk-factor classification with its primary and
         secondary parents, its description, and the taxonomy version; the categories of
-        `risk_factors()` come from it. Served by REST (`/stocks/taxonomies/vX/risk-factors`) through
-        `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy` and the
-        three categories.
-
-        `limit` caps the total number of rows across pages; the page size is internal. The
-        dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factor_taxonomy,
-        the web UI's column tooltips, or `columns()`.
+        `risk_factors()` come from it. The dataset takes no `symbols`. `poll()` replaces the table
+        each cycle, keyed by `Taxonomy` and the three categories.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`; None for the server
-                default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"primary_category": "Financial"}`; checked now.
+            sort: The field to sort by, such as `"primary_category"`. See
+                README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.risk_factor_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `order` is given without `sort`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1272,30 +1127,24 @@ class _StockFilings(Namespace):
 
         Each row is one tertiary category of the 8-K disclosure classification with its primary and
         secondary parents, its description, and the taxonomy version; the categories of
-        `disclosures_8k()` come from it. Served by REST (`/stocks/taxonomies/vX/disclosures`)
-        through `fetch()` and `poll()`. `poll()` replaces the table each cycle, keyed by `Taxonomy`
-        and the three categories.
-
-        `limit` caps the total number of rows across pages; the page size is internal. The
-        dataset takes no `symbols`, so `dm.ALL` does not apply. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosure_taxonomy,
-        the web UI's column tooltips, or `columns()`.
+        `disclosures_8k()` come from it. The dataset takes no `symbols`. `poll()` replaces the table
+        each cycle, keyed by `Taxonomy` and the three categories.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`; None for the server
-                default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"taxonomy": "1.0"}`; checked now.
+            sort: The field to sort by, such as `"primary_category"`. See
+                README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.filings.disclosure_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `order` is given without `sort`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::

@@ -149,7 +149,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
 | column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column the library computes ([section 19.4](#194-generated-schemas)). |
-| column reference | The generated, committed pages `docs/datasets/<namespace>.md` (and `snapshots.md` for `m.snapshots`), one section per dataset ([section 7.4](#74-column-descriptions)). |
+| dataset reference | The generated, committed pages under `docs/datasets/`: an index, `README.md`, and one page per dataset, `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), with its call, verbs, filters, Massive's plan tables, and columns ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
@@ -344,8 +344,8 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
   source_columns.py      SourceColumn: the key rename, required fields, widen
   column_descriptions.py the description rules of dataset columns, the transport labels and
                          their order (section 7.4)
-  column_reference.py    the column reference: render(catalog, provenance) -> {file name:
-                         Markdown} (pure); sync(directory, pages) owns docs/datasets/
+  column_reference.py    the dataset reference: render(catalog, provenance, calls) -> {file
+                         name: Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
   symbols.py             the canonical ticker grammar and its checks (check_symbol(),
                          normalize()), the public scalar converters, option_roots(),
@@ -444,8 +444,8 @@ Supporting files outside the package:
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
 | `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
-| `uv run python scripts/render_reference.py` | Regenerates the column reference, `docs/datasets/`, the whole directory and nothing else ([section 7.4](#74-column-descriptions)). |
-| `docs/datasets/<namespace>.md` | The generated column reference, committed, never edited by hand. |
+| `uv run python scripts/render_reference.py` | Regenerates the dataset reference, `docs/datasets/`, the whole directory and nothing else ([section 7.4](#74-column-descriptions)). |
+| `docs/datasets/README.md`, `docs/datasets/<dataset>.md` | The generated dataset reference, committed, never edited by hand. |
 | `vendor/massive/` | The vendored spec snapshot the refresh reads ([section 19](#19-wire-clients-and-the-spec-snapshot)). It is Massive's published content, vendored as generation input: not covered by the repository's license, and in neither the wheel nor the sdist. `vendor/README.md` says so beside it. |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
@@ -532,10 +532,12 @@ others:
   ([section 19](#19-wire-clients-and-the-spec-snapshot)) and the library's layer rules
   ([section 4.3](#43-layers)), with a negative test per rule: `tests/massive/` may import any
   `_massive` module, and the rest of `tests/` only the interface.
-- `tests/test_readme.py`: runs the Python examples of `README.md` in the embedded JVM against
-  the fakes, today those of its "Split adjustment" section ([section 21](#21-examples) example
-  7), and every example of section 21 once the README carries them. It mirrors `README.md`, not
-  a source module.
+- `tests/test_docs.py`: the user documentation's tests. It runs every Python block of
+  `README.md`, in order, in the embedded JVM against the fakes (and the first-tables and split
+  adjustment sections alone against scripted data), checks that every `README.md#<anchor>` and
+  `docs/datasets/<dataset>.md` a source file cites exists and that every link inside the README
+  resolves, and checks the README's namespace table against the catalog. It mirrors
+  `README.md`, not a source module.
 - `_` helper directories, of which there are two, `HELPER_PACKAGES` in `tests/test_layout.py`
   (a new one needs owner approval). The second, `tests/_live/` (`plans.py`, `probe.py`,
   `classes.py`, `calendar.py`, `contracts.py`, `events.py`, `streams.py`, `week_windows.py`,
@@ -1595,23 +1597,32 @@ same descriptions, plus each column's type and the transports that supply it, as
 table built from the dataset schema with no network call. The tooltip only exists in the web
 UI; `columns()` serves a notebook, an IDE, or a script.
 
-**3. The column reference documents them on GitHub.** `docs/datasets/<namespace>.md` holds
-one generated page per namespace module (`stocks.md`, …, `partners.md`), and one page of its
-own for `m.snapshots`, a dataset of the session itself with no namespace (`snapshots.md`), with
-one section per dataset in declaration order. Under each page's guide, one paragraph gives the
-recipe that merges tables of two asset classes on the columns they share:
-`merge([t.view(common) for t in tables])`, or, to keep every column, a typed null added for
-each missing one first (`update("Tape = NULL_LONG")`). Each section starts with an explicit
-anchor, `<a id="<dataset>"></a>`, where `<dataset>` is the dataset's name below its namespace
-with dots written as hyphens (`trades`, `financials-ratios`, `benzinga-news`), or the whole
-name of a dataset with no namespace (`snapshots`); a heading naming the dataset
-(`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
-result order. The table's columns are **Column**, **Deephaven type**, **Description**,
-**Supplied by** (the transports of `columns()`'s `SuppliedBy`, in the same spelling), and one
-**Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
-`WebSocket field`). A wire-field cell lists the distinct wire keys of that
-transport's sources that feed the column, in source order and before any projection, or
-`request` for a key filled from the request. Under the table, a list headed "Massive's
+**3. The dataset reference documents them on GitHub.** `docs/datasets/` holds an index,
+`README.md`, which GitHub shows when a reader opens the directory, and one generated page per
+dataset, named after its dotted name (`stocks.trades.md`, `stocks.financials.ratios.md`, and
+`snapshots.md` for `m.snapshots`, a dataset of the session itself). The index has a grid of
+the dataset names two or more asset-class namespaces share (`trades`, `bars`, `snapshots`, …)
+by asset class, each mark linking that class's page; the recipe that merges tables of two
+asset classes on the columns they share, `merge([t.view(common) for t in tables])`, or, to
+keep every column, a typed null added for each missing one first
+(`update("Tape = NULL_LONG")`); and one table per namespace listing each dataset's page,
+summary, and verbs. A dataset's page has its call path as title (`m.stocks.trades`), its
+`DatasetSpec.summary`, its call with every argument's default (`DatasetCall.signature`), and a
+table of facts: its verbs, the transports that serve it, the wire parameters its `start` and
+`end` are sent as, its default `poll()` mode and keys (for a dataset with `fetch()`), the
+`sort` values it takes (an enum's values, or any REST field for a free-text `sort`) and the
+`filters` keys it accepts (`filters.filter_keys`, minus the families of the method's own
+arguments), each only where the method takes `sort` or `filters`. Then come **Plan access**,
+the plan tables of Massive's pages that document its sources (`Provenance.plans`, read by the
+refresh from each page's "Plan Access", "Plan Recency", and "Plan History" sections, so they
+follow every refresh): one row per plan, one column per page, each cell the plan's recency and
+history, or "Not included"; and **Columns**, one row per column in result order, with
+**Column**, **Deephaven type**, **Description**, and **Supplied by** (the transports of
+`columns()`'s `SuppliedBy`, in the same spelling), a note on `RawSymbol` where the dataset has
+it, and, folded in `<details>`, one **Wire field** column per transport the dataset uses
+(`REST field`, `Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct
+wire keys of that transport's sources that feed the column, in source order and before any
+projection, or `request` for a key filled from the request. Then a list headed "Massive's
 documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
 distinct, from the `Provenance` passed to the renderer ([section 19.4](#194-generated-schemas));
 a dataset whose sources have no URLs gets no list. A source several asset classes share (the
@@ -1620,16 +1631,21 @@ with an `asset_class`, only the pages whose URL path has a segment equal to that
 (`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
 of the source's pages when none matches, so a dataset never loses its links to a change in the
 vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
-`snapshots` or `reference.tickers`) lists every class's page. The page ends with a
-footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
-timestamp is an `Instant`, and **Supplied by** with the description already says when a
-column is null. Readers can see what each table holds before they install.
+`snapshots` or `reference.tickers`) lists every class's page; the plan table uses the same
+pages. Every page ends with a footer naming the generator command and the snapshot's fetch
+date. Units and nullability get no columns: every timestamp is an `Instant`, and **Supplied by**
+with the description already says when a column is null. Readers can see what each table holds
+and which plan serves it before they install.
 
-- **The renderer** is `column_reference.render(catalog: Catalog, provenance: Provenance) ->
-  dict[str, str]` in `_datasets/column_reference.py`, a pure function from the `catalog` (the
-  `Catalog` of `_datasets/catalog.py`: every declared `DatasetSpec`, by name) and `provenance`
-  it is given, and the dataset schemas, to `{file name: page text}`; it reads no
-  other state, so tests pass a synthetic catalog and `Provenance`. A **Deephaven type** cell is
+- **The renderer** is `column_reference.render(catalog: Catalog, provenance: Provenance,
+  calls: Mapping[str, DatasetCall]) -> dict[str, str]` in `_datasets/column_reference.py`, a
+  pure function from the `catalog` (the `Catalog` of `_datasets/catalog.py`: every declared
+  `DatasetSpec`, by name), `provenance`, and `calls` it is given, and the dataset schemas, to
+  `{file name: page text}`; it reads no other state, so tests pass a synthetic catalog,
+  `Provenance`, and calls. Each `DatasetCall` (signature, verbs, argument names, and the wire
+  parameter each argument sets) comes from the API layer, `dataset_calls()` in
+  `_dataset_list.py`, which walks the namespace classes, since the dataset layer may not import
+  the dataset methods. A **Deephaven type** cell is
   the column's `ColumnType` value (`Instant`, `long`, …), so the renderer imports no
   Deephaven. It escapes `|` in cells, emits no trailing whitespace, and ends every page with one
   newline, so the pages pass the commit hooks unchanged. `column_reference.sync(directory,
@@ -1640,11 +1656,11 @@ column is null. Readers can see what each table holds before they install.
   `sync` is the only function of `_datasets` that touches the file system; it makes no network
   call and no Deephaven call, and keeping it in the module keeps it under the unit tests and
   the coverage gate, which the script is not.
-- **The command** `uv run python scripts/render_reference.py` regenerates the whole column
+- **The command** `uv run python scripts/render_reference.py` regenerates the whole dataset
   reference and nothing else. The script starts the embedded Deephaven server (the API imports
   Deephaven, and the library never imports `deephaven_server`), imports the library, takes the
   catalog the session module builds from every namespace module, calls
-  `render(catalog, _massive.provenance())`, prints which columns each dataset gained or lost
+  `render(catalog, _massive.provenance(), dataset_calls())`, prints which columns each dataset gained or lost
   against the committed pages (`column_changes`), then calls `sync()` on `docs/datasets/` and
   prints what it wrote and deleted. Run after every refresh, the column report is how a refresh
   shows what it does to each dataset's table (the wire package cannot see datasets). It holds no logic of its own. A renamed or removed namespace or dataset therefore never leaves an
@@ -1653,18 +1669,31 @@ column is null. Readers can see what each table holds before they install.
 - **The parity test**, `tests/datasets/test_column_reference.py`, renders the pages in the test
   JVM and fails on a stale page (bytes differ), a missing page, and any extra file or directory
   under `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
-  a description therefore lands with its regenerated pages in the same pull request.
+  a description or a plan table therefore lands with its regenerated pages in the same pull
+  request.
 - **Dataset method docstrings link, never list.** A column list in a docstring is a
   hand-written schema and goes stale. Each dataset method's docstring starts with its
-  `DatasetSpec.summary`, explains the dataset, states its transports, `limit`, and `ALL`, and
-  points to its section,
-  `https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/<namespace>.md#<dataset>`,
-  to the web UI's column tooltips, and to `columns()`. `tests/datasets/test_column_reference.py`
-  checks that every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>`
-  for its own namespace and dataset. The summary is the docstring's whole first line: ruff's
+  `DatasetSpec.summary`, explains what is unusual about the dataset, and names its page,
+  `docs/datasets/<dataset>.md`. `tests/datasets/test_column_reference.py` checks that every
+  declared dataset's docstring names its own page. The summary is the docstring's whole first line: ruff's
   D205 requires a blank line after that line, so a sentence too long to fit on it, after the
   method's indentation and the opening quotes, within the 100-character line length, is
   shortened in the spec, never wrapped in the docstring.
+- **Dataset and verb docstrings link the README, never repeat it** (owner decision, 2026-10-30).
+  `README.md` holds all hand-written user documentation and defines once each shared argument
+  (`symbols`, `start` and `end`, `as_of`, `sort`, `order`, `limit`, `filters`, `adjusted`,
+  `timespan`, `multiplier`, `venues`, and the verb arguments) and each concept (table shapes,
+  time, bars, history sources, split adjustment, live-table lifetime, plans and errors,
+  diagnostics), each under an explicit `<a id>` anchor. A dataset docstring runs about 15 to 25
+  lines: the summary; what a row is and what is unusual about the dataset (its `poll()` mode
+  where not the plain default, a per-symbol `limit`, a refused `dm.ALL`, vendor quirks); one
+  Args line per argument, a shared one giving only this dataset's difference and `See
+  README.md#<anchor>.`; a one-line Returns naming `docs/datasets/<dataset>.md`; exact Raises;
+  and one or two example lines. A verb docstring stays within 40 lines. `tests/test_docs.py`
+  fails on any cited `README.md#<anchor>` or `docs/datasets/<dataset>.md` that does not exist,
+  runs every Python block of the README against the fakes, and checks the README's namespace
+  table against the catalog. The tests that pinned the old repeated sentences check only that a
+  docstring names its own page.
 
 ### 7.5 One-row datasets
 
@@ -1738,7 +1767,7 @@ description:
 | `Summary` | String | `DatasetSpec.summary`, the first sentence of the method's docstring. |
 | `Verbs` | String[] | The verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`, `ring`, `last_by`, `history`; a `bars` dataset lists the stream verbs, which only its streaming timespans have. |
 | `Transports` | String[] | The transports that serve it, spelled as `columns()` spells them: `REST`, `flat files`, `WebSocket`. |
-| `Documentation` | String | The web address of its section of the column reference. |
+| `Documentation` | String | The web address of its page of the dataset reference. |
 
 `Verbs` and `Transports` are arrays, so a filter tests membership:
 ``dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")``. The function is a module-level
@@ -1790,7 +1819,7 @@ Notation:
   (the indicators) or a symbol parameter that takes one ticker
   (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. Every docstring says so. The cap is
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
@@ -2981,7 +3010,7 @@ futures bars have no corporate actions and take no `adjusted`.
   recipe); the description of every price and volume column of `stocks.bars`, `options.bars`,
   and both daily open-close datasets, through a library note (`DatasetSpec.column_notes`), so
   `columns()`, the tooltips, and the column reference show it; and the README's "Split
-  adjustment" section, whose examples run in `tests/test_readme.py`.
+  adjustment" section, whose examples run in `tests/test_docs.py`.
 
 **One-day parameters.** A dataset parameter that names one calendar day (`daily_open_close`'s
 `date`, `options.contracts`' `as_of`, `reference.tickers`' and `ticker_details`' `date`)
@@ -4622,6 +4651,8 @@ refresh/             build time only; excluded from the wheel; may import any of
                      prefix tables, "Columns" tables, and "Example Data" headers
   knowledge_base.py  ARTICLES (slug -> what the library takes from it), the knowledge-base
                      articles the library relies on; the Markdown of an article's HTML page
+  plan_access.py     each vendor page's "Plan Access", "Plan Recency", and "Plan History"
+                     sections -> PlanAccess, stored in descriptions.json by page URL
   openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
   plain_text.py      the four fixed rules that turn a vendor description into plain text
   naming.py          the naming policy shared by every transport: PascalCase columns, snake
@@ -5517,8 +5548,10 @@ checks.
   schema lacks, raises, so `sources` and `provenance` reject the same files. A description
   belongs to a `(source, wire key)`, so a projected field keeps the description of its wire
   key.
-  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])`
-  exposes the fetch date and the URLs of each source, for the footer of the column reference;
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]], plans: Mapping[str, PlanAccess])`
+  exposes the fetch date, the URLs of each source, and each vendor page's plan tables (by page
+  URL: its title, the access, recency, and history summaries, and one `PlanTerms` per plan,
+  which the refresh's `plan_access` reads into `descriptions.json`), for the dataset reference;
   it loads every transport the file gives URLs for. Each file is read once under the lock,
   whichever of `sources` and `provenance` comes first. No other name is added to the interface.
 
@@ -5930,9 +5963,9 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
   and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used ⊎ deferred) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
-- **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
+- **Dataset reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
-  dataset method's docstring names its own section; `tests/namespaces/test_query_building.py` passes:
+  dataset method's docstring names its own page; `tests/namespaces/test_query_building.py` passes:
   every dataset method's docstring starts with its `DatasetSpec.summary`
   ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
@@ -6072,7 +6105,7 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 ## 21. Examples
 
 Every example below runs in the embedded test JVM against fake REST and WebSocket servers, as
-a test in `tests/test_readme.py` ([section 4.2](#42-test-layout)).
+a test in `tests/test_docs.py` ([section 4.2](#42-test-layout)).
 
 **1. Stocks Starter (15-minute delayed).**
 
@@ -6182,7 +6215,7 @@ t = merge([q.history("2026-10-20", "2026-10-23"), q.append_only()])
 
 **7. Split adjustment.** The README's "Split adjustment" section explains the bases
 ([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment") and holds these
-examples; `tests/test_readme.py` runs every Python block of that section, in order, against the
+examples; `tests/test_docs.py` runs every Python block of that section, in order, against the
 fake REST server.
 
 ```python

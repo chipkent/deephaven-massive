@@ -1023,8 +1023,8 @@ You are free most of the time. Good uses of it:
 - the try-your-own examples (2.2), with a new Deephaven server, but **not while a stream day
   or a connection-limit check runs**, since both use your key's live connection; `status`
   shows when those are planned;
-- reading the user guide in `docs/getting-started/` and the column references in
-  `docs/datasets/` of the checkout, and noting anything unclear;
+- reading the user guide, `README.md`, and the dataset reference in `docs/datasets/` of the
+  checkout, and noting anything unclear;
 - writing up anything from part 2 you have not reported yet.
 
 ## 3.7 Pack and send

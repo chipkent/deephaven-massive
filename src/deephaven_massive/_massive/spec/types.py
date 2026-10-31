@@ -17,7 +17,9 @@ Decoders compare each payload with its source and return a `DriftReport` of the 
 were extra or missing.
 
 `Provenance` records where the generated values came from: the day the vendor sources were
-fetched and the vendor URL of each source.
+fetched, the vendor URL of each source, and what each vendor page says about Massive's plans:
+which plans include the data, how recent it is on each, and how far back its history goes
+(`PlanAccess`, one `PlanTerms` per plan).
 
 The refresh generates every value of these types into `spec/*.json`, and the library reads
 them from there; tests build them by hand. Every type is a frozen dataclass or a `StrEnum`,
@@ -66,6 +68,8 @@ __all__ = [
     "Membership",
     "Param",
     "ParamKind",
+    "PlanAccess",
+    "PlanTerms",
     "Provenance",
     "RestPath",
     "Source",
@@ -634,6 +638,72 @@ class RestPath(Source):
 
 
 @dataclass(frozen=True, kw_only=True)
+class PlanTerms:
+    """What one Massive plan gets of the data one vendor page documents.
+
+    Massive's documentation pages end in three tables, "Plan Access", "Plan Recency", and
+    "Plan History", each with one row per plan; this is one plan's row of all three.
+
+    Attributes:
+        plan: The plan's name as Massive writes it, such as `"Stocks Starter"` or
+            `"Stocks Business"`.
+        access: Whether the plan includes the data, as Massive writes it: `"Included"` or
+            `"Not included"`, usually.
+        recency: How recent the data is on the plan, such as `"15-minute delayed"`,
+            `"Real-time"`, `"End-of-day"`, or `"Not included"`; None when the page's recency
+            table has no row for the plan.
+        history: How far back the plan reaches, such as `"5 years"` or `"All history"`; None
+            when the page's history table has no row for the plan (a WebSocket page has no
+            history table at all).
+    """
+
+    plan: str
+    access: str
+    recency: str | None = None
+    history: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PlanAccess:
+    """What one vendor documentation page says about Massive's plans.
+
+    The refresh reads it from the page's "Plan Access", "Plan Recency", and "Plan History"
+    sections (`refresh.plan_access`) and stores it in `descriptions.json`, keyed by the page's
+    URL; `Provenance.plans` carries it at run time, and the generated dataset reference renders
+    it, so the reference follows Massive's own plan tables after every refresh.
+
+    Attributes:
+        title: The page's title, its one `###` heading, such as `"Custom Bars (OHLC)"`.
+        access: The access summary line, such as `"Included in all Stocks plans"`.
+        recency: The recency summary line, such as `"End-of-day, 15-minute delayed, or
+            real-time"`.
+        history: The history summary line, such as `"Records date back to September 10,
+            2003"` or `"Not applicable to websockets"`.
+        plans: One entry per plan, in the order the access table lists them (individual
+            plans, then business plans).
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.types import PlanAccess, PlanTerms
+
+            bars = PlanAccess(
+                title="Custom Bars (OHLC)",
+                access="Included in all Stocks plans",
+                recency="End-of-day, 15-minute delayed, or real-time",
+                history="Records date back to September 10, 2003",
+                plans=(PlanTerms(plan="Stocks Basic", access="Included", history="2 years"),),
+            )
+    """
+
+    title: str
+    access: str
+    recency: str
+    history: str
+    plans: tuple[PlanTerms, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
 class Provenance:
     """Where the generated sources came from: the vendor snapshot's date and each source's URLs.
 
@@ -650,6 +720,9 @@ class Provenance:
             mapping is copied into a read-only view of tuples, so later changes to the caller's
             mapping have no effect; like a membership's projection, that view cannot be
             pickled or deep-copied.
+        plans: What each vendor page says about Massive's plans, by the page's URL; a page
+            without plan tables has no entry. Empty by default. Copied into a read-only view,
+            like `urls`.
 
     Example:
         ::
@@ -668,9 +741,10 @@ class Provenance:
 
     fetched: dt.date
     urls: Mapping[tuple[Transport, str], Sequence[str]] = dataclasses.field(hash=False)
+    plans: Mapping[str, PlanAccess] = dataclasses.field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
-        """Freeze a copy of the URLs, each source's as a tuple.
+        """Freeze a copy of the URLs, each source's as a tuple, and of the plans.
 
         Raises:
             TypeError: If a source's URLs are one string rather than a sequence of strings,
@@ -683,6 +757,7 @@ class Provenance:
             raise TypeError(f"the URLs of {strings} are a string, not a sequence of strings")
         frozen = {key: tuple(found) for key, found in self.urls.items()}
         object.__setattr__(self, "urls", MappingProxyType(frozen))
+        object.__setattr__(self, "plans", MappingProxyType(dict(self.plans)))
 
 
 @dataclass(frozen=True)

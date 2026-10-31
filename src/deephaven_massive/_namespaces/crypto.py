@@ -264,51 +264,28 @@ class _Crypto(Namespace):
     def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
-        Each row is one trade on one exchange: its price, size, exchange ID, conditions, and the
-        exchange's own (participant) time, which is the row's `Timestamp`. Each row also carries
-        its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and
-        `TimestampInsert`, when the library received it.
-
-        Transports: the stream verbs (`blink()`, `append_only()`, `ring()`, `last_by()`)
-        read the WebSocket `XT` channel; `history()` reads `/v3/trades/{cryptoTicker}` over
-        REST or the `global_crypto/trades_v1` flat files. Each pair's latest trade is
-        `last_trade()`. No verb takes a `limit`: `history()` pages internally through every
-        row of the range.
-
-        `dm.ALL` streams every pair and reads every pair's flat files;
-        `history(source=dm.HistorySource.REST)` with `dm.ALL` raises `ValueError` (the REST
-        endpoint takes one pair per request).
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#trades.
-
-        A pair missing from Massive's crypto ticker list (read once per session, listed and delisted
-        pairs alike) is refused later, since the stream's topic spells the pair as two currencies: a
-        stream verb raises `MassiveError` when it starts, and a symbol table that adds one fails the
-        stream.
+        Each row is one trade on one exchange; `Timestamp` is the exchange's own time and `Date` its
+        UTC date. The stream verbs read the WebSocket; `history()` reads REST or the flat files.
+        Each pair's latest trade alone is `last_trade()`. A pair missing from Massive's crypto
+        ticker list (read once per session, delisted pairs included) is refused when the verb runs,
+        since Massive spells it as two currencies.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, a Deephaven table with a `Symbol` column (followed live by the
-                stream verbs), or `dm.ALL`.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`, which
+                `history()` reads only from the flat files. See README.md#symbols.
 
         Returns:
-            The query. No request is made and no stream is opened until a verb is called.
+            A query. Columns: docs/datasets/crypto.trades.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, a table,
-                or `dm.ALL`.
-            ValueError: For a symbol that is not Massive's `X:` crypto ticker, or that carries
-                another class's prefix, an empty sequence or exhausted generator, or a table without
-                a `Symbol` column. Also for `symbols` of None, with a message that names the forms
-                it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a symbol is not an `X:` crypto ticker, the sequence is empty, a table has
+                no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
 
-                q = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"])
-                live = q.append_only()
-                day = q.history("2026-01-02", "2026-01-02")
+                live = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).append_only()
         """
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
@@ -316,45 +293,25 @@ class _Crypto(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each crypto pair.
 
-        One row per pair: its most recent trade, in the columns of its kind that its endpoint
-        fills: its price, size, exchange ID, conditions, and time (`Timestamp`), its trading day
-        `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and `TimestampInsert`, when
-        the library received it. The endpoint carries no trade ID and no received time, so the
-        table has neither column. Served by REST (`/v1/last/crypto/{from}/{to}`) through
-        `fetch()` and `poll()`, one request per pair; `poll()` replaces the table each cycle,
-        keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last
-        trade when it is new, so a trade between two cycles is never seen (`trades()` streams
-        every one). Some plans lack the endpoint (HTTP 403 raises `EntitlementError`);
-        `snapshots(symbols)` also carries each pair's last trade, on a plan that includes
-        snapshots (see
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
-        A pair with no trade (HTTP 404) is left out, with a WARNING.
-
-        `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
-        since the endpoint takes one pair per request: use `m.crypto.snapshots(dm.ALL).fetch()`.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#last_trade.
-
-        The path takes the pair as two currencies, split by Massive's crypto ticker list (read once
-        per session, listed and delisted pairs alike), so a pair missing from it makes `fetch()`
-        raise `MassiveError` and fails a `poll()` table.
+        One row per pair, from one REST request per pair; it carries no trade ID and no received
+        time. An explicit `mode=dm.PollMode.APPEND` appends each cycle's trade when it is new, so a
+        trade between two cycles is never seen (`trades()` streams every one). Some plans lack this
+        endpoint (`EntitlementError`); `snapshots(symbols)` also carries each pair's last trade. A
+        pair with no trade (HTTP 404) is left out, with a WARNING. A pair missing from Massive's
+        crypto ticker list (read once per session, delisted pairs included) is refused when the verb
+        runs, since Massive spells it as two currencies.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
-                cycle.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
+                `m.crypto.snapshots(dm.ALL)`. See README.md#symbols.
 
         Returns:
-            The query. No request is made until a verb is called.
+            A query. Columns: docs/datasets/crypto.last_trade.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, or a
-                table.
-            ValueError: For `dm.ALL`, a symbol that is not Massive's `X:` crypto ticker, or that
-                carries another class's prefix, an empty sequence or exhausted generator, or a table
-                without a `Symbol` column. Also for `symbols` of None, with a message that names the
-                forms it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
+            ValueError: If `symbols` is `dm.ALL` or None, a symbol is not an `X:` crypto ticker, the
+                sequence is empty, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -373,39 +330,22 @@ class _Crypto(Namespace):
     def quotes(self, symbols: Symbols) -> StreamQuery:
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
-        Each row is one exchange's top of book for one pair, with its bid and ask prices and
-        sizes and the exchange's (participant) time, which is the row's `Timestamp`. Each row
-        also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
-        `Timestamp`), and `TimestampInsert`, when the library received it.
-
-        Transports: the WebSocket `XQ` channel only, through the stream verbs (`blink()`,
-        `append_only()`, `ring()`, `last_by()`). Massive serves no crypto quote history and no
-        last-quote endpoint, so the query has no `history()` and no `fetch()`; a stream has
-        no `limit`. `m.crypto.snapshots(symbols).poll(n)` is the polled view of current
-        state. `dm.ALL` subscribes to every pair.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#quotes.
-
-        A pair missing from Massive's crypto ticker list (read once per session, listed and delisted
-        pairs alike) is refused later: a stream verb raises `MassiveError` when it starts, and a
-        symbol table that adds one fails the stream.
+        Each row is one exchange's top of book for one pair. Stream only: Massive serves no crypto
+        quote history and no last quote, so poll `snapshots(symbols)` for current state. A pair
+        missing from Massive's crypto ticker list (read once per session, delisted pairs included)
+        is refused when the verb runs, since Massive spells it as two currencies.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, a Deephaven table with a `Symbol` column (followed live), or
-                `dm.ALL`.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`. See
+                README.md#symbols.
 
         Returns:
-            The query. No stream is opened until a verb is called.
+            A query. Columns: docs/datasets/crypto.quotes.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, a table,
-                or `dm.ALL`.
-            ValueError: For a symbol that is not Massive's `X:` crypto ticker, or that carries
-                another class's prefix, an empty sequence or exhausted generator, or a table without
-                a `Symbol` column. Also for `symbols` of None, with a message that names the forms
-                it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a symbol is not an `X:` crypto ticker, the sequence is empty, a table has
+                no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
@@ -440,86 +380,33 @@ class _Crypto(Namespace):
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
-        Each row is one bar of one pair: open, high, low, close, volume, and, where the
-        transport supplies them, the volume-weighted average price and the trade count. It
-        carries its window, from `TimestampStart` to the exclusive `TimestampEnd`, its trading
-        day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`, when the library
-        received it. `TimestampEnd` is the first instant at which the bar is complete, so join
-        on it (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table`
-        is a table a verb such as `history()` returned) to attach only closed bars; an intraday
-        bar ends its length after its start, and a bar of a day or longer at
-        00:00 UTC after its window's last day. `Date` is null for a bar that spans more than one
-        UTC date.
-
-        The timespan and multiplier decide the transports and so the query's class:
-
-        - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1` (the default) streams the
-          WebSocket `XAS` or `XA` channel (`blink()`, `append_only()`, `ring()`,
-          `last_by()`) and has `history()`: a `StreamHistoryQuery`.
-        - Anything else is history only: a `HistoryQuery`. Each pair's bar of the previous
-          completed day is `previous_day_bar()`.
-
-        `history()` reads the aggregates range endpoint over REST, one pair at a time, or the
-        `global_crypto/minute_aggs_v1` and `global_crypto/day_aggs_v1` flat files for 1-minute
-        and 1-day bars. Crypto has no splits or other corporate actions, so its bars are never
-        adjusted: there is no `adjusted` choice and the library sends Massive's `adjusted`
-        parameter on no request. There is no `limit`: `history()` pages internally (the
-        endpoint's own `limit` counts base aggregates, not rows, so it cannot cap rows).
-
-        A 1-day bar covers one UTC day and starts at 00:00 UTC of that day, whatever the source. The
-        `global_crypto/day_aggs_v1` files stamp it at the day's last millisecond (23:59:59.999 UTC),
-        which is moved to 00:00 UTC. Massive's documented REST samples do not sit on a UTC day
-        boundary (the aggregates range at midnight New York time, grouped daily at times such as
-        20:48 UTC), which would be another day cut, so a 1-day bar stamped anywhere in its UTC day
-        but its first or last millisecond fails the call with `MassiveError` naming the source,
-        rather than being relabelled; so does a REST bar of several days or longer not stamped at
-        00:00 UTC, or a week not stamped on its Sunday or a month, quarter, or year not on its 1st.
-        The day cut of live REST data is not verified yet: if it follows those samples, crypto 1-day
-        bars come only from the flat files (`source=dm.HistorySource.FLAT_FILES`).
-        `HistorySource.AUTO` picks the source as for every other dataset; the check keeps the bars
-        of both sources the same UTC days. `history()` keeps only bars whose whole window lies
-        inside the requested range and has ended; weeks run Sunday to Saturday, as Massive starts
-        them, and months are whole calendar months.
-
-        `dm.ALL` streams every pair. Its `history()` reads the flat files for 1-minute and
-        1-day bars, and the grouped-daily endpoint, one request per day, for 1-day bars over
-        REST; every other timespan raises `ValueError` with `dm.ALL` (no flat file holds those
-        bars, and the range endpoint takes one pair per request).
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#bars.
-
-        A pair missing from Massive's crypto ticker list (read once per session, listed and delisted
-        pairs alike) is refused later: a stream verb raises `MassiveError` when it starts, and a
-        symbol table that adds one fails the stream. `history()` needs no split.
+        Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
+        stream from the WebSocket; every other length is history only. Days are UTC days and weeks
+        run Sunday to Saturday. A 1-day bar that Massive stamps elsewhere than its UTC day's first
+        or last millisecond is served on the day it falls on, with a WARNING. Crypto has no
+        corporate actions, so there is no `adjusted`. Bar windows, stamps, and which bars
+        `history()` returns follow README.md#bars. A pair missing from Massive's crypto ticker list
+        (read once per session, delisted pairs included) is refused when the verb runs, since
+        Massive spells it as two currencies.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The unit of the bar window, a `dm.Timespan`; required, with no default.
-                `Timespan.SESSION` is for futures only.
-            multiplier: How many `timespan` units one bar spans, a positive integer; 1 by
-                default. Only 1 streams.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL` (`history()`
+                takes it for one-minute and one-day bars). See README.md#symbols.
+            timespan: The bar unit; required. See README.md#timespan-and-multiplier.
+            multiplier: Units per bar; only 1 streams.
 
         Returns:
-            The query; its class follows from `timespan` and `multiplier` as above. No request
-            is made and no stream is opened until a verb is called.
+            A query of the class the timespan picks. Columns: docs/datasets/crypto.bars.md.
 
         Raises:
-            TypeError: For a `timespan` that is not a `dm.Timespan` (a plain string such as
-                `"minute"` included), a `multiplier` that is not an `int`, or `symbols` of another
-                type than a string, a sequence of strings, a table, or `dm.ALL`.
-            ValueError: For `Timespan.SESSION` (futures only), a `multiplier` that is not positive,
-                or a symbol that is not Massive's `X:` crypto ticker, or that carries another
-                class's prefix, an empty sequence or exhausted generator, or a table without a
-                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
-                takes.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `timespan` is `SESSION`, `multiplier` is below 1, or `symbols` is empty,
+                None, or holds a symbol that is not an `X:` crypto ticker.
 
         Example:
             ::
 
-                live = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()
-                hourly = m.crypto.bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=4).history(
+                hourly = m.crypto.bars("X:BTCUSD", dm.Timespan.HOUR).history(
                     "2026-01-01", "2026-01-07"
                 )
         """
@@ -538,44 +425,22 @@ class _Crypto(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
-        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of its
-        kind that its endpoint fills: open, high, low, close, volume, the volume-weighted average
-        price, and the trade count, its window, from `TimestampStart`, 00:00 UTC, to the exclusive
-        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd` text),
-        and `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/aggs/ticker/{cryptoTicker}/prev`) through `fetch()` and `poll()`, one request per
-        pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new day's bar. Crypto has no corporate actions, so
-        there is no `adjusted` argument. A pair with no bar (HTTP 404) is left out, with a WARNING.
-
-        A bar stamped at the first or last millisecond of its UTC day starts at 00:00 UTC of
-        that day; Massive's documented sample of this endpoint sits at midnight New York time,
-        another day cut, so a bar stamped anywhere else in its day fails the call with
-        `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()` for that day, rather
-        than being relabelled. The day cut of live data is not verified yet.
-
-        `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
-        since the endpoint takes one pair per request: use
-        `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` for every pair's bar of a day.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#previous_day_bar.
+        One row per pair, from one REST request per pair: the 1-day bar of the previous completed
+        UTC day. A bar stamped elsewhere than its UTC day's first or last millisecond is served on
+        the day it falls on, with a WARNING (README.md#bars). An explicit `mode=dm.PollMode.APPEND`
+        appends each new day's bar. A pair with no bar (HTTP 404) is left out, with a WARNING.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
-                cycle.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
+                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. See README.md#symbols.
 
         Returns:
-            The query. No request is made until a verb is called.
+            A query. Columns: docs/datasets/crypto.previous_day_bar.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, or a
-                table.
-            ValueError: For `dm.ALL`, a symbol that is not Massive's `X:` crypto ticker, or that
-                carries another class's prefix, an empty sequence or exhausted generator, or a table
-                without a `Symbol` column. Also for `symbols` of None, with a message that names the
-                forms it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
+            ValueError: If `symbols` is `dm.ALL` or None, a symbol is not an `X:` crypto ticker, the
+                sequence is empty, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -598,40 +463,23 @@ class _Crypto(Namespace):
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
-        Each row is one fair-market-value update of one pair: Massive's proprietary estimate of
-        its price and the time of the estimate, which is the row's `Timestamp`. Each row also
-        carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`),
-        and `TimestampInsert`, when the library received it.
-
-        Transports: the WebSocket `FMV` channel only, through the stream verbs (`blink()`,
-        `append_only()`, `ring()`, `last_by()`), served from `business.massive.com/crypto`
-        and available on Business plans. The verbs themselves never raise for a missing plan:
-        when Massive refuses the topic, the stream's table fails with `EntitlementError`, and
-        when it rejects the key on that host, with `AuthenticationError`. There is no history,
-        no `fetch()`, and no `limit`. `dm.ALL` subscribes to every pair.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#fmv.
-
-        A pair missing from Massive's crypto ticker list (read once per session, listed and delisted
-        pairs alike) is refused later: a stream verb raises `MassiveError` when it starts, and a
-        symbol table that adds one fails the stream.
+        Each row is one update of Massive's proprietary price estimate, from its Business feed. A
+        plan without it fails the stream's table with `EntitlementError`
+        (README.md#plans-and-errors). Stream only: no `history()` or `fetch()`. A pair missing from
+        Massive's crypto ticker list (read once per session, delisted pairs included) is refused
+        when the verb runs, since Massive spells it as two currencies.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, a Deephaven table with a `Symbol` column (followed live), or
-                `dm.ALL`.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`. See
+                README.md#symbols.
 
         Returns:
-            The query. No stream is opened until a verb is called.
+            A query. Columns: docs/datasets/crypto.fmv.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, a table,
-                or `dm.ALL`.
-            ValueError: For a symbol that is not Massive's `X:` crypto ticker, or that carries
-                another class's prefix, an empty sequence or exhausted generator, or a table without
-                a `Symbol` column. Also for `symbols` of None, with a message that names the forms
-                it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a symbol is not an `X:` crypto ticker, the sequence is empty, a table has
+                no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
@@ -644,46 +492,27 @@ class _Crypto(Namespace):
     def snapshots(self, symbols: Symbols) -> Query:
         """The current state of crypto pairs: today's, the last minute's, and yesterday's bars.
 
-        Each row is one pair: today's open, high, low, close, volume, and VWAP; the latest
-        minute bar; the previous day's bar; the last trade; today's change and percentage
-        change; and the time the snapshot was last updated. Massive clears the snapshot at
-        midnight Eastern time and fills it as trades arrive.
-
-        Transports: REST, `/v2/snapshot/locale/global/markets/crypto/tickers`, with the
-        pairs in `tickers`: one request for up to 250 pairs, and one more for each further 250,
-        so that no URL grows too long; `dm.ALL` is one request. `fetch()` returns every row of
-        the responses and `poll(interval)` repeats them, keyed by `Symbol`
-        (`PollMode.REPLACE` by default). The endpoint is not paginated and there is no
-        `limit`. It needs a Currencies Starter plan or above, as the crypto
-        streams do. The streams' `last_by()` never seeds from REST; poll this dataset for the
-        current state of pairs instead.
-
-        `dm.ALL` returns every traded pair.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#snapshots.
+        One row per pair: today's bar, the latest minute bar, the previous day's bar, the last
+        trade, and today's change. Massive clears the snapshot at midnight Eastern time and refills
+        it as trades arrive. Up to 250 pairs go in one request. The streams' `last_by()` never seeds
+        from REST: poll this dataset for the current state instead.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, a Deephaven table with a `Symbol` column (read once per `poll()`
-                cycle), or `dm.ALL` for the whole market.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL` for every
+                traded pair. See README.md#symbols.
 
         Returns:
-            The query. No request is made until a verb is called.
+            A query. Columns: docs/datasets/crypto.snapshots.md.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, a table,
-                or `dm.ALL`.
-            ValueError: For a symbol that is not Massive's `X:` crypto ticker, or that carries
-                another class's prefix, an empty sequence or exhausted generator, or a table without
-                a `Symbol` column. Also for `symbols` of None, with a message that names the forms
-                it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a symbol is not an `X:` crypto ticker, the sequence is empty, a table has
+                no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
 
-                board = m.crypto.snapshots(["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"]).poll(5)
-                market = m.crypto.snapshots(dm.ALL).fetch()
+                board = m.crypto.snapshots(["X:BTCUSD", "X:ETHUSD"]).poll(5)
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
 
@@ -691,29 +520,20 @@ class _Crypto(Namespace):
     def movers(self, direction: Direction) -> Query:
         """The 20 crypto pairs that gained or lost the most since the previous day's close.
 
-        Each row is one pair, in the same columns as `snapshots()`: today's, the last
-        minute's, and yesterday's bars, the last trade, and today's change. Massive ranks the
-        pairs by percentage change and clears the list at midnight Eastern time.
-
-        Transports: one REST request,
-        `/v2/snapshot/locale/global/markets/crypto/{direction}`. `fetch()` returns the
-        response's rows and `poll(interval)` repeats it, keyed by `Symbol`
-        (`PollMode.REPLACE` by default, so pairs that leave the list are removed). There is
-        no `limit` and no `symbols`: the endpoint chooses the pairs. A polled movers table
-        can itself be the `symbols` of another dataset, which then follows the list.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#movers.
+        Rows have the columns of `snapshots()`, ranked by percentage change; Massive clears the list
+        at midnight Eastern time. A `poll()` table keeps one row per pair, so pairs leave as the
+        ranking changes, and it can be the `symbols` of another dataset, which then follows the
+        list.
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
 
         Returns:
-            The query. No request is made until a verb is called.
+            A query. Columns: docs/datasets/crypto.movers.md.
 
         Raises:
-            TypeError: For a `direction` that is not a `dm.Direction` (a plain string such as
-                `"gainers"` included).
+            TypeError: If `direction` is not a `dm.Direction` (a plain string such as `"gainers"`
+                included).
 
         Example:
             ::
@@ -728,54 +548,33 @@ class _Crypto(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
-        Each row is one pair on one day: its open and close prices, and the first and last
-        trades of the day (`OpenTrades` and `ClosingTrades`, JSON text). The crypto day runs
-        from midnight to midnight UTC, which is the row's `TimestampStart` to `TimestampEnd`;
-        a row Massive marks as not UTC (`IsUtc` false) is served with that UTC window too, and
-        logs one WARNING per session: Massive cut its day elsewhere, so its dates may not line
-        up with the other crypto tables'.
-
-        Transports: REST, `/v1/open-close/crypto/{from}/{to}/{date}`, one request per pair.
-        `fetch()` returns one row per pair and `poll(interval)` repeats the requests, keyed
-        by `Symbol`. There is no `limit`. Crypto has no splits or other corporate actions,
-        so there is no `adjusted` choice and Massive's `adjusted` parameter is never sent.
-
-        `dm.ALL` raises `ValueError`: the endpoint takes one pair per request. The daily bars
-        of every pair are `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-
-        Columns: `columns()` on the query, the web UI's column tooltips, or
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#daily_open_close.
-
-        A pair missing from Massive's crypto ticker list (read once per session, listed and delisted
-        pairs alike) is refused later, since the path takes the pair as two currencies: `fetch()`
-        raises `MassiveError`, and a `poll()` table fails with it. Since the list holds delisted
-        pairs too, a past date of a pair no longer traded still resolves.
+        One row per pair, from one REST request per pair: the day's open and close, and its first
+        and last trades (`OpenTrades` and `ClosingTrades`, JSON text). The window is the UTC day. A
+        row Massive marks as not UTC (`IsUtc` false) is still served with the UTC day's window and
+        logs one WARNING per session, since its dates may not line up with the other crypto tables'.
+        A pair missing from Massive's crypto ticker list (read once per session, delisted pairs
+        included) is refused when the verb runs, since Massive spells it as two currencies; delisted
+        pairs still resolve for past dates.
 
         Args:
-            symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
-                sequence, or a Deephaven table with a `Symbol` column (read once per
-                `poll()` cycle).
-            date: The UTC day, as `"YYYY-MM-DD"`, a `date`, Deephaven date text such as
-                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
-                calendar date, so a `datetime` or an instant raises `ValueError`.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
+                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. See README.md#symbols.
+            date: The UTC day, as a calendar date (`"2026-01-02"`, a `date`, or any `DateLike`
+                date); a `datetime` or an instant is refused. See README.md#time.
 
         Returns:
-            The query. No request is made until a verb is called.
+            A query. Columns: docs/datasets/crypto.daily_open_close.md.
 
         Raises:
-            TypeError: For a `date` of none of the `DateLike` types, or `symbols` of an
-                unsupported type.
-            ValueError: For `dm.ALL`, a `datetime` or other time as `date`, text that is neither
-                an ISO-8601 date nor Deephaven date text, a symbol that is not Massive's `X:`
-                crypto ticker or that carries another class's prefix, an empty sequence or
-                exhausted generator, or a table without a `Symbol` column. Also for `symbols` of
-                None, with a message that names the forms it takes.
+            TypeError: If `date` is not a `DateLike`, or `symbols` has an unsupported type.
+            ValueError: If `symbols` is `dm.ALL` or None, `date` is a time rather than a date or is
+                text that is not a date, a symbol is not an `X:` crypto ticker, the sequence is
+                empty, or a table has no `Symbol` column.
 
         Example:
             ::
 
-                q = m.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02")
-                opens = q.fetch().view(["Symbol", "Open", "Close"])
+                q = m.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02").fetch()
         """
         return cast(
             "Query",
