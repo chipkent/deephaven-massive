@@ -200,6 +200,20 @@ def test_creating_a_session_logs_its_configuration_without_secrets(
         assert secret not in line
 
 
+def test_the_logged_configuration_never_shows_a_url_s_password(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = dm.MassiveConfig(
+        api_key="k", s3_endpoint_url="https://reader:hunter2@files.massive.com"
+    )
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._session"):
+        m = dm.MassiveSession(config)
+    m.close()
+    [line] = [r.getMessage() for r in caplog.records if "with api_key set" in r.getMessage()]
+    assert "s3_endpoint_url='https://***@files.massive.com'" in line
+    assert "hunter2" not in caplog.text
+
+
 def test_config_must_be_a_massive_config() -> None:
     with pytest.raises(TypeError, match=r"config must be a dm\.MassiveConfig"):
         dm.MassiveSession(cast("dm.MassiveConfig", {"api_key": "k"}))

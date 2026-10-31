@@ -1399,7 +1399,7 @@
    ],
    "fields": [
     {"column": "ProductCode", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "product_code"},
-    {"column": "DetailsSettlementDate", "conversion": "date-as-epoch", "required": false, "type": "epoch", "unit": "ns", "wire_key": "details.settlement_date"},
+    {"column": "DetailsSettlementDate", "conversion": "chicago-midnight-date", "required": false, "type": "date", "unit": null, "wire_key": "details.settlement_date"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "LastMinuteOpen", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.open"},
     {"column": "LastMinuteHigh", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.high"},

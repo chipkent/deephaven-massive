@@ -277,15 +277,25 @@ def test_required_keys_resolve_to_the_fields_behind_them() -> None:
     ]
 
 
-def test_the_fmv_channel_takes_the_magnitude_rule() -> None:
-    fmv = (W, "stocks/FMV")
+@pytest.mark.parametrize(
+    ("name", "channel", "time_key"),
+    [
+        ("stocks.fmv", "stocks/FMV", "FmvLastUpdated"),
+        ("stocks.luld", "stocks/LULD", "UnixTimestamp"),
+    ],
+)
+def test_a_time_documented_in_two_units_is_read_by_magnitude(
+    name: str, channel: str, time_key: str
+) -> None:
+    # The documentation and its samples disagree on milliseconds and nanoseconds, so the
+    # spec refresh gives the field the magnitude rule, which reads either.
     stream = spec(
-        "stocks.fmv",
-        {fmv: SourceKeys(KeySpec("Ticker"), KeySpec("FmvLastUpdated"))},
+        name,
+        {(W, channel): SourceKeys(KeySpec("Ticker"), KeySpec(time_key))},
         asset_class=AssetClass.STOCKS,
     )
-    time = next(c for c in rename(stream, source(*fmv)) if c.column == "Timestamp")
-    assert time.unit is TimeUnit.FMV_MAGNITUDE
+    time = next(c for c in rename(stream, source(W, channel)) if c.column == "Timestamp")
+    assert time.unit is TimeUnit.MS_OR_NS
 
 
 def test_rename_refuses_a_key_the_source_lacks() -> None:

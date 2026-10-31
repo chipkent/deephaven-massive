@@ -441,6 +441,10 @@ class Subscriptions:
     def _acknowledge(self, topics: tuple[str, ...]) -> None:
         """Mark topics acknowledged in the current generation.
 
+        Topics in `NO_ACK` that are acknowledged now, late, are logged at INFO, the recovery
+        of the WARNING `_report_no_ack` logged for them; one whose WARNING is still waiting for
+        its step to resolve leaves that WARNING instead, so it is never reported as missing.
+
         Args:
             topics: The topics the status names; empty when its message could not be parsed,
                 which acknowledges the whole step in flight.
@@ -453,13 +457,24 @@ class Subscriptions:
                     "whole subscription in flight"
                 )
             topics = self._unanswered()
+        late = []  # topics in `NO_ACK` that Massive acknowledges after all
         for topic in topics:
             if topic in self._sent:
+                if topic in self._unreported:  # its WARNING was not logged yet: none is due
+                    self._unreported.remove(topic)
+                elif topic in self._noack:
+                    late.append(topic)
                 self._acked.add(topic)
                 self._noack.discard(topic)
                 self._pending.discard(topic)
                 self._cancel(topic)
                 self._resend_resolved(topic)
+        if late:
+            logger.info(
+                "generation %d: Massive acknowledged %s after all; they leave NoAckTopics",
+                self.generation,
+                bounded_list(sorted(late)),
+            )
 
     def _refuse_status(self, status: Status) -> None:
         """Apply a refusal: of the topics it names, or else of the one topic it surely answers.

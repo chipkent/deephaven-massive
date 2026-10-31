@@ -499,6 +499,26 @@ def test_a_round_of_an_ended_generation_does_nothing() -> None:
     assert loop.sender.take() == []
 
 
+def test_a_no_ack_topic_acknowledged_before_its_warning_is_never_reported_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.timers.fire()  # both are re-sent once
+    [timer] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    with caplog.at_level(logging.INFO, logger=subscriptions.__name__):
+        # T.AAPL turns NO_ACK while T.MSFT keeps the step in flight, so its WARNING waits.
+        loop.timers.timers.remove(timer)
+        timer.callback(*timer.args)
+        assert loop.subs.no_ack == {"T.AAPL"}
+        loop.subs.status(ack("T.AAPL"))
+        loop.subs.status(ack("T.MSFT"))  # the step resolves
+    assert loop.subs.no_ack == frozenset()
+    # Neither a WARNING that T.AAPL went unacknowledged nor a recovery from one.
+    assert caplog.records == []
+
+
 def test_a_new_generation_clears_the_no_acks() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL"])
@@ -512,16 +532,26 @@ def test_a_new_generation_clears_the_no_acks() -> None:
     assert loop.subs.no_ack == frozenset()
 
 
-def test_a_late_acknowledgement_clears_a_no_ack() -> None:
+def test_a_late_acknowledgement_clears_a_no_ack(caplog: pytest.LogCaptureFixture) -> None:
     loop = make_loop()
-    loop.subs.add(["T.AAPL"])
+    loop.subs.add(["T.AAPL", "T.MSFT"])
     loop.subs.opened(1)
+    loop.subs.status(ack("T.MSFT"))
     loop.timers.fire()
     loop.timers.fire()
-    assert loop.subs.counts() == (1, 0, 0, 1)
-    loop.subs.status(ack("T.AAPL"))
-    assert loop.subs.counts() == (1, 1, 0, 0)
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",)), ("subscribe", 1, ("T.AAPL",))]
+    assert loop.subs.counts() == (2, 1, 0, 1)
+    with caplog.at_level(logging.INFO, logger=subscriptions.__name__):
+        loop.subs.status(ack("T.AAPL"))
+        loop.subs.status(ack("T.MSFT"))  # acknowledged already: no recovery to log
+    assert loop.subs.counts() == (2, 2, 0, 0)
+    # The recovery of the NO_ACK WARNING, at INFO.
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
+        "generation 1: Massive acknowledged 1 [T.AAPL] after all; they leave NoAckTopics"
+    ]
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.AAPL", "T.MSFT")),
+        ("subscribe", 1, ("T.AAPL",)),
+    ]
 
 
 def test_a_watchdog_of_an_ended_generation_does_not_escalate() -> None:

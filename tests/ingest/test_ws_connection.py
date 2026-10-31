@@ -1158,6 +1158,8 @@ def test_a_lost_connection_warns_once_per_outage_and_its_reconnect_is_info(
     )
     back = [entry for entry in ours if "reconnected after" in entry[1]]
     assert [level for level, _ in back] == [logging.INFO]
+    # The socket is back, but no data has arrived on it yet.
+    assert re.fullmatch(rf"{re.escape(_URL)}: reconnected after \d+ s; re-subscribing", back[0][1])
     ws_session.session.release(result)
 
 
@@ -1179,6 +1181,61 @@ def test_an_outage_names_a_full_account_and_logs_once(
     down = [r for r in caplog.records if "the connection is down" in r.getMessage()]
     assert [r.levelno for r in down] == [logging.WARNING]
     assert "is down (the account has no free connection, max_connections)" in down[0].getMessage()
+    ws_session.session.release(result)
+
+
+def test_an_outage_that_comes_to_wait_for_a_slot_warns_of_the_full_account_once(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
+        # A reconnect first, then two waits for a free connection slot, all one outage.
+        for state in (WsState.RECONNECTING, WsState.WAITING_SLOT, WsState.WAITING_SLOT):
+            ws_session.on_loop(
+                connection, functools.partial(connection._on_state, state, time.time() + 30.0)
+            )
+    down = [r.getMessage() for r in caplog.records if "the connection is down" in r.getMessage()]
+    assert [m.split(";")[0] for m in down] == [
+        f"{_URL}: the connection is down (reconnecting)",
+        f"{_URL}: the connection is down (the account has no free connection, max_connections)",
+    ]
+    ws_session.session.release(result)
+
+
+def test_the_options_cap_warns_once_per_episode_with_its_changes_at_debug(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+
+    def note(old: int, new: int) -> None:
+        stream = next(iter(connection._streams.values()))
+        connection._log_note(stream, count=new, old_count=old, missing=frozenset())
+
+    with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
+        for old, new in ((0, 2), (2, 3), (3, 0)):
+            ws_session.on_loop(connection, functools.partial(note, old, new))
+    levels = [r.levelno for r in caplog.records if "stream 1:" in r.getMessage()]
+    # Deferred from none to some warns; a change of the count logs only at DEBUG; none
+    # deferred again is the recovery, at INFO.
+    assert levels == [logging.WARNING, logging.INFO]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=ws_connection.__name__):
+        ws_session.on_loop(connection, functools.partial(note, 2, 3))
+    assert [
+        (r.levelno, r.getMessage()) for r in caplog.records if "deferred, " in r.getMessage()
+    ] == [
+        (
+            logging.DEBUG,
+            (
+                "test.trades stream 1: 3 contracts deferred, 2 before; over capacity: 1/1000; "
+                "0 deferred"
+            ),
+        )
+    ]
     ws_session.session.release(result)
 
 
@@ -1250,6 +1307,7 @@ def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
@@ -1264,10 +1322,19 @@ def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
     assert re.fullmatch(_DOWN, row["Error"])
     assert row["State"] == "RUNNING"
     assert 280.0 < _left(ws_session, connection, 1) <= 300.0  # the default: five minutes
-    fake_ws_server.send(_ack("T.AAPL"))
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
-    assert _down(ws_session, connection) == set()
-    assert _down_since(ws_session, connection) is None  # the outage is over
+    with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
+        fake_ws_server.send(_ack("T.AAPL"))
+        wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
+        assert _down(ws_session, connection) == set()
+        assert _down_since(ws_session, connection) is None  # the outage is over
+    # Its real end, once data flows again, is logged at INFO.
+    (over,) = [r for r in caplog.records if "is over" in r.getMessage()]
+    assert over.levelno == logging.INFO
+    assert re.fullmatch(
+        rf"{re.escape(_URL)}: the outage that began at \S+Z is over after \d+ s: Massive "
+        "confirmed the subscriptions of its 1 live tables, or sent them rows",
+        over.getMessage(),
+    )
     assert streams_of(ws_session, dh_to_pylist)[0]["State"] == "RUNNING"
     ws_session.session.release(result)
 

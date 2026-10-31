@@ -40,7 +40,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`. | REST |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST |
 | `ProductCode` | String | The identifier for the contract's product. | REST |
-| `DetailsSettlementDate` | Instant | The day that this contract is settled. | REST |
+| `DetailsSettlementDate` | String | The day that this contract is settled. | REST |
 | `LastMinuteOpen` | double | The opening price at the start of the minute bar. | REST |
 | `LastMinuteHigh` | double | The highest price reached in the minute bar. | REST |
 | `LastMinuteLow` | double | The lowest price reached in the minute bar. | REST |

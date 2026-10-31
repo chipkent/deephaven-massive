@@ -45,9 +45,10 @@ guess: it returns every such day as unread (`FlatFileRead.unread`), keeping no r
 the query reads each from REST, where no rows means a day without trading. When nothing else
 can serve the call, Massive's order decides: it writes a day's file after the day ends, in date
 order, so a missing trading day's file with a later day's file after it (in the range, or
-looked for in the days after it, up to `ROLL_LIMIT`, 7 days, and before the current day) is a
-day without trading, a holiday, and is skipped with a WARNING; the first one with no later
-file may simply not be published yet, and the query raises. A futures exchange holiday folds
+looked for in the `ROLL_LIMIT`, 7 days, after the range's end, and before the current day) is a
+day without trading, a holiday, and is skipped with a WARNING. With no later file, a missing day
+within `ROLL_LIMIT` of the current day may simply not be published yet, and an older one has no
+file at all; the query raises, saying which. A futures exchange holiday folds
 into the next session, so in that case a futures range named by instants reads the later
 session file found too: its early-opened hours may lie inside the range. A range named by
 session dates never rolls forward: a date names its own session's file exactly.
@@ -114,7 +115,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -126,6 +127,7 @@ from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start, is_trading_day
+from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -179,6 +181,7 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
     from datetime import date
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -188,7 +191,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import Field, FlatFileClient
+    from deephaven_massive._massive import Field, FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
@@ -244,13 +247,15 @@ def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
 
 
 def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
-    """Tell whether a read's files are trimmed to their own days, to tile with REST's days.
+    """Tell whether the files' rows inside a day REST reads are dropped, to tile with REST.
 
     A range of instants keeps a file's rows by the call's range only, and a futures session
     a holiday folded into opens early, so its file holds hours that REST's read of the
-    holiday's session also returns. Trimming each file to its day's instants makes the files'
-    days and REST's days tile exactly. Bars of a day or longer are not trimmed: a session bar
-    starts before its session's open, and REST serves those bars by their `Date` instead.
+    holiday's session also returns. Dropping the files' rows that lie in the instants of a
+    day REST reads (`_outside_days`) makes the two sources tile exactly, and leaves every
+    other row where it is: a file may hold rows of a neighbouring session, which no other
+    source returns. Bars of a day or longer are not trimmed: a session bar starts before its
+    session's open, and REST serves those bars by their `Date` instead.
 
     Args:
         spec: The dataset.
@@ -264,6 +269,41 @@ def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
         return False
     timespan = request.timespan
     return not spec.is_bars or timespan is None or intraday(timespan)
+
+
+def _outside_days(
+    parts: Sequence[tuple[date, Table]],
+    *,
+    time_name: str,
+    tile: AssetClass,
+    days: Sequence[date],
+    exec_ctx: ExecutionContext,
+) -> list[tuple[date, Table]]:
+    """Drop the files' rows that lie in the instants of the days REST reads instead.
+
+    A day's instants are `[day_start(day), day_start(day + 1))` in the class's day rules (for
+    futures, its session's hours): exactly what REST reads for it. Only those rows are
+    dropped, so a file's rows of a neighbouring day or session that was read stay.
+
+    Args:
+        parts: The kept files' tables, each with its file's day.
+        time_name: The time column the instants are compared on (`Timestamp`, or a bar's
+            `TimestampStart`).
+        tile: The asset class whose day rules apply.
+        days: The days REST reads.
+        exec_ctx: The session's execution context, entered for the filter.
+
+    Returns:
+        The parts, each table filtered (a static `where`), in the same order.
+    """
+    excluded = " && ".join(
+        f"(epochNanos({time_name}) < {epoch_ns(day_start(tile, day))}L"
+        f" || epochNanos({time_name}) >= {epoch_ns(day_start(tile, day + _ONE_DAY))}L)"
+        for day in days
+    )
+    logger.debug("flat-file rows inside the days REST reads are dropped: %s", excluded)
+    with entered(exec_ctx):
+        return [(day, table.where(excluded)) for day, table in parts]
 
 
 def _ends_at_an_instant(spec: DatasetSpec, window: HistoryWindow) -> bool:
@@ -388,8 +428,7 @@ class _Transform:
 
     Attributes:
         dataset: The dataset name, for messages.
-        plan: What every file of the request reads and keeps; `plan_for` narrows its time
-            range to a file's own day when `tile` is set.
+        plan: What every file of the request reads and keeps.
         columns: Per schema column, in order: its type, its name, and the source column that
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
@@ -409,10 +448,6 @@ class _Transform:
             zone (`row_times.stamp_rule`); None otherwise.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
             None for ticks.
-        tile: The asset class whose day rules trim each file's rows to its own day's
-            instants, `[day_start(day), day_start(day + 1))` (for futures, its session's
-            hours), so a file's rows and REST's rows of another day never overlap; None to
-            trim only to the call's range.
         seen: What the read's futures files showed of other sessions' rows, for the
             sessions the read may have left incomplete (`FlatFileRead.uncertain`); its own
             per call, shared by the call's reader threads.
@@ -432,7 +467,6 @@ class _Transform:
     symbols: WireSymbols
     stamps: StampRule | None = None
     bars: BarBounds | None = None
-    tile: AssetClass | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
 
     @classmethod
@@ -537,22 +571,6 @@ class _Transform:
             stamps=stamps,
             bars=window.bars,
         )
-
-    def plan_for(self, key: _Key) -> ReadPlan:
-        """Return the read plan of one file: with `tile`, its time range is the file's own day.
-
-        Args:
-            key: The file.
-
-        Returns:
-            The request's plan; with `tile`, its time range narrowed to the file's own day.
-        """
-        plan = self.plan
-        if self.tile is None or plan.window_ns is None:
-            return plan
-        own = TimeRange(day_start(self.tile, key.day), day_start(self.tile, key.day + _ONE_DAY))
-        start, end = plan.window_ns
-        return replace(plan, window_ns=(max(start, own.start_ns), min(end, own.end_ns)))
 
     def apply(
         self, batch: pa.RecordBatch, *, received: int, key: _Key
@@ -680,7 +698,12 @@ class _Transform:
         values = batch[name]
         if source.unit is not None:
             sent = values
-            values, failed = masked_instants(source.unit, sent, time_column=name == self.time_name)
+            values, failed = masked_instants(
+                source.unit,
+                sent,
+                time_column=name == self.time_name,
+                label=f"{self.dataset}.{name}",
+            )
             first = first_failure(sent, failed)
             if first is not None:
                 odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
@@ -709,7 +732,7 @@ def _time_nanos(label: str, unit: TimeUnit, values: pa.Array) -> tuple[pa.Array,
         The nanoseconds, null where a value fails the routine; and the first failure's
         message (`timestamps.mismatch_message`), or `""` when no value fails.
     """
-    nanos, failed = masked_instants(unit, values, time_column=True)
+    nanos, failed = masked_instants(unit, values, time_column=True, label=label)
     first = first_failure(values, failed)
     return nanos, "" if first is None else mismatch_message(label, unit, first)
 
@@ -811,8 +834,7 @@ class FlatFileHistory:
             warnings=self._core.warnings,
             stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
-        if not infer_holidays and _tiles(spec, request, window):
-            transform = replace(transform, tile=cast("AssetClass", spec.asset_class))
+        tiled = not infer_holidays and _tiles(spec, request, window)
         keys = _keys(prefix, request.venues, dates)
         threads = f"{self._core.thread_prefix} call-{call} files"
         return self._read(
@@ -822,6 +844,7 @@ class FlatFileHistory:
             prefix=prefix,
             roll=_ends_at_an_instant(spec, window),
             infer_holidays=infer_holidays,
+            tile=cast("AssetClass", spec.asset_class) if tiled else None,
             threads=threads,
             stop=cast("Cancel | None", stop),
         )
@@ -835,6 +858,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool = False,
         infer_holidays: bool = True,
+        tile: AssetClass | None = None,
         threads: str,
         stop: Cancel | None = None,
     ) -> FlatFileRead:
@@ -865,6 +889,9 @@ class FlatFileHistory:
                 `infer_holidays` is set.
             infer_holidays: True to take a missing trading day with a later file for a day
                 without trading; False to report every missing trading day as unread.
+            tile: The asset class whose day rules give the instants of an unread day, which
+                REST reads: the kept files' rows inside them are dropped (`_outside_days`),
+                so the two sources never return a row twice. None to drop none.
             threads: The name prefix of the reader threads, such as `"massive #1 call-9 files"`.
             stop: A background read's stop token, which the call's cancel event follows; once
                 it is set, the call raises `MassiveError` naming the cancellation after the
@@ -898,8 +925,9 @@ class FlatFileHistory:
         trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
         later: list[tuple[date, Table]] = []
         unread: tuple[date, ...]
+        absent: tuple[date, ...] = ()
         if infer_holidays:
-            unpublished, later = self._after_missing(
+            unpublished, absent, later = self._after_missing(
                 spec,
                 transform,
                 keys=keys,
@@ -909,7 +937,11 @@ class FlatFileHistory:
                 stop=stop,
             )
             unread = () if unpublished is None else (unpublished,)
-            holidays = [day for day in trading if unpublished is None or day < unpublished]
+            holidays = [
+                day
+                for day in trading
+                if (unpublished is None or day < unpublished) and day not in absent
+            ]
         else:
             unread, holidays = tuple(trading), []
         for key in missing:
@@ -938,11 +970,19 @@ class FlatFileHistory:
         if not unread:
             # A later file read for a holiday's hours.
             kept.extend(later)
+        elif tile is not None:
+            kept = _outside_days(
+                kept,
+                time_name=transform.time_name,
+                tile=tile,
+                days=unread,
+                exec_ctx=self._core.exec_ctx,
+            )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
             empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
         return FlatFileRead(
-            tuple(kept), empty, unread, transform.seen.uncertain(transform.sessions)
+            tuple(kept), empty, unread, transform.seen.uncertain(transform.sessions), absent
         )
 
     def _after_missing(
@@ -955,19 +995,21 @@ class FlatFileHistory:
         prefix: str,
         roll: bool,
         stop: Cancel | None,
-    ) -> tuple[date | None, list[tuple[date, Table]]]:
-        """Tell the files missing at a range's end apart: a day without trading, or not out yet.
+    ) -> tuple[date | None, tuple[date, ...], list[tuple[date, Table]]]:
+        """Tell the files missing at a range's end apart: no trading, not out yet, or none.
 
         Massive writes a day's file after the day ends, in date order, so a missing trading
         day's file with a later day's file after it is a day without trading (a holiday), and
         one with no later file may simply not be published yet. For each venue (one, outside
         futures), the run of missing files that ends its keys is examined: a run of days
         without trading only (weekends) needs nothing; otherwise the days after the range are
-        looked for, trading days only, up to `ROLL_LIMIT` (7 days) past the run's first
-        missing trading day and never as far as `current_partition`, whose file cannot exist
-        yet. A file found makes the run days without trading. None found makes the run's
-        first missing trading day unpublished. No clock time is assumed: Massive's publication
-        time varies.
+        looked for, trading days only, up to `ROLL_LIMIT` (7 days) past the range's end and
+        never as far as `current_partition`, whose file cannot exist yet. A file found makes
+        the run days without trading. With none found, a missing trading day less than
+        `ROLL_LIMIT` before `current_partition` may be unpublished, and the earliest such day
+        is; an older one has no file at all (a file is published the day after its day, give
+        or take a weekend), whatever the length of the run. No clock time is assumed:
+        Massive's publication time varies.
 
         When `roll` is set (futures named by instants), the file found is read, since a
         holiday's trading folds into the next session, which opens early: the session of
@@ -991,8 +1033,9 @@ class FlatFileHistory:
                 should stop the reads.
 
         Returns:
-            The first unpublished day over all venues, or None; and the tables of the later
-            files read for `roll`, each with its file's day, in venue order.
+            The first unpublished day over all venues, or None; the missing trading days that
+            have no file at all, oldest first; and the tables of the later files read for
+            `roll`, each with its file's day, in venue order.
 
         Raises:
             MassiveError: `"<dataset> history: the read was cancelled"` once `stop` is set. A
@@ -1002,6 +1045,7 @@ class FlatFileHistory:
         cancel = threading.Event() if stop is None else stop
         current = current_partition(spec)
         unpublished: date | None = None
+        absent: set[date] = set()
         tables: list[tuple[date, Table]] = []
         for venue in dict.fromkeys(key.venue for key in keys):
             own = [key for key in keys if key.venue == venue]
@@ -1024,11 +1068,15 @@ class FlatFileHistory:
                 roll=roll,
                 cancel=cancel,
             )
-            if later is None:
-                unpublished = first.day if unpublished is None else min(unpublished, first.day)
-            else:
+            if later is not None:
                 tables.extend(later)
-        return unpublished, tables
+                continue
+            recent = [key.day for key in trading if key.day + ROLL_LIMIT >= current]
+            absent.update(key.day for key in trading if key.day + ROLL_LIMIT < current)
+            if recent:
+                earliest = min(recent)
+                unpublished = earliest if unpublished is None else min(unpublished, earliest)
+        return unpublished, tuple(sorted(absent)), tables
 
     def _later_file(
         self,
@@ -1047,8 +1095,9 @@ class FlatFileHistory:
         Args:
             spec: The dataset.
             transform: The request's block transform.
-            first: The run's first missing trading day's file.
-            after: The range's last partition date: the look starts the day after.
+            first: The run's first missing trading day's file, for its venue and the log.
+            after: The range's last partition date: the look starts the day after, and goes
+                on `ROLL_LIMIT` past it.
             current: `current_partition`: the look stops before it.
             prefix: The dataset's prefix, with its `{venue}` placeholder for futures.
             roll: True to read the file found; False to only open and close it.
@@ -1064,7 +1113,7 @@ class FlatFileHistory:
                 a failed request or read raises the public error `_read_key` raises.
         """
         name = None if first.venue is None else first.venue.value
-        day, limit = after, first.day + ROLL_LIMIT
+        day, limit = after, after + ROLL_LIMIT
         while (day := day + timedelta(days=1)) < current and day <= limit:
             if not is_trading_day(spec.asset_class, day):
                 continue
@@ -1224,16 +1273,10 @@ class FlatFileHistory:
             file = self._client.open(key.key)
             if file is None:
                 return None
-            with file, contextlib.closing(file.batches(transform.plan_for(key))) as batches:
+            with file, contextlib.closing(file.batches(transform.plan)) as batches:
                 self._check(cancel)
                 try:
-                    return self._gather(
-                        batches,
-                        transform,
-                        key=key,
-                        cancel=cancel,
-                        where=file.location,
-                    )
+                    return self._gather(batches, transform, key=key, cancel=cancel, file=file)
                 except pa.ArrowException as error:
                     raise MassiveError(
                         f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
@@ -1255,7 +1298,7 @@ class FlatFileHistory:
         *,
         key: _Key,
         cancel: threading.Event,
-        where: str,
+        file: FlatFile,
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
@@ -1263,15 +1306,18 @@ class FlatFileHistory:
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once.
+        read again is counted once. Then logs one DEBUG line with the rows after each step:
+        read, of the requested symbols, kept by the window (and a readable key), and kept as
+        whole bars of the requested sessions, so an empty table can be traced to the step
+        that emptied it.
 
         Args:
             batches: The file's batches, one per block, each with its drift.
             transform: The request's block transform.
             key: The file the batches come from.
             cancel: The call's cancel event, checked after each block.
-            where: The file's location (`s3://<bucket>/<key> at <endpoint>`), for the drift
-                WARNING.
+            file: The file, for its location (`s3://<bucket>/<key> at <endpoint>`), named in
+                the drift WARNING, and its row counts.
 
         Returns:
             The file's tables, in file order.
@@ -1281,9 +1327,11 @@ class FlatFileHistory:
         size = 0
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
+        served = 0
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
                 rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
+                served += rows.num_rows
                 found = found.merge(drift).merge(odd)
                 if rows.num_rows:
                     pending.append(rows)
@@ -1300,7 +1348,17 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
-        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=where)
+        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
+        logger.debug(
+            "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
+            "whole bars",
+            transform.dataset,
+            file.location,
+            file.rows_read,
+            file.rows_of_symbols,
+            file.rows_kept,
+            served,
+        )
         return tables
 
 

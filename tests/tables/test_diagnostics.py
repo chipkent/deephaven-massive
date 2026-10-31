@@ -3,6 +3,7 @@
 import contextlib
 import dataclasses
 import logging
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
@@ -23,6 +24,7 @@ from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
+from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
     QUERY_SHOWN,
@@ -658,30 +660,27 @@ def test_a_value_that_does_not_fit_warns_once_and_shows_with_a_question_mark(
 
 
 def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = DriftRegistry()
     first = DriftReport(dropped_rows=2, dropped_reason="row 0: no Ticker")
     later = DriftReport(dropped_rows=3, dropped_reason="row 4: no Ticker")
     with caplog.at_level(logging.DEBUG, logger=DRIFT_LOGGER):
         registry.report("stocks.trades", Transport.REST, first, where=WHERE)
+        # Within the interval, a drop is counted, not logged.
         registry.report("stocks.trades", Transport.WS, later, where="wss://h/stocks channel T")
         registry.report("stocks.trades", Transport.REST, DriftReport(), where=WHERE)
         registry.report("stocks.quotes", Transport.REST, first, where=WHERE)
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        # Once the interval has passed, the next drop logs the running count.
+        monkeypatch.setattr(diagnostics, "DROPPED_COUNT_INTERVAL", 0.0)
+        registry.report("stocks.trades", Transport.WS, later, where="wss://h/stocks channel T")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records[:2]] == [
         (
             logging.WARNING,
             (
                 f"stocks.trades: dropped 2 REST row(s) whose key cannot be read, the first at "
                 f"{WHERE}: row 0: no Ticker; such rows are dropped and counted, and the running "
                 "count is logged at DEBUG"
-            ),
-        ),
-        (
-            logging.DEBUG,
-            (
-                "stocks.trades: dropped 3 more WS row(s) whose key cannot be read at "
-                "wss://h/stocks channel T (5 so far): row 4: no Ticker"
             ),
         ),
         (
@@ -693,6 +692,14 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
             ),
         ),
     ]
+    (counted,) = caplog.records[2:]
+    assert counted.levelno == logging.DEBUG
+    # Every drop since the WARNING: 3 counted silently, then 3 more.
+    assert re.fullmatch(
+        r"stocks\.trades: dropped 6 more row\(s\) whose key cannot be read in the last \d+ s "
+        r"\(8 so far\); the latest WS at wss://h/stocks channel T: row 4: no Ticker",
+        counted.getMessage(),
+    )
     # Dropped rows add no entry to a row's drift: the log counts them.
     assert registry.record(1, "REST", first) is None
 

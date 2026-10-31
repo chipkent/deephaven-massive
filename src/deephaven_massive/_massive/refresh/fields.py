@@ -380,24 +380,14 @@ class SourceFields:
                 description=description,
             )
             fix = None
-        # A fix to an epoch is an integer count whose unit comes from UNITS, like any other.
-        to_epoch = fix is not None and fix.wire_type is WireType.EPOCH
         unit = self.unit(
             raw,
-            WireType.LONG if to_epoch else spec_type,
+            spec_type,
             long_name=long_names[-1],
             description=description,
             fixed=fix is not None,
         )
-        if to_epoch and unit is None:
-            self.problem(
-                Gate.TIMESTAMP_UNIT,
-                raw.wire_key,
-                "TYPE_FIXES makes it an epoch, but no UNITS entry gives its unit",
-                description=description,
-            )
-            return None
-        if unit is not None and fix is not None and not to_epoch:
+        if unit is not None and fix is not None:
             self.problem(
                 Gate.STALE_ENTRY,
                 raw.wire_key,

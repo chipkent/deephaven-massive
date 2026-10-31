@@ -134,9 +134,10 @@ _INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
 _FOREX: Final = re.compile(r"^C:[A-Z]{3}[A-Z]{3}$")
 """A canonical forex ticker: `C:` and two three-letter ISO 4217 codes."""
-_CRYPTO: Final = re.compile(r"^X:[A-Z0-9]+$")
+_CRYPTO: Final = re.compile(r"^X:[A-Z0-9]{4,}$")
 """A canonical crypto ticker: `X:` and the pair's two codes joined, whatever the quote; only a
-WebSocket topic needs the pair split into its two codes (`ws_symbol`)."""
+WebSocket topic needs the pair split into its two codes (`ws_symbol`). A pair is at least a
+base of one character and a quote of three, so a lone currency such as `X:BTC` is refused."""
 _FOREX_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
 _CURRENCIES: Final = re.compile(r"^[A-Z0-9]+$")
 _PAIR: Final = re.compile(r"^(?P<base>[A-Z0-9]+)[/-](?P<quote>[A-Z0-9]+)$")
@@ -678,12 +679,18 @@ def _convert_crypto(text: str) -> str:
         `X:` and the joined pair, such as `X:BTCUSD`.
 
     Raises:
-        ValueError: If the text is not a pair of letters and digits, or names another class.
+        ValueError: If the text is not a pair of letters and digits, is too short to hold a
+            base and a three-letter quote (`BTC` names one currency), or names another class.
     """
     _refuse_other_prefix(AssetClass.CRYPTO, text)
     symbol = read_crypto_pair(text.upper(), ("X:",))
     if symbol is None:
         raise ValueError(f"cannot read {text!r} as a crypto pair; write it as BASE-QUOTE")
+    if _CRYPTO.fullmatch(symbol) is None:
+        raise ValueError(
+            f"cannot read {text!r} as a crypto pair: it is too short to hold a base currency "
+            "and a quote currency; write it as BASE-QUOTE, such as 'BTC-USD'"
+        )
     return symbol
 
 
@@ -1134,8 +1141,9 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
 
     Raises:
         TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a pair of letters and digits, or carries another class's
-            prefix (`C:` is forex).
+        ValueError: If the text is not a pair of letters and digits, is too short to hold a
+            base and a three-letter quote (`BTC` names one currency, not a pair), or carries
+            another class's prefix (`C:` is forex).
     """
     return canonical_symbol(text, AssetClass.CRYPTO)
 

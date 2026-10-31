@@ -162,7 +162,7 @@ from deephaven_massive._ingest.rest_rows import (
     stamped,
     whole_bars,
 )
-from deephaven_massive._log_limits import log_once
+from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
@@ -174,7 +174,7 @@ from deephaven_massive._types import _All
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
-    from datetime import timedelta
+    from datetime import date, timedelta
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
@@ -207,9 +207,31 @@ _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists crypto tickers with their base and quote currencies."""
 _TICKERS_PAGE: Final = 1000
 """The rows per page of the crypto ticker list: the endpoint's largest page."""
+_TICKERS_REREAD: Final = 3600.0
+"""The seconds after which a ticker the crypto list does not hold makes the session read the list
+again, so a pair Massive lists later is found without a restart, at most once an hour."""
+
+
+def _monotonic() -> float:
+    """Return the monotonic clock the crypto ticker list's age is measured by; tests replace it.
+
+    Returns:
+        Seconds, as `time.monotonic` gives them.
+    """
+    return time.monotonic()
+
 
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
+
+_FACTS_LIMIT: Final = 10_000
+"""The most facts a session remembers having warned about (`RestState.first`); past it, it
+forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
+at the cost of warning about an old fact once more."""
+
+_ANSWER_SHOWN: Final = 200
+"""The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
+line shows it whole."""
 
 T = TypeVar("T")
 """The outcome of a shared lookup (`RestReader.wait_for_shared`)."""
@@ -300,9 +322,9 @@ class UnlistedPairError(PermanentError):
 
     A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
     `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
-    data gives; the session's crypto ticker list, read once, does not list the ticker, or gives
-    currencies that do not join to it (`RestReader.crypto_pair`). A `poll()` table fails with
-    it, since every later cycle would read the same list.
+    data gives; the session's crypto ticker list, read again on a miss at most once an hour,
+    does not list the ticker, or gives currencies that do not join to it
+    (`RestReader.crypto_pair`). A `poll()` table fails with it.
     """
 
 
@@ -328,6 +350,56 @@ def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     return rows.take(kept.sort())
 
 
+def _cut(text: str) -> str:
+    """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
+
+    Args:
+        text: The text.
+
+    Returns:
+        The text, or its first characters ending in `…` when it is longer.
+    """
+    return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
+
+
+def _page_rows(
+    batches: Sequence[pa.RecordBatch],
+    *,
+    window: HistoryWindow | None,
+    time_name: str,
+    fill: Callable[[pa.RecordBatch], pa.RecordBatch],
+    where: str,
+    read: int,
+) -> list[pa.RecordBatch]:
+    """Keep a page's rows of the `history()` window, fill their time columns, keep whole bars.
+
+    Logs one DEBUG line per page with the rows left after each step, so an empty table can be
+    traced to the step that emptied it.
+
+    Args:
+        batches: The page's converted rows, stamped.
+        window: The `history()` window, or None for `fetch()` and `poll()`.
+        time_name: The dataset's time column, for `keep_window`.
+        fill: Fills the library's time columns (`row_times.TimeRule.fill`).
+        where: The dataset, page, path, and symbol, for the line.
+        read: How many rows the page held, before conversion.
+
+    Returns:
+        The rows kept.
+    """
+    windowed = [keep_window(batch, window, time=time_name) for batch in batches]
+    whole = [whole_bars(fill(batch), window) for batch in windowed]
+    logger.debug(
+        "%s: %d rows read, %d converted, %d in the window, %d kept as whole bars",
+        where,
+        read,
+        sum(batch.num_rows for batch in batches),
+        sum(batch.num_rows for batch in windowed),
+        sum(batch.num_rows for batch in whole),
+    )
+    return whole
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """What one call returned.
@@ -335,10 +407,14 @@ class _Outcome:
     Attributes:
         batches: Its rows, in the dataset's schema.
         requests: How many requests it made (pages, and a dropped symbol's 404).
+        missing: The symbol Massive answered HTTP 404 for, so left out, with the futures
+            session it was asked for (`"ESZ6 for the session 2026-10-30"`); None when the call
+            was answered.
     """
 
     batches: tuple[pa.RecordBatch, ...]
     requests: int
+    missing: str | None = None
 
 
 class RestState:
@@ -351,11 +427,21 @@ class RestState:
     or change them; the host decisions (`hosts`, a `HostDecisionCache`), the client, and the
     pollers are thread-safe. It
     also holds, for the session, Massive's list of crypto tickers with their two currencies
-    (`RestReader.crypto_pair`): read once, on first need, by the first caller, while every
-    other caller waits on its future outside the lock.
+    (`RestReader.crypto_pair`): read on first need by the first caller, while every other
+    caller waits on its future outside the lock, and read again when a ticker it does not
+    hold is asked for and it is an hour old or more (`retire_crypto`).
     """
 
-    __slots__ = ("_client", "_crypto", "_lock", "_once", "hosts", "label", "pollers")
+    __slots__ = (
+        "_client",
+        "_crypto",
+        "_crypto_claimed",
+        "_lock",
+        "_once",
+        "hosts",
+        "label",
+        "pollers",
+    )
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -371,6 +457,7 @@ class RestState:
         self.hosts: Final = HostDecisionCache()
         self._once: set[tuple[str, ...]] = set()
         self._crypto: Future[CryptoTickers] | None = None
+        self._crypto_claimed = 0.0  # when the current read of the list was claimed (`_monotonic`)
 
     @property
     def client(self) -> RestClient:
@@ -402,7 +489,33 @@ class RestState:
             if self._crypto is not None:
                 return self._crypto, False
             self._crypto = Future()
+            self._crypto_claimed = _monotonic()
             return self._crypto, True
+
+    def retire_crypto(self, tickers: CryptoTickers) -> bool:
+        """Forget the session's crypto ticker list when it is old, so the next caller reads it.
+
+        A caller whose ticker the list does not hold calls it before refusing the ticker: a
+        pair Massive has listed since is then found. The list is retired only when it is the
+        one the caller read and was claimed `_TICKERS_REREAD` seconds ago or more, so the
+        session reads it at most once an hour however many tickers it misses, and callers that
+        miss at once retire it once.
+
+        Args:
+            tickers: The list the caller read.
+
+        Returns:
+            True when the caller should read the list again: it was retired now, or another
+            caller retired or replaced it meanwhile. False while it is the current list and
+            younger than `_TICKERS_REREAD`.
+        """
+        with self._lock:
+            future = self._crypto
+            if future is not None and succeeded_result(future) is tickers:
+                if _monotonic() - self._crypto_claimed < _TICKERS_REREAD:
+                    return False
+                self._crypto = None
+            return True
 
     def known_crypto(self) -> CryptoTickers | None:
         """Return the session's crypto ticker list if it is read, without claiming it.
@@ -432,17 +545,30 @@ class RestState:
     def first(self, *key: str) -> bool:
         """Tell whether a fact is seen for the first time in this session, and remember it.
 
+        The memory is bounded: once it holds `_FACTS_LIMIT` facts, a new one empties it first,
+        logged at DEBUG, so a fact forgotten then counts as new again.
+
         Args:
             *key: The fact, such as `("missing", "stocks.prev", "AAPL")`.
 
         Returns:
-            True the first time, False afterwards.
+            True the first time, and again after the memory was emptied; False otherwise.
         """
         with self._lock:
             if key in self._once:
                 return False
+            forgot = len(self._once) if len(self._once) >= _FACTS_LIMIT else 0
+            if forgot:
+                self._once.clear()
             self._once.add(key)
-            return True
+        if forgot:
+            logger.debug(
+                "%s: forgot the %d facts already warned about, past the limit of %d",
+                self.label,
+                forgot,
+                _FACTS_LIMIT,
+            )
+        return True
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -517,8 +643,10 @@ class RestReader:
         while another thread makes it, sharing that read rather than starting a second one; a
         caller that shares it still waits out no more of its pauses than its own patience
         covers (`wait_for_shared`). Holds no lock meanwhile. A failed read is not kept, so
-        the next call tries again. A read that succeeds is kept for the session as it is, even
-        when it lists no pair: every pair is then refused.
+        the next call tries again. A read that succeeds is kept, even when it lists no pair;
+        a ticker it does not hold makes the session read the list again before refusing it,
+        when the list is an hour old or more (`RestState.retire_crypto`), so a pair Massive
+        lists later is found without a restart, and the list is read at most once an hour.
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
@@ -538,8 +666,39 @@ class RestReader:
         ticker; nothing falls back to a guessed split.
         """
         where = f"{symbol!r} cannot be split into its two currencies"
+        tickers = self._listed_crypto(where, cancel)
+        entry = tickers.get(symbol)
+        if entry is None and self.state.retire_crypto(tickers):
+            logger.info(
+                "%s: Massive's crypto ticker list does not hold %s; reading the list again, "
+                "since it is an hour old or more",
+                self.state.label,
+                symbol,
+            )
+            tickers = self._listed_crypto(where, cancel)
+            entry = tickers.get(symbol)
+        if entry is None:
+            raise UnlistedPairError(f"{where}: Massive's reference data does not list it")
+        if isinstance(entry, str):
+            raise UnlistedPairError(f"{where}: {entry}")
+        return entry
+
+    def _listed_crypto(self, where: str, cancel: Cancel | None) -> CryptoTickers:
+        """Return the session's crypto ticker list for `crypto_pair`, naming the ticker on failure.
+
+        Args:
+            where: The start of every message: which ticker cannot be split.
+            cancel: The caller's stop token, or None.
+
+        Returns:
+            The list (`_crypto_tickers`).
+
+        Raises:
+            MassiveError: The failed read's public error, of the same type, status, and
+                request id, its message prefixed with `where`.
+        """
         try:
-            tickers = self._crypto_tickers(cancel)
+            return self._crypto_tickers(cancel)
         except MassiveError as public:
             raise type(public)(
                 f"{where}: reading Massive's crypto tickers failed: {public}",
@@ -547,12 +706,6 @@ class RestReader:
                 request_id=public.request_id,
                 cause=public.cause,
             ) from public
-        entry = tickers.get(symbol)
-        if entry is None:
-            raise UnlistedPairError(f"{where}: Massive's reference data does not list it")
-        if isinstance(entry, str):
-            raise UnlistedPairError(f"{where}: {entry}")
-        return entry
 
     def _crypto_tickers(self, cancel: Cancel | None) -> CryptoTickers:
         """Return the session's crypto ticker list, reading it on first need.
@@ -844,6 +997,16 @@ class RestReader:
                 outcomes = [run(call) for call in calls]
             else:
                 outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
+        missing = [o.missing for o in outcomes if o.missing is not None]
+        # One WARNING per read, naming each symbol once per session, however many there are.
+        new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
+        if new:
+            logger.warning(
+                "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",
+                spec.name,
+                bounded_list(new),
+                rest_path.template,
+            )
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -931,8 +1094,10 @@ class RestReader:
 
         Returns:
             The call's rows and request count; no rows for a per-symbol call whose first
-            request Massive answered with HTTP 404 (a symbol with no data), which logs one
-            WARNING per symbol and session.
+            request Massive answered with HTTP 404 (a symbol with no data), logged at DEBUG
+            and named in `missing`; `read` warns once per read for the symbols new to the
+            session. Each page logs one DEBUG line with its rows after each step
+            (`_page_rows`).
 
         Raises:
             MassiveError: If a per-symbol call's later page answers HTTP 404, so the symbol's
@@ -985,18 +1150,22 @@ class RestReader:
                 )
                 if record is not None:
                     record(drift)
-                self._warn_error_rows(converter, flagged, call.symbol)
+                self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
                     batches = [stamped(spec, template, batch, rule=stamps) for batch in batches]
-                filled = (
-                    times.fill(
-                        keep_window(batch, window, time=converter.time_name), received=received
+                kept.extend(
+                    _page_rows(
+                        batches,
+                        window=window,
+                        time_name=converter.time_name,
+                        fill=functools.partial(times.fill, received=received),
+                        where=f"{spec.name}: page {requests} of {template} for "
+                        f"{call.symbol or 'the request'}",
+                        read=len(page.rows),
                     )
-                    for batch in batches
                 )
-                kept.extend(whole_bars(rows, window) for rows in filled)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 # A 404 that arrives after the session closed is no answer about the symbol,
@@ -1026,15 +1195,16 @@ class RestReader:
                     else None
                 )
                 scope = "" if session is None else f" for the session {session}"
-                if self.state.first("missing", spec.name, call.symbol, scope):
-                    logger.warning(
-                        "%s: %s has no data%s (HTTP 404 from %s); it is left out",
-                        spec.name,
-                        call.symbol,
-                        scope,
-                        template,
-                    )
-                return _Outcome(tuple(kept), requests + 1)
+                logger.debug(
+                    "%s: %s has no data%s (HTTP 404 from %s, request_id %s: %s); it is left out",
+                    spec.name,
+                    call.symbol,
+                    scope,
+                    template,
+                    error.request_id,
+                    error.message,
+                )
+                return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._public(error) from error
         return _Outcome(tuple(kept), requests)
 
@@ -1060,9 +1230,14 @@ class RestReader:
         ticker's class's (`symbol_class`). An envelope `status` of `DELAYED` labels the whole
         page, so it is refused unless every class the request names is listed. A row's
         `timeframe` fields (`recency_labels.read_labels`, which never reads
-        `underlying_asset.timeframe`) label that row. Reference endpoints are never checked,
+        `underlying_asset.timeframe`) label that row. Forex and crypto data is never refused:
+        Massive has no delayed currencies feed, and `delayed_subscriptions` cannot list
+        `CURRENCIES`, so a label can name no remedy; the label still shows as `DELAYED`.
+        Reference endpoints are never checked,
         and a page of no subscription and no tickers (economy, partner data) has nothing to
-        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass.
+        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass. A
+        `timeframe` that is neither label is served and logs a WARNING once per subscription,
+        field, and value in the session (`_warn_unknown_label`).
 
         Args:
             spec: The dataset, for the message.
@@ -1085,8 +1260,11 @@ class RestReader:
         listed = self.delayed_subscriptions
         fixed = None if bucket == OTHER else Subscription(bucket)
         named = {fixed} if fixed is not None else {subscription_of(symbol_class(s)) for s in own}
+        # Massive has no delayed currencies feed, and the configuration cannot list one, so a
+        # delay label is never held against forex or crypto data; it still shows as delayed.
+        held = named - {Subscription.CURRENCIES}
         if page.status == DELAYED_LABEL:
-            unlisted = sorted(named - listed)
+            unlisted = sorted(held - listed)
             if unlisted:
                 refusal = delayed_refusal(
                     unlisted[0], f"{spec.name} data", "status=DELAYED", streams=False
@@ -1097,15 +1275,19 @@ class RestReader:
         for row in page.rows:
             labels = read_labels("", [row])
             real_time = real_time or labels.real_time is not None
-            if labels.delayed is None:
+            if labels.delayed is None and labels.unknown is None:
                 continue
             ticker = row.get(symbol_key) if symbol_key is not None else call.symbol
             subscription = fixed or (
                 subscription_of(symbol_class(ticker)) if isinstance(ticker, str) else None
             )
-            if subscription is None:
+            if labels.unknown is not None:
+                self._warn_unknown_label(
+                    spec, template=template, subscription=subscription, unknown=labels.unknown
+                )
+            if labels.delayed is None or subscription is None:
                 continue
-            if subscription not in listed:
+            if subscription is not Subscription.CURRENCIES and subscription not in listed:
                 refusal = delayed_refusal(
                     subscription, f"{spec.name} data", labels.delayed, streams=False
                 )
@@ -1113,6 +1295,39 @@ class RestReader:
             delayed = True
         if on_recency is not None and (delayed or real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
+
+    def _warn_unknown_label(
+        self,
+        spec: DatasetSpec,
+        *,
+        template: str,
+        subscription: Subscription | None,
+        unknown: tuple[str, object],
+    ) -> None:
+        """Warn of a recency label that is neither `DELAYED` nor `REAL-TIME`, once per value.
+
+        Such a label tells nothing about the row's recency, so the row is neither refused
+        nor counted as real-time; the WARNING says so once per subscription, field, and value
+        in the session, since a new label from Massive may mean delayed data passes unseen.
+
+        Args:
+            spec: The dataset.
+            template: The page's path template.
+            subscription: The subscription of the row's data, or None when it has none.
+            unknown: The field and its value (`RecencyLabels.unknown`).
+        """
+        field, value = unknown
+        owner = "no subscription" if subscription is None else str(subscription)
+        if self.state.first("recency-label", owner, field, repr(value)):
+            logger.warning(
+                "%s: %s answered %s=%r, which is neither DELAYED nor REAL-TIME, for %s data; "
+                "the library cannot tell whether the row is delayed and serves it",
+                spec.name,
+                template,
+                field,
+                value,
+                owner,
+            )
 
     def _check_adjusted(
         self, spec: DatasetSpec, request: Request, *, template: str, echoed: bool | None
@@ -1158,30 +1373,45 @@ class RestReader:
             )
 
     def _warn_error_rows(
-        self, converter: RowConverter, flagged: Sequence[Mapping[str, object]], symbol: str | None
+        self,
+        converter: RowConverter,
+        flagged: Sequence[Mapping[str, object]],
+        symbol: str | None,
+        *,
+        template: str,
     ) -> None:
-        """Log each ticker of an error row once per session, naming Massive's message.
+        """Log a page's error rows: each at DEBUG, and one WARNING for the tickers new to it.
 
-        The row is kept, with its `Error` and `Message` columns.
+        The WARNING lists each ticker not warned about before in the session, with Massive's
+        error and message, through `bounded_list`, so a page of thousands of error rows logs
+        one short line. The rows are kept, with their `Error` and `Message` columns.
 
         Args:
             converter: The path's conversion.
             flagged: The page's error rows.
             symbol: The request's one symbol, for a path whose rows do not carry it.
+            template: The path template, for the record.
         """
         dataset = converter.dataset
+        key = converter.symbol_key
+        new = []
         for row in flagged:
-            key = converter.symbol_key
             ticker = str(symbol if key is None else row.get(key))
+            answer = f"{ticker} ({row.get('error')}: {row.get('message')})"
+            logger.debug(
+                "%s: Massive answered an error row from %s for %s", dataset, template, answer
+            )
             if self.state.first("error-row", dataset, ticker):
-                logger.warning(
-                    "%s: Massive answered %s for %s: %s; the row is kept with its Error and "
-                    "Message columns",
-                    dataset,
-                    row.get("error"),
-                    ticker,
-                    row.get("message"),
-                )
+                # The WARNING shows the start of each answer; the DEBUG line above has it all.
+                new.append(_cut(answer))
+        if new:
+            logger.warning(
+                "%s: Massive answered error rows from %s for %s; the rows are kept with their "
+                "Error and Message columns",
+                dataset,
+                template,
+                bounded_list(new),
+            )
 
     def _public(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.
@@ -1841,10 +2071,12 @@ class RestEndpoints:
         *,
         call: int,
         stop: threading.Event | None = None,
+        days: Sequence[date] | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
-        `dm.ALL` reads the grouped-daily path, one request per trading day of the window
+        `dm.ALL` reads the grouped-daily path, one request per trading day of the window (of
+        `days` only, when given)
         (`dates.is_trading_day`: weekdays, plus Sundays for forex and every day for crypto). Futures
         trades and quotes named by session dates read one request series per weekday session
         and symbol (`session_end_date=<date>`), sessions in date order and the symbols of one
@@ -1868,6 +2100,8 @@ class RestEndpoints:
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             call: The call's id, which names its fan-out threads, as in `fetch`.
             stop: A background read's stop token, as `fetch` takes it.
+            days: For `dm.ALL`, the only days of the window to request, such as the days the
+                flat files lack; None for every day. Explicit symbols ignore it.
 
         Returns:
             A static table in the dataset's schema.
@@ -1883,6 +2117,7 @@ class RestEndpoints:
             request,
             window=window,
             split=functools.partial(reader.crypto_pair, cancel=_token(stop)),
+            days=days,
         )
         announce(
             self._state.client.governor,
@@ -2131,11 +2366,13 @@ def _history_plan(
     *,
     window: HistoryWindow,
     split: CryptoSplit,
+    days: Sequence[date] | None = None,
 ) -> tuple[RestPath, list[Call], ReadShape]:
     """Plan a REST `history()`'s requests: the path, its calls, and how they are counted.
 
-    `dm.ALL` reads the grouped-daily path, one request per trading day of the window; any other
-    request reads the history path (`history_calls`). Makes no request unless `split` does.
+    `dm.ALL` reads the grouped-daily path, one request per trading day of the window (of
+    `days` only, when given); any other request reads the history path (`history_calls`).
+    Makes no request unless `split` does.
 
     Args:
         reader: The reader whose paths the plan names.
@@ -2144,6 +2381,7 @@ def _history_plan(
         window: The call's window.
         split: Splits a crypto pair into its currencies (`RestReader.crypto_pair`, or
             `_unsplit` for a check).
+        days: For `dm.ALL`, the only days of the window to request; None for every day.
 
     Returns:
         The path, the planned calls in result order, and the read's `ReadShape`.
@@ -2154,10 +2392,13 @@ def _history_plan(
         rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
         path, query = shared_params(spec, rest_path, request, fixed={})
         # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
-        days = [
-            day for day in partition_dates(spec, window) if is_trading_day(spec.asset_class, day)
+        wanted = None if days is None else set(days)
+        planned = [
+            day
+            for day in partition_dates(spec, window)
+            if is_trading_day(spec.asset_class, day) and (wanted is None or day in wanted)
         ]
-        return rest_path, [Call({**path, "date": day}, query) for day in days], ReadShape.PER_DAY
+        return rest_path, [Call({**path, "date": day}, query) for day in planned], ReadShape.PER_DAY
     rest_path = reader.rest_path(cast("str", spec.history_path))
     calls = history_calls(spec, rest_path, request, window=window, split=split)
     shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED

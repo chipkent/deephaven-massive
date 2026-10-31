@@ -495,11 +495,32 @@ class SessionCore:
         `PAUSED_TABLES_WARNING_SECONDS` or longer, such as a `history()` of many requests on a
         rate-limited key, logs one WARNING saying so, whether it returned or raised: once per
         pause, so one console command of several long verbs warns once, and the next command
-        that pauses the tables again warns again.
+        that pauses the tables again warns again. Any exception that escapes the verb, its
+        guard's included, is logged at DEBUG with the verb and re-raised.
 
         Args:
             call: The verb, as the warning names it, such as
                 `"m.stocks.bars('AAPL', dm.Timespan.DAY).history()"`.
+            body: The verb's work.
+
+        Returns:
+            What `body` returned.
+
+        Raises:
+            MassiveError: If the session is closed.
+        """
+        try:
+            return self._guarded_verb(call, body)
+        except BaseException as error:
+            # The caller receives the error; the log keeps which verb raised it, and why.
+            logger.debug("%s raised %s: %s", call, type(error).__name__, error)
+            raise
+
+    def _guarded_verb(self, call: str, body: Callable[[], _T]) -> _T:
+        """Run a verb's guard and body, timing it under the UG lock (`run_verb`).
+
+        Args:
+            call: The verb, as the warning names it.
             body: The verb's work.
 
         Returns:

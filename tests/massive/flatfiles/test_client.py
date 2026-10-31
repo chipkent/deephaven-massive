@@ -1683,3 +1683,31 @@ def test_closing_the_client_ends_a_listing_retry_wait(fake_s3: FakeS3) -> None:
     (error,) = raised
     assert error.message == "the flat-file client for https://files.massive.com is closed"
     assert fake_s3.listings == [None]
+
+
+def test_an_endpoint_s_user_and_password_never_reach_a_message(
+    *, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    # botocore names the endpoint as configured when it cannot reach it.
+    endpoint = "https://reader:hunter2@files.massive.com"
+
+    def unreachable(_key: str) -> None:
+        raise EndpointConnectionError(endpoint_url=f"{endpoint}/flatfiles/{KEY}")
+
+    fake_s3.put(KEY, b"data")
+    fake_s3.before_answer = unreachable
+    flat_files = make_client(endpoint_url=endpoint, clock=clock)
+    try:
+        with pytest.raises(WireError) as info:
+            flat_files.open(KEY)
+    finally:
+        flat_files.close()
+    message = str(info.value)
+    assert message.startswith(
+        f"cannot read s3://flatfiles/{KEY} at https://***@files.massive.com: "
+    )
+    assert "hunter2" not in message
+    assert "reader" not in message
+    assert "https://***@files.massive.com/flatfiles/" in message
+    with pytest.raises(WireError, match=r"^the flat-file client for https://\*\*\*@files"):
+        flat_files.open(KEY)

@@ -457,3 +457,25 @@ def test_configs_are_hashable_and_compare_by_value() -> None:
 def test_equal_backoffs_are_accepted() -> None:
     cfg = MassiveConfig(api_key="k", reconnect_backoff=30.0, max_reconnect_backoff=30.0)
     assert cfg.max_reconnect_backoff == cfg.reconnect_backoff == 30.0
+
+
+def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
+    config = dm.MassiveConfig(
+        api_key="k",
+        rest_base_url="https://u:hunter2@api.massive.com",
+        s3_endpoint_url="https://reader:hunter2@files.massive.com",
+    )
+    shown = repr(config)
+    assert "hunter2" not in shown
+    assert "rest_base_url='https://***@api.massive.com'" in shown
+    assert "s3_endpoint_url='https://***@files.massive.com'" in shown
+    assert shown.startswith("MassiveConfig(s3_access_key_id=")
+    assert "api_key" not in shown
+
+
+def test_a_refused_ws_host_never_shows_a_password() -> None:
+    with pytest.raises(ValueError, match=r"got '\*\*\*@delayed\.massive\.com'$") as info:
+        dm.MassiveConfig(
+            api_key="k", ws_hosts={dm.AssetClass.STOCKS: "u:hunter2@delayed.massive.com"}
+        )
+    assert "hunter2" not in str(info.value)
