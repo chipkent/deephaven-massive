@@ -4142,6 +4142,20 @@ def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
     assert len(debug) == 25
 
 
+def test_an_error_row_answer_is_cut_in_the_warning_and_whole_at_debug(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    message = "x" * 500
+    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": message}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    shown = "I:VIX (NOT_ENTITLED: " + message
+    assert f"for 1 [{shown[: rest._ANSWER_SHOWN - 1]}…]; the rows are kept" in warning
+    assert any(f"for {shown})" in r.getMessage() for r in caplog.records)
+
+
 def test_the_facts_a_session_warned_about_are_bounded(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

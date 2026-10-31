@@ -216,6 +216,10 @@ _FACTS_LIMIT: Final = 10_000
 forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
 at the cost of warning about an old fact once more."""
 
+_ANSWER_SHOWN: Final = 200
+"""The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
+line shows it whole."""
+
 T = TypeVar("T")
 """The outcome of a shared lookup (`RestReader.wait_for_shared`)."""
 
@@ -331,6 +335,18 @@ def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
     kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
     return rows.take(kept.sort())
+
+
+def _cut(text: str) -> str:
+    """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
+
+    Args:
+        text: The text.
+
+    Returns:
+        The text, or its first characters ending in `…` when it is longer.
+    """
+    return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
 
 
 def _page_rows(
@@ -1303,7 +1319,8 @@ class RestReader:
                 "%s: Massive answered an error row from %s for %s", dataset, template, answer
             )
             if self.state.first("error-row", dataset, ticker):
-                new.append(answer)
+                # The WARNING shows the start of each answer; the DEBUG line above has it all.
+                new.append(_cut(answer))
         if new:
             logger.warning(
                 "%s: Massive answered error rows from %s for %s; the rows are kept with their "

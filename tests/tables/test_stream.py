@@ -1117,6 +1117,40 @@ def test_a_stale_symbol_warns_once_when_it_starves_and_logs_its_return_at_info(
     ]
 
 
+def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    flusher.routes.add("T", every)
+    limit = stream.DROPPED_RUN_LIMIT
+    flusher.rows("T", [trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit])
+    flusher.flush()
+    with caplog.at_level(logging.INFO, logger=stream.__name__):
+        # A spelling the library cannot read fails the stream before ILLQ's row could publish.
+        flusher.rows("T", [trade("ILLQ"), trade("BRK/B")])
+        flusher.flush()
+    assert every.failed
+    assert "published again" not in caplog.text
+
+
+def test_a_dataset_whose_every_row_is_dropped_fails_its_streams_without_a_stale_warning(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    flusher.routes.add("T", every)
+    with caplog.at_level(logging.WARNING, logger=stream.__name__):
+        # The symbol's run and the dataset's reach the limit in one flush: the stream fails,
+        # so no WARNING says it keeps running.
+        flusher.rows("T", [trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT)
+        flusher.flush()
+    assert every.failed
+    assert "may be stale" not in caplog.text
+
+
 def test_a_flush_merges_its_frames_drift_and_reports_it_outside_the_flush_lock(
     *,
     massive_session: dm.MassiveSession,

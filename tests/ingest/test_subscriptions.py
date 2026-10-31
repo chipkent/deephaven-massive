@@ -350,6 +350,26 @@ def test_a_no_ack_topic_no_longer_wanted_is_not_resent() -> None:
     assert loop.subs.no_ack == frozenset()
 
 
+def test_a_no_ack_topic_acknowledged_before_its_warning_is_never_reported_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.timers.fire()  # both are re-sent once
+    [timer] = [t for t in loop.timers.live() if t.args[0] == "T.AAPL"]
+    with caplog.at_level(logging.INFO, logger=subscriptions.__name__):
+        # T.AAPL turns NO_ACK while T.MSFT keeps the step in flight, so its WARNING waits.
+        loop.timers.timers.remove(timer)
+        timer.callback(*timer.args)
+        assert loop.subs.no_ack == {"T.AAPL"}
+        loop.subs.status(ack("T.AAPL"))
+        loop.subs.status(ack("T.MSFT"))  # the step resolves
+    assert loop.subs.no_ack == frozenset()
+    # Neither a WARNING that T.AAPL went unacknowledged nor a recovery from one.
+    assert caplog.records == []
+
+
 def test_a_new_generation_clears_the_no_acks() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL"])

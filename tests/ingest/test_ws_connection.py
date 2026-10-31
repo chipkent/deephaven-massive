@@ -1331,8 +1331,8 @@ def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
     (over,) = [r for r in caplog.records if "is over" in r.getMessage()]
     assert over.levelno == logging.INFO
     assert re.fullmatch(
-        rf"{re.escape(_URL)}: the outage that began at \S+Z is over after \d+ s; its 1 live "
-        "tables receive data again",
+        rf"{re.escape(_URL)}: the outage that began at \S+Z is over after \d+ s: Massive "
+        "confirmed the subscriptions of its 1 live tables, or sent them rows",
         over.getMessage(),
     )
     assert streams_of(ws_session, dh_to_pylist)[0]["State"] == "RUNNING"

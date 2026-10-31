@@ -1288,8 +1288,8 @@ class Connection:
         logger.log(
             # INFO is the recovery of the outage's WARNING, which only live tables cause.
             logging.INFO if self._streams else logging.DEBUG,
-            "%s: the outage that began at %s is over after %.0f s; its %d live tables receive "
-            "data again",
+            "%s: the outage that began at %s is over after %.0f s: Massive confirmed the "
+            "subscriptions of its %d live tables, or sent them rows",
             self.url,
             utc_text(episodes.down_since),
             time.time() - episodes.down_since,

@@ -1488,9 +1488,10 @@ class Flusher:
         if drift.fields_drifted or drift.dropped_rows:
             where = f"{self._thread.name} channel {plan.channel}"
             self._found(tuple(readers), drift, where=where)
-        self._counted_symbols(plan, converted, batch=batch, readers=readers)
+        # The dataset's run first: when it fails every stream, no symbol is named stale.
         if self._counted(plan, converted, lost=batch.lost, readers=readers):
             return
+        self._counted_symbols(plan, converted, batch=batch, readers=readers)
         if converted.batch.num_rows:
             self._publish_batch(plan, converted, readers=readers, updates=updates)
         self._write_notes(readers, updates)
@@ -1627,7 +1628,8 @@ class Flusher:
         runs = self._symbol_runs.setdefault(plan, {})
         for symbol in converted.symbols:
             runs.pop(symbol, None)
-        everyone = [s for s in readers if s.receives_all]
+        # A stream failed this flush (a spelling the library cannot read) publishes nothing.
+        everyone = [s for s in readers if s.receives_all and not s.failed]
         self._clear_stale(plan, everyone, published=converted.symbols)
         became: dict[str, str] = {}  # the symbols that become stale, with their first reason
         dropped = Counter(converted.dropped_symbols)
