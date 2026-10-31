@@ -15,7 +15,8 @@ everything else belongs here:
 - **Refusals.** A refused topic fails exactly the streams that want it, with
   `EntitlementError`; nothing tears down the connection. A refusal that names no topic
   applies to the whole step in flight, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown: then the decision is recorded with the REST
+  `socket.` connection whose recency was unknown and that has never had a topic acknowledged:
+  then the decision is recorded with the REST
   transport (`RestTransport.record_verdict`), the connection's streams move to the `delayed.`
   host, and they keep running.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
@@ -47,11 +48,11 @@ everything else belongs here:
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
 thread; other threads reach it only through `loop.call_soon_threadsafe` with plain data
 (`Connection.post`). The registries that map URLs to connections and streams to connections,
-each connection's leases, sessions, failure, and options-cap bookkeeping, each session's
-registry state here, and the group's record of `NO_ACK` topics are guarded by the group's lock,
-a leaf lock like the sessions' `registry_lock` (the two are never held together): no Deephaven
-call, network call, or wait happens under it (creating a client loads TLS settings, so it
-happens outside). The loop thread makes no Java call: every failure goes to a flush thread, or,
+each connection's leases, sessions, failure, and options-cap bookkeeping, and each session's
+registry state here are guarded by the group's lock, a leaf lock like the sessions'
+`registry_lock` (the two are never held together): no Deephaven call, network call, or wait
+happens under it (creating a client loads TLS settings, so it happens outside). The loop
+thread makes no Java call: every failure goes to a flush thread, or,
 for a stream whose connection failed while it opened, to the opening caller. A stream's
 blink-table shutdown callback takes the locks only to update the registries and then posts the
 release of the stream's topics to its connection's loop; it never sends and never calls Java.
@@ -79,7 +80,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionGroup,
     ConnectionStream,
 )
-from deephaven_massive._log_limits import mark_failure_logged
+from deephaven_massive._log_limits import bounded_list, mark_failure_logged
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "JOIN_TIMEOUT",
+    "SCHEDULE_WAIT",
     "WsConnections",
     "WsTransport",
 ]
@@ -106,6 +108,12 @@ logger = logging.getLogger(__name__)
 
 JOIN_TIMEOUT: Final = 5.0
 """Seconds `m.close()` waits for each connection's threads before it logs a WARNING."""
+
+SCHEDULE_WAIT: Final = 15.0
+"""Seconds a futures stream's verb waits for its contracts' products and schedules before it
+subscribes, so its first rows are dated by the schedules. Bounded, since the verb may run on a
+console command that holds the update graph's lock; a lookup still running then dates its rows
+once it ends, and they have a null `Date` meanwhile."""
 
 
 def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
@@ -334,8 +342,8 @@ class WsConnections:
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
         `/options` connection (counting every session's topics on it) raise the `ValueError`
         of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
-        resolution raises the `EntitlementError` or `MassiveError` of `resolve_host`; a crypto
-        ticker Massive's crypto ticker list does not split raises the `MassiveError` of
+        resolution raises the `AuthenticationError` or `MassiveError` of `resolve_host`; a
+        crypto ticker Massive's crypto ticker list does not split raises the `MassiveError` of
         `resolve_pairs`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
@@ -358,7 +366,7 @@ class WsConnections:
             if verdict is decision:  # the group's verdict decided the host
                 self._take_verdict(asset_class, spec.family, verdict)
             if asset_class is AssetClass.FUTURES and wanted:
-                self.futures_calendar().watch(wanted)
+                self._load_schedules(wanted, stream_id=stream_id)
             if created:
                 connection.start()
             opened = open_stream_tables(
@@ -391,6 +399,35 @@ class WsConnections:
             self._abandon(connection, stream_id)
             raise
         return opened.handle
+
+    def _load_schedules(self, contracts: frozenset[str], *, stream_id: int) -> None:
+        """Load a futures stream's schedules before it subscribes, waiting `SCHEDULE_WAIT`.
+
+        Runs on the verb's thread, with no lock held. It waits only on the calendar's worker,
+        which makes no Deephaven call, so a console command holding the update graph's lock
+        may run it. A lookup that does not end in time is logged at WARNING once; its rows get
+        a null `Date` until it ends. A failed lookup logs its own WARNING.
+
+        Args:
+            contracts: The stream's canonical futures symbols; spreads are never looked up.
+            stream_id: The stream, for the log.
+        """
+        calendar = self.futures_calendar()
+        calendar.watch(contracts)
+        if not calendar.wait_loaded(contracts, SCHEDULE_WAIT):
+            logger.warning(
+                "futures stream %d: the schedules of %s did not load within %.0f s; their rows "
+                "get a null Date until they do",
+                stream_id,
+                bounded_list(sorted(contracts)),
+                SCHEDULE_WAIT,
+            )
+        else:
+            logger.debug(
+                "futures stream %d: schedules loaded for %s",
+                stream_id,
+                bounded_list(sorted(contracts)),
+            )
 
     def _decide(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Return the host of a (class, family): the group's verdict, or the session's decision.
@@ -559,7 +596,9 @@ class WsConnections:
 
         In use are the topics the connection admitted and those of streams still opening, of
         every session on the connection. The cap counts topics, one per contract and channel,
-        so `T.X` and `Q.X` are two.
+        so `T.X` and `Q.X` are two: Massive documents "1,000 option contracts", but whether its
+        server counts contracts or topics is not verified, and the stricter count never
+        crosses it.
 
         Args:
             spec: The stream's dataset.

@@ -23,18 +23,20 @@ import pytest
 from deephaven import empty_table
 
 import deephaven_massive as dm
-from deephaven_massive import _debug_log
+from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
+from deephaven_massive._ingest import ws_connection
 from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._live.live_run.secret_scrub import SecretFilter
 from tests._live.tester import examples
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from deephaven.table import Table
 
+    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
@@ -172,12 +174,50 @@ def market(
     library.setLevel(level)
 
 
+def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every WebSocket client a session makes connects to the fake server's endpoint of its
+    # path, with a short backoff, so no stream reaches Massive.
+    def fake(
+        _factory: object,
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[[int], None],
+        on_status: Callable[[int, Status], None],
+        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_state: Callable[[WsState, float | WireError | None], None],
+    ) -> _massive.WsClient:
+        path = "/" + url.split("/", 3)[3]
+        return _massive.WsClient(
+            server.url(path),
+            api_key=KEY,
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=on_data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+            thread_prefix="tester examples",
+        )
+
+    monkeypatch.setattr(ws_connection._WsClientFactory, "__call__", fake)
+
+
 @pytest.mark.jvm_held
 @pytest.mark.timeout(300)  # 22 examples, Deephaven compiling each formula, on a busy worker
 def test_every_example_runs_against_the_fake_market(
-    market: MarketServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    market: MarketServer,
+    tmp_path: Path,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_ws_server: FakeMassiveServer,
 ) -> None:
     monkeypatch.setenv("MASSIVE_TEST_FOLDER", str(tmp_path))
+    # The free plan's snapshot is refused, so the live minute bars open on the real-time host
+    # and Massive's live connection refuses their topic.
+    _clients_reach(fake_ws_server, monkeypatch)
+    fake_ws_server.refuse["AM.AAPL"] = "You are not entitled to this data."
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
@@ -191,7 +231,8 @@ def test_every_example_runs_against_the_fake_market(
     assert re.search(r"<MassiveSession #\d+ open>", printed["01_start_a_session"])
     query = "m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)"
     assert query in printed["02_explore_datasets"]
-    assert printed["11_plan_refusals"].count(": EntitlementError: ") == 3
+    assert printed["11_plan_refusals"].count(": EntitlementError: ") == 2
+    assert "live minute bars: opened;" in printed["11_plan_refusals"]
     assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["13_check_the_log"]
     assert re.search(r"<MassiveSession #\d+ closed>", printed["22_finish"])

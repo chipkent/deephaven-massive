@@ -2964,9 +2964,8 @@ pre-open starts before 17:00 Chicago time (16:45 on CBOT). The calendar looks up
 product (`/futures/v1/contracts`, `ticker.any_of`) and each product's sessions from a week back
 to ten days ahead (`/futures/v1/schedules`, on every futures plan, records from 2025-03-17): one
 session per `session_end_date`, open from its first event (a pre-open or the open) to its last
-(the close). A row inside the session the rule gave it keeps it; a row the schedules place in
-another session moves there; a row between a close and the next session's first event keeps the
-rule's date. The calendar belongs to the connection group, since its connections serve every
+(the close). A row inside a loaded session gets its date; a row between a close and the next
+loaded session's first event gets that next session's date. The calendar belongs to the connection group, since its connections serve every
 session of the group: it is created with the group's first futures connection and lives until
 the group's last session leaves. One worker thread makes every request, through the REST client
 of any session of the group still open (the contracts and schedules are the same for every
@@ -2976,15 +2975,23 @@ arrive); the flush never waits on it. Only a single contract ticker is looked up
 grammar of the symbols module (`symbols.is_futures_contract`); a spread or combination
 (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6` in the vendor's files) is
 never looked up: Massive documents no grammar that names a combo's legs, so its schedule
-cannot be told from its ticker. Its rows keep the rule's date, which a holiday fold can make wrong, so the
-first rows of each spread log one WARNING. What is still loading keeps the rule's date silently
-for up to a minute (`LOAD_PATIENCE`), so a stream's start shows no error; a contract or product
-still not loaded a minute after it was first asked for (a stalled or rate-limited lookup) is a
-miss, "its schedule was not loaded after 60 s". A row the loaded schedules cannot place (past
-the last loaded session, a contract Massive's contracts do not list, a failed lookup) is a
-**miss** too: it keeps the rule's date, the miss is logged at WARNING once per product (or
-contract) and date, and the `Error` of every stream that receives the contract shows it in
-`m.streams()` until a later batch of the stream's rows all place; the stream keeps running. An
+cannot be told from its ticker. A row the schedules cannot place is a **miss**: a spread's, one
+whose contract or product is still loading (a stream's first rows, or a stalled or
+rate-limited lookup), one past the loaded sessions, one of a contract Massive's contracts do
+not list, or one whose lookup failed. A miss gets a null `Date`: without the schedule the
+rule's date can be wrong on any weekday, since a holiday folds its trading into the next
+session and the library has no holiday calendar to rule that out, and a wrong date is worse
+than none. Its `Timestamp` and every other column are kept, and the streams' `Error` is not
+touched: the stream is healthy. A miss whose lookup is still running logs at DEBUG; any other
+logs at WARNING once per product (or contract) and rule date. So that a stream's first rows
+are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
+asks for them and waits, before it subscribes, until their products and schedules are loaded
+or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
+no Deephaven call, so a console command holding the update graph's lock may run it. A wait
+that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
+the gap between one loaded session's close and the next one's first event gets the next
+session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
+rule's date is never kept. An
 answer the calendar cannot read, or any other failure of a lookup, is a miss of its contracts'
 rows too, and the worker carries on. A miss past the loaded sessions asks for a reload of its
 product, at most once per 10 minutes (`RELOAD_SPACING`, so a stream of misses never spends a
@@ -3202,9 +3209,13 @@ TICK family:
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
   4. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
-          -> raise EntitlementError("<class> plan has no WebSocket access: ...")   # Basic plans
-             (the message says the refused request was the library's own host check, names
-             its path, and quotes Massive's text)
+          -> socket.massive.com, REALTIME,
+             evidence="the host check's snapshot (<path>) was refused: <Massive's text>";
+             WARNING naming the evidence. A refused REST snapshot says nothing certain about
+             the WebSocket plan, so the class streams the real-time host's data, labelled as
+             such. The connection is never moved to the delayed host (its recency is not
+             UNKNOWN): a refusal from Massive fails the refused streams with Massive's text
+             (a Basic plan's streams fail that way)
      b. Read the class's ordered timeframe fields, excluding underlying_asset:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
@@ -3212,9 +3223,12 @@ TICK family:
                            (in the OpenAPI spec; absent from the documentation page)
         If any value is DELAYED  -> delayed.massive.com, DELAYED, evidence="<field>=DELAYED"
                                     (DELAYED wins conflicts; the field used is logged)
+        elif any other value     -> socket.massive.com, REALTIME,
+                                    evidence="<field>='<value>', neither DELAYED nor
+                                    REAL-TIME, in the snapshot"; WARNING naming the field,
+                                    the value, and MassiveConfig.ws_hosts; never moved, as
+                                    in 4a
         elif any is REAL-TIME    -> socket.massive.com,  REALTIME, evidence="<field>=REAL-TIME"
-        Any other value          -> raise MassiveError naming the field, the value, and
-                                    MassiveConfig.ws_hosts; nothing is cached
      c. No timeframe found:
           STOCKS, OPTIONS with a top-level "fmv" field (Business key without a trades/quotes
           expansion)
@@ -3230,7 +3244,8 @@ TICK family:
           FUTURES
               -> socket.massive.com, UNKNOWN, evidence="no timeframe in futures snapshot";
                  the explicit-verdict rule of 13.3 applies
-     d. Transport error -> MassiveError; nothing cached; the table fails with that error
+     d. Transport error or rejected key -> MassiveError or AuthenticationError; nothing
+        cached; the verb raises it
   5. Record the decision in m.connections().
 ```
 
@@ -3245,8 +3260,11 @@ Basic has no chain snapshot (403, rule 4a) and no WebSocket. The option-chain sa
 `socket.massive.com`, with Starter real-time, so no REST call is made. The futures snapshot
 documentation lists no `timeframe` (only the OpenAPI spec has it), so absence proves nothing, and a
 real-time customer must never be routed to delayed data by inference. For the same reason, a
-`timeframe` value other than the documented `DELAYED` and `REAL-TIME` fails loudly at the first
-stream verb for that class instead of being guessed at.
+`timeframe` value other than the documented `DELAYED` and `REAL-TIME`, and a refused snapshot,
+are not guessed at: the class connects to the real-time host with `REALTIME` recency, the
+host's own, and is never moved to delayed data; a refusal from Massive fails the refused
+streams with its text. Raising instead would refuse every stream of the class on a guess about
+the vendor's behavior, though the WebSocket server may serve it.
 
 **Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
@@ -3308,8 +3326,7 @@ then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
 size is conservative). A call for a generation that is no longer current is discarded: the next
-generation re-sends the whole desired set. `reconnect()` closes the current socket so the client
-reconnects under its backoff rules. Rows from `on_data` go to the per-channel row buffer;
+generation re-sends the whole desired set. Rows from `on_data` go to the per-channel row buffer;
 rejects never enter a buffer and fail no stream: they are counted in the frame's drift, which
 goes to the flush thread, which reports it to the session's `DriftRegistry` and counts the
 drops toward `DROPPED_RUN_LIMIT` ([section 19.5](#195-runtime-drift)).
@@ -3339,7 +3356,7 @@ Responsibilities:
 | Step | Owner |
 |---|---|
 | Open the socket (TLS, proxy, keepalive pings), read `connected`, send auth, read the auth reply, all within the handshake timeout | client |
-| `auth_failed` | The client reports `FAILED` with `WireAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_wire`). |
+| `auth_failed` | The client reports `FAILED` with `WireAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_wire`), whose message quotes Massive's text and adds that it can also mean the class's plan includes no WebSocket streams, not only a bad key: Massive may answer `auth_failed` to such a key too. |
 | `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
 | `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`, remembers it for the generation, and when that generation's socket closes reports `WAITING_SLOT` instead of `RECONNECTING`. The library only displays the state. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
@@ -3392,10 +3409,17 @@ Status(MAX_CONNECTIONS) after authentication
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
-   -> topic state NO_ACK; WARNING logged; the first NO_ACK of this topic on the cluster's
-      connections calls client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
-      logs at WARNING and counts in NoAckTopics. The topic stays desired; streams never fail
-      on it
+   -> topic state NO_ACK; it counts in NoAckTopics of m.connections(), and each stream that
+      wants it shows "no acknowledgement from Massive for <topic>; its rows may be missing"
+      in its Error without failing (the options cap's text wins when both apply). One
+      WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
+      stays desired and subscribed, and its subscribe is re-sent alone every 60 s
+      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends, but
+      never while a step is in flight (that round waits for the next), so a status naming
+      no topic is always the step's. A
+      late acknowledgement or a new generation clears the state and the streams' Error.
+      Streams never fail on it, and the connection is never reconnected for it: a reconnect
+      would cut every other stream on the shared connection over one late answer
 watchdog fires but its topic left S or W, or its generation is no longer current
    -> cancelled without escalating
 socket closed or failed (not by close())
@@ -3443,11 +3467,15 @@ the connection authenticates.
 **Explicit-verdict rule.** When a `Status(REFUSED)` with no topic arrives on a `socket.` TICK
 connection with `realtime_verdict` set (its message contains "real-time", case-insensitive; the exact text is
 **UNVERIFIED**, the knowledge base quotes only "not authorized"), the library re-resolves the
-host only if all three hold:
+host only if all four hold:
 
-1. the connection's cached `Recency` is `UNKNOWN` (the futures default);
+1. the connection's cached `Recency` is `UNKNOWN` (the futures default when its snapshot
+   carries no timeframe; never a class whose snapshot was refused or held an undocumented
+   `timeframe`, which is `REALTIME`);
 2. every topic of the in-flight step was refused;
-3. the host is not pinned by `ws_hosts`.
+3. the host is not pinned by `ws_hosts`;
+4. the connection has never had a topic acknowledged, in any generation: a host that served
+   this key is not moved, so a working real-time stream never jumps to 15-minute-old data.
 
 Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` through
 `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the one cached
@@ -3868,9 +3896,13 @@ How a request is built from a `DatasetSpec` and a `Request`:
 
 ## 15. Options contract cap
 
-Massive allows 1,000 option contracts per `/options` connection. The library counts
+Massive allows "1,000 option contracts" per `/options` connection. The library counts
 **topics** per connection: `T.X` and `Q.X` count as two. Whether the server counts contracts or
-topics is **UNVERIFIED**, so the stricter count is used (fixture test). Wildcards count zero.
+topics is **UNVERIFIED**, so the stricter count is used (fixture test) until the live check
+(`test_the_options_cap_counts_contracts_or_topics`, 1,000 contracts on `T` and `Q`) shows that
+Massive counts contracts. Counting contracts without that evidence could send a frame past
+the server's limit, and a server that answers by closing the socket would reconnect, and cut,
+every stream on the connection in a loop. Wildcards count zero.
 Every wanted explicit topic counts, also one covered by an acknowledged wildcard and so off the
 wire meanwhile ([section 13.3](#133-connection-and-subscription-protocol)): the wildcard may be
 removed at any time, and a static contract the verb accepted must never be deferred then.
@@ -3883,13 +3915,15 @@ sent:
 - **Reactive `Table` input.** Static topics are admitted first (their verb checked them);
   a reactive table's adds take the room left, in sorted order, and contracts admitted before
   keep their place, across reconnects too. The rest are deferred: not subscribed, not failed.
-  `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
+  `m.streams()` shows `State=RUNNING`, `Deferred=<n>` (the stream's own deferred topics), and
   `Error="over capacity: 1234/1000; 234 deferred"`, with a WARNING on each transition. When
   removals free capacity, deferred contracts subscribe in the same order. Rows for deferred
   contracts are absent, never stale, except while a wildcard on the connection delivers them
   anyway.
 
-No all-or-nothing server refusal can occur, so frame chunking has no interaction with the cap.
+Since a frame never crosses the cap, frame chunking has no interaction with it. How the
+server answers a subscription past its own count (refusing the topics past it one by one, or
+closing the socket) is **UNVERIFIED**.
 
 ## 16. `HistorySource.AUTO`
 
@@ -6487,11 +6521,13 @@ document already reflects them.
 36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,
     a checked multiply to nanoseconds, and the [1990, 2100] bound on epoch integers only
     ([section 12](#12-timestamp-units-and-day-boundaries)).
-37. **An undocumented value of an interpreted field fails loudly.** An unknown `timeframe`
-    value raises at the first stream verb for that class and nothing is cached
-    ([section 13.2](#132-host-decision)).
-38. **A never-acknowledged topic** triggers at most one reconnect per topic per session; later
-    `NO_ACK`s only log and count ([section 13.3](#133-connection-and-subscription-protocol)).
+37. **No stream is moved to delayed data by inference.** An unknown `timeframe` value, like a
+    refused snapshot, connects the class to the real-time host with `REALTIME` recency and a
+    WARNING, and is never moved; a connection that has had a topic acknowledged is never moved
+    either ([section 13.2](#132-host-decision), [section 13.3](#133-connection-and-subscription-protocol)).
+38. **A never-acknowledged topic** never reconnects its connection: after one re-send it counts
+    as `NO_ACK`, shows in its streams' `Error`, and is re-sent alone every 60 s until it is
+    acknowledged ([section 13.3](#133-connection-and-subscription-protocol)).
 39. **S3 follows the shared network rules:** the `net` CA bundle and proxy, botocore retries off
     in favour of the shared schedule, TLS never retried ([section 19.3](#193-the-flat-file-client)).
 40. **REST rate limits and host resolution are shared.** One `RequestGovernor` per API key and
@@ -6646,10 +6682,10 @@ document already reflects them.
     stores one shared string per distinct date, so a date costs a reference per row; one type
     lets every date join and compare. Forex and crypto use Massive's UTC day; futures use
     `session_end_date`, or on the WebSocket the 17:00 Chicago rule corrected by
-    `/futures/v1/schedules`, a row the schedules cannot place keeping the rule's date with a
-    WARNING and its miss shown in `m.streams()`, never failing the stream and never refusing a subscription; a
-    contract or product still loading a minute after it was asked for is such a miss, and a
-    spread is never looked up. The ends are conservative where Massive's labels are not
+    `/futures/v1/schedules`, a row the schedules cannot place (a spread, which is never looked
+    up, a lookup still running or failed, a row outside the loaded sessions) getting a null
+    `Date`, never failing the stream and never refusing a subscription; a futures stream verb
+    waits up to 15 s for its contracts' schedules before it subscribes. The ends are conservative where Massive's labels are not
     verified: an index bar of a day or longer ends at 01:00 New York time, and an index week or
     longer after its calendar period, weekend included; a bar of several futures sessions
     (revised 2026-10-30: a stock, option, or index bar of several days counts calendar days,
@@ -7070,7 +7106,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
 | 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
-| 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
+| 11 | Options cap counted in contracts or topics | Topics (the stricter count) until the live check shows contracts | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 1,000 contracts on `T` and `Q` (2,000 topics) |
 | 12 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | Settled by owner decision 78: no publish time is assumed. The live check of 2026-10-30 found weekday files landing at about 00:45 ET, but Friday's on Saturday at 10:27 and 11:17 ET, so the time varies. A missing trading day's file with a later day's file is a day without trading; one with no later file is not published yet, and `AUTO` reads it from REST when REST can serve the request, else the call raises with a message that the time is approximate | `tests/ingest/test_flatfiles.py`: a missing day with and without a later file, under `FLAT_FILES` and `AUTO`; `tests/test_query.py`: `AUTO` reads the unpublished days from REST | `tests/massive/flatfiles/test_client_integration.py`: record when each of the last ten weekdays' files was published, Fridays' included |
@@ -7117,7 +7153,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 55 | That Massive never adjusts for cash dividends: COST's special dividend (ex-date 2023-12-27) | The documentation says splits only; nothing adjusts for dividends | none (documentation) | `tests/namespaces/test_stocks_integration.py`: COST day bars around 2023-12-27 with `adjusted=true` and `adjusted=false`; record whether any price differs |
 | 56 | Whether `adjusted=true` applies `stock_dividend` events of the splits dataset | Documented as unknown: the README's recipe applies every factor the splits dataset lists | none (documentation) | `tests/namespaces/test_stocks_integration.py`: one ticker with a `stock_dividend` event; compare both bases across its execution date |
 | 57 | Whether option bars are adjusted for splits of the underlying in full (`adjusted=true`) | Options take `adjusted` like stocks, with the same guarantee | `tests/namespaces/test_options.py`: the parameter is sent and its echo checked | `tests/namespaces/test_options_integration.py`: a contract of NVDA across 2024-06-10 under both bases; record the prices |
-| 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place keeps the rule's date with a WARNING and its miss in `m.streams()` | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
+| 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place gets a null `Date` with a WARNING; a row between sessions gets the next session's date | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
 | 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
 | 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served, labelled by the day it falls on, with a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |

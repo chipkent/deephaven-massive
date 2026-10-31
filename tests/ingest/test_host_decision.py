@@ -112,14 +112,37 @@ def test_not_entitled_rows_count_as_absent(snapshot: Callable[[str], Snapshot]) 
     assert decision.recency is Recency.REALTIME
 
 
-def test_an_undocumented_timeframe_fails_loudly(snapshot: Callable[[str], Snapshot]) -> None:
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"last_trade\.timeframe is 'END-OF-DAY'.*ws_hosts=\{dm\.AssetClass\.STOCKS",
-    ) as info:
-        run(AssetClass.STOCKS, snapshot("stocks_unknown_timeframe.json"))
-    # A value the library cannot interpret is its own defect, never an expected failure.
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+def test_an_undocumented_timeframe_streams_real_time_data(
+    snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, LOGGER):
+        decision = run(AssetClass.STOCKS, snapshot("stocks_unknown_timeframe.json"))
+    # Nothing is guessed from a value the library does not know: the real-time host, labelled
+    # as such, and never moved to delayed data; a refusal from Massive fails its streams.
+    assert decision == HostDecision(
+        REALTIME_HOST,
+        Recency.REALTIME,
+        "last_trade.timeframe='END-OF-DAY', neither DELAYED nor REAL-TIME, in the snapshot",
+    )
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "'END-OF-DAY'" in record.getMessage()
+    assert "ws_hosts={dm.AssetClass.STOCKS" in record.getMessage()
+
+
+def test_delayed_beside_an_undocumented_timeframe_is_delayed() -> None:
+    fetch = Snapshot(
+        [{"last_trade": {"timeframe": "END-OF-DAY"}, "last_quote": {"timeframe": "DELAYED"}}]
+    )
+    assert run(AssetClass.STOCKS, fetch).host == DELAYED_HOST
+
+
+def test_real_time_beside_an_undocumented_timeframe_is_real_time() -> None:
+    fetch = Snapshot(
+        [{"last_trade": {"timeframe": "REAL-TIME"}, "last_quote": {"timeframe": "END-OF-DAY"}}]
+    )
+    decision = run(AssetClass.STOCKS, fetch)
+    assert (decision.host, decision.recency) == (REALTIME_HOST, Recency.REALTIME)
 
 
 def test_a_business_key_without_trades_streams_from_business(
@@ -176,19 +199,22 @@ def test_futures_without_a_timeframe_are_never_routed_to_delayed(
     )
 
 
-def test_a_refused_snapshot_means_no_websocket_access() -> None:
+def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixture) -> None:
     def refuse(probe: SnapshotProbe) -> Sequence[Mapping[str, object]]:
         raise dm.EntitlementError("HTTP 403 from GET /v3/snapshot", status=403, request_id="r1")
 
-    with pytest.raises(dm.EntitlementError) as info:
-        decide(AssetClass.STOCKS, TICK, ws_hosts={}, fetch=refuse)
-    # The refused request was the library's own, so the message says so.
-    assert str(info.value) == (
-        "stocks plan has no WebSocket access: the stocks subscription refused the library's own "
-        "host check, a REST snapshot request (/v3/snapshot) it sends before the first stocks "
-        "stream; Massive said: HTTP 403 from GET /v3/snapshot"
+    with caplog.at_level(logging.WARNING, LOGGER):
+        decision = decide(AssetClass.STOCKS, TICK, ws_hosts={}, fetch=refuse)
+    # A refused REST snapshot says nothing certain about the WebSocket plan: the stream opens
+    # on the real-time host, and a refusal from the WebSocket server fails it with its text.
+    assert decision == HostDecision(
+        REALTIME_HOST,
+        Recency.REALTIME,
+        "the host check's snapshot (/v3/snapshot) was refused: HTTP 403 from GET /v3/snapshot",
     )
-    assert (info.value.status, info.value.request_id) == (403, "r1")
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "HTTP 403 from GET /v3/snapshot" in record.getMessage()
 
 
 def test_other_errors_propagate_unchanged() -> None:

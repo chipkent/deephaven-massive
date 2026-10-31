@@ -1258,7 +1258,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     # Another connection with the key (another process, here the fake's reply) holds the slot.
     monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
-    ws_session = make_ws_session(backoff=1.0)
+    ws_session = make_ws_session(backoff=3.0)  # long enough to change the watchlist during the wait
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
@@ -1277,7 +1277,16 @@ def test_a_stream_waiting_for_a_slot_says_so(
     wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == stall)
     every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [stall] * 2)
+    # A contract added during the wait is counted, while the wait stays the `Error`.
+    watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
+    wait_for(
+        lambda: (
+            [(r["Deferred"], r["Error"]) for r in streams_of(ws_session, dh_to_pylist)]
+            == [(2, stall), (0, stall)]
+        )
+    )
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
+    cap = "over capacity: 3/1; 2 deferred"
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
     del capped, every
 
@@ -1569,6 +1578,38 @@ def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSessi
     # A spread is not a contract: it is never looked up.
     sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
     assert sent == [("ESZ5",)]
+    ws_session.session.release(result)
+
+
+def test_a_futures_stream_loads_its_schedules_before_it_subscribes(
+    ws_session: WsSession,
+) -> None:
+    # The verb waits for the contract's product and schedule, so the first rows are dated.
+    ws_session.rows["/futures/v1/contracts"] = [{"ticker": "ESZ5", "product_code": "ES"}]
+    ws_session.rows["/futures/v1/schedules"] = [
+        {
+            "product_code": "ES",
+            "session_end_date": "2025-12-01",
+            "timestamp": "2025-11-30T23:00:00+00:00",
+        }
+    ]
+    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert ws_session.connections.futures_calendar().wait_loaded(["ESZ5"], 0)
+    ws_session.session.release(result)
+
+
+def test_a_futures_stream_whose_schedules_are_slow_says_so_once(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", lambda *_: False)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"):
+        result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "futures stream 1: the schedules of 1 [ESZ5] did not load within 15 s; their rows "
+            "get a null Date until they do"
+        )
+    ]
     ws_session.session.release(result)
 
 
