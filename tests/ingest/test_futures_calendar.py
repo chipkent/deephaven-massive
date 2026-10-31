@@ -310,7 +310,9 @@ def test_a_row_between_sessions_gets_the_next_sessions_date(
     assert not caplog.records
 
 
-def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
+def test_rows_without_a_symbol_or_an_instant_get_no_date(calendar: FuturesCalendar) -> None:
+    # Such a row (a symbol `unreadable_symbols` kept as null, say) cannot be placed, and the
+    # 17:00 rule's date may be wrong, so it has none.
     dates, misses = correct(
         calendar,
         [
@@ -319,7 +321,7 @@ def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
             ("ESM4", "2024-03-28T15:00:00", None),
         ],
     )
-    assert (dates, misses) == (["2024-03-28", "2024-03-28", None], [])
+    assert (dates, misses) == ([None, None, None], [])
 
 
 def test_an_unknown_contract_has_no_date_until_it_is_looked_up(

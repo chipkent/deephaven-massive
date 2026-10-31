@@ -359,7 +359,11 @@ class FuturesCalendar:
         fixed: list[str | None] = list(ruled)
         batch = _Batch()
         for row, (symbol, moment, day) in enumerate(zip(names, moments, ruled, strict=True)):
-            if symbol is None or moment is None or day is None:
+            if symbol is None or moment is None:
+                # No contract or no instant to place: the rule's date may be wrong, so none.
+                fixed[row] = None
+                continue
+            if day is None:
                 continue
             if not is_futures_contract(symbol):
                 batch.misses[symbol, symbol, day, _SPREAD] = None
