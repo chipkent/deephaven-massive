@@ -152,12 +152,13 @@ def start(
     mode: PollMode = PollMode.REPLACE,
     symbols: NormalizedSymbols | None = ("AAPL", "MSFT"),
     stop: threading.Event | None = None,
+    interval: float = 60.0,
 ) -> Table:
     return open_poll(
         m._core,
         spec=DIVIDENDS,
         request=Request(symbols=symbols),
-        interval=timedelta(seconds=60),
+        interval=timedelta(seconds=interval),
         mode=mode,
         query="<Query test>",
         read=script,
@@ -183,11 +184,11 @@ def pairs(table: Table, to_pylist: ToPylist) -> list[tuple[str, float]]:
     return sorted((row["Symbol"], row["CashAmount"]) for row in to_pylist(table))
 
 
-def next_cycle(clock: FakeClock) -> None:
+def next_cycle(clock: FakeClock, interval: float = 60.0) -> None:
     # Ends the wait after a cycle and returns once the next cycle has run and waits again.
     clock.wait_for_sleepers(1)
     waits = len(clock.waits)
-    clock.advance(60)
+    clock.advance(interval)
     until(lambda: len(clock.waits) > waits)
 
 
@@ -681,28 +682,61 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
     error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends")
-    for _ in range(4):  # failures at 60 to 240 s: the table runs and names its last good cycle
+    for _ in range(5):  # failures at 60 to 300 s: the table runs and names its last good cycle
         script.fail(error)
         next_cycle(clock)
         (row,) = stream_rows()
         assert (row["State"], row["Error"]) == ("RUNNING", f"{error}; {GOOD}")
-    script.rows()  # a good cycle with no new row: quiet data, which starts the count again
+    script.rows()  # a good cycle with no new row: quiet data, which ends the run of failures
     next_cycle(clock)
-    good_again = "last good cycle at 2027-01-15T08:05:00Z"
-    for _ in range(4):
+    good_again = "last good cycle at 2027-01-15T08:06:00Z"
+    for _ in range(5):  # failures at 420 to 660 s: under 300 s since the run's first
         script.fail(error)
         next_cycle(clock)
     assert stream_rows()[0]["Error"] == f"{error}; {good_again}"
-    script.fail(error)  # 300 s after the last good cycle began: max_outage
+    script.fail(error)  # 300 s after the run's first failure: max_outage
     _last_cycle_fails_the_table(clock, pollers)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {good_again}, and every cycle has failed for 300 s since, "
-        "longer than MassiveConfig.max_outage (300 s); the rows since then may be missing, so "
-        f"this table stopped; call the verb again for a new live table. The latest error: {error}"
+        f"stocks.dividends poll(): {good_again}; every cycle since 2027-01-15T08:07:00Z has "
+        "failed, for 300 s, longer than MassiveConfig.max_outage (300 s); the rows since then "
+        "may be missing, so this table stopped; call the verb again for a new live table. The "
+        f"latest error: {error}"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+
+
+@pytest.mark.parametrize(
+    ("interval", "took"),
+    [(3600.0, 0.0), (600.0, 400.0)],
+    ids=["an hourly poll", "cycles slowed by rate-limit pauses"],
+)
+def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    interval: float,
+    took: float,
+) -> None:
+    # The last good cycle began well over max_outage before the failure, but the run of
+    # failures has just begun: the table keeps running, and the next good cycle clears it.
+    script.clock, script.took = clock, took
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=interval)
+    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    script.fail(error)
+    next_cycle(clock, interval)
+    (row,) = stream_rows()
+    assert (row["State"], row["Error"]) == ("RUNNING", f"{error}; {GOOD}")
+    script.rows(("AAPL", 2.0))
+    next_cycle(clock, interval)
+    (row,) = stream_rows()
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert not table.j_table.isFailed()
 
 
 def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
@@ -723,9 +757,10 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {NO_GOOD}, and every cycle has failed for 0 s since, longer "
-        "than MassiveConfig.max_outage (0 s); the rows since then may be missing, so this "
-        "table stopped; call the verb again for a new live table. The latest error: a defect"
+        f"stocks.dividends poll(): {NO_GOOD}; every cycle since 2027-01-15T08:00:00Z has "
+        "failed, for 0 s, longer than MassiveConfig.max_outage (0 s); the rows since then may "
+        "be missing, so this table stopped; call the verb again for a new live table. The "
+        "latest error: a defect"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
 

@@ -109,7 +109,7 @@ from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, lib
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
-from deephaven_massive._tables.diagnostics import StreamUpdate
+from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -1154,9 +1154,9 @@ class Flusher:
         # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
         self._shown: dict[int, str] = {}
         # Flush-lock state: per `dm.ALL` stream, the symbols whose rows are being dropped, with
-        # the first reason, which its `Error` names; and the `Error` text last written.
+        # the first reason, which its `Error` names; and the two `Error` parts last written.
         self._stale: dict[int, dict[str, str]] = {}
-        self._noted: dict[int, str] = {}
+        self._noted: dict[int, tuple[str | None, str | None]] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
@@ -1528,28 +1528,29 @@ class Flusher:
     def _write_notes(
         self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
     ) -> None:
-        """Write each stream's warning into its `Error` when it changed, or clear it.
+        """Write each stream's two flush-thread parts of its `Error` when they changed.
 
-        A stream's warning joins its futures session miss and, for a `dm.ALL` stream, the
-        symbols whose rows are being dropped (`_stale_text`); neither fails the stream.
+        The parts are its futures session miss (`NotePart.SESSION_MISS`) and, for a `dm.ALL`
+        stream, the symbols whose rows are being dropped (`NotePart.STALE_SYMBOLS`,
+        `_stale_text`); neither fails the stream, and the other sources' parts (the
+        connection's outage or options-cap notes) stay as they are.
 
         Args:
             readers: The dataset's streams on the channel.
-            updates: Receives each stream's new `Error`, or its clearing.
+            updates: Receives each stream's changed parts.
         """
         for sink in readers:
             key = sink.stream_id
-            parts = [self._shown.get(key), _stale_text(self._stale.get(key, {}))]
-            text = "; ".join(part for part in parts if part)
-            if text == self._noted.get(key, ""):
+            parts = (self._shown.get(key), _stale_text(self._stale.get(key, {})) or None)
+            if parts == self._noted.get(key, (None, None)):
                 continue
-            found = updates.get(sink, StreamUpdate())
-            if text:
-                self._noted[key] = text
-                updates[sink] = replace(found, error=text)
-            else:
+            if parts == (None, None):
                 del self._noted[key]
-                updates[sink] = replace(found, clear_error=True)
+            else:
+                self._noted[key] = parts
+            found = updates.get(sink, StreamUpdate())
+            notes = {NotePart.SESSION_MISS: parts[0], NotePart.STALE_SYMBOLS: parts[1]}
+            updates[sink] = replace(found, notes=notes)
 
     def _counted(
         self,

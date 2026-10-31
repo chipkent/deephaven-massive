@@ -72,7 +72,7 @@ from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_s
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable, Sequence
+    from collections.abc import Callable, Hashable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
@@ -95,6 +95,7 @@ __all__ = [
     "Diagnostics",
     "DriftRegistry",
     "LimitSource",
+    "NotePart",
     "RateLimitPull",
     "RateLimitRow",
     "RateLimitState",
@@ -167,6 +168,34 @@ class StreamState(StrEnum):
     RELEASED = "RELEASED"
     CLOSED = "CLOSED"
 
+
+class NotePart(StrEnum):
+    """One named part of a running stream's `Error`: a warning that leaves the stream running.
+
+    Several sources warn about one stream independently: its connection (an outage, silence,
+    the options cap), its flush thread (a futures session miss, `dm.ALL` symbols whose rows are
+    dropped), and a `poll()` table's poller (a failed cycle). Each sets or clears only its own
+    part with `StreamUpdate.notes`, so no source replaces or clears another's warning, and the
+    `Error` column joins the current parts in this order, with the skipped symbol-table values
+    last. A stopped stream's `Error` shows only why it stopped.
+    """
+
+    OUTAGE = "outage"
+    """The stream's connection is down, and its data has not flowed again since."""
+    QUIET = "quiet"
+    """The connection has received nothing for a while during market hours."""
+    CAP = "cap"
+    """The options contract cap defers some of the stream's contracts."""
+    SESSION_MISS = "session_miss"
+    """A futures row whose trading session the schedules could not place."""
+    STALE_SYMBOLS = "stale_symbols"
+    """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
+    POLL_CYCLE = "poll_cycle"
+    """A `poll()` cycle failed; the next one runs as scheduled."""
+
+
+_NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
+"""Each `NotePart`'s place in a stream's `Error`."""
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
@@ -366,8 +395,8 @@ class StreamRow:
         rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
-        error: The failure, or the transport's warning (a wait for a connection slot, deferred
-            options contracts, a poll cycle's error).
+        error: Why the stream stopped, once it has; null while it runs, when the `Error`
+            column shows its `notes` and `skipped` instead (`as_row`).
         created_at: When the stream was created.
         schema_drift: The stream's drift, as `DriftRegistry.record` writes it
             (`transport:field+` for an extra field, `transport:field-` for a missing one,
@@ -375,8 +404,10 @@ class StreamRow:
             is none. Separate from `error`, so drift never hides a failure.
         skipped: The symbol-table values the stream or poll skips because they are not
             Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
-            is. Not a column of its own: the `Error` column shows it after `error` while the
-            stream runs (`as_row`), so neither source of a warning hides or clears the other.
+            is. Not a column of its own: the `Error` column shows it after `notes` while the
+            stream runs (`as_row`).
+        notes: The current warnings that leave the stream running, each a named part, in
+            `NotePart` order. Not a column of its own: the `Error` column joins them.
     """
 
     stream_id: int
@@ -397,6 +428,9 @@ class StreamRow:
     created_at: int
     schema_drift: str | None = None
     skipped: str | None = dataclasses.field(default=None, metadata={_NOT_A_COLUMN: True})
+    notes: tuple[tuple[NotePart, str], ...] = dataclasses.field(
+        default=(), metadata={_NOT_A_COLUMN: True}
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -404,10 +438,11 @@ class StreamUpdate:
     """A change to one stream's diagnostics row, for `SessionCore.update_streams`.
 
     Built by the WebSocket transport's flush thread after each flush, and by a `poll()` table's
-    poller after each cycle; every field left as None keeps the row's current value. It never
-    changes `State`: only `SessionCore.fail_stream` fails a stream, so an `error` here is a warning
-    shown in the `Error` column, and `clear_error=True` removes it again (for example once the
-    options contract cap no longer defers anything).
+    poller after each cycle, and by a connection's loop thread; every field left as None keeps
+    the row's current value. It never changes `State` or the failure: only
+    `SessionCore.fail_stream` fails a stream. A warning is one named part of the `Error`
+    (`notes`): an update sets or clears only the parts it names, so the other sources' warnings
+    stay (for example, an outage's note leaves the options-cap warning in place).
 
     Attributes:
         rows_published: The stream's total rows published so far.
@@ -417,9 +452,8 @@ class StreamUpdate:
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.
         path: The cluster path.
-        error: The transport's warning text (`StreamRow.error`).
-        clear_error: True to set the transport's warning back to null; takes precedence over
-            `error`.
+        notes: The warning parts this update sets (to a text) or clears (to None); the parts
+            it leaves out keep their text.
         skipped: The skipped symbol-table values' text (`StreamRow.skipped`).
         clear_skipped: True to set that text back to null; takes precedence over `skipped`.
 
@@ -434,17 +468,15 @@ class StreamUpdate:
     symbols: str | None = None
     host: str | None = None
     path: str | None = None
-    error: str | None = None
-    clear_error: bool = False
+    notes: Mapping[NotePart, str | None] | None = None
     skipped: str | None = None
     clear_skipped: bool = False
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
 
-        The `Error` of a `FAILED` or `CLOSED` row names why the stream stopped, so `error` and
-        `clear_error` leave it alone: a flush or a poll cycle that races the stop never replaces
-        the cause.
+        The `Error` of a `FAILED` or `CLOSED` row names why the stream stopped, and its notes
+        are not shown, so a flush or a poll cycle that races the stop never replaces the cause.
 
         Args:
             row: The stream's current row.
@@ -465,25 +497,30 @@ class StreamUpdate:
             symbols=row.symbols if self.symbols is None else self.symbols,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
-            error=self._error(row),
+            notes=self._notes(row),
             skipped=None
             if self.clear_skipped
             else (row.skipped if self.skipped is None else self.skipped),
         )
 
-    def _error(self, row: StreamRow) -> str | None:
-        """Return the row's new `Error`.
+    def _notes(self, row: StreamRow) -> tuple[tuple[NotePart, str], ...]:
+        """Return the row's warning parts with this update's set or cleared.
 
         Args:
             row: The stream's current row.
 
         Returns:
-            The current text for a stopped stream or an update that sets none, null for
-            `clear_error`, and the update's text otherwise.
+            The parts, in `NotePart` order.
         """
-        if row.state in _STOPPED or (self.error is None and not self.clear_error):
-            return row.error
-        return None if self.clear_error else self.error
+        if not self.notes:
+            return row.notes
+        notes = dict(row.notes)
+        for part, text in self.notes.items():
+            if text is None:
+                notes.pop(part, None)
+            else:
+                notes[part] = text
+        return tuple(sorted(notes.items(), key=lambda item: _NOTE_ORDER[item[0]]))
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -529,9 +566,9 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
     A `Transport` value becomes its user-facing label (`TRANSPORT_LABELS`), so the tables spell
-    transports as `columns()` does: `Transport.WS` is shown as `WebSocket`. A stream's `Error`
-    joins its two warning sources while it runs, the transport's warning and the skipped
-    symbol-table values, with `"; "`; a stopped stream's shows only why it stopped.
+    transports as `columns()` does: `Transport.WS` is shown as `WebSocket`. A running stream's
+    `Error` joins its warning parts (`StreamRow.notes`) and then the skipped symbol-table values,
+    with `"; "`, or is null when there is none; a stopped stream's shows only why it stopped.
 
     Args:
         row: A connection, stream, or rate-limit row.
@@ -544,8 +581,11 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
         for f in fields(row)
         if not f.metadata.get(_NOT_A_COLUMN)
     }
-    if isinstance(row, StreamRow) and row.state not in _STOPPED and row.skipped is not None:
-        shown["Error"] = "; ".join(text for text in (row.error, row.skipped) if text is not None)
+    if isinstance(row, StreamRow) and row.state not in _STOPPED:
+        texts = [text for _, text in row.notes]
+        if row.skipped is not None:
+            texts.append(row.skipped)
+        shown["Error"] = "; ".join(texts) if texts else row.error
     return shown
 
 

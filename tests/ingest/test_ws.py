@@ -1278,13 +1278,18 @@ def test_a_stream_waiting_for_a_slot_says_so(
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
 
-    def stalled(count: int) -> bool:
-        errors = [r["Error"] or "" for r in streams_of(ws_session, dh_to_pylist)]
-        return len(errors) == count and all(re.fullmatch(STALL, e) for e in errors)
+    # The stall and the options cap are two parts of the Error: both show, the stall first.
+    capped_stall = f"{STALL}; {re.escape(cap)}"
 
-    wait_for(lambda: stalled(1))
+    def stalled(*patterns: str) -> bool:
+        errors = [r["Error"] or "" for r in streams_of(ws_session, dh_to_pylist)]
+        return len(errors) == len(patterns) and all(
+            re.fullmatch(p, e) for p, e in zip(patterns, errors, strict=True)
+        )
+
+    wait_for(lambda: stalled(capped_stall))
     every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
-    wait_for(lambda: stalled(2))
+    wait_for(lambda: stalled(capped_stall, STALL))
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
     del capped, every
@@ -1324,7 +1329,8 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     skipped = f"; {re.escape(SKIPPED_SPY)}"
 
     def stalled(suffix: str) -> bool:
-        return re.fullmatch(STALL + suffix, cast("str", error() or "")) is not None
+        pattern = f"{STALL}; {re.escape(cap)}{suffix}"  # each source keeps its own part
+        return re.fullmatch(pattern, cast("str", error() or "")) is not None
 
     wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))

@@ -205,13 +205,13 @@ class MassiveConfig:
             max_reconnect_backoff]`. Defaults to 120 seconds.
         max_outage: Seconds of outage a live table survives. While a WebSocket connection is
             down or reconnecting, each stream on it says so in its `m.streams()` `Error`
-            ("connection down since <time>; no data", the time of its last message), and once
-            the outage has lasted this long, every stream on the connection fails, naming when
-            the gap began: its rows from then on are missing, so a table that kept running
-            would show stale data as if it were current. Call the verb again for a new live
-            table. An outage ends once the connection is back and every subscription is
-            confirmed again, or data arrives. A `poll()` table whose cycles have all failed
-            for this long fails the same way, naming its last good cycle. `0` fails at the
+            ("connection down since <time>; no data", the time of its last message) until its
+            own data flows again: Massive confirms its subscriptions, or sends it rows. A
+            stream still down this long after the drop fails, naming when the gap began: its
+            rows from then on are missing, so a table that kept running would show stale data
+            as if it were current. Call the verb again for a new live table. A `poll()` table
+            fails the same way once its cycles have kept failing for this long, counted from
+            the first failure since its last good cycle, which it names. `0` fails at the
             first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
             outlasts a reconnect or two (`reconnect_backoff`) but not a real outage.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
