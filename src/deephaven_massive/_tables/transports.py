@@ -252,9 +252,17 @@ class RestTransport(Protocol):
             after it exists fails the table rather than raising.
 
         Raises:
-            ValueError: Before the table exists, if a path the call can read does not take a
-                parameter or filter the request sets. A cycle's failure later fails the table
-                instead of raising.
+            ValueError: Before the table exists, if a path the call reads does not take a
+                parameter or filter the request sets, even when another of its paths does.
+                Over a reactive symbol table, whose symbols choose the paths at each cycle,
+                only a parameter that no fetch path takes raises here; one the cycle's path
+                lacks fails the table then.
+            AuthenticationError: If Massive rejects the API key while the call reads its
+                crypto ticker list to split a crypto ticker.
+            EntitlementError: If the plan does not include that list (HTTP 403).
+            MassiveError: If the session is closed, or a crypto ticker cannot be split into
+                its currencies (Massive's crypto ticker list cannot be read or does not hold
+                it). A cycle's failure later fails the table instead of raising.
         """
         ...
 

@@ -611,7 +611,7 @@ class _Reference(Namespace):
             sip: The SIP whose condition mapping to list; None for every SIP.
             sort: See README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: See README.md#filters.
 
         Returns:

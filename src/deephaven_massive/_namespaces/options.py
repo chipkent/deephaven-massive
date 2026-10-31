@@ -644,7 +644,7 @@ class _Options(Namespace):
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
                 README.md#filters.
 
@@ -702,7 +702,7 @@ class _Options(Namespace):
                 README.md#symbols.
             sort: `"ticker"`. See README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
                 `ticker_lte`. See README.md#filters.
 
@@ -771,7 +771,8 @@ class _Options(Namespace):
             expired: True lists expired contracts only; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: See README.md#sort-order-limit.
-            limit: Per contract with `symbols`, so no effect there. See README.md#sort-order-limit.
+            limit: The most rows in total without `symbols`; per contract with them, so no
+                effect there. See README.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
                 README.md#filters.
 
