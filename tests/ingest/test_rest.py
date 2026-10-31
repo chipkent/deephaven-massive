@@ -1790,9 +1790,9 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is Massive's ticker, so the "
-        r"result would follow nothing: skipping 1 symbol-table value that is not Massive's "
-        r"ticker: 'SPX'; fix or delete that row$",
+        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
+        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
+        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.

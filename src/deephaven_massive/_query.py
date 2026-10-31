@@ -303,8 +303,8 @@ def _read_symbol_table(
         rows = read_symbols(rule, symbols.table, stream_id=None)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the symbol table is Massive's ticker, so the result would "
-            f"follow nothing: {skipped_rows_text(rows.skipped)}"
+            f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
+            f"would follow nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
         raise ValueError(f"{query}: the symbol table holds no symbols")

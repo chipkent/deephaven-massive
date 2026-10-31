@@ -2334,15 +2334,14 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   by the CQS suffixes Massive keeps, `.X` (a class or another dotted suffix, `BRK.B`,
   `NTEST.Q`, one or more, as in the NYSE warrants `AAC.WS` and `NE.WS.A`), `p` and an optional series (`KIMpL`), and the markers `r` and `w`; an option is
   `O:` and an OCC symbol whose root is 1 to 6 letters or digits (no dot) and whose `YYMMDD`
-  expiry is a real date; a single futures contract is upper-case letters and digits with at
-  least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
-  `ESZ5`); a futures spread is one of the spellings Massive's samples show, exactly as
-  written (below); a futures dataset takes a contract or a listed spread, the same grammar
-  `dm.canonical_symbol(text, dm.AssetClass.FUTURES)` checks, and refuses any other text
-  (`'esz5'`, `'hello world'`) with the converter's message. A futures row still keeps any
-  ticker as Massive writes it (not empty, no surrounding whitespace, no control character, no
-  class prefix), so a combo form not yet listed shows in `Symbol` but cannot be passed back as
-  `symbols` until the list learns it; an index is `I:` and letters and digits, as Massive's WebSocket pattern
+  expiry is a real date; a single futures contract is a root of upper-case letters and digits,
+  a month code, and a one- or two-digit year (`ESZ5`, `6CH5`, `0NGH39`; a year is never
+  rewritten, and `ESZ25` is not `ESZ5`); a futures combo is the shape below; a futures dataset
+  takes a contract or a combo, the same grammar `dm.canonical_symbol(text,
+  dm.AssetClass.FUTURES)` checks, and refuses any other text (`'ESZ'`, `'esz5'`, `' ESZ5'`)
+  with the converter's message. A futures row keeps any ticker as Massive writes it (not
+  empty, no surrounding whitespace, no control character, no class prefix), so no row is lost
+  to the grammar; an index is `I:` and letters and digits, as Massive's WebSocket pattern
   `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
   three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
   quote. A stream needs the WebSocket form (`BTC-USD`), and two REST paths take the pair as
@@ -2371,23 +2370,21 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   York days. The symbol rules (`is_canonical`, `check_symbol`, `canonical_from_wire`,
   `wire_spellings`) and the day rules take `AssetClass | ClassFromPrefix`; `ClassFromPrefix`
   is not exported, since no public signature takes it.
-- **Futures spreads.** Massive documents no spread grammar (its contracts and products carry
-  only `type: 'combo'`), so the spellings taken are those its vendored samples show, each
-  exactly as written: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`,
-  `6AU7-6AU6`; `flat-files/futures/minute-aggregates/comex.md`, `cbot.md`,
-  `session-aggregates/cme.md`), a CBOT inter-commodity spread (`BOB 02-01 U6`, `TEX 07-05 U6`;
-  `minute-aggregates/cbot.md`, `session-aggregates/cbot.md`), a NYMEX strategy of one or two
-  products over months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`;
-  `minute-aggregates/nymex.md`, `session-aggregates/nymex.md`), and a CME currency cross
-  (`6A:XF:AUDUSD:Q6`; `session-aggregates/cme.md`). Every futures dataset takes any ticker as
-  Massive writes it as `symbols` and keeps any on its rows, so input equals output; only the
-  converters check the grammar of a contract or a spread. No function builds a spread ticker from its legs: Massive's
-  grammar is unverified, so a builder waits for a live check
+- **Futures combos.** A combo is a spread, strip, pack, or bundle: Massive's contracts list
+  returns them with `type: 'combo'`, by default. Massive documents no combo grammar, and its
+  live lists show more forms than its samples (`1Y:SA 03M F6`, `10YF5-10YG5XXX` beside
+  `GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`), so the forms are not
+  enumerated. A combo is any run of upper-case letters and digits joined by single `-`, `:`,
+  or spaces, exactly as written. The reason: every ticker Massive itself writes must
+  round-trip, from a row to `symbols` and to a symbol table, while whitespace, lower case, an
+  empty part, and a truncated contract (`ESZ`, one token with no year, so no combo) are
+  garbage and refused. No function builds a combo ticker from its legs: Massive's grammar is
+  unverified, so a builder waits for a live check
   ([section 23](#23-open-verification-items)).
 - **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
   asset_class, *, convention=SymbolConvention.MASSIVE)` takes a required `AssetClass`: the class is never guessed,
   so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes a
-  single contract or a spread, as strictly as `canonical_symbol_future` and
+  single contract or a combo, as strictly as `canonical_symbol_future` and
   `canonical_symbol_future_spread`, and refuses other text with `canonical_symbol_future`'s
   message. One function per class
   (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
@@ -2971,8 +2968,8 @@ when an unknown contract first streams (a `dm.ALL` stream's contracts are looked
 arrive); the flush never waits on it. Only a single contract ticker is looked up, by the futures
 grammar of the symbols module (`symbols.is_futures_contract`); a spread or combination
 (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6` in the vendor's files) is
-never looked up, since the contracts endpoint lists none and Massive documents no grammar that
-names their legs. Its rows keep the rule's date, which a holiday fold can make wrong, so the
+never looked up: Massive documents no grammar that names a combo's legs, so its schedule
+cannot be told from its ticker. Its rows keep the rule's date, which a holiday fold can make wrong, so the
 first rows of each spread log one WARNING. What is still loading keeps the rule's date silently
 for up to a minute (`LOAD_PATIENCE`), so a stream's start shows no error; a contract or product
 still not loaded a minute after it was first asked for (a stalled or rate-limited lookup) is a
@@ -6996,8 +6993,8 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_wire_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
 | 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
 | 46 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
-| 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 48 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
-| 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
+| 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | A root of upper-case letters and digits, a month code, and a one- or two-digit year; a year is never rewritten, and `ESZ25` is not `ESZ5`; combos are item 48 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `ESZ` and `esz5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
+| 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | Any run of upper-case letters and digits joined by single `-`, `:`, or spaces is a combo, taken as written, so every ticker Massive lists round-trips; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: every futures ticker of the vendored samples and the live evidence round-trips as `symbols` and as a symbol-table row, a made-up combo is accepted, and a single contract and a combo refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
 | 49 | Whether Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, read with `active=true` and with `active=false`) holds every pair, delisted ones included, its WebSocket channels and the last-trade and daily open/close paths serve, with a `base_currency_symbol` and `currency_symbol` that join to the ticker | Any `X:` ticker is canonical; wherever a pair must be split (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`) the split comes only from that list, both reads once per session (a ticker in both keeps its listed row), and a pair the list does not hold, or whose currencies do not join to it, is refused there; every other path serves it | `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, `X:BTCPYUSD`, and `X:ETHWBTC` subscribe the topic the list gives, `X:BTCXYZ`, unlisted, is refused, and a delisted `X:FTTUSD` splits from the delisted read | `tests/namespaces/test_crypto_integration.py`: both reads of the list; record every row whose currencies do not join to its ticker, and stream a sample of pairs to confirm their topics |
 | 50 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (the Friday after Thanksgiving), and of week and month bars from the range; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | A 1-day stamp at 00:00, 13:00 (a short day's close, presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar is expected at 00:00 New York time on the day its period starts, and any other stamp is served, labelled by the day it falls on, with a WARNING naming the dataset, the source, and the stamp | `tests/datasets/test_row_times.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source and a 13:00 close map to 00:00 New York time; 14:30 is served with a WARNING | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, from the range, grouped daily, and `day_aggs_v1`; `/prev`, which serves only the most recent completed trading day, read at run time beside the range bar of that same day and marked when that day is a half day; and the week bars of that Thanksgiving week and the week before and the month bars of the two whole months before the run's month from the range, one bar for each period; record each `TimestampStart` and which day's range bar each other source matches, with its largest relative error |
 | 51 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time); and whether `/prev` stamps an index option (SPXW) at its own 16:15 close, or 13:15 on a short day; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | As item 50, for options, with 16:15 and 13:15 also accepted for 1-day bars (presumed) | `tests/datasets/test_row_times.py`, `tests/namespaces/test_options.py`: the documented stamps and a 13:00 close map to 00:00 New York time; another stamp is served with a WARNING | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract and of a listed SPXW contract from the range and `day_aggs_v1` for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, and their week bars of that Thanksgiving week and the week before from the range; the contracts expire on the third Friday of that December and are struck near SPY's close of that Wednesday (ten times it for SPXW); `/prev` of a SPY and an SPXW call listed at run time, found in the contracts reference, for the most recent completed trading day, beside the range bar of that same day and marked when that day is a half day; record each `TimestampStart` |

@@ -1153,11 +1153,11 @@ def test_a_file_of_spreads_reads_every_ticker_as_written(
 
 
 def test_futures_datasets_take_contracts_and_spreads(massive_session: dm.MassiveSession) -> None:
-    # A contract or a listed spread; any other text, even a combo form Massive may write, is
+    # A contract or a combo in Massive's shape, a form never seen before included; garbage is
     # refused, as dm.canonical_symbol refuses it.
-    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6"])
-    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6")
-    for bad in (" ESZ5", "X:ESZ5", "", "esz5", "ZZ:NEW COMBO Z6"):
+    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6", "ZZ:NEW COMBO Z6"])
+    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6", "ZZ:NEW COMBO Z6")
+    for bad in (" ESZ5", "X:ESZ5", "", "esz5", "ESZ"):
         with pytest.raises(ValueError, match="ticker"):
             massive_session.futures.trades(bad)
 
