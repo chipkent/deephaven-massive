@@ -359,3 +359,16 @@ def test_forgetting_keeps_a_newer_decision() -> None:
     assert created
     cache.forget_host(key, old)  # not the current one: kept
     assert cache.host_future(key) == (new, False)
+
+
+@pytest.mark.parametrize("fixture", ["stocks_delayed.json", "stocks_conflict.json"])
+def test_a_listed_subscription_on_a_delayed_plan_does_not_warn(
+    snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture, fixture: str
+) -> None:
+    # A snapshot with any delayed label is a delayed plan, even beside a real-time label.
+    with caplog.at_level(logging.WARNING, LOGGER):
+        decision = run(
+            AssetClass.STOCKS, snapshot(fixture), delayed=frozenset({Subscription.STOCKS})
+        )
+    assert decision.host == DELAYED_HOST
+    assert caplog.records == []
