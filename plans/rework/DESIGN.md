@@ -3092,7 +3092,10 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     own session it requested, and one named by datetimes keeps rows by time. A file that holds
     rows of another session logs one WARNING per dataset per session, naming the file and the
     session, and saying that rows of a requested session may then sit in a neighbouring day's
-    file, which a call by dates does not read, and be missing; a row whose `session_end_date` is empty or does not parse is dropped and counted
+    file, which a call by dates does not read, and be missing. The call then names those
+    sessions on the table: when a file held an earlier session's rows, the range's last
+    session may be incomplete, and when one held a later session's, its first; the table's
+    description and a WARNING name them (`FlatFileRead.uncertain`); a row whose `session_end_date` is empty or does not parse is dropped and counted
     ([section 19.5](#195-runtime-drift)). Dates read one file per session date and never roll forward:
     a date names its own session exactly. Datetimes read the sessions from that of `start` to
     that of `end - 1 µs`, so an intraday window reads one file and an evening window only the
@@ -5924,7 +5927,12 @@ serving it would quietly return an empty table. So a loud failure, a defect of t
   have been dropped in a row, across flushes and symbols, with no row of the dataset published
   between them (`Flusher._counted`, counting the client's drops and the flush's). A flush is
   no unit here: a quiet stream's flush often holds one row, so a per-flush rule would let one
-  odd row fail it. A published row starts the count again.
+  odd row fail it. A published row starts the count again. Each symbol also has a run of its
+  own (`Flusher._counted_symbols`), which other symbols' published rows do not end: after
+  `DROPPED_RUN_LIMIT` of one symbol's rows in a row are dropped with none of its rows
+  published, the streams that name that symbol fail, so it never freezes them without an
+  error. A `dm.ALL` stream is never failed for one symbol; the dataset's WARNING and count
+  name the drops.
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire` or `RowDataError`; `poll()` fails its table through

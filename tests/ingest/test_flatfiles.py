@@ -1805,6 +1805,51 @@ def test_a_futures_row_keeps_its_own_session_and_the_call_keeps_the_requested(
     assert [
         r.getMessage() for r in caplog.records if "holds rows of session" in r.getMessage()
     ] == [OTHER_SESSIONS]
+    # The file held an earlier session's rows, so the last requested session's rows may sit
+    # in the next day's file, which a read by dates does not open: the table says so.
+    assert t.attributes()["TableDescription"].endswith(
+        "Session(s) 2025-03-04 may be incomplete: Massive's flat files held rows of other "
+        "sessions, so some of their rows may sit in a file outside the range."
+    )
+    doubts = [r.getMessage() for r in caplog.records if "may sit in a file" in r.getMessage()]
+    assert (
+        doubts
+        == [
+            (
+                "futures.trades history: the flat files hold rows of sessions other than their "
+                "own day's, so rows of session(s) 2025-03-04 may sit in a file outside the range "
+                "and be missing; read a wider range of dates, or by datetimes, to include them"
+            )
+        ]
+        * 2
+    )
+
+
+def test_a_futures_read_names_both_edge_sessions_when_files_hold_both_neighbours(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    later = ",1.0,1,1,1,1,2025-03-04,ESH5,1741042800000000000\n"
+    earlier = ",1.0,1,1,1,2,2025-03-03,ESH5,1740956400000000000\n"
+    fake_s3.put(FUTURES_0304.format("cme"), make_csv_gz(FUTURES_HEADER + earlier))
+    fake_s3.put(
+        "us_futures_cme/trades_v1/2025/03/2025-03-03.csv.gz",
+        make_csv_gz(FUTURES_HEADER + later),
+    )
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
+    t = q.history("2025-03-03", "2025-03-04")
+    assert (
+        "Session(s) 2025-03-03, 2025-03-04 may be incomplete"
+        in (t.attributes()["TableDescription"])
+    )
+
+
+def test_a_read_whose_files_hold_only_their_own_sessions_names_no_doubt() -> None:
+    seen = flatfiles._OtherSessions()
+    span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
+    assert seen.uncertain(span) == ()
+    seen.saw(pa.array([date(2025, 3, 2)], pa.date32()), date(2025, 3, 3))
+    assert seen.uncertain(span) == (date(2025, 3, 5),)
+    assert seen.uncertain(None) == ()  # a read by instants covers its whole range
 
 
 def test_a_futures_row_of_another_requested_session_is_kept_with_its_own_date(

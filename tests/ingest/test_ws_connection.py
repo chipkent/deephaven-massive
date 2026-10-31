@@ -562,7 +562,7 @@ def test_a_connection_skips_a_session_that_is_gone(
     monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     ws_session.on_loop(connection, connection._write_row)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
-    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift))
+    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift, dropped={}))
     assert written == []
     monkeypatch.undo()
     assert ws_session.on_loop(
@@ -1705,6 +1705,19 @@ def test_buffered_rows_are_shown_until_they_are_published(
 
 
 _URL = "wss://socket.test/stocks"
+
+
+def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSession) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    error = _massive.WireError("dropped")
+    rejects = [
+        _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
+        for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
+    ]
+    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1}
+    del result
 
 
 def test_the_connection_logs_drift_dropped_rows_and_a_summary(

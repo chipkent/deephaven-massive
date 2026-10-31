@@ -47,6 +47,7 @@ import itertools
 import logging
 import threading
 import time
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -54,6 +55,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
 from deephaven_massive._datasets.trading_hours import in_trading_hours
+from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -911,7 +913,7 @@ class Connection:
             self.flusher.rows(channel, rows)
             self._arm_backlog_row()  # the row write below may be throttled
         if drift.fields_drifted or drift.dropped_rows:
-            self._record_drift(channel, drift)
+            self._record_drift(channel, drift, dropped=self._dropped_symbols(rejects))
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -1139,18 +1141,35 @@ class Connection:
             self._moving = self._group.reroute(self, status.message)
         return self._moving
 
-    def _record_drift(self, channel: str, drift: DriftReport) -> None:
+    def _record_drift(
+        self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
+    ) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
 
         Args:
             channel: The channel.
             drift: Its drift in the frame.
+            dropped: How many of the frame's dropped rows each canonical symbol had.
         """
         text = self._drift_seen.record(self.key, channel, drift)
         if text is not None:
             self._drift = text
             self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
+        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
+
+    def _dropped_symbols(self, rejects: list[Reject]) -> dict[str, int]:
+        """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
+
+        Args:
+            rejects: The rows the client dropped.
+
+        Returns:
+            Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
+            not text, or a spelling the library cannot read is left out (the dataset's own run
+            still counts it).
+        """
+        found = (canonical_from_wire(self.asset_class, r.symbol) for r in rejects if r.symbol)
+        return dict(Counter(symbol for symbol in found if symbol is not None))
 
     def _stall_text(self) -> str:
         """Return the `Error` of a stream whose connection waits for a slot.

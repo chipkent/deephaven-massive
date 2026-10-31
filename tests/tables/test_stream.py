@@ -1007,6 +1007,53 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     assert flusher._runs == {}
 
 
+def test_a_symbol_whose_every_row_is_dropped_fails_its_streams_while_others_publish(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    # AAPL publishes in every flush, so the dataset's run never grows; ILLQ's rows are all
+    # dropped, and the streams that name ILLQ must not freeze without an error.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    illq, _ = make_sink(core, ("ILLQ",), plan)
+    aapl, _ = make_sink(core, ("AAPL",), plan)
+    for sink in (every, illq, aapl):
+        flusher.routes.add("T", sink)
+    half = stream.DROPPED_RUN_LIMIT // 2
+    flusher.rows("T", [trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * half])
+    flusher.flush()
+    flusher.rows("T", [trade("AAPL")])
+    # The client dropped ILLQ rows too, counted by their canonical symbol.
+    lost = DriftReport(dropped_rows=half - 1, dropped_reason="a T row for ILLQ: no Price")
+    flusher.drift("T", lost, where="wss://h/stocks channel T", dropped={"ILLQ": half - 1})
+    flusher.flush()
+    assert (every.failed, illq.failed, aapl.failed) == (False, False, False)
+    with caplog.at_level(logging.ERROR):
+        flusher.rows("T", [trade("AAPL"), trade("ILLQ", SipTimestamp=5)])
+        flusher.flush()
+    assert (every.failed, illq.failed, aapl.failed) == (False, True, False)
+    error = next(r.getMessage() for r in caplog.records if "rows of ILLQ" in r.getMessage())
+    assert f"the last {2 * half} rows of ILLQ on channel T were dropped" in error
+    assert "the first: timestamp unit mismatch for test.trades.Timestamp" in error
+
+
+def test_a_published_row_of_a_symbol_ends_its_run(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    core = massive_session._core
+    illq, _ = make_sink(core, ("ILLQ",))
+    flusher.routes.add("T", illq)
+    flusher.rows("T", [trade("ILLQ", SipTimestamp=5)] * 3)
+    flusher.flush()
+    assert flusher._symbol_runs[illq.plan]["ILLQ"][0] == 3
+    flusher.rows("T", [trade("ILLQ"), trade("ILLQ", SipTimestamp=5)])
+    flusher.flush()
+    assert flusher._symbol_runs[illq.plan] == {}
+    flusher.routes.remove(1)
+    flusher.flush()
+    assert flusher._symbol_runs == {}
+
+
 def test_a_flush_forgets_the_run_of_a_dataset_no_longer_routed(
     massive_session: dm.MassiveSession, flusher: Flusher
 ) -> None:

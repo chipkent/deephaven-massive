@@ -114,7 +114,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -324,6 +324,60 @@ text: its only lists are the code lists of a `code-list-text` field."""
 _LONG_LIST: Final = pa.list_(pa.int64())
 
 
+class _OtherSessions:
+    """What one futures read's files showed of rows from sessions other than their own day's.
+
+    A futures flat file is named by session date, but Massive does not document that it holds
+    only that session's rows. When a file holds a row of an earlier session, a requested
+    session's rows may also sit in the file after it, which a call by dates reads only up to
+    its last session; when a file holds a row of a later session, they may sit in the file
+    before it. The read cannot see those files, so it says which requested sessions may be
+    incomplete (`uncertain`). Shared by the read's reader threads; one leaf lock guards it.
+    """
+
+    __slots__ = ("_earlier", "_later", "_lock")
+
+    def __init__(self) -> None:
+        """Start having seen no other session."""
+        self._lock = threading.Lock()
+        self._earlier = False
+        self._later = False
+
+    def saw(self, others: pa.Array, day: date) -> None:
+        """Record a file's rows of other sessions.
+
+        Args:
+            others: The sessions, `date32`, of the file's rows whose session is not its day.
+            day: The file's day.
+        """
+        own = pa.scalar(day, pa.date32())
+        earlier = bool(pc.any(pc.less(others, own)).as_py())
+        later = bool(pc.any(pc.greater(others, own)).as_py())
+        with self._lock:
+            self._earlier |= earlier
+            self._later |= later
+
+    def uncertain(self, sessions: DaySpan | None) -> tuple[date, ...]:
+        """Return the requested sessions whose rows may sit in a file the read did not read.
+
+        Args:
+            sessions: The sessions a call by dates requested, or None for a call by instants,
+                whose files cover its whole time range.
+
+        Returns:
+            The first session when some file held a later session's rows, and the last when
+            some file held an earlier session's rows, oldest first, without repeats; empty
+            when no file held another session's rows.
+        """
+        if sessions is None:
+            return ()
+        with self._lock:
+            found = {sessions.first} if self._later else set()
+            if self._earlier:
+                found.add(sessions.last)
+        return tuple(sorted(found))
+
+
 @dataclass(frozen=True, eq=False, slots=True)
 class _Transform:
     """How one request turns flat-file batches into blocks of the dataset's schema.
@@ -359,6 +413,9 @@ class _Transform:
             instants, `[day_start(day), day_start(day + 1))` (for futures, its session's
             hours), so a file's rows and REST's rows of another day never overlap; None to
             trim only to the call's range.
+        seen: What the read's futures files showed of other sessions' rows, for the
+            sessions the read may have left incomplete (`FlatFileRead.uncertain`); its own
+            per call, shared by the call's reader threads.
     """
 
     dataset: str
@@ -376,6 +433,7 @@ class _Transform:
     stamps: StampRule | None = None
     bars: BarBounds | None = None
     tile: AssetClass | None = None
+    seen: _OtherSessions = field(default_factory=_OtherSessions)
 
     @classmethod
     def build(
@@ -576,6 +634,7 @@ class _Transform:
         own = pa.scalar(key.day, pa.date32())
         others = pc.filter(sessions, pc.not_equal(sessions, own))
         if len(others):
+            self.seen.saw(others, key.day)
             self.warnings.log(
                 f"{self.dataset}\0other sessions",
                 "%s: the flat file %s holds rows of session %s, not only of its own %s; each "
@@ -882,7 +941,9 @@ class FlatFileHistory:
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
             empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
-        return FlatFileRead(tuple(kept), empty, unread)
+        return FlatFileRead(
+            tuple(kept), empty, unread, transform.seen.uncertain(transform.sessions)
+        )
 
     def _after_missing(
         self,
