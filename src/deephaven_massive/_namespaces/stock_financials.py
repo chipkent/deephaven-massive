@@ -102,7 +102,6 @@ RATIOS: Final = DatasetSpec(
     keys={(_R, _RATIOS): ticker_key()},
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
-    page_size=50_000,
 )
 
 

@@ -1203,6 +1203,22 @@ def test_a_parameter_keeps_the_scalar_default_its_schema_documents() -> None:
     ]
 
 
+def test_a_parameter_keeps_the_integer_maximum_its_schema_documents() -> None:
+    params = [
+        _param("limit", {"type": "integer", "default": 10, "maximum": 50000}),
+        _param("ratio", {"type": "number", "maximum": 1.5}),  # not an integer
+        _param("flag", {"type": "integer", "maximum": True}),  # a boolean, not an integer
+        _param("count", {"type": "integer"}),  # the maximum is stated only in prose, if at all
+    ]
+    path = _one(_row(price={"type": "number"}), params=params)
+    assert [(p.name, p.maximum) for p in path.params[1:]] == [
+        ("limit", 50000),
+        ("ratio", None),
+        ("flag", None),
+        ("count", None),
+    ]
+
+
 def test_path_item_parameters_come_first() -> None:
     item = _item(_row(price={"type": "number"}))
     item["parameters"] = [_param("shared", {"type": "string"})]

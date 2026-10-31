@@ -148,7 +148,6 @@ TRADES: Final = DatasetSpec(
         (_FLAT_FILES, _TRADES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 
 QUOTES: Final = DatasetSpec(
@@ -165,7 +164,6 @@ QUOTES: Final = DatasetSpec(
         (_FLAT_FILES, _QUOTES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 
 BARS: Final = DatasetSpec(
@@ -185,7 +183,6 @@ BARS: Final = DatasetSpec(
         (_FLAT_FILES, _SESSION_FILES): _tick_keys("WindowStart"),
     },
     time_axis=("window_start.gte", "window_start.lt"),
-    page_size=50_000,
 )
 
 SNAPSHOTS: Final = DatasetSpec(
@@ -195,7 +192,6 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT_PATH,
     keys={(_REST, _SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
-    page_size=50_000,
     # The contract's last quote and trade times: an explicit APPEND poll appends each new
     # state of a contract. The snapshot carries no single update time of its own.
     revision_keys=("LastQuoteLastUpdated", "LastTradeLastUpdated"),
@@ -212,7 +208,6 @@ CONTRACTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     poll_keys=("Symbol", "Date"),
-    page_size=1_000,
 )
 
 PRODUCTS: Final = DatasetSpec(
@@ -221,7 +216,6 @@ PRODUCTS: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     fetch_path=_PRODUCTS_PATH,
     poll_keys=("ProductCode", "TradingVenue", "Date"),
-    page_size=50_000,
 )
 
 EXCHANGES: Final = DatasetSpec(
@@ -230,7 +224,6 @@ EXCHANGES: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     fetch_path=_EXCHANGES_PATH,
     poll_keys=("Id",),
-    page_size=1_000,
 )
 
 MARKET_STATUS: Final = DatasetSpec(
@@ -242,7 +235,6 @@ MARKET_STATUS: Final = DatasetSpec(
     # library's name, so it comes from a declared key.
     keys={(_REST, _MARKET_STATUS_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     poll_keys=("ProductCode", "TradingVenue"),
-    page_size=100,
     # The time of the product's latest market event: an explicit APPEND poll appends each
     # status change.
     revision_keys=("Timestamp",),
@@ -258,7 +250,6 @@ SCHEDULES: Final = DatasetSpec(
     keys={(_REST, _SCHEDULES_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     time_axis=("session_end_date.gte", "session_end_date.lte"),
     poll_keys=("ProductCode", "TradingVenue", "Timestamp", "Event"),
-    page_size=1_000,
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
@@ -471,7 +462,7 @@ class _Futures(Namespace):
                 for every product.
             sort: Such as `"ticker"`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"ticker_gte": "ES"}`. See README.md#filters.
 
         Returns:
@@ -527,7 +518,7 @@ class _Futures(Namespace):
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
                 README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. See
                 README.md#filters.
 
@@ -588,7 +579,7 @@ class _Futures(Namespace):
             as_of: The day whose specifications to list; None for today. See README.md#as-of.
             sort: Such as `"name"`; the endpoint sorts by `date`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`. See
                 README.md#filters.
 
@@ -630,7 +621,7 @@ class _Futures(Namespace):
         neither has this method. It takes no symbols and has no `Symbol` column.
 
         Args:
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.exchanges.md.
@@ -663,7 +654,7 @@ class _Futures(Namespace):
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
@@ -710,7 +701,7 @@ class _Futures(Namespace):
             end: The last session, inclusive; None also returns future sessions.
             sort: The endpoint sorts by `product_code`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"trading_venue": "XCME"}`; never `session_end_date`, which `start`
                 and `end` set. See README.md#filters.
 

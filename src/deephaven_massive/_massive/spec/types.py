@@ -444,6 +444,10 @@ class Param:
             the JSON scalar it gives (`50` for an indicator's `window`, `"day"` for its
             `timespan`, `True` for `adjusted`); `None` when it documents none, or documents
             one that is not a scalar.
+        maximum: The largest value Massive's specification documents for an integer
+            parameter (its schema's `maximum`), such as `50000` for most paths' page-size
+            `limit`; `None` when it documents none, as for the aggregates' `limit`, whose
+            maximum only its prose states.
     """
 
     name: str
@@ -452,6 +456,7 @@ class Param:
     values: tuple[str, ...] = ()
     unit: WireUnit | None = None
     default: str | int | float | bool | None = None
+    maximum: int | None = None
 
     def __post_init__(self) -> None:
         """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
@@ -569,7 +574,8 @@ class Source:
 
         Returns:
             The membership whose kind and group these are; None when the source holds none,
-            and always for a kind of None. A source holds at most one per kind and group.
+            and always for a kind of None. A source holds at most one per kind and group:
+            constructing it with two raises `ValueError`.
         """
         return next(
             (m for m in self.memberships if (m.kind, m.group) == (kind, group)),

@@ -28,7 +28,7 @@ _PATH = RestPath(
     params=(
         Param(name="id", kind=ParamKind.STRING, in_path=True),
         Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS),
-        Param(name="window", kind=ParamKind.INTEGER, default=50),
+        Param(name="window", kind=ParamKind.INTEGER, default=50, maximum=500),
     ),
     fields=(
         Field(
@@ -61,10 +61,12 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
         "wire_key": "price",
     }
     assert document["sources"][0]["params"][2]["default"] == 50
+    assert document["sources"][0]["params"][2]["maximum"] == 500
     assert document["sources"][0]["params"][1] == {
         "default": None,
         "in_path": False,
         "kind": "timestamp",
+        "maximum": None,
         "name": "timestamp.gte",
         "unit": "ms",
         "values": [],

@@ -25,6 +25,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.query_building import Namespace
@@ -101,7 +102,7 @@ def test_tickers_are_instruments_filtered_one_ticker_a_request() -> None:
     assert spec.symbol_param == "ticker"
     assert not spec.per_symbol  # no symbols lists every ticker
     assert CATALOG.takes_symbols(spec)
-    assert spec.page_size == 1000
+    assert page_size(spec, CATALOG.rest_path(spec.fetch_path)) == 1000
     assert CATALOG.dataset_schema(spec).column_names[0] == "Symbol"
     types = _types(spec)
     assert "Ticker" not in types

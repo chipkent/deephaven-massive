@@ -16,8 +16,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   `published_utc`, the instants that start the bounds' days in the request's day zone), the
   symbol parameter (`DatasetSpec.symbol_param`, at most `DatasetSpec.symbols_per_request`
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
-  size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
-  fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
+  size (`DatasetSpec.page_size`, else the path's documented maximum `limit`, or `Request.limit`
+  when that is smaller, so a small cap fetches no more than it keeps), and for `history()` the
+  ascending direction (`_ascending`).
   `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
   sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
   indicator) it caps each symbol's rows instead, and for a dataset whose symbols overlap
@@ -224,7 +225,8 @@ def _shared_failure(error: BaseException, context: str, *, stopped: bool = False
             that interrupted it.
         context: What failed, for an unexpected error's message, such as `"the read failed"`.
         stopped: True when the maker's own read was stopped (a background read whose table
-            was released), which ends its requests with a cancellation.
+            was released) and its request ended without an answer from Massive: the
+            cancellation that stop causes, not a refusal that came as it was set.
 
     Returns:
         `_AbandonedError` when the maker stopped for its own reason: its read was stopped, a
@@ -587,7 +589,18 @@ class RestReader:
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()
-            stopped = cancel is not None and cancel.is_set()
+            # A stop ends a request with an error of no status; one with a status is Massive's
+            # answer, a refusal the waiters copy even when the stop came at the same moment.
+            stopped = cancel is not None and cancel.is_set() and error.status is None
+            logger.debug(
+                "%s: reading the crypto ticker list failed (status %s, stop set %s); its "
+                "waiters %s: %s",
+                self.state.label,
+                error.status,
+                cancel is not None and cancel.is_set(),
+                "try again" if stopped else "get a copy of the error",
+                public,
+            )
             future.set_exception(_shared_failure(public, "the read failed", stopped=stopped))
             raise public from error
         except BaseException as error:

@@ -59,8 +59,9 @@ _REST: Final = Transport.REST
 _WS: Final = Transport.WS
 _FILES: Final = Transport.FLAT_FILES
 
-_PAGE_SIZE: Final = 50_000
-"""The largest page the quotes and aggregate-range endpoints accept (their documented maximum)."""
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
 
 _LAST_QUOTE: Final = "/v1/last_quote/currencies/{from}/{to}"
 _QUOTES: Final = "/v3/quotes/{fxTicker}"
@@ -86,7 +87,6 @@ QUOTES: Final = DatasetSpec(
         ),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_PAGE_SIZE,
 )
 """`m.forex.quotes`: the `C` stream, REST quote history, and quote files."""
 
@@ -137,7 +137,7 @@ BARS: Final = DatasetSpec(
         (_FILES, _MINUTE_FILES): _BAR_KEYS,
         (_FILES, _DAY_FILES): _BAR_KEYS,
     },
-    page_size=_PAGE_SIZE,
+    page_size=_AGGREGATES_PAGE,
 )
 """`m.forex.bars`: `CAS` and `CA` streams, ranges, grouped daily bars, and bar files."""
 
