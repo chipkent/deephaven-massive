@@ -317,6 +317,39 @@ def unknown_futures(*_: object) -> HostDecision:
     return HostDecision("socket.test", Recency.UNKNOWN, "no timeframe in futures snapshot")
 
 
+def test_a_connection_that_was_served_is_never_moved_to_delayed_data(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The host acknowledged a topic, so it serves this key: a later real-time refusal fails
+    # only that step's streams, and the working stream stays on real-time data.
+    custom_session = make_ws_session(decide=unknown_futures)
+    first = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+    second = custom_session.query(FUTURES, ["NQZ5"]).blink()
+    custom_session.wait(lambda s: len(s.statuses) == 2)
+    settle(custom_session)
+    custom_session.flush()  # applies the failure
+    wait_for(
+        lambda: (
+            [r["State"] for r in streams_of(custom_session, dh_to_pylist)]
+            == [
+                "RUNNING",
+                "FAILED",
+            ]
+        )
+    )
+    assert custom_session.urls == ["wss://socket.test/futures"]
+    assert custom_session.verdicts == []
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert row["Host"] == "socket.test"
+    [_, failed] = streams_of(custom_session, dh_to_pylist)
+    assert "Real-time data requires an upgrade" in failed["Error"]
+    del first, second
+
+
 def test_the_real_time_verdict_moves_the_connection_once(
     fake_ws_server: FakeMassiveServer,
     make_ws_session: Callable[..., WsSession],

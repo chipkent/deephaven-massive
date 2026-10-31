@@ -3196,12 +3196,13 @@ TICK family:
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
   4. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
-          -> socket.massive.com, UNKNOWN,
+          -> socket.massive.com, REALTIME,
              evidence="the host check's snapshot (<path>) was refused: <Massive's text>";
              WARNING naming the evidence. A refused REST snapshot says nothing certain about
-             the WebSocket plan, so the server decides: the explicit-verdict rule of 13.3
-             moves the connection to the delayed host, and any other refusal fails only the
-             refused topics with Massive's message (a Basic plan's streams fail that way)
+             the WebSocket plan, so the class streams the real-time host's data, labelled as
+             such. The connection is never moved to the delayed host (its recency is not
+             UNKNOWN): a refusal from Massive fails the refused streams with Massive's text
+             (a Basic plan's streams fail that way)
      b. Read the class's ordered timeframe fields, excluding underlying_asset:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
@@ -3209,11 +3210,11 @@ TICK family:
                            (in the OpenAPI spec; absent from the documentation page)
         If any value is DELAYED  -> delayed.massive.com, DELAYED, evidence="<field>=DELAYED"
                                     (DELAYED wins conflicts; the field used is logged)
-        elif any other value     -> socket.massive.com, UNKNOWN,
+        elif any other value     -> socket.massive.com, REALTIME,
                                     evidence="<field>='<value>', neither DELAYED nor
                                     REAL-TIME, in the snapshot"; WARNING naming the field,
-                                    the value, and MassiveConfig.ws_hosts; the server decides
-                                    as in 4a
+                                    the value, and MassiveConfig.ws_hosts; never moved, as
+                                    in 4a
         elif any is REAL-TIME    -> socket.massive.com,  REALTIME, evidence="<field>=REAL-TIME"
      c. No timeframe found:
           STOCKS, OPTIONS with a top-level "fmv" field (Business key without a trades/quotes
@@ -3247,9 +3248,10 @@ Basic has no chain snapshot (403, rule 4a) and no WebSocket. The option-chain sa
 documentation lists no `timeframe` (only the OpenAPI spec has it), so absence proves nothing, and a
 real-time customer must never be routed to delayed data by inference. For the same reason, a
 `timeframe` value other than the documented `DELAYED` and `REAL-TIME`, and a refused snapshot,
-are not guessed at: the class connects to the real-time host with `UNKNOWN` recency, and the
-server's explicit answer decides. Raising instead would refuse every stream of the class on a
-guess about the vendor's behavior, though the WebSocket server may serve it.
+are not guessed at: the class connects to the real-time host with `REALTIME` recency, the
+host's own, and is never moved to delayed data; a refusal from Massive fails the refused
+streams with its text. Raising instead would refuse every stream of the class on a guess about
+the vendor's behavior, though the WebSocket server may serve it.
 
 **Base Business key, TICK family.** A Business key without a trades/quotes expansion is routed
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
@@ -3451,12 +3453,15 @@ the connection authenticates.
 **Explicit-verdict rule.** When a `Status(REFUSED)` with no topic arrives on a `socket.` TICK
 connection with `realtime_verdict` set (its message contains "real-time", case-insensitive; the exact text is
 **UNVERIFIED**, the knowledge base quotes only "not authorized"), the library re-resolves the
-host only if all three hold:
+host only if all four hold:
 
-1. the connection's cached `Recency` is `UNKNOWN` (the futures default, and every class whose
-   snapshot was refused or held an undocumented `timeframe`);
+1. the connection's cached `Recency` is `UNKNOWN` (the futures default when its snapshot
+   carries no timeframe; never a class whose snapshot was refused or held an undocumented
+   `timeframe`, which is `REALTIME`);
 2. every topic of the in-flight step was refused;
-3. the host is not pinned by `ws_hosts`.
+3. the host is not pinned by `ws_hosts`;
+4. the connection has never had a topic acknowledged, in any generation: a host that served
+   this key is not moved, so a working real-time stream never jumps to 15-minute-old data.
 
 Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` through
 `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the one cached
@@ -6448,9 +6453,10 @@ document already reflects them.
 36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,
     a checked multiply to nanoseconds, and the [1990, 2100] bound on epoch integers only
     ([section 12](#12-timestamp-units-and-day-boundaries)).
-37. **An undocumented `timeframe` is not guessed at.** An unknown value, like a refused
-    snapshot, connects the class to the real-time host with `UNKNOWN` recency and a WARNING,
-    and the server's explicit answer decides ([section 13.2](#132-host-decision)).
+37. **No stream is moved to delayed data by inference.** An unknown `timeframe` value, like a
+    refused snapshot, connects the class to the real-time host with `REALTIME` recency and a
+    WARNING, and is never moved; a connection that has had a topic acknowledged is never moved
+    either ([section 13.2](#132-host-decision), [section 13.3](#133-connection-and-subscription-protocol)).
 38. **A never-acknowledged topic** never reconnects its connection: after one re-send it counts
     as `NO_ACK`, shows in its streams' `Error`, and is re-sent alone every 60 s until it is
     acknowledged ([section 13.3](#133-connection-and-subscription-protocol)).

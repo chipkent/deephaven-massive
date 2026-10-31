@@ -112,16 +112,16 @@ def test_not_entitled_rows_count_as_absent(snapshot: Callable[[str], Snapshot]) 
     assert decision.recency is Recency.REALTIME
 
 
-def test_an_undocumented_timeframe_lets_the_server_decide(
+def test_an_undocumented_timeframe_streams_real_time_data(
     snapshot: Callable[[str], Snapshot], caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, LOGGER):
         decision = run(AssetClass.STOCKS, snapshot("stocks_unknown_timeframe.json"))
-    # Nothing is guessed from a value the library does not know: the real-time host with
-    # unknown recency, so the server's explicit verdict decides.
+    # Nothing is guessed from a value the library does not know: the real-time host, labelled
+    # as such, and never moved to delayed data; a refusal from Massive fails its streams.
     assert decision == HostDecision(
         REALTIME_HOST,
-        Recency.UNKNOWN,
+        Recency.REALTIME,
         "last_trade.timeframe='END-OF-DAY', neither DELAYED nor REAL-TIME, in the snapshot",
     )
     (record,) = caplog.records
@@ -137,12 +137,12 @@ def test_delayed_beside_an_undocumented_timeframe_is_delayed() -> None:
     assert run(AssetClass.STOCKS, fetch).host == DELAYED_HOST
 
 
-def test_real_time_beside_an_undocumented_timeframe_is_unknown() -> None:
+def test_real_time_beside_an_undocumented_timeframe_is_real_time() -> None:
     fetch = Snapshot(
         [{"last_trade": {"timeframe": "REAL-TIME"}, "last_quote": {"timeframe": "END-OF-DAY"}}]
     )
     decision = run(AssetClass.STOCKS, fetch)
-    assert (decision.host, decision.recency) == (REALTIME_HOST, Recency.UNKNOWN)
+    assert (decision.host, decision.recency) == (REALTIME_HOST, Recency.REALTIME)
 
 
 def test_a_business_key_without_trades_streams_from_business(
@@ -206,10 +206,10 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
     with caplog.at_level(logging.WARNING, LOGGER):
         decision = decide(AssetClass.STOCKS, TICK, ws_hosts={}, fetch=refuse)
     # A refused REST snapshot says nothing certain about the WebSocket plan: the stream opens
-    # on the real-time host, and the WebSocket server's own answer decides.
+    # on the real-time host, and a refusal from the WebSocket server fails it with its text.
     assert decision == HostDecision(
         REALTIME_HOST,
-        Recency.UNKNOWN,
+        Recency.REALTIME,
         "the host check's snapshot (/v3/snapshot) was refused: HTTP 403 from GET /v3/snapshot",
     )
     (record,) = caplog.records

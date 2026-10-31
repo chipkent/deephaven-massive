@@ -136,8 +136,8 @@ class RestTransport(Protocol):
         Raises:
             AuthenticationError: Massive rejected the API key.
             MassiveError: The request failed. A refused request is not an error: the class
-                then streams from the real-time host with `UNKNOWN` recency, and the WebSocket
-                server's own answer decides.
+                then streams from the real-time host with `REALTIME` recency, and a refusal
+                from the WebSocket server fails the refused streams.
         """
         ...
 

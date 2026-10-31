@@ -15,7 +15,8 @@ everything else belongs here:
 - **Refusals.** A refused topic fails exactly the streams that want it, with
   `EntitlementError`; nothing tears down the connection. A refusal that names no topic
   applies to the whole step in flight, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown: then the decision is recorded with the REST
+  `socket.` connection whose recency was unknown and that has never had a topic acknowledged:
+  then the decision is recorded with the REST
   transport (`RestTransport.record_verdict`), the connection's streams move to the `delayed.`
   host, and they keep running.
 - **Rows, rejects, and drift.** Rows go to the connection's flush thread (`Flusher`), which

@@ -191,10 +191,11 @@ def _date_sentence(spec: DatasetSpec) -> str:
             return (
                 "The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd "
                 "text: Massive's `session_end_date` from REST and the flat files. The WebSocket "
-                "sends none, so a streamed row gets the session that ends at the next 17:00 "
-                "Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the "
-                "session Massive's futures schedules place the row in; a row the schedules do "
-                "not cover keeps that date, and the stream's m.streams() row shows the error."
+                "sends none, so a streamed row gets the session Massive's futures schedules "
+                "place it in (between two sessions, the next one). A row the schedules cannot "
+                "place (a spread, or a contract whose schedule failed or has not loaded yet) "
+                "has a null Date, with a WARNING in the log: the 17:00 Chicago rule can be "
+                "wrong around a holiday. The stream keeps running."
             )
         return (
             "The futures session of the bar (its trading date), as ISO yyyy-MM-dd text: "

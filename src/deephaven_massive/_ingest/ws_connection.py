@@ -7,8 +7,9 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
 
 - **Refusals and failures.** A refused topic fails exactly the streams that want it; a
   refusal of a whole step fails the step, unless it is the server's real-time verdict on a
-  `socket.` connection whose recency was unknown, which moves the connection's streams to the
-  `delayed.` host (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
+  `socket.` connection whose recency was unknown and that has never had a topic
+  acknowledged, which moves the connection's streams to the `delayed.` host
+  (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
   rejected key, a handshake error retrying cannot fix) fails every stream on it.
 - **Rows, rejects, drift, and its row.** Rows go to the flush thread; a rejected row fails the
   streams that would have received it; drift is recorded on the connection's `SchemaDrift`. A
@@ -73,7 +74,7 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list, log_failure
-from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
+from deephaven_massive._massive import Cancel, StatusKind, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -425,6 +426,9 @@ class Connection:
         self._traffic = _Traffic()
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
         self._stalled = self._ended = self._moving = False
+        # Set by the first acknowledgement, in any generation: the host serves this key, so a
+        # later real-time refusal never moves the connection to delayed data.
+        self._served = False
         self._episodes = _Episodes()
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
@@ -892,6 +896,8 @@ class Connection:
         """
         self._episodes.last_frame_at = time.time_ns()
         if generation == self.subscriptions.generation:
+            if status.kind is StatusKind.ACK:
+                self._served = True
             self.subscriptions.status(status)
 
     def _on_data(
@@ -1179,10 +1185,16 @@ class Connection:
         Args:
             status: A refusal naming no topic, of a step none of whose topics was resolved.
 
+        A connection that has ever had a topic acknowledged is never moved: the real-time host
+        serves this key, so a later real-time refusal is an `EntitlementError` for that step's
+        streams only, and no working stream jumps to 15-minute-old data.
+
         Returns:
             True when the connection is moving to the `delayed.` host (the streams keep
             running); False when the refusal fails the step's streams.
         """
+        if self._moving:
+            return True
         decision = self.decision
         with self._lock:
             tick = ChannelFamily.TICK in self.families
@@ -1193,8 +1205,15 @@ class Connection:
             or not decision.host.startswith("socket.")
         ):
             return False
-        if not self._moving:
-            self._moving = self._group.reroute(self, status.message)
+        if self._served:
+            logger.info(
+                "%s: a real-time refusal after acknowledgements on this host (%s); failing the "
+                "step's streams rather than moving the connection to delayed data",
+                self.url,
+                status.message,
+            )
+            return False
+        self._moving = self._group.reroute(self, status.message)
         return self._moving
 
     def _record_drift(self, channel: str, drift: DriftReport) -> None:

@@ -18,11 +18,10 @@ snapshot request, and never by opening a connection to try:
 
 When the snapshot gives no usable answer (Massive refuses it, or a timeframe holds a value other
 than `DELAYED` or `REAL-TIME`), nothing is guessed from it: the class streams from the
-real-time host with `UNKNOWN` recency, and a WARNING names the evidence. The server then
-decides. Its explicit real-time verdict moves the connection to the delayed host
-(`ConnectionGroup.reroute` in `_ingest/ws_connection.py`), and any other refusal fails only the
-refused topics, with Massive's message. A real-time customer is never sent to delayed data by
-inference, and a plan the snapshot misjudges still gets every stream it is entitled to.
+real-time host, with `REALTIME` recency since that is the host's data, and a WARNING names the
+evidence. Such a connection is never moved to the delayed host: if Massive refuses its topics,
+their streams fail with Massive's text. No stream is ever sent to delayed data by inference,
+and a plan the snapshot misjudges still gets every stream it is entitled to.
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
@@ -153,9 +152,10 @@ def _classify(asset_class: AssetClass, rows: Sequence[Mapping[str, object]]) -> 
 
     `DELAYED` wins a conflict, since routing a delayed plan to the real-time host fails every
     subscription, while the reverse only delays data. Without a `DELAYED`, a value other than
-    `DELAYED` or `REAL-TIME` routes to the real-time host with `UNKNOWN` recency and a WARNING
-    naming the field and the value: the library does not know what the value means, so the
-    server's own answer decides (see the module docstring).
+    `DELAYED` or `REAL-TIME` routes to the real-time host with `REALTIME` recency and a WARNING
+    naming the field and the value: the library does not know what the value means, so it
+    serves the real-time host's data and lets a refusal from Massive fail the refused streams
+    (see the module docstring).
 
     Args:
         asset_class: The class whose fields are read.
@@ -183,7 +183,7 @@ def _classify(asset_class: AssetClass, rows: Sequence[Mapping[str, object]]) -> 
         return HostDecision(DELAYED_HOST, Recency.DELAYED, f"{delayed}=DELAYED")
     if unknown is not None:
         field, value = unknown
-        return _server_decides(
+        return _unconfirmed_real_time(
             asset_class, f"{field}={value!r}, neither DELAYED nor REAL-TIME, in the snapshot"
         )
     if real_time is not None:
@@ -192,30 +192,29 @@ def _classify(asset_class: AssetClass, rows: Sequence[Mapping[str, object]]) -> 
     return None
 
 
-def _server_decides(asset_class: AssetClass, evidence: str) -> HostDecision:
-    """Route a class to the real-time host with `UNKNOWN` recency, logging one WARNING.
+def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecision:
+    """Route a class to the real-time host with `REALTIME` recency, logging one WARNING.
 
-    Used when the snapshot gives no usable answer. The server's explicit refusal then decides:
-    its real-time verdict moves the connection to the delayed host, and any other refusal fails
-    only the refused topics.
+    Used when the snapshot gives no usable answer. The label is the host's: the connection is
+    never moved to delayed data, and a refusal from Massive fails the refused streams with its
+    text.
 
     Args:
         asset_class: The class.
         evidence: What the snapshot showed, for the log and the `m.connections()` row.
 
     Returns:
-        The decision: `socket.massive.com`, `UNKNOWN`, with the evidence.
+        The decision: `socket.massive.com`, `REALTIME`, with the evidence.
     """
     logger.warning(
-        "%s WebSocket host: %s; streaming from %s and letting the server's answer decide "
-        "(a real-time refusal moves the streams to %s; pin a host with %s)",
+        "%s WebSocket host: %s; streaming real-time data from %s, and a refusal from Massive "
+        "fails the refused streams with its text (pin another host with %s)",
         asset_class.value,
         evidence,
         REALTIME_HOST,
-        DELAYED_HOST,
         _ws_hosts_hint(asset_class),
     )
-    return HostDecision(REALTIME_HOST, Recency.UNKNOWN, evidence)
+    return HostDecision(REALTIME_HOST, Recency.REALTIME, evidence)
 
 
 def _without_timeframe(
@@ -307,9 +306,9 @@ def decide(
 
     A refused snapshot (HTTP 403 or `NOT_AUTHORIZED`) and a timeframe that holds an
     undocumented value are not errors: the class streams from the real-time host with
-    `UNKNOWN` recency, a WARNING names the evidence (Massive's text for a refusal), and the
-    WebSocket server's own answer decides. A refused snapshot says nothing certain about the
-    WebSocket plan, so no stream is refused on its account.
+    `REALTIME` recency, a WARNING names the evidence (Massive's text for a refusal), and a
+    refusal from the WebSocket server fails the refused streams. A refused snapshot says
+    nothing certain about the WebSocket plan, so no stream is refused on its account.
 
     Raises:
         AuthenticationError: If `fetch` raises it (a rejected key).
@@ -330,7 +329,7 @@ def decide(
     try:
         rows = fetch(probe)
     except EntitlementError as error:
-        return _server_decides(
+        return _unconfirmed_real_time(
             asset_class, f"the host check's snapshot ({probe.path}) was refused: {error}"
         )
     entitled = [row for row in rows if not is_error_row(row)]

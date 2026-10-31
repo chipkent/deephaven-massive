@@ -1507,7 +1507,7 @@ def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
 ) -> None:
     # A waiter that tries again must claim a fresh lookup, never find the failed one, so the
     # claim is removed before its future completes. A refused host check is not a failure
-    # (the WebSocket server decides then), so the host lookup fails on a rejected key.
+    # (the class streams real-time data then), so the host lookup fails on a rejected key.
     refused = Reply(
         {"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403 if kind == "crypto" else 401
     )
