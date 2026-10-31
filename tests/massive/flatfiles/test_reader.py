@@ -186,7 +186,7 @@ def test_a_row_whose_time_cannot_be_placed_is_dropped_and_counted(trades: FlatFi
     assert batch["Id"].to_pylist() == ["1", "3", "4"]
     assert report.dropped_rows == 1
     assert report.dropped_reason == (
-        f"{KEY}: timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
+        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
     )
 
 
@@ -219,7 +219,7 @@ def test_a_row_whose_key_cannot_be_read_is_dropped(
     with opened(KEY, TRADE_HEADER + row + good) as file:
         [(batch, report)] = list(file.batches(plan()))
     assert batch["Id"].to_pylist() == ["2"]
-    assert (report.dropped_rows, report.dropped_reason) == (1, f"{KEY}: {reason}")
+    assert (report.dropped_rows, report.dropped_reason) == (1, reason)
 
 
 def test_rows_the_symbol_filter_removes_never_fail_a_block(
@@ -270,7 +270,7 @@ def test_a_futures_row_without_a_session_is_dropped(
     assert batch["ReportSequence"].to_pylist() == [2]
     assert (report.dropped_rows, report.dropped_reason) == (
         2,
-        f"{FUTURES_KEY}: a row has no session_end_date",
+        "a row has no session_end_date",
     )
 
 

@@ -624,7 +624,7 @@ def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
     [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
     assert warning == (
         f"stocks.trades: dropped 2 FLAT_FILES row(s) whose key cannot be read, the first at "
-        f"{LOCATION.format(TRADES_0303)}: {TRADES_0303}: timestamp unit mismatch for "
+        f"{LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
         "stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100; such rows are "
         "dropped and counted, and the running count is logged at DEBUG"
     )

@@ -463,9 +463,9 @@ class FlatFile:
 
         Returns:
             The rows kept, still as text; the drift of the rows dropped (`dropped_rows`, and a
-            reason naming the file, the header, and the value of the first header that dropped
-            a row); and the kept rows' times in epoch nanoseconds, or None when the time header
-            is no key.
+            reason naming the header, and the value, of the first header that dropped a row;
+            the library names the file); and the kept rows' times in epoch nanoseconds, or None
+            when the time header is no key.
 
         Raises:
             WireError: If the block had rows and every one of them is dropped, the sign of a
@@ -496,9 +496,7 @@ class FlatFile:
                 f"every one of {rows} rows of a block was dropped, so the file's format may "
                 f"have changed; the first: {reason}"
             )
-        dropped = DriftReport(
-            dropped_rows=rows - block.num_rows, dropped_reason=f"{self._key}: {reason}"
-        )
+        dropped = DriftReport(dropped_rows=rows - block.num_rows, dropped_reason=reason)
         return block, dropped, None if nanos is None else nanos.filter(keep)
 
 
