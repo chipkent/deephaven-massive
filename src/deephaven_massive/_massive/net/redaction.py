@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from typing import Final, overload
 
-__all__ = ["REDACTED", "Redactor", "redact"]
+__all__ = ["REDACTED", "Redactor", "redact", "without_userinfo"]
 
 REDACTED: Final = "***"
 """What each occurrence of a secret becomes."""
@@ -54,6 +54,36 @@ def redact(text: str, *secrets: str | None) -> str:
         if secret and secret in text:
             text = text.replace(secret, REDACTED)
     return text
+
+
+def without_userinfo(url: str) -> str:
+    """Return a URL with the user name and password of its authority replaced by `REDACTED`.
+
+    A URL a user configures can carry credentials (`https://user:password@host`), and every
+    URL the library logs or puts in a message goes through here first. The text before the
+    host's last `@` is replaced, so a password holding `@` is hidden too. A bare host
+    (`user:password@host`, without a scheme) is cleaned the same way.
+
+    Args:
+        url: The URL or host, as configured.
+
+    Returns:
+        The URL with `***@` in place of its user information, such as
+        `"https://***@files.massive.com"`; `url` itself when it has none.
+
+    Example:
+        ::
+
+            assert without_userinfo("https://u:p@h.example/x") == "https://***@h.example/x"
+    """
+    prefix, scheme_mark, rest = url.partition("://")
+    if not scheme_mark:
+        prefix, rest = "", url
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+    host = authority.rpartition("@")[2]
+    return f"{prefix}{scheme_mark}{REDACTED}@{host}{slash}{tail}"
 
 
 class Redactor:

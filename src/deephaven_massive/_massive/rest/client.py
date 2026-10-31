@@ -54,7 +54,7 @@ from deephaven_massive._massive.net.http import (
     ssl_context,
 )
 from deephaven_massive._massive.net.origins import origin_of
-from deephaven_massive._massive.net.redaction import Redactor
+from deephaven_massive._massive.net.redaction import Redactor, without_userinfo
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
@@ -188,10 +188,12 @@ def _check_base_url(base_url: str) -> Origin:
     origin = origin_of(base_url)
     parts = urlsplit(base_url)
     if parts.path not in {"", "/"} or parts.query or parts.fragment or "@" in parts.netloc:
-        raise ValueError(f"base_url {base_url!r} must name only a scheme, host, and port")
+        shown = without_userinfo(base_url)  # a user and password never reach a message
+        raise ValueError(f"base_url {shown!r} must name only a scheme, host, and port")
     if origin[0] == "http" and not _is_loopback(origin[1]):
         raise ValueError(
-            f"base_url {base_url!r} would send the API key in clear text; use https "
+            f"base_url {without_userinfo(base_url)!r} would send the API key in clear text; "
+            "use https "
             "(http is allowed only for a loopback host, such as a local test server)"
         )
     return origin

@@ -64,7 +64,9 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
   every event.
 - No log call is passed the API key, the S3 secret, a header, or the authentication frame. A
   wire client cleans what it receives of its own secret (`_massive/net/redaction.py`) before
-  anything reads it, so text built from a server's answer is safe to log.
+  anything reads it, so text built from a server's answer is safe to log. A configured URL
+  shows `***@` in place of a user and password in it, in every log line and message
+  (`without_userinfo` in `_massive/net/redaction.py`, `MassiveConfig.__repr__`).
 - Log calls use `%` arguments. Every new thread or pool is named after its owner:
   `massive #<session> <role>` for a session's (`SessionCore.thread_prefix`), and
   `massive group #<group> <role>` for a connection group's (`ConnectionGroup.label`). Nothing is
