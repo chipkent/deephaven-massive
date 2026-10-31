@@ -3582,12 +3582,13 @@ sees:
 - **Fan-out and missing symbols.** A symbol with no data returns no rows, never an error and
   never an option: in a per-symbol request series (`ticker_details`, `daily_open_close` on a
   holiday, `/prev`, the "last" endpoints, a symbol's `history()`), HTTP 404 on the first
-  request of a request series drops that series, with one WARNING per symbol and session (the
+  request of a request series drops that series, logged at DEBUG; one WARNING per read lists
+  the dropped symbols not warned about before in the session, through `bounded_list` (the
   aggregates and tick endpoints answer an unknown ticker with an empty 200 instead, and a flat
   file simply has no rows for it). "First request" means each series's own: futures trades and
   quotes named by dates are one series per symbol and session, so a 404 on a later session,
-  after earlier sessions returned rows, drops only that session, with its own WARNING ("ESH5
-  has no data for the session 2025-01-22"), since a session can have no data. HTTP 404 on a
+  after earlier sessions returned rows, drops only that session, named on its own in that
+  WARNING ("ESH5 for the session 2025-01-22"), since a session can have no data. HTTP 404 on a
   later page of one series means its data was cut short and raises `MassiveError` naming the
   symbol, the path, and the pages received. Every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
@@ -3842,8 +3843,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   ([section 10](#10-symbols-and-all)).
 - **Error rows in multi-ticker snapshots.** A snapshot of several tickers answers a ticker it
   cannot serve (`NOT_FOUND`, `NOT_ENTITLED`) with a row carrying `error` and `message`.
-  `snapshots()` keeps such rows, with their `Error` and `Message` columns, and logs each
-  ticker once.
+  `snapshots()` keeps such rows, with their `Error` and `Message` columns, and logs each at
+  DEBUG; one WARNING per page lists the tickers not warned about before in the session, with
+  Massive's message, through `bounded_list`.
 
 ## 14. Publishers, fan-out, and failure semantics
 
@@ -6005,7 +6007,7 @@ that declares no key has none.
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field), naming where it was seen, the first symbol, and the first value ([section 17.1](#171-the-log)). Shown in `SchemaDrift`. |
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
-| **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); every later drop logs the dataset's running count at DEBUG. Never a failure, unless every row of a payload is dropped (below). |
+| **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); later drops log the dataset's running count at DEBUG, at most once a minute. Never a failure, unless every row of a payload is dropped (below). |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |

@@ -316,6 +316,9 @@ class _Episodes:
         lost_at: When the socket was lost (seconds since the epoch), or None while connected.
         lost_warned: Whether the outage's WARNING was logged (only when the connection had
             live tables), so its reconnect logs the recovery.
+        slot_warned: Whether the outage has logged its WARNING for waiting on a free
+            connection slot, which its first `WAITING_SLOT` logs even when the outage began as
+            a reconnect.
         down_since: When the outage began: the last frame before it (seconds since the
             epoch), or None outside one. Unlike `lost_at`, it lasts until every stream has
             recovered on a reconnected socket, so a reconnect that drops again before that
@@ -337,6 +340,7 @@ class _Episodes:
 
     lost_at: float | None = None
     lost_warned: bool = False
+    slot_warned: bool = False
     down_since: float | None = None
     down: dict[int, Timer] = field(default_factory=dict)
     published_at_open: dict[int, int] = field(default_factory=dict)
@@ -753,12 +757,13 @@ class Connection:
         if episodes.lost_at is not None:
             if episodes.lost_warned:
                 logger.info(
-                    "%s: reconnected after %.0f s; its live tables receive data again",
+                    "%s: reconnected after %.0f s; re-subscribing",
                     self.url,
                     time.time() - episodes.lost_at,
                 )
             episodes.lost_at = None
             episodes.lost_warned = False
+            episodes.slot_warned = False
         episodes.last_frame_at = time.time_ns()
         if self._summary is None:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
@@ -932,13 +937,47 @@ class Connection:
         self._episodes.quiet_note = note
         self._show_outage_notes(list(self._streams))
 
+    def _warn_down(self, *, waiting_slot: bool, at: float) -> None:
+        """Date a lost socket's outage, and warn once of it and once of a wait for a slot.
+
+        The first `RECONNECTING` or `WAITING_SLOT` of an outage logs one WARNING when the
+        connection carries live tables, since they get no data until it reconnects. The first
+        `WAITING_SLOT` of the outage also warns when the outage began as a reconnect, since
+        the account then has no free connection, which only the user can change. Each later
+        attempt logs nothing here.
+
+        Args:
+            waiting_slot: True for `WAITING_SLOT`, False for `RECONNECTING`.
+            at: The next attempt's time, seconds since the epoch.
+        """
+        episodes = self._episodes
+        warn = False
+        if episodes.lost_at is None:
+            episodes.lost_at = time.time()
+            warn = bool(self._streams)
+        if waiting_slot and not episodes.slot_warned and self._streams:
+            episodes.slot_warned = True
+            warn = True
+        if not warn:
+            return
+        episodes.lost_warned = True  # so the reconnect logs the recovery
+        logger.warning(
+            "%s: the connection is down (%s); its %d live tables get no data until it "
+            "reconnects, next attempt in %.0f s; m.connections() shows its state",
+            self.url,
+            "the account has no free connection, max_connections"
+            if waiting_slot
+            else "reconnecting",
+            len(self._streams),
+            at - time.time(),
+        )
+
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         """Show the client's state; on a fatal failure, fail every stream.
 
-        The first `RECONNECTING` or `WAITING_SLOT` of an outage logs one WARNING when the
-        connection carries live tables, since they get no data until it reconnects; each
-        later attempt of the same outage logs nothing here, and the reconnect logs the
-        recovery at INFO (`_on_open`). Each also starts or continues the outage (`_outage`).
+        A `RECONNECTING` or `WAITING_SLOT` warns of the outage once (`_warn_down`), and the
+        reconnect logs it at INFO (`_on_open`), the outage's end once every stream receives
+        data again (`_check_recovered`). Each also starts or continues the outage (`_outage`).
 
         Args:
             state: The client's new state.
@@ -949,21 +988,7 @@ class Connection:
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
             self._next_reconnect_at = int(cast("float", detail) * 1e9)
-            episodes = self._episodes
-            if episodes.lost_at is None:
-                episodes.lost_at = time.time()
-                episodes.lost_warned = bool(self._streams)
-                if episodes.lost_warned:
-                    logger.warning(
-                        "%s: the connection is down (%s); its %d live tables get no data until "
-                        "it reconnects, next attempt in %.0f s; m.connections() shows its state",
-                        self.url,
-                        "the account has no free connection, max_connections"
-                        if state is WsState.WAITING_SLOT
-                        else "reconnecting",
-                        len(self._streams),
-                        cast("float", detail) - episodes.lost_at,
-                    )
+            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=cast("float", detail))
             self._outage(waiting_slot=state is WsState.WAITING_SLOT)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
@@ -1245,9 +1270,9 @@ class Connection:
         frame, and each summary. A recovered stream's timer is cancelled and its note
         cleared, while a stream with a topic in `NO_ACK` stays down and fails at its limit, so
         one silent topic never holds the others down. The outage ends once no stream is down
-        and the socket has proved itself: a topic is acknowledged, or data arrived. A socket
-        that the server accepts but never answers is still down, so a stream that opens on
-        it is held down too.
+        and the socket has proved itself: a topic is acknowledged, or data arrived; that end is
+        logged at INFO with the outage's length. A socket that the server accepts but never
+        answers is still down, so a stream that opens on it is held down too.
         """
         episodes = self._episodes
         if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
@@ -1256,12 +1281,19 @@ class Connection:
         for stream_id in recovered:
             self._release_down(stream_id)
         if recovered:
-            logger.debug("%s: streams %s receive data again", self.url, recovered)
+            logger.debug("%s: streams %s receive data again", self.url, bounded_list(recovered))
             self._show_outage_notes(recovered)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
-        logger.debug(
-            "%s: the outage that began at %s is over", self.url, utc_text(episodes.down_since)
+        logger.log(
+            # INFO is the recovery of the outage's WARNING, which only live tables cause.
+            logging.INFO if self._streams else logging.DEBUG,
+            "%s: the outage that began at %s is over after %.0f s: Massive confirmed the "
+            "subscriptions of its %d live tables, or sent them rows",
+            self.url,
+            utc_text(episodes.down_since),
+            time.time() - episodes.down_since,
+            len(self._streams),
         )
         episodes.down_since = None
         episodes.down_note = None
@@ -1402,9 +1434,12 @@ class Connection:
     def _log_note(
         self, stream: ConnectionStream, *, count: int, old_count: int, missing: frozenset[str]
     ) -> None:
-        """Log a change of a stream's notes: the cap's at WARNING and INFO, no-acks at DEBUG.
+        """Log a change of a stream's notes: the cap's at three levels, no-acks at DEBUG.
 
-        The no-acks were logged at WARNING, once per step, when they happened.
+        A stream whose deferred contracts go from none to some logs a WARNING, each later
+        change of their count a DEBUG line, and their return to none an INFO, so a cap that
+        moves with every subscription change warns once per episode. The no-acks were logged
+        at WARNING, once per step, when they happened.
 
         Args:
             stream: The stream.
@@ -1412,9 +1447,18 @@ class Connection:
             old_count: Its deferred options topics before.
             missing: Its unacknowledged topics now.
         """
-        if count and count != old_count:
+        if count and not old_count:
             logger.warning(
                 "%s stream %d: %s", stream.plan.dataset, stream.stream_id, self._cap_text()
+            )
+        elif count != old_count and count:
+            logger.debug(
+                "%s stream %d: %d contracts deferred, %d before; %s",
+                stream.plan.dataset,
+                stream.stream_id,
+                count,
+                old_count,
+                self._cap_text(),
             )
         elif old_count and not count:
             logger.info(

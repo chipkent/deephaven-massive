@@ -162,7 +162,7 @@ from deephaven_massive._ingest.rest_rows import (
     stamped,
     whole_bars,
 )
-from deephaven_massive._log_limits import log_once
+from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
@@ -210,6 +210,15 @@ _TICKERS_PAGE: Final = 1000
 
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
+
+_FACTS_LIMIT: Final = 10_000
+"""The most facts a session remembers having warned about (`RestState.first`); past it, it
+forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
+at the cost of warning about an old fact once more."""
+
+_ANSWER_SHOWN: Final = 200
+"""The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
+line shows it whole."""
 
 T = TypeVar("T")
 """The outcome of a shared lookup (`RestReader.wait_for_shared`)."""
@@ -328,6 +337,56 @@ def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     return rows.take(kept.sort())
 
 
+def _cut(text: str) -> str:
+    """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
+
+    Args:
+        text: The text.
+
+    Returns:
+        The text, or its first characters ending in `…` when it is longer.
+    """
+    return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
+
+
+def _page_rows(
+    batches: Sequence[pa.RecordBatch],
+    *,
+    window: HistoryWindow | None,
+    time_name: str,
+    fill: Callable[[pa.RecordBatch], pa.RecordBatch],
+    where: str,
+    read: int,
+) -> list[pa.RecordBatch]:
+    """Keep a page's rows of the `history()` window, fill their time columns, keep whole bars.
+
+    Logs one DEBUG line per page with the rows left after each step, so an empty table can be
+    traced to the step that emptied it.
+
+    Args:
+        batches: The page's converted rows, stamped.
+        window: The `history()` window, or None for `fetch()` and `poll()`.
+        time_name: The dataset's time column, for `keep_window`.
+        fill: Fills the library's time columns (`row_times.TimeRule.fill`).
+        where: The dataset, page, path, and symbol, for the line.
+        read: How many rows the page held, before conversion.
+
+    Returns:
+        The rows kept.
+    """
+    windowed = [keep_window(batch, window, time=time_name) for batch in batches]
+    whole = [whole_bars(fill(batch), window) for batch in windowed]
+    logger.debug(
+        "%s: %d rows read, %d converted, %d in the window, %d kept as whole bars",
+        where,
+        read,
+        sum(batch.num_rows for batch in batches),
+        sum(batch.num_rows for batch in windowed),
+        sum(batch.num_rows for batch in whole),
+    )
+    return whole
+
+
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """What one call returned.
@@ -335,10 +394,14 @@ class _Outcome:
     Attributes:
         batches: Its rows, in the dataset's schema.
         requests: How many requests it made (pages, and a dropped symbol's 404).
+        missing: The symbol Massive answered HTTP 404 for, so left out, with the futures
+            session it was asked for (`"ESZ6 for the session 2026-10-30"`); None when the call
+            was answered.
     """
 
     batches: tuple[pa.RecordBatch, ...]
     requests: int
+    missing: str | None = None
 
 
 class RestState:
@@ -432,17 +495,30 @@ class RestState:
     def first(self, *key: str) -> bool:
         """Tell whether a fact is seen for the first time in this session, and remember it.
 
+        The memory is bounded: once it holds `_FACTS_LIMIT` facts, a new one empties it first,
+        logged at DEBUG, so a fact forgotten then counts as new again.
+
         Args:
             *key: The fact, such as `("missing", "stocks.prev", "AAPL")`.
 
         Returns:
-            True the first time, False afterwards.
+            True the first time, and again after the memory was emptied; False otherwise.
         """
         with self._lock:
             if key in self._once:
                 return False
+            forgot = len(self._once) if len(self._once) >= _FACTS_LIMIT else 0
+            if forgot:
+                self._once.clear()
             self._once.add(key)
-            return True
+        if forgot:
+            logger.debug(
+                "%s: forgot the %d facts already warned about, past the limit of %d",
+                self.label,
+                forgot,
+                _FACTS_LIMIT,
+            )
+        return True
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -844,6 +920,16 @@ class RestReader:
                 outcomes = [run(call) for call in calls]
             else:
                 outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
+        missing = [o.missing for o in outcomes if o.missing is not None]
+        # One WARNING per read, naming each symbol once per session, however many there are.
+        new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
+        if new:
+            logger.warning(
+                "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",
+                spec.name,
+                bounded_list(new),
+                rest_path.template,
+            )
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -931,8 +1017,10 @@ class RestReader:
 
         Returns:
             The call's rows and request count; no rows for a per-symbol call whose first
-            request Massive answered with HTTP 404 (a symbol with no data), which logs one
-            WARNING per symbol and session.
+            request Massive answered with HTTP 404 (a symbol with no data), logged at DEBUG
+            and named in `missing`; `read` warns once per read for the symbols new to the
+            session. Each page logs one DEBUG line with its rows after each step
+            (`_page_rows`).
 
         Raises:
             MassiveError: If a per-symbol call's later page answers HTTP 404, so the symbol's
@@ -985,18 +1073,22 @@ class RestReader:
                 )
                 if record is not None:
                     record(drift)
-                self._warn_error_rows(converter, flagged, call.symbol)
+                self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
                     batches = [stamped(spec, template, batch, rule=stamps) for batch in batches]
-                filled = (
-                    times.fill(
-                        keep_window(batch, window, time=converter.time_name), received=received
+                kept.extend(
+                    _page_rows(
+                        batches,
+                        window=window,
+                        time_name=converter.time_name,
+                        fill=functools.partial(times.fill, received=received),
+                        where=f"{spec.name}: page {requests} of {template} for "
+                        f"{call.symbol or 'the request'}",
+                        read=len(page.rows),
                     )
-                    for batch in batches
                 )
-                kept.extend(whole_bars(rows, window) for rows in filled)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 # A 404 that arrives after the session closed is no answer about the symbol,
@@ -1026,15 +1118,16 @@ class RestReader:
                     else None
                 )
                 scope = "" if session is None else f" for the session {session}"
-                if self.state.first("missing", spec.name, call.symbol, scope):
-                    logger.warning(
-                        "%s: %s has no data%s (HTTP 404 from %s); it is left out",
-                        spec.name,
-                        call.symbol,
-                        scope,
-                        template,
-                    )
-                return _Outcome(tuple(kept), requests + 1)
+                logger.debug(
+                    "%s: %s has no data%s (HTTP 404 from %s, request_id %s: %s); it is left out",
+                    spec.name,
+                    call.symbol,
+                    scope,
+                    template,
+                    error.request_id,
+                    error.message,
+                )
+                return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._public(error) from error
         return _Outcome(tuple(kept), requests)
 
@@ -1062,7 +1155,9 @@ class RestReader:
         `timeframe` fields (`recency_labels.read_labels`, which never reads
         `underlying_asset.timeframe`) label that row. Reference endpoints are never checked,
         and a page of no subscription and no tickers (economy, partner data) has nothing to
-        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass.
+        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass. A
+        `timeframe` that is neither label is served and logs a WARNING once per subscription,
+        field, and value in the session (`_warn_unknown_label`).
 
         Args:
             spec: The dataset, for the message.
@@ -1097,13 +1192,17 @@ class RestReader:
         for row in page.rows:
             labels = read_labels("", [row])
             real_time = real_time or labels.real_time is not None
-            if labels.delayed is None:
+            if labels.delayed is None and labels.unknown is None:
                 continue
             ticker = row.get(symbol_key) if symbol_key is not None else call.symbol
             subscription = fixed or (
                 subscription_of(symbol_class(ticker)) if isinstance(ticker, str) else None
             )
-            if subscription is None:
+            if labels.unknown is not None:
+                self._warn_unknown_label(
+                    spec, template=template, subscription=subscription, unknown=labels.unknown
+                )
+            if labels.delayed is None or subscription is None:
                 continue
             if subscription not in listed:
                 refusal = delayed_refusal(
@@ -1113,6 +1212,39 @@ class RestReader:
             delayed = True
         if on_recency is not None and (delayed or real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
+
+    def _warn_unknown_label(
+        self,
+        spec: DatasetSpec,
+        *,
+        template: str,
+        subscription: Subscription | None,
+        unknown: tuple[str, object],
+    ) -> None:
+        """Warn of a recency label that is neither `DELAYED` nor `REAL-TIME`, once per value.
+
+        Such a label tells nothing about the row's recency, so the row is neither refused
+        nor counted as real-time; the WARNING says so once per subscription, field, and value
+        in the session, since a new label from Massive may mean delayed data passes unseen.
+
+        Args:
+            spec: The dataset.
+            template: The page's path template.
+            subscription: The subscription of the row's data, or None when it has none.
+            unknown: The field and its value (`RecencyLabels.unknown`).
+        """
+        field, value = unknown
+        owner = "no subscription" if subscription is None else str(subscription)
+        if self.state.first("recency-label", owner, field, repr(value)):
+            logger.warning(
+                "%s: %s answered %s=%r, which is neither DELAYED nor REAL-TIME, for %s data; "
+                "the library cannot tell whether the row is delayed and serves it",
+                spec.name,
+                template,
+                field,
+                value,
+                owner,
+            )
 
     def _check_adjusted(
         self, spec: DatasetSpec, request: Request, *, template: str, echoed: bool | None
@@ -1158,30 +1290,45 @@ class RestReader:
             )
 
     def _warn_error_rows(
-        self, converter: RowConverter, flagged: Sequence[Mapping[str, object]], symbol: str | None
+        self,
+        converter: RowConverter,
+        flagged: Sequence[Mapping[str, object]],
+        symbol: str | None,
+        *,
+        template: str,
     ) -> None:
-        """Log each ticker of an error row once per session, naming Massive's message.
+        """Log a page's error rows: each at DEBUG, and one WARNING for the tickers new to it.
 
-        The row is kept, with its `Error` and `Message` columns.
+        The WARNING lists each ticker not warned about before in the session, with Massive's
+        error and message, through `bounded_list`, so a page of thousands of error rows logs
+        one short line. The rows are kept, with their `Error` and `Message` columns.
 
         Args:
             converter: The path's conversion.
             flagged: The page's error rows.
             symbol: The request's one symbol, for a path whose rows do not carry it.
+            template: The path template, for the record.
         """
         dataset = converter.dataset
+        key = converter.symbol_key
+        new = []
         for row in flagged:
-            key = converter.symbol_key
             ticker = str(symbol if key is None else row.get(key))
+            answer = f"{ticker} ({row.get('error')}: {row.get('message')})"
+            logger.debug(
+                "%s: Massive answered an error row from %s for %s", dataset, template, answer
+            )
             if self.state.first("error-row", dataset, ticker):
-                logger.warning(
-                    "%s: Massive answered %s for %s: %s; the row is kept with its Error and "
-                    "Message columns",
-                    dataset,
-                    row.get("error"),
-                    ticker,
-                    row.get("message"),
-                )
+                # The WARNING shows the start of each answer; the DEBUG line above has it all.
+                new.append(_cut(answer))
+        if new:
+            logger.warning(
+                "%s: Massive answered error rows from %s for %s; the rows are kept with their "
+                "Error and Message columns",
+                dataset,
+                template,
+                bounded_list(new),
+            )
 
     def _public(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.

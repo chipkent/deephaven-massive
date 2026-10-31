@@ -754,6 +754,24 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
     assert converted == [0]  # only the empty schema table: no table of an empty block
 
 
+def test_each_file_logs_its_rows_after_each_step(
+    *,
+    session: dm.MassiveSession,
+    put: Callable[[str, str], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
+    with caplog.at_level(logging.DEBUG, logger=flatfiles.__name__):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    # The empty table is explained: the file held rows, none of the requested symbol.
+    (line,) = [r.getMessage() for r in caplog.records if "rows read" in r.getMessage()]
+    assert line.startswith(f"stocks.trades: s3://flatfiles/{TRADES_0303} at ")
+    assert line.endswith(
+        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 kept as whole bars"
+    )
+
+
 def test_instant_bounds_are_half_open(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
@@ -1115,7 +1133,8 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert req.symbols == tuple(sorted(MANY))
     assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1].startswith(
-        "stocks.trades history: AUTO read REST because the flat files for 2025-03-04 are missing"
+        "stocks.trades history: AUTO read REST because the flat files are missing for these "
+        "days: 1 [2025-03-04]"
     )
     assert t.attributes()["TableDescription"].endswith(
         "Read from flat files, and from REST for 2025-03-04, whose files are missing."

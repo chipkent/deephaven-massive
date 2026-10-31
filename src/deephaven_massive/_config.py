@@ -22,7 +22,7 @@ import os
 import re
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import (
@@ -50,6 +50,7 @@ __all__ = [
     "environment_text",
     "require_positive_int",
     "require_positive_number",
+    "shown_setting",
 ]
 
 MIN_RECONNECT_BACKOFF: Final = 15.0
@@ -270,7 +271,8 @@ class MassiveConfig:
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
             Defaults to 0.05 seconds (50 ms).
         rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
-        s3_endpoint_url: The flat-file S3 endpoint URL. Defaults to
+        s3_endpoint_url: The flat-file S3 endpoint URL; a user and password in it show as
+            `***@` in every log line and message. Defaults to
             `https://files.massive.com`.
         s3_bucket: The flat-file S3 bucket. Defaults to `flatfiles`.
         noncanonical_symbols: What a row of a symbol table (a Deephaven table passed as
@@ -381,6 +383,69 @@ class MassiveConfig:
         delayed = _validate_subscriptions(self.delayed_subscriptions, "delayed_subscriptions")
         _check_delayed_subscriptions(delayed, self.ws_hosts)
         object.__setattr__(self, "delayed_subscriptions", delayed)
+
+    @override
+    def __repr__(self) -> str:
+        """Show every setting but the secrets, with no user or password in a URL.
+
+        The API key and the S3 secret are left out, as the fields declare, and a URL
+        (`rest_base_url`, `s3_endpoint_url`) shows `***@` in place of a user and password in
+        it, so the text is safe to log (`shown_setting`).
+
+        Returns:
+            `"MassiveConfig(s3_access_key_id=None, ws_hosts={}, ...)"`, field by field.
+        """
+        shown = ", ".join(
+            f"{f.name}={shown_setting(f.name, getattr(self, f.name))}"
+            for f in fields(self)
+            if f.repr
+        )
+        return f"MassiveConfig({shown})"
+
+
+_URL_SETTINGS: Final = frozenset({"rest_base_url", "s3_endpoint_url"})
+"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials."""
+
+
+def _without_userinfo(url: str) -> str:
+    """Return a URL or host with the user and password before its host replaced by `***`.
+
+    A URL a user configures can carry credentials (`https://user:password@host`); every
+    setting the library logs or puts in a message goes through here first. The text before
+    the host's last `@` is replaced, so a password holding `@` is hidden too. The wire
+    clients clean what they are given the same way, with their own copy of this rule
+    (`_massive/net/redaction.py`), since the wire package imports nothing of the library.
+
+    Args:
+        url: The URL, or a bare host such as `user:password@host`.
+
+    Returns:
+        The text with `***@` in place of its user information, such as
+        `"https://***@files.massive.com"`; `url` itself when it has none.
+    """
+    prefix, scheme_mark, rest = url.partition("://")
+    if not scheme_mark:
+        prefix, rest = "", url
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+    return f"{prefix}{scheme_mark}***@{authority.rpartition('@')[2]}{slash}{tail}"
+
+
+def shown_setting(name: str, value: object) -> str:
+    """Return the text a log line or `repr` shows for one `MassiveConfig` setting.
+
+    Args:
+        name: The field's name.
+        value: Its value.
+
+    Returns:
+        The value's `repr`; for a URL setting, with `***@` in place of a user and password
+        (`_without_userinfo`).
+    """
+    if name in _URL_SETTINGS and isinstance(value, str):
+        return repr(_without_userinfo(value))
+    return repr(value)
 
 
 def require_positive_int(name: str, value: object, *, maximum: int | None = None) -> int:
@@ -626,7 +691,7 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
         if not _HOSTNAME.match(value):
             raise ValueError(
                 f"ws_hosts[{asset_class}] must be a bare hostname such as "
-                f"'delayed.massive.com', got {value!r}"
+                f"'delayed.massive.com', got {_without_userinfo(value)!r}"
             )
         hosts[asset_class] = value
     return HostMap(hosts)

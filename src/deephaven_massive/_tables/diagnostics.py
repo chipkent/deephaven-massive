@@ -84,6 +84,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
+    "DROPPED_COUNT_INTERVAL",
     "QUERY_SHOWN",
     "RATE_LIMITS",
     "RATE_LIMIT_KEYS",
@@ -120,6 +121,10 @@ QUERY_SHOWN: Final = 200
 
 SCHEMA_DRIFT_SHOWN: Final = 200
 """The longest `SchemaDrift` text, in characters; a longer one is cut and ends in `…`."""
+
+DROPPED_COUNT_INTERVAL: Final = 60.0
+"""The fewest seconds between two DEBUG lines of one dataset's running count of rows dropped
+for a key (`DriftRegistry.report`): the same as a connection's traffic summary."""
 
 
 class ConnectionState(StrEnum):
@@ -697,8 +702,8 @@ class DriftRegistry:
 
     - `report` logs one WARNING per (dataset, transport, field) for the life of the session,
       and one WARNING per dataset the first time a row of it is dropped, with the running count
-      of dropped rows at DEBUG after that. A static verb (`fetch()`, `history()`) reports drift
-      only this way.
+      of dropped rows at DEBUG after that, at most once a minute. A static verb (`fetch()`,
+      `history()`) reports drift only this way.
     - `report_statuses` logs one WARNING per (REST path, status) for a REST envelope status
       outside the documented ones; the page's rows are kept.
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
@@ -737,7 +742,7 @@ class DriftRegistry:
             registry.record(7, "REST", drift)  # unchanged: None
     """
 
-    __slots__ = ("_dropped", "_lock", "_owners", "_statuses", "_warned")
+    __slots__ = ("_dropped", "_dropped_logged", "_lock", "_owners", "_statuses", "_warned")
 
     def __init__(self) -> None:
         """Start with no drift seen."""
@@ -746,6 +751,9 @@ class DriftRegistry:
         self._statuses: set[tuple[str, str]] = set()
         self._owners: dict[Hashable, frozenset[str]] = {}
         self._dropped: dict[str, int] = {}
+        # Per dataset, when its dropped rows were last logged (monotonic seconds), and the
+        # running count that line showed.
+        self._dropped_logged: dict[str, tuple[float, int]] = {}
 
     def report(
         self,
@@ -765,8 +773,10 @@ class DriftRegistry:
         channel T; symbol AAPL; first value 182.33`. A field is reported once per session and
         dataset; the first sample is the one a fix needs. The first rows of a dataset dropped
         because a key could not be read log one WARNING with the reason of the first of them;
-        every later drop logs the running count of the dataset's dropped rows at DEBUG. Ignores
-        `drift.statuses`; see `report_statuses`.
+        later drops log the running count of the dataset's dropped rows at DEBUG, at most once
+        every `DROPPED_COUNT_INTERVAL` seconds per dataset, with the rows dropped since the
+        last such line: drops between are counted, not logged. Ignores `drift.statuses`; see
+        `report_statuses`.
 
         Args:
             dataset: The dataset name, such as `"stocks.trades"`.
@@ -781,13 +791,20 @@ class DriftRegistry:
         changes = [(field, _EXTRA) for field in drift.extra]
         changes += [(field, _MISSING) for field in drift.missing]
         changes += [(field, _UNCONVERTIBLE) for field in drift.unconvertible]
+        now = time.monotonic()
         with self._lock:
             new = [(f, kind) for f, kind in changes if (dataset, transport, f) not in self._warned]
             self._warned.update((dataset, transport, f) for f, _ in new)
             before = self._dropped.get(dataset, 0)
             total = before + drift.dropped_rows
+            logged_at, logged_total = self._dropped_logged.get(dataset, (now, 0))
+            due = bool(drift.dropped_rows) and (
+                not before or now - logged_at >= DROPPED_COUNT_INTERVAL
+            )
             if drift.dropped_rows:
                 self._dropped[dataset] = total
+            if due:
+                self._dropped_logged[dataset] = (now, total)
         for field, kind in sorted(new):
             context = _drift_context(drift, field, where=where, symbol=symbol)
             logger.warning(
@@ -808,14 +825,16 @@ class DriftRegistry:
                 where,
                 drift.dropped_reason,
             )
-        elif drift.dropped_rows:
+        elif due:
             logger.debug(
-                "%s: dropped %d more %s row(s) whose key cannot be read at %s (%d so far): %s",
+                "%s: dropped %d more row(s) whose key cannot be read in the last %.0f s (%d so "
+                "far); the latest %s at %s: %s",
                 dataset,
-                drift.dropped_rows,
+                total - logged_total,
+                now - logged_at,
+                total,
                 transport.value,
                 where,
-                total,
                 drift.dropped_reason,
             )
 

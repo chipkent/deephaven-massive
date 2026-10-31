@@ -188,7 +188,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import Field, FlatFileClient
+    from deephaven_massive._massive import Field, FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
@@ -1227,13 +1227,7 @@ class FlatFileHistory:
             with file, contextlib.closing(file.batches(transform.plan_for(key))) as batches:
                 self._check(cancel)
                 try:
-                    return self._gather(
-                        batches,
-                        transform,
-                        key=key,
-                        cancel=cancel,
-                        where=file.location,
-                    )
+                    return self._gather(batches, transform, key=key, cancel=cancel, file=file)
                 except pa.ArrowException as error:
                     raise MassiveError(
                         f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
@@ -1255,7 +1249,7 @@ class FlatFileHistory:
         *,
         key: _Key,
         cancel: threading.Event,
-        where: str,
+        file: FlatFile,
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
@@ -1263,15 +1257,18 @@ class FlatFileHistory:
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once.
+        read again is counted once. Then logs one DEBUG line with the rows after each step:
+        read, of the requested symbols, kept by the window (and a readable key), and kept as
+        whole bars of the requested sessions, so an empty table can be traced to the step
+        that emptied it.
 
         Args:
             batches: The file's batches, one per block, each with its drift.
             transform: The request's block transform.
             key: The file the batches come from.
             cancel: The call's cancel event, checked after each block.
-            where: The file's location (`s3://<bucket>/<key> at <endpoint>`), for the drift
-                WARNING.
+            file: The file, for its location (`s3://<bucket>/<key> at <endpoint>`), named in
+                the drift WARNING, and its row counts.
 
         Returns:
             The file's tables, in file order.
@@ -1281,9 +1278,11 @@ class FlatFileHistory:
         size = 0
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
+        served = 0
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
                 rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
+                served += rows.num_rows
                 found = found.merge(drift).merge(odd)
                 if rows.num_rows:
                     pending.append(rows)
@@ -1300,7 +1299,17 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
-        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=where)
+        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
+        logger.debug(
+            "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
+            "whole bars",
+            transform.dataset,
+            file.location,
+            file.rows_read,
+            file.rows_of_symbols,
+            file.rows_kept,
+            served,
+        )
         return tables
 
 

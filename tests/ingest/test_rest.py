@@ -1692,7 +1692,12 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
     assert [(r["Symbol"], r["Price"], r["Timestamp"]) for r in out] == [
         ("X:BTCUSD", 97000.5, 1704310200000 * 10**6)
     ]
-    assert "X:ETHUSD has no data (HTTP 404" in caplog.text
+    assert caplog.messages == [
+        (
+            "crypto.last: no data for 1 [X:ETHUSD]: Massive answered HTTP 404 from "
+            "/v1/last/crypto/{from}/{to}, so they are left out"
+        )
+    ]
 
 
 def test_fan_out_threads_are_named_after_the_session_and_the_call(
@@ -1880,10 +1885,14 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
         ("I:VIX", "NOT_ENTITLED", None),
         ("I:RUT", "NOT_ENTITLED", None),
     ]
-    # Once per ticker and session.
-    kept = "the row is kept with its Error and Message columns"
-    assert caplog.text.count(f"NOT_ENTITLED for I:VIX: Not entitled; {kept}") == 1
-    assert caplog.text.count(f"NOT_ENTITLED for I:RUT: Not entitled; {kept}") == 1
+    # One WARNING per page, naming each ticker once per session.
+    assert [r.message for r in caplog.records if "error rows" in r.message] == [
+        (
+            f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 2 "
+            "[I:VIX (NOT_ENTITLED: Not entitled), I:RUT (NOT_ENTITLED: Not entitled)]; the rows "
+            "are kept with their Error and Message columns"
+        )
+    ]
 
 
 def test_the_first_part_of_a_page_gives_a_drift_sample(
@@ -2264,8 +2273,14 @@ def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
             session, FUTURES_TRADES, start="2025-01-21", end="2025-01-23", symbols=["ESH5"]
         )
     assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
-    for day in ("2025-01-22", "2025-01-23"):
-        assert caplog.text.count(f"ESH5 has no data for the session {day} (HTTP 404") == 1
+    # One WARNING for the read, naming each session.
+    assert caplog.messages == [
+        (
+            "futures.trades: no data for 2 [ESH5 for the session 2025-01-22, ESH5 for the session "
+            "2025-01-23]: Massive answered HTTP 404 from /futures/v1/trades/{ticker}, so they are "
+            "left out"
+        )
+    ]
 
 
 def test_futures_sessions_skip_weekends_and_come_in_date_order(
@@ -2538,9 +2553,8 @@ def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
             assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
-    assert caplog.text.count("X:ETHUSD has no data") == 1
-    kept = "the row is kept with its Error and Message columns"
-    assert caplog.text.count(f"for I:VIX: Not entitled; {kept}") == 1
+    assert caplog.text.count("no data for 1 [X:ETHUSD]") == 1
+    assert caplog.text.count("for 1 [I:VIX (NOT_ENTITLED: Not entitled)]") == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -2789,7 +2803,10 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
     with caplog.at_level(logging.WARNING, LOGGER):
         (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
-    assert "Massive answered NOT_ENTITLED for X:BTCUSD: Not entitled" in caplog.text
+    assert (
+        "error rows from /v1/last/crypto/{from}/{to} for 1 [X:BTCUSD (NOT_ENTITLED: Not entitled)]"
+        in caplog.text
+    )
 
 
 def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
@@ -3552,7 +3569,12 @@ def test_a_symbol_with_no_data_returns_no_rows(
             session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["MSFT", "ZZZZ"]
         )
     assert out == []
-    assert caplog.text.count("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker})") == 1
+    assert caplog.messages == [
+        (
+            "stocks.trades: no data for 1 [ZZZZ]: Massive answered HTTP 404 from "
+            "/v3/trades/{stockTicker}, so they are left out"
+        )
+    ]
 
 
 def test_a_404_after_the_first_page_means_the_data_was_cut_short(
@@ -4064,3 +4086,137 @@ def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing
     q = query(session, UNIFIED)
     assert isinstance(q, Query)
     assert q.fetch().size == 1  # the row without a ticker is dropped as unreadable
+
+
+# --- Bounded and explaining log records ---------------------------------------------------------
+
+
+def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for _ in range(2):  # the second read names no new symbol, so it warns of nothing
+            history(
+                session,
+                TRADES,
+                start="2025-03-03",
+                end="2025-03-03",
+                symbols=["MSFT", "YYYY", "ZZZZ"],
+            )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        (
+            "stocks.trades: no data for 2 [YYYY, ZZZZ]: Massive answered HTTP 404 from "
+            "/v3/trades/{stockTicker}, so they are left out"
+        )
+    ]
+    debug = [r.getMessage() for r in caplog.records if "has no data" in r.getMessage()]
+    assert len(debug) == 4  # each symbol of each read
+    assert all(r.startswith("stocks.trades: ") and "HTTP 404 from" in r for r in debug)
+    assert any("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker}" in r for r in debug)
+
+
+def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    tickers = [f"I:X{n:02d}" for n in range(25)]
+    refused = [{"ticker": t, "error": "NOT_ENTITLED", "message": "Not entitled"} for t in tickers]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(refused)))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning.startswith(
+        f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 25 "
+        "[I:X00 (NOT_ENTITLED: Not entitled), "
+    )
+    assert warning.endswith(
+        "I:X19 (NOT_ENTITLED: Not entitled), +5 more]; the rows are kept with their Error and "
+        "Message columns"
+    )
+    debug = [r.getMessage() for r in caplog.records if "an error row" in r.getMessage()]
+    assert debug[-1] == (
+        f"indices.snapshots: Massive answered an error row from {INDEX_SNAPSHOT_PATH} for "
+        "I:X24 (NOT_ENTITLED: Not entitled)"
+    )
+    assert len(debug) == 25
+
+
+def test_an_error_row_answer_is_cut_in_the_warning_and_whole_at_debug(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    message = "x" * 500
+    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": message}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    shown = "I:VIX (NOT_ENTITLED: " + message
+    assert f"for 1 [{shown[: rest._ANSWER_SHOWN - 1]}…]; the rows are kept" in warning
+    assert any(f"for {shown})" in r.getMessage() for r in caplog.records)
+
+
+def test_the_facts_a_session_warned_about_are_bounded(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rest, "_FACTS_LIMIT", 2)
+    state = rest.RestState(cast("_massive.RestClient", object()), "MassiveSession #9")
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        assert [state.first("x", "a"), state.first("x", "b"), state.first("x", "a")] == [
+            True,
+            True,
+            False,
+        ]
+        # A third fact empties the memory first, so the first counts as new again.
+        assert [state.first("x", "c"), state.first("x", "a")] == [True, True]
+    assert caplog.messages == [
+        "MassiveSession #9: forgot the 2 facts already warned about, past the limit of 2"
+    ]
+
+
+def test_each_page_logs_its_rows_after_each_step(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Four weekly bars: the window keeps the two whole weeks inside it.
+    start, end = ny_ms(date(2025, 3, 9)), ny_ms(date(2025, 3, 22)) - 1
+    path = f"/v2/aggs/ticker/AAPL/range/1/week/{start}/{end}"
+    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]
+    fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        history(
+            session,
+            BARS,
+            start="2025-03-05",
+            end="2025-03-21",
+            symbols=["AAPL"],
+            timespan=Timespan.WEEK,
+            adjusted=False,
+        )
+    pages = [r.getMessage() for r in caplog.records if "rows read" in r.getMessage()]
+    assert pages == [
+        (
+            "stocks.bars: page 1 of /v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/"
+            "{from}/{to} for AAPL: 4 rows read, 4 converted, 2 in the window, 2 kept as whole bars"
+        )
+    ]
+
+
+def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    rows = [
+        {"ticker": "I:SPX", "value": 1.0, "timeframe": "SOMETIMES"},
+        {"ticker": "I:NDX", "value": 2.0, "timeframe": "SOMETIMES"},
+    ]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        for _ in range(2):
+            out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:NDX"])
+            assert [r["Symbol"] for r in out] == ["I:SPX", "I:NDX"]  # served
+    assert caplog.messages == [
+        (
+            f"indices.snapshots: {INDEX_SNAPSHOT_PATH} answered timeframe='SOMETIMES', which is "
+            "neither DELAYED nor REAL-TIME, for indices data; the library cannot tell whether "
+            "the row is delayed and serves it"
+        )
+    ]

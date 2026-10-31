@@ -335,10 +335,20 @@ def test_a_listed_subscription_ignores_a_refused_snapshot(
     def refuse(probe: SnapshotProbe) -> SnapshotAnswer:
         raise dm.EntitlementError("HTTP 403", status=403)
 
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.DEBUG, LOGGER):
         decision = run(AssetClass.OPTIONS, refuse, delayed=frozenset({Subscription.OPTIONS}))
     assert decision.host == DELAYED_HOST
-    assert caplog.records == []
+    # Nothing to warn of; the refusal is kept at DEBUG, and the decision at INFO.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.DEBUG,
+            "options snapshot refused, so the delayed feed is used unchecked: HTTP 403",
+        ),
+        (
+            logging.INFO,
+            "options WebSocket host: delayed.massive.com (MassiveConfig.delayed_subscriptions)",
+        ),
+    ]
 
 
 def test_mixed_tiers_real_time_stocks_and_delayed_options(

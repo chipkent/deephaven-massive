@@ -106,7 +106,7 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
 from deephaven_massive._enums import NotBars, OnError
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
-from deephaven_massive._log_limits import log_failure, mark_failure_logged
+from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
@@ -119,6 +119,7 @@ from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import PartitionedTable, Table
@@ -1090,6 +1091,7 @@ class Flusher:
         "_backlog_lock",
         "_backlog_warned",
         "_control",
+        "_drift",
         "_exec_ctx",
         "_final",
         "_flush_lock",
@@ -1143,6 +1145,9 @@ class Flusher:
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
         # Flush-lock state: per routed plan and symbol, the same run (`_counted_symbols`).
         self._symbol_runs: dict[ChannelPlan, dict[str, tuple[int, str]]] = {}
+        # Flush-lock state: the drift a flush found, merged per (streams, where), which the
+        # flush reports once it has released the flush lock (`_report_found`).
+        self._drift: dict[tuple[tuple[StreamSink, ...], str], DriftReport] = {}
         # Guarded by the backlog lock, a leaf lock.
         self._backlog_lock = threading.Lock()
         self._backlog = 0
@@ -1292,7 +1297,10 @@ class Flusher:
         rows, applies the other failures, and reports the row counts. Runs under the flush
         lock, inside the flusher's execution context, with no other library lock held: it
         calls Deephaven (`to_table`, `partition_by`, `where_in`, `add`, `publish_failure`) and
-        then each session with a stream that published once (`update_streams`).
+        then each session with a stream that published once (`update_streams`). The drift the
+        flush found, its frames' and its rows' timestamps', is merged per channel and dataset
+        (`_found`) and reported once the flush lock is released (`_report_found`), so the
+        session's `DriftRegistry` logs once per flush, not once per frame.
         """
         with self._flush_lock, entered(self._exec_ctx):
             controls = _drain(self._control)
@@ -1325,20 +1333,46 @@ class Flusher:
                     self._publish(batch, sinks, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
-                    try:
-                        self._report_drift(
-                            routes.get(item.channel, ()), item.drift, where=item.where
-                        )
-                    except Exception:
-                        logger.exception(
-                            "%s: could not report the drift of channel %s (%s). %s",
-                            self._thread.name,
-                            item.channel,
-                            item.where,
-                            LIBRARY_BUG,
-                        )
+                    self._found(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
             self._forget([sink for sinks in routes.values() for sink in sinks])
+            found, self._drift = self._drift, {}
+        self._report_found(found)
+
+    def _found(self, sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str) -> None:
+        """Add drift a flush found to what it reports once the flush lock is released.
+
+        Merged per streams and origin, so a flush of a thousand frames that each dropped a row
+        reports, and logs, once rather than a thousand times.
+
+        Args:
+            sinks: The streams of the channel or dataset the drift is about.
+            drift: The drift.
+            where: The connection's URL and the channel, or the flush thread and the channel.
+        """
+        key = (sinks, where)
+        self._drift[key] = self._drift.get(key, DriftReport()).merge(drift)
+
+    def _report_found(
+        self, found: Mapping[tuple[tuple[StreamSink, ...], str], DriftReport]
+    ) -> None:
+        """Report a flush's drift, with no lock held: its logs never wait under the flush lock.
+
+        A report that raises is logged at ERROR, and the others are still reported.
+
+        Args:
+            found: The flush's drift, merged per streams and origin (`_found`).
+        """
+        for (sinks, where), drift in found.items():
+            try:
+                self._report_drift(sinks, drift, where=where)
+            except Exception:
+                logger.exception(
+                    "%s: could not report the drift of %s. %s",
+                    self._thread.name,
+                    where,
+                    LIBRARY_BUG,
+                )
 
     def _forget(self, routed: list[StreamSink]) -> None:
         """Forget the flush-lock state of streams and datasets no longer routed.
@@ -1437,7 +1471,7 @@ class Flusher:
 
         A futures row the schedules cannot place has a null `Date` and leaves every stream's
         `Error` alone (the calendar logs it). The drift of the rows' timestamps is
-        reported like a frame's (`_report_drift`), and the rows dropped, here or by the client,
+        reported like a frame's (`_found`), and the rows dropped, here or by the client,
         count toward the plan's run (`_counted`).
 
         Args:
@@ -1453,10 +1487,11 @@ class Flusher:
         drift = converted.drift
         if drift.fields_drifted or drift.dropped_rows:
             where = f"{self._thread.name} channel {plan.channel}"
-            self._report_drift(tuple(readers), drift, where=where)
-        self._counted_symbols(plan, converted, batch=batch, readers=readers)
+            self._found(tuple(readers), drift, where=where)
+        # The dataset's run first: when it fails every stream, no symbol is named stale.
         if self._counted(plan, converted, lost=batch.lost, readers=readers):
             return
+        self._counted_symbols(plan, converted, batch=batch, readers=readers)
         if converted.batch.num_rows:
             self._publish_batch(plan, converted, readers=readers, updates=updates)
         self._write_notes(readers, updates)
@@ -1581,7 +1616,8 @@ class Flusher:
         row's reason (`ErrorCause.LIBRARY_DEFECT`), and the run starts over. A `dm.ALL` stream
         is never failed for one symbol, since it serves every other symbol; instead its
         `Error` names the symbol as possibly stale (`_write_notes`) until a row of the symbol
-        is published again.
+        is published again. A symbol becoming stale logs a WARNING (`_mark_stale`), and one
+        published again an INFO (`_clear_stale`).
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1592,12 +1628,10 @@ class Flusher:
         runs = self._symbol_runs.setdefault(plan, {})
         for symbol in converted.symbols:
             runs.pop(symbol, None)
-        everyone = [s for s in readers if s.receives_all]
-        for sink in everyone:  # a symbol published again is no longer stale
-            stale = self._stale.get(sink.stream_id)
-            if stale is not None:
-                for symbol in converted.symbols & stale.keys():
-                    del stale[symbol]
+        # A stream failed this flush (a spelling the library cannot read) publishes nothing.
+        everyone = [s for s in readers if s.receives_all and not s.failed]
+        self._clear_stale(plan, everyone, published=converted.symbols)
+        became: dict[str, str] = {}  # the symbols that become stale, with their first reason
         dropped = Counter(converted.dropped_symbols)
         dropped.update(batch.lost_symbols)
         reason = batch.lost.dropped_reason or converted.drift.dropped_reason
@@ -1620,8 +1654,67 @@ class Flusher:
                 cause=ErrorCause.LIBRARY_DEFECT,
             )
             self._fail_each([s for s in readers if s.holds(symbol)], failure)
-            for sink in everyone:
-                self._stale.setdefault(sink.stream_id, {})[symbol] = first
+            became[symbol] = first
+        self._mark_stale(plan, everyone, became)
+
+    def _mark_stale(
+        self, plan: ChannelPlan, everyone: list[StreamSink], became: Mapping[str, str]
+    ) -> None:
+        """Name symbols as possibly stale in each `dm.ALL` stream; warn of the new ones once.
+
+        One WARNING per flush and dataset lists the symbols not stale before in some stream,
+        with the first one's reason and the streams, through `bounded_list`; a symbol stale
+        already is not warned about again.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            everyone: The dataset's `dm.ALL` streams on the channel.
+            became: Each symbol whose run reached the limit, with its first row's reason.
+        """
+        new: set[str] = set()
+        for sink in everyone:
+            stale = self._stale.setdefault(sink.stream_id, {})
+            new.update(symbol for symbol in became if symbol not in stale)
+            stale.update(became)
+        if new:
+            first = min(new)
+            logger.warning(
+                "%s: every recent row of %s on channel %s was dropped because a key could not "
+                "be read (the first: %s), so the dm.ALL streams %s may be stale for them; they "
+                "keep running and name the symbols in their Error until a row is published",
+                plan.dataset,
+                bounded_list(sorted(new)),
+                plan.channel,
+                became[first],
+                bounded_list(sink.stream_id for sink in everyone),
+            )
+
+    def _clear_stale(
+        self, plan: ChannelPlan, everyone: list[StreamSink], *, published: AbstractSet[str]
+    ) -> None:
+        """Clear the stale mark of symbols published again; log the recovery at INFO.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            everyone: The dataset's `dm.ALL` streams on the channel.
+            published: The symbols this flush published.
+        """
+        recovered: set[str] = set()
+        for sink in everyone:
+            stale = self._stale.get(sink.stream_id)
+            if stale is not None:
+                back = published & stale.keys()
+                for symbol in back:
+                    del stale[symbol]
+                recovered |= back
+        if recovered:
+            logger.info(
+                "%s: rows of %s on channel %s are published again; the dm.ALL streams no "
+                "longer name them as stale",
+                plan.dataset,
+                bounded_list(sorted(recovered)),
+                plan.channel,
+            )
 
     def _convert(
         self, plan: ChannelPlan, rows: list[dict[str, object]], *, arrived: list[int]
