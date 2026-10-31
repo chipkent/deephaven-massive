@@ -1633,9 +1633,10 @@ def test_wait_false_reads_in_the_background(
         _join_reads(massive_session)
     assert fetched.is_refreshing
     assert history.is_refreshing
-    # The parameters were checked on the calling thread, then the transport ran with a token.
+    # The parameters were checked on the calling thread, in call order, then each read ran on
+    # its own background thread with a token, so the reads may finish in either order.
     assert [check[0] for check in rest.checks] == ["fetch", "history"]
-    assert [call[0] for call in rest.calls] == ["fetch", "history"]
+    assert sorted(call[0] for call in rest.calls) == ["fetch", "history"]
     assert all(isinstance(call[3]["stop"], threading.Event) for call in rest.calls)
     rows = stream_rows()
     assert [(r["StreamId"], r["Kind"], r["State"], r["Transport"]) for r in rows] == [
