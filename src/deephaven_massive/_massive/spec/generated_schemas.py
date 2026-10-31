@@ -27,6 +27,8 @@ from deephaven_massive._massive.spec.types import (
     Membership,
     Param,
     ParamKind,
+    PlanAccess,
+    PlanTerms,
     RestPath,
     Source,
     Transport,
@@ -59,12 +61,15 @@ class DescriptionsFile:
             description. A field without a description has no entry.
         class_texts: Per transport, per source key, each wire key with per-asset-class
             descriptions mapped to them, by asset class. Only those fields have an entry.
+        plans: What each vendor page says about Massive's plans, by the page's URL. A page
+            without plan tables has no entry.
     """
 
     fetched: dt.date
     urls: Mapping[Transport, Mapping[str, tuple[str, ...]]]
     texts: Mapping[Transport, Mapping[str, Mapping[str, str]]]
     class_texts: Mapping[Transport, Mapping[str, Mapping[str, Mapping[str, str]]]]
+    plans: Mapping[str, PlanAccess]
 
 
 def parse(
@@ -133,8 +138,9 @@ def parse_descriptions(text: str) -> DescriptionsFile:
         text: The file's JSON text: `{"generated_by", "fetched": "<YYYY-MM-DD>", "urls":
             {<transport>: {<source key>: [<url>, ...]}}, "descriptions": {<transport>:
             {<source key>: {<wire key>: <text>}}}, "class_descriptions": {<transport>:
-            {<source key>: {<wire key>: {<asset class>: <text>}}}}}`, as the refresh writes
-            it.
+            {<source key>: {<wire key>: {<asset class>: <text>}}}}, "plans": {<page url>:
+            {"title", "access", "recency", "history", "plans": [{"plan", "access", "recency",
+            "history"}, ...]}}}`, as the refresh writes it.
 
     Returns:
         The parsed values, every mapping read-only.
@@ -143,6 +149,7 @@ def parse_descriptions(text: str) -> DescriptionsFile:
     urls = _object(_member(document, "urls"), "urls")
     texts = _object(_member(document, "descriptions"), "descriptions")
     by_class = _object(_member(document, "class_descriptions"), "class_descriptions")
+    plans = _object(_member(document, "plans"), "plans")
     return DescriptionsFile(
         fetched=dt.date.fromisoformat(_text(document, "fetched")),
         urls=MappingProxyType(
@@ -188,6 +195,35 @@ def parse_descriptions(text: str) -> DescriptionsFile:
                 )
                 for transport, by_key in by_class.items()
             }
+        ),
+        plans=MappingProxyType(
+            {url: _plan_access(_object(page, f"plans of {url}")) for url, page in plans.items()}
+        ),
+    )
+
+
+def _plan_access(page: dict[str, object]) -> PlanAccess:
+    """Build one vendor page's plan access from its entry in `descriptions.json`.
+
+    Args:
+        page: The decoded JSON object of the page.
+
+    Returns:
+        The page's plan access.
+    """
+    return PlanAccess(
+        title=_text(page, "title"),
+        access=_text(page, "access"),
+        recency=_text(page, "recency"),
+        history=_text(page, "history"),
+        plans=tuple(
+            PlanTerms(
+                plan=_text(row, "plan"),
+                access=_text(row, "access"),
+                recency=_optional(row, "recency"),
+                history=_optional(row, "history"),
+            )
+            for row in _list(_member(page, "plans"))
         ),
     )
 

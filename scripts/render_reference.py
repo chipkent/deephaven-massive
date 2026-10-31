@@ -1,4 +1,4 @@
-"""Regenerate the column reference, `docs/datasets/`: the whole directory and nothing else.
+"""Regenerate the dataset reference, `docs/datasets/`: the whole directory and nothing else.
 
 Run it from a source checkout:
 
@@ -6,11 +6,13 @@ Run it from a source checkout:
 
 It starts an embedded Deephaven server first, because the library's session module, which
 builds the dataset catalog, imports Deephaven, and the library itself never starts a server.
-Then it renders one page per namespace from that catalog and the provenance of the generated
-wire schemas, makes `docs/datasets/` hold exactly those pages (deleting any other file or
-directory there, so no orphaned page survives a rename), and prints which columns each dataset
-gained or lost, then what it wrote and deleted. Run after a refresh of Massive's
-specifications, the column report is how the refresh shows what it does to each table.
+Then it renders an index and one page per dataset from that catalog, each dataset's call (its
+method's signature and verbs), and the provenance of the generated wire schemas (their vendor
+pages and those pages' plan tables), makes `docs/datasets/` hold exactly those pages (deleting
+any other file or directory there, so no orphaned page survives a rename), and prints which
+columns each dataset gained or lost, then what it wrote and deleted. Run after a refresh of
+Massive's specifications, the column report is how the refresh shows what it does to each
+table.
 All the logic is in `deephaven_massive._datasets.column_reference`, where the unit tests and
 the coverage gate reach it; this script only wires it up.
 
@@ -36,10 +38,10 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.column_reference import column_changes, render, sync
 
 if TYPE_CHECKING:
-    from deephaven_massive import _session
+    from deephaven_massive import _dataset_list, _session
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
-"""The column reference's directory, found from this script's place in the checkout."""
+"""The dataset reference's directory, found from this script's place in the checkout."""
 
 
 def main() -> None:
@@ -53,14 +55,16 @@ def main() -> None:
     atexit.register(_exit)
     # Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
     Server(port=0, jvm_args=["-Xmx1g"]).start()
-    # The session module, which builds the catalog, imports Deephaven, so it is imported only
-    # once the server runs. The type checker reads the static import above instead, so a
-    # renamed module or `CATALOG` fails the type check.
+    # The session module, which builds the catalog, and the dataset list, which reads each
+    # dataset's method, import Deephaven, so they are imported only once the server runs. The
+    # type checker reads the static import above instead, so a renamed module, `CATALOG`, or
+    # `dataset_calls` fails the type check.
     if TYPE_CHECKING:
-        session = _session
+        session, dataset_list = _session, _dataset_list
     else:
         session = importlib.import_module("deephaven_massive._session")
-    pages = render(session.CATALOG, _massive.provenance())
+        dataset_list = importlib.import_module("deephaven_massive._dataset_list")
+    pages = render(session.CATALOG, _massive.provenance(), dataset_list.dataset_calls())
     committed = {p.name: p.read_text() for p in sorted(_DIRECTORY.glob("*.md")) if p.is_file()}
     for line in column_changes(committed, pages):
         sys.stdout.write(f"columns: {line}\n")

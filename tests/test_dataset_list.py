@@ -1,14 +1,17 @@
 """Tests for `dm.datasets()`, the static table of every dataset."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
+import pytest
 from deephaven import dtypes
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS
-from deephaven_massive._datasets.column_reference import PAGES_URL
+from deephaven_massive import _dataset_list
+from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS, dataset_calls
+from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall
+from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._session import CATALOG
 
 ToPylist = Callable[[Table], list[dict[str, Any]]]
@@ -43,16 +46,16 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
         "Summary": CATALOG.by_name["stocks.trades"].summary,
         "Verbs": stream_and_history,
         "Transports": ["REST", "flat files", "WebSocket"],
-        "Documentation": f"{_PAGES}stocks.md#trades",
+        "Documentation": f"{_PAGES}stocks.trades.md",
     }
     assert rows["stocks.last_trade"]["Verbs"] == ["fetch", "poll"]
     assert rows["stocks.last_trade"]["Transports"] == ["REST"]
     # Bars stream at some timespans only; the dataset lists every verb one of its calls has.
     assert rows["stocks.bars"]["Verbs"] == stream_and_history
     ratios = rows["stocks.financials.ratios"]
-    assert ratios["Documentation"] == f"{_PAGES}stocks.md#financials-ratios"
+    assert ratios["Documentation"] == f"{_PAGES}stocks.financials.ratios.md"
     assert rows["snapshots"]["Call"] == "m.snapshots"
-    assert rows["snapshots"]["Documentation"] == f"{_PAGES}snapshots.md#snapshots"
+    assert rows["snapshots"]["Documentation"] == f"{_PAGES}snapshots.md"
 
 
 def test_the_list_can_be_filtered_by_verb(dh_to_pylist: ToPylist) -> None:
@@ -70,3 +73,83 @@ def test_every_column_is_described() -> None:
     }
     assert descriptions == dict(DATASET_LIST_DESCRIPTIONS)
     assert set(descriptions) == {column.name for column in table.columns}
+
+
+# --- dataset_calls -----------------------------------------------------------------------------
+
+
+def test_every_dataset_has_its_call() -> None:
+    calls = dataset_calls()
+    assert list(calls) == list(CATALOG.by_name)
+    assert calls["stocks.bars"] == DatasetCall(
+        signature="m.stocks.bars(symbols, timespan, *, multiplier=1, adjusted=True)",
+        verbs=("blink", "append_only", "ring", "last_by", "history"),
+        arguments=("symbols", "timespan", "multiplier", "adjusted"),
+        typed=("symbols", "timespan", "multiplier", "adjusted"),
+    )
+    # The session's own dataset method, and defaults written as a user types them.
+    assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")
+    assert "timespan=dm.Timespan.DAY" in calls["indicators.sma"].signature
+    assert "venues=frozenset(dm.FuturesVenue)" in calls["futures.trades"].signature
+
+
+def test_arguments_named_apart_from_their_wire_parameter() -> None:
+    tickers = dataset_calls()["reference.tickers"]
+    # `ticker_type` sets `type` and `as_of` sets `date`; `cik` is its own wire name.
+    assert {"type", "date", "cik"} <= set(tickers.typed)
+    assert "ticker_type" not in tickers.typed
+    assert "id" in dataset_calls()["reference.conditions"].typed
+    # `underlying` sets the one wire parameter that starts with it, `underlying_ticker`.
+    assert "underlying_ticker" in dataset_calls()["options.contracts"].typed
+    # An argument that sets no wire parameter keeps its name.
+    assert "include_otc" in dataset_calls()["stocks.snapshots"].typed
+
+
+def test_no_filters_key_the_reference_lists_is_refused_as_an_argument(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Every key a dataset page lists must reach the filter check, never the refusal of a key
+    # that has its own argument: a wrong wire name for an argument would list such a key.
+    refused = []
+    for name, call in dataset_calls().items():
+        if "filters" not in call.arguments:
+            continue
+        method: Any = massive_session
+        for part in name.split("."):
+            method = getattr(method, part)
+        required = [
+            "AAPL" if argument == "symbols" else dm.Timespan.DAY
+            for argument in call.arguments
+            if f" {argument}," in f" {call.signature.split('(', 1)[1]}".split("*")[0]
+        ]
+        for key in filter_keys(CATALOG, CATALOG.by_name[name], typed=call.typed):
+            try:
+                method(*required, filters={key: "1"})
+            except (TypeError, ValueError) as error:
+                if "its own argument" in str(error) or "not a filter" in str(error):
+                    refused.append(f"{name}: {key}")
+    assert refused == []
+
+
+def test_a_default_set_of_some_members_is_written_as_its_repr() -> None:
+    some = frozenset({dm.FuturesVenue.CME})
+    assert _dataset_list._default(some) == repr(some)
+    assert _dataset_list._default(frozenset()) == "frozenset()"
+
+
+def test_a_dataset_without_a_method_or_a_method_without_a_dataset_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = _dataset_list._dataset_methods
+
+    def extra() -> Iterator[tuple[str, Callable[..., object]]]:
+        yield from ((name, method) for name, method in real() if name != "stocks.trades")
+        yield "stocks.nothing", print
+
+    monkeypatch.setattr(_dataset_list, "_dataset_methods", extra)
+    with pytest.raises(
+        LookupError,
+        match=r"without a method: \['stocks.trades'\]; .*"
+        r"without a dataset: \['stocks.nothing'\]",
+    ):
+        dataset_calls()

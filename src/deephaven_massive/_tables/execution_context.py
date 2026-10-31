@@ -39,10 +39,9 @@ __all__ = [
 ]
 
 
-_SCHEDULES_GUIDE: Final = (
-    "https://github.com/chipkent/deephaven-massive/blob/main/docs/guides/schedules.md"
-)
-"""The guide to a symbol table that follows a schedule, which the update-graph refusal names."""
+_SYMBOLS_GUIDE: Final = "https://github.com/chipkent/deephaven-massive/blob/main/README.md#symbols"
+"""The README section on symbol tables, schedules included, which the update-graph refusal
+names as the way to change a stream without a table listener."""
 
 
 # A thread with no execution context gets Deephaven's empty default context, whose update graph
@@ -125,8 +124,8 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
             "deephaven_massive calls must not run on a Deephaven update-graph thread "
             "(for example inside a table listener). To change what a live table follows, pass "
             "a refreshing symbol table as symbols instead: the stream follows its rows as they "
-            "change, and the schedules guide shows one that follows the trading day: "
-            f"{_SCHEDULES_GUIDE}"
+            "change, and the README shows one that follows the trading day: "
+            f"{_SYMBOLS_GUIDE}"
         )
 
 

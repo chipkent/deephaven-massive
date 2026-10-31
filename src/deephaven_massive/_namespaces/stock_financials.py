@@ -10,8 +10,8 @@ touches the network until a verb is called on the query. This module owns the na
 `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
 `_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
 the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and `end` bound the
-statement period, and the `sort`, `order`, `limit`, and `filters` block works as described in
-the package documentation. `m.stocks` (`stocks.py`) creates the namespace.
+statement period, and `sort`, `order`, `limit`, and `filters` work as README.md#sort-order-limit
+and README.md#filters describe. `m.stocks` (`stocks.py`) creates the namespace.
 """
 
 from __future__ import annotations
@@ -201,52 +201,41 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Balance sheets of US public companies, one row per filer and reporting period.
 
-        Each row is a company's assets, liabilities, and equity at the end of a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so a row
-        has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
-        only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/balance-sheets`) through `fetch()` and `poll()`; `poll()`
-        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-balance_sheets,
-        the web UI's column tooltips, or `columns()`.
+        Each row is a company's assets, liabilities, and equity at the end of a quarter or fiscal
+        year, as filed with the SEC. A filing can name several share classes, so a row has no
+        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
+        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
+        and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL` or `dm.Timeframe.QUARTERLY`; None for both.
-                A balance sheet is a position at the period's end, so it has no trailing
-                twelve months.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; None, the default, for both. A balance
+                sheet is a position, so it has no trailing twelve months.
+            start: The first period end date. See README.md#start-and-end.
+            end: The last period end date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.financials.balance_sheets.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, which the
-                balance sheets do not offer; or if `symbols` is `dm.ALL` or empty, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or
-                of the wrong kind.
+            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, `symbols` is
+                `dm.ALL` or empty, a bound is not a date or ISO date, `end` is before `start`,
+                `order` is given without `sort`, or a filter is unknown, reserved, or of the wrong
+                kind.
 
         Example:
             ::
 
-                q = m.stocks.financials.balance_sheets(
-                    ["AAPL", "MSFT"], timeframe=dm.Timeframe.QUARTERLY, start="2023-01-01"
-                )
-                t = q.fetch()
+                t = m.stocks.financials.balance_sheets(
+                    "AAPL", timeframe=dm.Timeframe.ANNUAL
+                ).fetch()
         """
         if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
             raise ValueError(
@@ -281,41 +270,33 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Income statements of US public companies, one row per filer and reporting period.
 
-        Each row is a company's revenue, expenses, earnings, and per-share figures for a
-        quarter or fiscal year, as filed with the SEC. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
-        tickers, and `symbols` only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/income-statements`) through `fetch()` and `poll()`; `poll()`
-        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-income_statements,
-        the web UI's column tooltips, or `columns()`.
+        Each row is a company's revenue, expenses, earnings, and per-share figures for a quarter or
+        fiscal year, as filed with the SEC. A filing can name several share classes, so a row has no
+        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
+        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
+        and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
-                None for every timeframe the endpoint holds.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
+                default, for every timeframe.
+            start: The first period end date. See README.md#start-and-end.
+            end: The last period end date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.financials.income_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
             ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+                is before `start`, `order` is given without `sort`, or a filter is unknown,
+                reserved, or of the wrong kind.
 
         Example:
             ::
@@ -352,41 +333,33 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
-        Each row is a company's operating, investing, and financing cash flows for a quarter
-        or fiscal year, as filed with the SEC. A filing can name several share classes, so a
-        row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
-        only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/cash-flow-statements`) through `fetch()` and `poll()`;
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-cash_flow_statements,
-        the web UI's column tooltips, or `columns()`.
+        Each row is a company's operating, investing, and financing cash flows for a quarter or
+        fiscal year, as filed with the SEC. A filing can name several share classes, so a row has no
+        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
+        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
+        and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
-                None for every timeframe the endpoint holds.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+            symbols: Tickers whose filings to return; None, the default, for every filing. See
+                README.md#symbols.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
+                default, for every timeframe.
+            start: The first period end date. See README.md#start-and-end.
+            end: The last period end date. See README.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.financials.cash_flow_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
             ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+                is before `start`, `order` is given without `sort`, or a filter is unknown,
+                reserved, or of the wrong kind.
 
         Example:
             ::
@@ -418,35 +391,26 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
-        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity,
-        and so on) as of the row's `Date`, computed by Massive from the trailing twelve months
-        of filings and the daily close. The endpoint has no date filter, so the dataset has no
-        `start` or `end`. Served by REST (`/stocks/financials/v1/ratios`) through `fetch()` and
-        `poll()`; `symbols` is sent as one `ticker.any_of` list, and `poll()` replaces the
-        table each cycle, keyed by `Symbol` and `Date`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios,
-        the web UI's column tooltips, or `columns()`.
+        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity, and so
+        on) as of its `Date`, computed by Massive from the trailing twelve months of filings and the
+        daily close. The endpoint has no date filter, so there is no `start` or `end`. `poll()`
+        replaces the table each cycle, keyed by `Symbol` and `Date`.
 
         Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every ticker.
-            sort: The field to sort by, such as `"market_cap"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"price_to_earnings_lt": 15}`; checked now.
+            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
+            sort: The field to sort by, such as `"market_cap"`. See README.md#sort-order-limit.
+            order: The direction of `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`. See
+                README.md#filters.
 
         Returns:
-            The query; nothing is requested until a verb runs.
+            A query. Columns: docs/datasets/stocks.financials.ratios.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter is
-                unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, `order` is
+                given without `sort`, or a filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::

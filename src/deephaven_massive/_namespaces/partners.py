@@ -399,43 +399,25 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.
 
-        One row per analyst: name, firm, the number of ratings issued, and performance
-        measures such as success rate, average return, and their percentiles. The rows
-        describe people, not instruments, so the dataset takes no symbols and has no `Symbol`
-        column; select analysts or firms through `filters` (`full_name`, `firm_name`,
-        `benzinga_firm_id`, ...).
-
-        Served by REST only, from `GET /benzinga/v1/analysts`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-analysts,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per analyst: name, firm, ratings issued, and performance measures such as
+        success rate and average return. The rows describe people, so the dataset takes no
+        symbols and has no `Symbol`; select through `filters` (`full_name`, `firm_name`, ...).
+        `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            sort: The column to sort by, by its wire name (`"smart_score"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="smart_score", order=dm.Order.DESC` sends `sort=smart_score.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"firm_name_any_of": ["Wedbush", "Mizuho"]}` sends
-                `firm_name.any_of=Wedbush,Mizuho`); None sends none.
+            sort: The wire field to sort by, such as `"smart_score"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"firm_name": "Wedbush"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type (an `order` that is not a `dm.Order`), and
-            `ValueError` for an unknown filter, a filter value of the wrong kind, or a
-            `limit` that is not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.analysts.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
-                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
-            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
-                is set by a typed argument, or has a value of the wrong kind.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -466,54 +448,33 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga analyst insights on US stocks: a rating, a price target, and the reason.
 
-        One row per insight: the stock, the firm, the rating and rating action, the price
-        target, and the analyst's rationale as text, dated by `Date`. Narrow the dates through
-        `filters` (`date_gte`, `date_lt`, ...), since the dataset has no `start` and `end`.
-        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
-
-        Served by REST only, from `GET /benzinga/v1/analyst-insights`: `fetch()` reads every
-        page into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-analyst_insights,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per insight: the stock, the firm, the rating and its action, the price target,
+        and the analyst's rationale, dated by `Date`. `Symbol` is null on a row Benzinga sends
+        without a ticker. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it
+        has no `start`. `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            symbols: The stocks to return: one ticker (`"AAPL"`), a sequence of tickers, or a
-                Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"date_gte": "2025-01-01"}` sends
-                `date.gte=2025-01-01`); None sends none.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.analyst_insights.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                q = m.partners.benzinga.analyst_insights("NVDA", filters={"date_gte": "2025-01-01"})
-                insights = q.fetch()
+                insights = m.partners.benzinga.analyst_insights("NVDA").fetch()
         """
         return list_query(
             self._core,
@@ -538,48 +499,29 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 
-        One row per action by one analyst at one firm: an upgrade, a downgrade, a
-        reiteration, or a price-target change, with the previous and new rating and target,
-        dated by `Date`. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...),
-        since the dataset has no `start` and `end`.
-        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
-
-        Served by REST only, from `GET /benzinga/v1/ratings`: `fetch()` reads every page into
-        a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-ratings,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per action by one analyst at one firm: an upgrade, a downgrade, a reiteration,
+        or a price-target change, with the previous and new rating and target, dated by `Date`.
+        `Symbol` is null on a row Benzinga sends without a ticker. Narrow the dates through
+        `filters` (`date_gte`, `date_lt`, ...): it has no `start`. `poll()` re-reads it, keyed
+        by `BenzingaId`.
 
         Args:
-            symbols: The stocks to return: one ticker (`"AAPL"`), a sequence of tickers, or a
-                Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"rating_action": "upgrades"}`); None sends none.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"rating_action": "upgrades"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.ratings.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -603,53 +545,29 @@ class _Benzinga(Namespace):
     ) -> Query:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
-        One row per requested stock: the counts of strong-buy, buy, hold, sell, and
-        strong-sell ratings, the consensus rating and its numeric value, the consensus, high,
-        and low price targets, and the number of contributing analysts. `Symbol` is the row's
-        ticker, as on the other Benzinga datasets; a ticker the library cannot read leaves it
-        null and keeps Benzinga's spelling in `RawSymbol`. By
-        default the consensus aggregates every rating Benzinga holds for the stock; the
-        `date` filters restrict it to the ratings published in a range
-        (`{"date_gte": "2024-10-01", "date_lt": "2025-01-01"}` aggregates the fourth quarter
-        of 2024).
-
-        Served by REST only, from `GET /benzinga/v1/consensus-ratings/{ticker}`, which takes
-        one ticker as a path segment, so a list of symbols sends one request per symbol, at
-        most `max_concurrency` at a time. `fetch()` returns a static table, and
-        `poll(interval)` re-reads it into a live table keyed by `Symbol`. There is no stream
-        and no `history()`, and no `limit`: the endpoint returns one row per stock. The
-        columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-consensus_ratings,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per requested stock: the counts of each rating, the consensus rating, the
+        consensus, high, and low price targets, and the number of analysts. The endpoint takes
+        one ticker per request, so each symbol is its own request, and it has no `limit`. By
+        default the consensus covers every rating Benzinga holds; the `date` filters restrict it
+        to the ratings published in a range. `poll()` re-reads it, keyed by `Symbol`.
 
         Args:
-            symbols: The stocks: one ticker (`"AAPL"`), a sequence of tickers, or a Deephaven
-                table with a `Symbol` column, which `poll()` re-reads every cycle. Required:
-                the endpoint has no form without a ticker, so `dm.ALL` raises `ValueError`.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores: the `date` range of the ratings to aggregate
-                (`date`, `date_gte`, `date_lt`, ...); None, the default, aggregates every
-                rating.
+            symbols: US stock tickers; required (`dm.ALL` is refused). See README.md#symbols.
+            filters: The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...);
+                None aggregates every rating. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            a value that is not a ticker, a sequence of tickers, or a table, or for a
-            `filters` that is not a mapping, and `ValueError` for `dm.ALL`, no symbols (an
-            empty list or an exhausted generator), a symbol that is not a valid stock ticker,
-            a table without a `Symbol` column, an unknown filter, or a filter value that is
-            not a date.
+            A `Query`. Columns: docs/datasets/partners.benzinga.consensus_ratings.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; or `filters` is
-                not a mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
-                Massive's exact ticker; or a filter is not a parameter of the endpoint, is set by a
-                typed argument, or has a value of the wrong kind.
+                Massive's exact ticker; or a filter is unknown, set by a typed argument, or of
+                the wrong kind.
 
         Example:
             ::
 
-                consensus = m.partners.benzinga.consensus_ratings(["AAPL", "MSFT"]).fetch()
                 q4 = m.partners.benzinga.consensus_ratings(
                     "AAPL", filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
                 ).fetch()
@@ -674,47 +592,27 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga's bull case and bear case summaries for US stocks.
 
-        One row per summary: the stock, the bull case and the bear case as text, and when the
-        summary was last updated (`LastUpdated`, filterable as `last_updated_gte` and so on).
-        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
-
-        Served by REST only, from `GET /benzinga/v1/bulls-bears-say`: `fetch()` reads every
-        page into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-bulls_bears_say,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per summary: the stock, the bull and the bear case as text, and when it was last
+        updated (`LastUpdated`, filterable as `last_updated_gte` and so on). `Symbol` is null on
+        a row Benzinga sends without a ticker. `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            symbols: The stocks to return: one ticker (`"AAPL"`), a sequence of tickers, or a
-                Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"last_updated"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="last_updated", order=dm.Order.DESC` sends `sort=last_updated.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"last_updated_gte": "2025-06-01"}`); None sends
-                none.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"last_updated"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"last_updated_gte": "2025-06-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.bulls_bears_say.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -745,55 +643,33 @@ class _Benzinga(Namespace):
         """Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
         One row per guidance release: the stock, the fiscal period, the guided EPS and revenue
-        ranges with the previous ones, and whether the figure is the primary or a secondary
-        one (`Positioning`), dated by
-        `Date`. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...), since the
-        dataset has no `start` and `end`.
-        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
-
-        Served by REST only, from `GET /benzinga/v1/guidance`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-guidance,
-        in the web UI's column tooltips, and in `columns()`.
+        ranges with the previous ones, and whether the figure is the primary one
+        (`Positioning`), dated by `Date`. `Symbol` is null on a row Benzinga sends without a
+        ticker. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it has no
+        `start`. `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            symbols: The stocks to return: one ticker (`"AAPL"`), a sequence of tickers, or a
-                Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="date", order=dm.Order.DESC` sends `sort=date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"fiscal_year": 2025, "positioning": "primary"}`); None
-                sends none.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"positioning": "primary"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.guidance.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                outlook = m.partners.benzinga.guidance("AAPL", filters={"fiscal_year": 2025})
-                rows = outlook.fetch()
+                outlook = m.partners.benzinga.guidance("AAPL").fetch()
         """
         return list_query(
             self._core,
@@ -818,55 +694,34 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Earnings announcements of US companies from Benzinga, with estimates and surprises.
 
-        One row per announcement, past or scheduled: the stock, the fiscal period, the
-        announcement date and time and whether they are confirmed, and the estimated, actual,
-        and previous EPS and revenue with their surprises. Narrow the dates through `filters`
-        (`date_gte`, `date_lt`, ...), since the dataset has no `start` and `end`.
-        The stock is `Symbol`, null for a row Benzinga sends without a ticker.
-
-        Served by REST only, from `GET /benzinga/v1/earnings`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-earnings,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per announcement, past or scheduled: the stock, the fiscal period, the date and
+        time and whether they are confirmed, and the estimated, actual, and previous EPS and
+        revenue with their surprises. `Symbol` is null on a row Benzinga sends without a ticker.
+        Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it has no `start`.
+        `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            symbols: The stocks to return: one ticker (`"AAPL"`), a sequence of tickers, or a
-                Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="date", order=dm.Order.ASC` sends `sort=date.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"date_gte": "2025-07-01", "importance_gte": 3}`);
-                None sends none.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"importance_gte": 3}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.earnings.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                calendar = m.partners.benzinga.earnings(filters={"date_gte": "2025-07-01"})
-                upcoming = calendar.fetch()
+                upcoming = m.partners.benzinga.earnings(filters={"date_gte": "2025-07-01"}).fetch()
         """
         return list_query(
             self._core,
@@ -890,41 +745,25 @@ class _Benzinga(Namespace):
     ) -> Query:
         """The research firms behind Benzinga's analyst ratings.
 
-        One row per firm: its Benzinga identifier, name, currency, and when the record was
-        last updated. Join `BenzingaId` to the `BenzingaFirmId` of `ratings()`,
-        `analyst_insights()`, or `analysts()`. The rows describe firms, not instruments, so the
-        dataset takes no symbols and has no `Symbol` column.
-
-        Served by REST only, from `GET /benzinga/v1/firms`: `fetch()` reads every page into a
-        static table, and `poll(interval)` re-reads it into a live table keyed by
-        `BenzingaId`. There is no stream and no `history()`. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-firms,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per firm: its Benzinga id, name, currency, and last update. Join `BenzingaId` to
+        the `BenzingaFirmId` of `ratings()`, `analyst_insights()`, or `analysts()`. The rows
+        describe firms, so the dataset takes no symbols and has no `Symbol`. `poll()` re-reads
+        it, keyed by `BenzingaId`.
 
         Args:
-            sort: The column to sort by, by its wire name (`"name"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="name", order=dm.Order.ASC` sends `sort=name.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"benzinga_id_any_of": ["5f3ac1", "60a1b2"]}`);
-                None sends none.
+            sort: The wire field to sort by, such as `"name"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for an unknown filter, a filter
-            value of the wrong kind, or a `limit` that is not positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.firms.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
-                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
-            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
-                is set by a typed argument, or has a value of the wrong kind.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -955,80 +794,39 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
-        One row per article: its publication time as `Timestamp`, author, title, teaser, body,
-        URL, and the lists of tickers, channels, tags, and images, each a `String[]` column.
-        An article names any number of tickers, so the rows have no `Symbol` column: `Tickers`
-        holds the list, and `symbols` only selects the articles that name at least one of
-        them. To keep the articles that name one ticker, filter with the query language's
-        `inObj`, which needs a list, as in
-        `table.where("Tickers != null && inObj(`AAPL`, Tickers)")`; for one row per article and
-        ticker, `table.ungroup("Tickers")`.
-
-        Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
-        static table, and `poll(interval)` re-reads the endpoint into a live table that, by
-        default (`PollMode.APPEND`), only grows: each cycle appends the articles it has not
-        seen before, keyed by `BenzingaId`, so every article appears once. `poll()` needs a
-        `start` or a `limit`, and raises `ValueError` without either: every cycle reads every
-        page of the range, and without them the range is the whole Benzinga archive. A fixed
-        `start` keeps widening the window of a poll that runs for days. There is no stream
-        and no `history()`; use `start` and `end` for a past range. The columns and what they
-        mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per article, at its publication `Timestamp`. An article names any number of
+        tickers, so the table has no `Symbol` but a `Tickers` array, and `symbols` selects the
+        articles that name any of them: `t.where("Tickers != null && inObj(`AAPL`, Tickers)")`
+        keeps one ticker's. `poll()` appends the articles it has not seen, keyed by
+        `BenzingaId`, and needs `start` or `limit`, since each cycle reads the whole range; a
+        fixed `start` widens the window of a poll that runs for days.
 
         Args:
-            symbols: The tickers whose articles to return: one ticker (`"AAPL"`), a sequence
-                of tickers, or a Deephaven table with a `Symbol` column, which `poll()`
-                re-reads every cycle. An article matches when it names any of them. None, the
-                default, applies no ticker filter. `dm.ALL` raises `ValueError`; pass None
-                instead.
-            start: The earliest publication time: an ISO date (`"2025-06-02"`) or `date`,
-                meaning 00:00 America/New_York that day, or a timezone-aware `datetime` or
-                ISO text with an offset. None, the default, sets no lower bound, which
-                `poll()` refuses unless `limit` is set.
-            end: The end of the publication range, of the same kind as `start` (mixing a date with a
-                `datetime` raises `ValueError`): a date includes that whole day, and an aware
-                `datetime` is the first instant excluded. None (the default) sends no upper bound,
-                so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The column to sort by, by its wire name (`"published"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="published", order=dm.Order.ASC` sends `sort=published.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"channels_any_of": ["earnings"]}` sends
-                `channels.any_of=earnings`); None sends none. The `published` parameters are
-                set only through `start` and `end`.
+            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            start: The earliest publication time; `poll()` needs it or a `limit`.
+                See README.md#start-and-end.
+            end: The end of the range. See README.md#start-and-end.
+            sort: The wire field to sort by, such as `"published"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"channels_any_of": ["earnings"]}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, a naive `datetime` or an `end` before `start`, an unknown filter or a
-            filter on `published`, a filter value of the wrong kind, or a `limit` that is not
-            positive.
+            A `Query`. Columns: docs/datasets/partners.benzinga.news.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `start` or
-                `end` is not a `str`, `date`, or `datetime`; `sort` is not a `str`; `order` is not a
-                `dm.Order`; `limit` is not an `int`; or `filters` is not a mapping or holds a value
-                of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
                 exact ticker; a bound cannot be parsed or is naive, or the range ends before it
-                starts; `limit` is not positive; or a filter is not a parameter of the endpoint, is
-                set by a typed argument, or has a value of the wrong kind.
+                starts; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                from datetime import date, timedelta
-
-                q = m.partners.benzinga.news(["AAPL", "NVDA"], start="2025-06-02")
-                headlines = q.fetch().view(["Timestamp", "Title", "Tickers"])
-                yesterday = date.today() - timedelta(days=1)
-                feed = m.partners.benzinga.news(start=yesterday).poll(30)
+                feed = m.partners.benzinga.news(["AAPL", "NVDA"], start="2025-06-02").poll(30)
         """
         return list_query(
             self._core,
@@ -1084,46 +882,28 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 
-        One row per fund and date: the total risk and reward scores, the quant grade and total
-        score, and their technical, sentiment, behavioral, fundamental, global, and quality
-        components.
-
-        Served by REST only, from `GET /etf-global/v1/analytics`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `Symbol`, `EffectiveDate`, and `ProcessedDate`. There is no stream and no `history()`.
-        The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#etf_global-analytics,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per fund and date: the risk and reward scores, the quant grade and total score,
+        and their components. The fund is `Symbol`, the data's date `EffectiveDate`, and
+        `ProcessedDate` when ETF Global processed it; narrow dates through `filters`. `poll()`
+        re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: The funds to return: one ETF ticker (`"SPY"`), a sequence of tickers, or
-                a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"reward_score"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="reward_score", order=dm.Order.DESC` sends `sort=reward_score.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"quant_grade": "A"}`); None sends none.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"effective_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.etf_global.analytics.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -1153,54 +933,34 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """The holdings of US-listed ETFs from ETF Global, one row per fund, date, and holding.
 
-        Each row is one security a fund holds on a date: the fund in `Symbol`, the holding's
-        ticker (`ConstituentTicker`), name, identifiers (ISIN, FIGI, SEDOL, CUSIP), rank by
-        weight, weight, market value, and shares held. A fund holds hundreds of securities on
-        each of many dates, so filter by date (`{"effective_date": "2025-09-18"}`).
-
-        Served by REST only, from `GET /etf-global/v1/constituents`: `fetch()` reads every
-        page into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `Symbol`, `EffectiveDate`, `ProcessedDate`, and `ConstituentRank`. There is no stream
-        and no `history()`. The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#etf_global-constituents,
-        in the web UI's column tooltips, and in `columns()`.
+        Each row is one security a fund (`Symbol`) holds on a date: its ticker
+        (`ConstituentTicker`), name, identifiers, rank by weight, weight, market value, and
+        shares. A fund holds hundreds of securities on many dates, so filter by date. `poll()`
+        re-reads it, keyed by `Symbol`, `EffectiveDate`, `ProcessedDate`, and `ConstituentRank`.
 
         Args:
-            symbols: The funds whose holdings to return: one ETF ticker (`"SPY"`), a sequence
-                of tickers, or a Deephaven table with a `Symbol` column, which `poll()`
-                re-reads every cycle. None, the default, applies no fund filter. `dm.ALL`
-                raises `ValueError`; pass None instead. To find the funds that hold a
-                security, filter on `constituent_ticker` instead.
-            sort: The column to sort by, by its wire name (`"weight"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="weight", order=dm.Order.DESC` sends `sort=weight.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"constituent_ticker": "NVDA"}`); None sends none.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"effective_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"effective_date": "2025-09-18"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.etf_global.constituents.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                holders = m.partners.etf_global.constituents(
-                    filters={"constituent_ticker": "NVDA", "effective_date": "2025-09-18"}
+                spy = m.partners.etf_global.constituents(
+                    "SPY", filters={"effective_date": "2025-09-18"}
                 ).fetch()
         """
         return list_query(
@@ -1227,52 +987,31 @@ class _EtfGlobal(Namespace):
         """Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 
         One row per fund and date, from ETF Global: the money that flowed into or out of the
-        fund, its net asset value, and its shares outstanding.
-
-        Served by REST only, from `GET /etf-global/v1/fund-flows`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `Symbol`, `EffectiveDate`, and `ProcessedDate`. There is no stream and no `history()`.
-        The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#etf_global-fund_flows,
-        in the web UI's column tooltips, and in `columns()`.
+        fund, its net asset value, and its shares outstanding. `poll()` re-reads it, keyed by
+        `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: The funds to return: one ETF ticker (`"SPY"`), a sequence of tickers, or
-                a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"effective_date_gte": "2025-01-01"}`); None sends
-                none.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"effective_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.etf_global.fund_flows.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                flows = m.partners.etf_global.fund_flows(
-                    ["SPY", "IVV", "VOO"], filters={"effective_date_gte": "2025-01-01"}
-                ).fetch()
+                flows = m.partners.etf_global.fund_flows(["SPY", "IVV", "VOO"]).fetch()
         """
         return list_query(
             self._core,
@@ -1297,47 +1036,28 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
-        One row per fund and date: the issuer and service providers, inception date, fees and
-        expenses, assets under management, holdings count, trading and options activity, and
-        the fund's sector, industry, geographic, currency, coupon, and maturity exposures,
-        each a JSON text column.
-
-        Served by REST only, from `GET /etf-global/v1/profiles`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `Symbol`, `EffectiveDate`, and `ProcessedDate`. There is no stream and no `history()`.
-        The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#etf_global-profiles,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per fund and date: issuer, inception, fees, assets under management, holdings
+        count, trading activity, and the sector, geographic, currency, and other exposures, each
+        exposure a JSON text column. `poll()` re-reads it, keyed by `Symbol`, `EffectiveDate`,
+        and `ProcessedDate`.
 
         Args:
-            symbols: The funds to return: one ETF ticker (`"SPY"`), a sequence of tickers, or
-                a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"effective_date": "2025-09-18"}`); None sends none.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"effective_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.etf_global.profiles.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -1367,47 +1087,27 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's classification of US-listed ETFs by strategy, structure, and exposure.
 
-        One row per fund and date: the asset class, category, focus, region, objective,
-        selection and weighting methodology, leverage, rebalancing, ESG, and tax
-        classification that describe what the fund is.
-
-        Served by REST only, from `GET /etf-global/v1/taxonomies`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `Symbol`, `EffectiveDate`, and `ProcessedDate`. There is no stream and no `history()`.
-        The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#etf_global-taxonomies,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per fund and date: asset class, category, focus, region, objective, selection
+        and weighting method, leverage, rebalancing, ESG, and tax classification. `poll()`
+        re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: The funds to return: one ETF ticker (`"SPY"`), a sequence of tickers, or
-                a Deephaven table with a `Symbol` column, which `poll()` re-reads every cycle.
-                None, the default, applies no ticker filter. `dm.ALL` raises `ValueError`;
-                pass None instead.
-            sort: The column to sort by, by its wire name (`"effective_date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="effective_date", order=dm.Order.DESC` sends `sort=effective_date.desc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"processed_date_gte": "2025-09-01"}`); None sends
-                none.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
+                refused). See README.md#symbols.
+            sort: The wire field to sort by, such as `"effective_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
-            not positive.
+            A `Query`. Columns: docs/datasets/partners.etf_global.taxonomies.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is not a parameter of the
-                endpoint, is set by a typed argument, or has a value of the wrong kind.
+                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
@@ -1465,68 +1165,37 @@ class _Tmx(Namespace):
     ) -> Query:
         """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
-        One row per event: the company's ticker (`Symbol`), name, and ISIN, its trading
-        venue, the event's type, name, status (confirmed, unconfirmed, canceled, ...),
-        scheduled `Date`, and a link to its announcement. The calendar is global, and a
-        company without a ticker has a null `Symbol`; its `Isin` still names it. Events are
-        dated by day, so `Date` is a calendar date and the dataset has no `Timestamp`.
-
-        Served by REST only, from `GET /tmx/v1/corporate-events`: `fetch()` reads every page
-        into a static table, and `poll(interval)` re-reads it into a live table keyed by
-        `TmxRecordId`. There is no stream and no `history()`; use `start` and `end` for a
-        date range. The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#tmx-corporate_events,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per event: the company's ticker (`Symbol`), name, ISIN, and venue, and the
+        event's type, name, status, scheduled `Date`, and announcement link. The calendar is
+        global: tickers are taken exactly as TMX writes them, and a company without one has a
+        null `Symbol` but keeps its `Isin`. Events are dated by day, so there is no `Timestamp`.
+        `poll()` re-reads it, keyed by `TmxRecordId`.
 
         Args:
-            symbols: The companies to return: one ticker (`"AAPL"`), a sequence of tickers,
-                or a Deephaven table with a `Symbol` column, which `poll()` re-reads every
-                cycle. None, the default, applies no ticker filter. `dm.ALL` raises
-                `ValueError`; pass None instead.
-            start: The first event date to return, inclusive: an ISO date
-                (`"2025-07-01"`) or a `date`; the axis is a calendar date, so a `datetime` raises
-                `ValueError`. None, the default, sets no lower bound.
-            end: The last event date to return, inclusive, in the same forms. None (the default)
-                sends no upper bound, so rows dated in the future are returned too; pass `end=` to
-                stop at a date.
-            sort: The column to sort by, by its wire name (`"date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="date", order=dm.Order.ASC` sends `sort=date.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"type": "earnings_announcement_date"}`); None sends
-                none. The `date` parameters are set only through `start` and `end`.
+            symbols: Tickers as TMX writes them; None, the default, for no ticker filter
+                (`dm.ALL` is refused). See README.md#symbols.
+            start: The first event day. See README.md#start-and-end.
+            end: The end of the range. See README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"type": "earnings"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for `dm.ALL`, an empty or invalid
-            symbol, an `end` before `start`, an unknown filter or a filter on `date`, a
-            filter value of the wrong kind, or a `limit` that is not positive.
+            A `Query`. Columns: docs/datasets/partners.tmx.corporate_events.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `start` or
-                `end` is not a `str`, `date`, or `datetime`; `sort` is not a `str`; `order` is not a
-                `dm.Order`; `limit` is not an `int`; or `filters` is not a mapping or holds a value
-                of an unsupported type.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
                 exact ticker; a bound cannot be parsed or is naive, or the range ends before it
-                starts; `limit` is not positive; or a filter is not a parameter of the endpoint, is
-                set by a typed argument, or has a value of the wrong kind.
+                starts; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                q = m.partners.tmx.corporate_events(
-                    ["AAPL", "MSFT"],
-                    start="2025-07-01",
-                    end="2025-09-30",
-                    filters={"type": "earnings_announcement_date"},
-                )
-                dates = q.fetch()
+                events = m.partners.tmx.corporate_events("AAPL", start="2025-07-01").fetch()
         """
         return list_query(
             self._core,
@@ -1583,63 +1252,37 @@ class _Fable(Namespace):
     ) -> Query:
         """Daily European consumer spending per merchant, from Fable Data's transaction panel.
 
-        One row per merchant (or payment processor), transaction day, consumer country,
-        channel (online, offline, buy now pay later), and panel (credit, debit, open banking):
-        outbound and inbound spend, transaction and account counts, and the rolling panel sizes
-        that normalize them. Amounts are in the row's `TransactionCurrency` (EUR or GBP). A
-        restated day comes back with a later `PublishedDate`.
-
-        Served by REST only, from `GET /consumer-spending/eu/v1/merchant-aggregates`:
-        `fetch()` reads every page into a static table, and `poll(interval)` re-reads it into
-        a live table keyed by `TransactionDate`, `PublishedDate`, `Name`, `Type`,
-        `UserCountry`, `Channel`, `ConsumerType`, `MccGroup`, and `TransactionCurrency`.
-        There is no stream and no `history()`;
-        use `start` and `end` for a range of transaction days. The columns and what they mean
-        are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#fable-merchant_aggregates,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per merchant, transaction day, consumer country, channel, and panel: spend,
+        transaction and account counts, and the panel sizes that normalize them, in the row's
+        `TransactionCurrency` (EUR or GBP). A restated day returns with a later `PublishedDate`.
+        The tickers are Bloomberg's, so it takes no `symbols`: filter by name through `filters`.
+        `poll()` re-reads it, keyed by every dimension column, from `TransactionDate` and
+        `PublishedDate` to `TransactionCurrency`.
 
         Args:
-            start: The first transaction date to return, inclusive: an ISO date
-                (`"2025-06-01"`) or a `date`; the axis is a calendar date, so a `datetime` raises
-                `ValueError`. None, the default, sets no lower bound.
-            end: The last transaction date to return, inclusive, in the same forms. None (the
-                default) sends no upper bound, so rows dated in the future are returned too; pass
-                `end=` to stop at a date.
-            sort: The column to sort by, by its wire name (`"transaction_date"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="transaction_date", order=dm.Order.ASC` sends `sort=transaction_date.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"name": "asda", "channel": "online"}`); None sends
-                none. The `transaction_date` parameters are set only through `start` and `end`.
+            start: The first transaction day. See README.md#start-and-end.
+            end: The end of the range. See README.md#start-and-end.
+            sort: The wire field to sort by, such as `"transaction_date"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"parent_name": "Amazon Inc"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for an `end` before `start`, an
-            unknown filter or a filter on `transaction_date`, a filter value of the wrong kind
-            or outside a parameter's values (`channel` takes `online`, `offline`, or `bnpl`),
-            or a `limit` that is not positive.
+            A `Query`. Columns: docs/datasets/partners.fable.merchant_aggregates.md.
 
         Raises:
-            TypeError: If `start` or `end` is not a `str`, `date`, or `datetime`; `sort` is not a
-                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
-                mapping or holds a value of an unsupported type.
-            ValueError: If a bound cannot be parsed or is naive, or the range ends before it starts;
-                `limit` is not positive; or a filter is not a parameter of the endpoint, is set by a
-                typed argument, or has a value of the wrong kind.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound cannot be parsed or is naive, or the range ends before it
+                starts; `limit` is not positive; or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                q = m.partners.fable.merchant_aggregates(
-                    start="2025-06-01", end="2025-06-30", filters={"user_country": "UK"}
-                )
-                june = q.fetch()
+                uk = m.partners.fable.merchant_aggregates(
+                    start="2025-06-01", filters={"user_country": "UK"}
+                ).fetch()
         """
         return list_query(
             self._core,
@@ -1664,48 +1307,31 @@ class _Fable(Namespace):
     ) -> Query:
         """Fable Data's map from merchants to parent companies, tickers, and industries.
 
-        One row per merchant and period of validity: the merchant's lookup and display names,
-        its parent, grandparent, and great-grandparent companies with their Bloomberg tickers,
-        whether it is listed, and its sector, industry, and category. `ActiveFrom` and
-        `ActiveTo` bound when the mapping applies (`0001-01-01` and `9999-12-31` mean
-        unbounded), so a join on `LookupName` within them is point in time.
-
-        Served by REST only, from `GET /consumer-spending/eu/v1/merchant-hierarchy`: `fetch()`
-        reads every page into a static table, and `poll(interval)` re-reads it into a live
-        table keyed by `LookupName` and `ActiveFrom`. There is no stream and no `history()`.
-        The columns and what they mean are in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#fable-merchant_hierarchy,
-        in the web UI's column tooltips, and in `columns()`.
+        One row per merchant and period of validity: its names, its parent companies with their
+        Bloomberg tickers, whether it is listed, and its sector and industry. Join an
+        aggregate's `Name` to `LookupName` between `ActiveFrom` and `ActiveTo` (`0001-01-01` and
+        `9999-12-31` mean unbounded) for a point-in-time map. `poll()` re-reads it, keyed by
+        `LookupName` and `ActiveFrom`.
 
         Args:
-            sort: The column to sort by, by its wire name (`"lookup_name"`); None keeps the
-                endpoint's default order.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
-                (`sort="lookup_name", order=dm.Order.ASC` sends `sort=lookup_name.asc`);
-                None leaves the direction to the endpoint. `order` without `sort` raises
-                `ValueError`.
-            limit: The cap on the total number of rows across all pages, a positive `int`,
-                or None (the default) for every row. The page size is internal.
-            filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"ticker": "AMZN US", "listing_status": "public"}`);
-                None sends none.
+            sort: The wire field to sort by, such as `"lookup_name"`. See
+                README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: See README.md#sort-order-limit.
+            filters: Such as `{"listing_status": "public"}`. See README.md#filters.
 
         Returns:
-            A `Query`. Building it checks every argument and sends nothing: `TypeError` for
-            an argument of the wrong type, and `ValueError` for an unknown filter, a filter
-            value of the wrong kind or outside a parameter's values (`listing_status` takes
-            `public` or `private`), or a `limit` that is not positive.
+            A `Query`. Columns: docs/datasets/partners.fable.merchant_hierarchy.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
-                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
-            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
-                is set by a typed argument, or has a value of the wrong kind.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
+                argument, or of the wrong kind.
 
         Example:
             ::
 
-                public = m.partners.fable.merchant_hierarchy(
+                listed = m.partners.fable.merchant_hierarchy(
                     filters={"listing_status": "public"}
                 ).fetch()
         """

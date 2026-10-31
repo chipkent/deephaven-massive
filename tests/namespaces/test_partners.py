@@ -551,23 +551,19 @@ def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
         ratings(filters=cast("dict[str, str]", [("date", "2025-01-01")]))
 
 
-# The docstrings: a summary, then a link to the column reference of the dataset.
+# The docstrings: a summary, then a link to the dataset's generated page.
 
 
 @pytest.mark.parametrize("name", DATASETS)
-def test_each_factory_links_its_column_reference(name: str) -> None:
+def test_each_factory_links_its_dataset_page(name: str) -> None:
     method = partners.__dict__[_class_of(name)].__dict__[name.rsplit(".", 1)[1]]
     doc = inspect.getdoc(method)
     assert doc is not None
-    anchor = name.removeprefix("partners.").replace(".", "-")
-    assert f"docs/datasets/partners.md#{anchor}" in doc
+    assert f"docs/datasets/{name}.md" in doc
     summary = doc.split("\n\n", 1)[0]
     assert summary == spec_of(name).summary
     assert "\n" not in summary
     assert summary.endswith(".")
-    assert "REST only" in doc
-    for key in spec_of(name).poll_keys:
-        assert f"`{key}`" in doc, key  # the keys of a keyed poll()
 
 
 # End to end: each dataset fetched through the fake REST server.

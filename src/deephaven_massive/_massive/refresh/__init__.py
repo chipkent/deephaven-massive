@@ -21,6 +21,8 @@ Modules:
       it, and describes how two copies differ.
     - `docs`: reads the documentation index (`llms.txt`) and the REST, WebSocket, and
       flat-file pages it links.
+    - `plan_access`: the plan tables at the end of each vendor page: which of Massive's plans
+      get the data, how recent it is, and how far back it goes.
     - `knowledge_base`: the knowledge-base articles the library relies on, and the Markdown
       extracted from each article's HTML page.
     - `openapi`: resolves references and merged schemas in the OpenAPI specifications.
@@ -36,7 +38,7 @@ Modules:
     - `gates`: the refresh gates, the problems they report, and the checks that span sources.
     - `plain_text`: the fixed rules that turn a vendor's field description into plain text.
     - `render`: writes `spec/rest.json`, `spec/ws.json`, `spec/flatfiles.json`, and
-      `spec/descriptions.json` in their canonical text.
+      `spec/descriptions.json` (descriptions, URLs, and plan tables) in their canonical text.
     - `hand_input`: bundles the hand input for the generators.
     - `lexicon`, `overrides`, `exclusions`: every piece of hand input, each entry with its
       reason. Nothing else in the refresh is written by hand.

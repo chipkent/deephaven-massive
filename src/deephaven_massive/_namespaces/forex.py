@@ -266,38 +266,27 @@ class _Forex(Namespace):
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
 
-        Massive's forex quotes are a consolidated feed of bank and venue prices. The stream verbs
-        read the `C` WebSocket channel; `history()` reads the REST quote history
-        (`/v3/quotes/{C:…}`) or the `global_forex/quotes_v1` flat files, in the same columns; each
-        pair's latest quote is `last_quote()`. There is no `limit`: `history()` pages internally and
-        returns every row of its range. `dm.ALL` streams every pair (the `C.*` topic) and is
-        accepted by `history()` over flat files. Each row also carries its time, `Timestamp`, its
-        trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and
-        `TimestampInsert`, when the library received it.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#quotes.
+        Each row is one quote of Massive's consolidated feed of bank and venue prices; `Date` is the
+        UTC date of `Timestamp`. The stream verbs read the WebSocket; `history()` reads REST or the
+        flat files. Each pair's latest quote alone is `last_quote()`.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with a
-                `Symbol` column (a live watchlist), or `dm.ALL`. Each pair is Massive's ticker, such
-                as `C:EURUSD` (`dm.canonical_symbol_forex` converts `EUR/USD`).
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`), or `dm.ALL`. See
+                README.md#symbols.
 
         Returns:
-            A query; nothing is requested or subscribed until one of its verbs is called.
+            A query. Columns: docs/datasets/forex.quotes.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a pair is not two three-letter currency codes, the sequence is empty
-                (`"no symbols"`), or a table has no `Symbol` column. Also for `symbols` of None,
-                with a message that names the forms it takes.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, a
+                table has no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
 
-                q = m.forex.quotes("C:EURUSD")
-                live = q.last_by()
-                day = q.history("2026-10-20", "2026-10-20")
+                eur = m.forex.quotes("C:EURUSD").last_by()
         """
         query = build_query(self._core, QUOTES, symbols=symbols)
         return cast("StreamHistoryQuery", query)
@@ -306,37 +295,23 @@ class _Forex(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest best bid and ask of each currency pair.
 
-        One row per pair: its most recent quote, in the columns of its kind that its endpoint fills,
-        with its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
-        `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
-        (`/v1/last_quote/currencies/{from}/{to}`) through `fetch()` and `poll()`, one request per
-        pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
-        two cycles is never seen (`quotes()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` also carries each pair's last quote,
-        on a plan that includes snapshots (see
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
-        A pair with no quote (HTTP 404) is left out, with a WARNING.
-
-        `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
-        since the endpoint takes one pair per request: use `m.forex.snapshots(dm.ALL).fetch()`.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#last_quote.
+        One row per pair, from one REST request per pair. An explicit `mode=dm.PollMode.APPEND`
+        appends each cycle's quote when it is new, so a quote between two cycles is never seen
+        (`quotes()` streams every one). Some plans lack this endpoint (`EntitlementError`);
+        `snapshots(symbols)` also carries each pair's last quote. A pair with no quote (HTTP 404) is
+        left out, with a WARNING.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, or a Deephaven table
-                with a `Symbol` column, re-read each `poll()` cycle. Each pair is Massive's
-                ticker, such as `C:EURUSD` (`dm.canonical_symbol_forex` converts `EUR/USD`).
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`. `dm.ALL` is refused:
+                use `m.forex.snapshots(dm.ALL)`. See README.md#symbols.
 
         Returns:
-            A query; nothing is requested until one of its verbs is called.
+            A query. Columns: docs/datasets/forex.last_quote.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL`, a pair is not two three-letter currency codes, the
-                sequence is empty, or a table has no `Symbol` column. Also for `symbols` of None,
-                with a message that names the forms it takes.
+            ValueError: If `symbols` is `dm.ALL` or None, a pair is not two three-letter currency
+                codes, the sequence is empty, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -377,69 +352,30 @@ class _Forex(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
-        Each row is one bar: its window, from `TimestampStart` to the exclusive `TimestampEnd`,
-        its trading day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`,
-        when the library received it. `TimestampEnd` is the first instant at which the bar is
-        complete, so join on it (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`,
-        where `bar_table` is a table a verb such as `history()` returned) to attach only closed
-        bars; an intraday bar ends its length after its start, and a bar of
-        a day or longer at 00:00 UTC after its window's last day. `Date` is null for a bar that
-        spans more than one UTC date.
-
-        The timespan decides the transports, and so the query's class. One-second and one-minute
-        bars (`multiplier=1`) stream from the `CAS` and `CA` WebSocket channels and have
-        `history()`; every other timespan and multiplier is `history()` only, and each pair's bar of
-        the previous UTC day is `previous_day_bar()`. `history()` reads the REST aggregate range
-        (`/v2/aggs/ticker/{t}/range/…`) or the `global_forex/minute_aggs_v1` and
-        `global_forex/day_aggs_v1` flat files. Currency pairs have no corporate actions, so their
-        bars are never adjusted and there is no `adjusted` argument: no request sends one, and the
-        flat files serve every bar timespan they hold. There is no `limit`: `history()` pages
-        internally. `dm.ALL` streams every pair (the `CA.*` or `CAS.*` topic), and `history()`
-        accepts it for one-day bars, through the grouped daily endpoint
-        (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per day) or the day files,
-        and for one-minute bars through the minute files.
-
-        A one-day bar is the UTC day and starts at 00:00 UTC on every source: the range already
-        is, and the grouped daily and the day files (stamped 23:59:59.999 UTC) are
-        moved to the start of their day. The interbank forex day rolls at 17:00 New York time,
-        so Massive's UTC day is not the dealers' day. A bar of several days or longer must be
-        stamped 00:00 UTC, a week on its Sunday and a month, quarter, or year on its 1st. Any
-        other stamp fails the call with `MassiveError` naming the source, since the bar may
-        cover other days than its label. `history()` returns only the bars whose whole window
-        lies inside the range and has ended, so the current day's bar never appears. Forex
-        trades from Sunday evening UTC, and Massive starts its weeks at 00:00 UTC on Sunday, so
-        its weeks run Sunday to Saturday and its months, quarters, and years are whole calendar
-        periods.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.
+        Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
+        stream from the WebSocket; every other length is history only. Days are UTC days, though the
+        interbank day rolls at 17:00 New York time, and weeks run Sunday to Saturday. Pairs have no
+        corporate actions, so there is no `adjusted`. Bar windows, stamps, and which bars
+        `history()` returns follow README.md#bars; each pair's previous day is `previous_day_bar()`.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
-                (`dm.canonical_symbol_forex` converts `EUR/USD`).
-            timespan: The unit of one bar's window, a `dm.Timespan`; required, with no
-                default. `dm.Timespan.SESSION` is futures only.
-            multiplier: The number of `timespan` units in one bar's window, a positive
-                integer. Defaults to 1.
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL`
+                (`history()` takes it for one-minute and one-day bars). See README.md#symbols.
+            timespan: The bar unit; required. See README.md#timespan-and-multiplier.
+            multiplier: Units per bar; only 1 streams.
 
         Returns:
-            A `StreamHistoryQuery` for one-second or one-minute bars and a `HistoryQuery`
-            otherwise. Nothing is requested or subscribed until a verb is called.
+            A query of the class the timespan picks. Columns: docs/datasets/forex.bars.md.
 
         Raises:
-            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`,
-                `timespan` is not a `dm.Timespan`, or `multiplier` is not an `int`.
-            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, a
-                table has no `Symbol` column, `multiplier` is not positive, or `timespan` is
-                `dm.Timespan.SESSION`. Also for `symbols` of None, with a message that names the
-                forms it takes.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `timespan` is `SESSION`, `multiplier` is below 1, or `symbols` is empty,
+                None, or holds a pair that is not two three-letter currency codes.
 
         Example:
             ::
 
-                live = m.forex.bars("C:EURUSD", dm.Timespan.MINUTE).append_only()
-                hourly = m.forex.bars(["C:EURUSD"], dm.Timespan.HOUR).history(
+                hourly = m.forex.bars("C:EURUSD", dm.Timespan.HOUR).history(
                     "2026-10-01", "2026-10-23"
                 )
         """
@@ -456,38 +392,24 @@ class _Forex(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
-        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of its
-        kind that its endpoint fills: its window, from `TimestampStart`, 00:00 UTC, to the exclusive
-        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd` text),
-        and `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/aggs/ticker/{t}/prev`) through `fetch()` and `poll()`, one request per pair; `poll()`
-        replaces the table each cycle, keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND`
-        appends each new day's bar. Massive stamps the bar at the day's last millisecond,
-        23:59:59.999 UTC, which is moved to the day's start; any other stamp raises `MassiveError`
-        naming `bars(symbols, dm.Timespan.DAY).history()` for that day. Currency pairs have no
-        corporate actions, so there is no `adjusted` argument. A pair with no bar (HTTP 404) is left
+        One row per pair, from one REST request per pair: the 1-day bar of the previous completed
+        UTC day. Massive stamps it at 23:59:59.999 UTC, which is moved to the day's start; another
+        stamp is served on the UTC day it falls on, with a WARNING (README.md#bars). An explicit
+        `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404) is left
         out, with a WARNING.
 
-        `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
-        since the endpoint takes one pair per request: use
-        `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` for every pair's bar of a day.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#previous_day_bar.
-
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, or a Deephaven table
-                with a `Symbol` column, re-read each `poll()` cycle. Each pair is Massive's
-                ticker, such as `C:EURUSD` (`dm.canonical_symbol_forex` converts `EUR/USD`).
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`. `dm.ALL` is refused:
+                use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. See
+                README.md#symbols.
 
         Returns:
-            A query; nothing is requested until one of its verbs is called.
+            A query. Columns: docs/datasets/forex.previous_day_bar.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL`, a pair is not two three-letter currency codes, the
-                sequence is empty, or a table has no `Symbol` column. Also for `symbols` of None,
-                with a message that names the forms it takes.
+            ValueError: If `symbols` is `dm.ALL` or None, a pair is not two three-letter currency
+                codes, the sequence is empty, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -510,28 +432,20 @@ class _Forex(Namespace):
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
-        The `FMV` channel of Massive's Business feed (`business.massive.com/forex`): a
-        proprietary real-time price estimate. It is stream only: no `history()` or `fetch()`,
-        and no `limit`. `dm.ALL` streams every pair (the `FMV.*` topic). Each row also carries
-        its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
-        `Timestamp`), and `TimestampInsert`, when the library received it.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#fmv.
+        Each row is one update of Massive's proprietary real-time price estimate, from the `FMV`
+        channel of its Business feed. Stream only: no `history()` or `fetch()`.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
-                (`dm.canonical_symbol_forex` converts `EUR/USD`).
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL`. See
+                README.md#symbols.
 
         Returns:
-            A query; nothing is subscribed until one of its verbs is called.
+            A query. Columns: docs/datasets/forex.fmv.md.
 
         Raises:
-            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`.
-            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, or
-                a table has no `Symbol` column. Also for `symbols` of None, with a message that
-                names the forms it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, a
+                table has no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
@@ -544,36 +458,25 @@ class _Forex(Namespace):
     def snapshots(self, symbols: Symbols) -> Query:
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
-        One request to `/v2/snapshot/locale/global/markets/forex/tickers` returns, per pair,
-        today's and the previous day's bars, the latest minute bar, the last quote, and the
-        change since the previous close; the day bars follow the UTC day. It is REST only:
-        `fetch()` once, or `poll(interval)` for a live table with one row per pair (keyed by
-        `Symbol`). Every pair is returned in one response, so there is no `limit`. `dm.ALL`
-        is every pair Massive tracks.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#snapshots.
+        One row per pair: today's and the previous UTC day's bars, the latest minute bar, the last
+        quote, and the change since the previous close. Every pair comes in one response.
 
         Args:
-            symbols: The currency pairs, sent as the `tickers` parameter: one pair, a sequence
-                of pairs, a Deephaven table with a `Symbol` column (re-read every poll
-                cycle), or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
-                (`dm.canonical_symbol_forex` converts `EUR/USD`).
+            symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL` for every
+                pair Massive tracks. See README.md#symbols.
 
         Returns:
-            A query; nothing is requested until `fetch()` or `poll()` is called.
+            A query. Columns: docs/datasets/forex.snapshots.md.
 
         Raises:
-            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`.
-            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, or
-                a table has no `Symbol` column. Also for `symbols` of None, with a message that
-                names the forms it takes.
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, a
+                table has no `Symbol` column, or `symbols` is None.
 
         Example:
             ::
 
                 board = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
-                market = m.forex.snapshots(dm.ALL).fetch()
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
 
@@ -581,24 +484,15 @@ class _Forex(Namespace):
     def movers(self, direction: Direction) -> Query:
         """The twenty currency pairs that gained or lost the most since the previous UTC close.
 
-        One request to `/v2/snapshot/locale/global/markets/forex/{direction}` returns the top
-        gainers or losers by percentage change since the previous UTC day's close, in the
-        same columns as `snapshots()`; the day bars follow the UTC day too. Massive clears the
-        snapshot daily at 12:00 AM Eastern and repopulates it as quotes arrive, so it can be
-        empty just after that reset. It is REST only: `fetch()`, or `poll(interval)` for a live
-        table keyed by `Symbol` whose rows come and go as the ranking changes. It takes no
-        symbols, so `dm.ALL` does not apply, and has no `limit`: Massive returns at most
-        twenty pairs.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#movers.
+        Rows have the columns of `snapshots()`, ranked by percentage change. Massive clears the list
+        daily at midnight Eastern time and refills it as quotes arrive, so it can be empty just
+        after. A `poll()` table keeps one row per pair, so pairs come and go as the ranking changes.
 
         Args:
-            direction: `dm.Direction.GAINERS` for the largest increases or
-                `dm.Direction.LOSERS` for the largest decreases.
+            direction: `dm.Direction.GAINERS` for the largest increases, or `dm.Direction.LOSERS`.
 
         Returns:
-            A query; nothing is requested until `fetch()` or `poll()` is called.
+            A query. Columns: docs/datasets/forex.movers.md.
 
         Raises:
             TypeError: If `direction` is not a `dm.Direction` (convert text with
@@ -618,32 +512,24 @@ class _Forex(Namespace):
     ) -> Query:
         """An amount converted between two currencies at the latest quote.
 
-        One request to `/v1/conversion/{from}/{to}` returns one row: the converted amount,
-        the amount converted, and the last bid and ask it used. It is REST only: `fetch()`,
-        or `poll(interval)` for a live single-row table keyed by `Symbol`. It takes no
-        symbols, so `dm.ALL` does not apply, and has no `limit`.
-
-        Each column is described in the web UI's column tooltips, by `columns()`, and at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#conversion.
+        One row: the converted amount, the amount converted, and the last bid and ask it used.
 
         Args:
-            from_currency: The currency to convert from, a three-letter code such as
-                `"AUD"`, written exactly: upper case, nothing around it.
+            from_currency: The currency to convert from, a three-letter code such as `"AUD"`,
+                written exactly: upper case, nothing around it.
             to_currency: The currency to convert to, such as `"USD"`.
-            amount: The amount of `from_currency` to convert, a positive, finite `int` or
-                `float`; an `int` is sent as is. Defaults to 1.0.
-            precision: The decimal places of the converted amount, one of the values the
-                endpoint's specification lists (0 to 4). Defaults to 2.
+            amount: The amount to convert, a positive, finite `int` or `float`; 1.0 by default.
+            precision: The decimal places of the result, 0 to 4; 2 by default.
 
         Returns:
-            A query; nothing is requested until `fetch()` or `poll()` is called.
+            A query. Columns: docs/datasets/forex.conversion.md.
 
         Raises:
-            TypeError: If a currency is not a `str`, `amount` is not a number, or `precision`
-                is not an `int` (a `bool` is neither).
+            TypeError: If a currency is not a `str`, `amount` is not a number, or `precision` is not
+                an `int` (a `bool` is neither).
             ValueError: If a currency is not exactly three upper-case letters (`" usd"` and
-                `"usd"` are refused, naming `'USD'`), `amount` is not positive and
-                finite, or `precision` is not one the endpoint accepts.
+                `"usd"` are refused, naming `'USD'`), `amount` is not positive and finite, or
+                `precision` is not one the endpoint accepts.
 
         Example:
             ::

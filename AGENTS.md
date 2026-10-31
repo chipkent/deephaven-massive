@@ -115,6 +115,18 @@ behavior worth knowing is a defect.
   units, accepted values, default); the return value (for a table, its columns); every exception
   and when; side effects (network calls, threads, subscriptions, tables created); blocking and
   threading constraints.
+- **Dataset methods and verbs** link instead of repeating. `README.md` defines each shared
+  argument (`symbols`, `start` and `end`, `as_of`, `sort`, `order`, `limit`, `filters`,
+  `adjusted`, `timespan`, `multiplier`, `venues`, the verb arguments) and each concept (bars,
+  history sources, split adjustment, live-table lifetime) once. A docstring gives a shared
+  argument one line with only this dataset's difference and `See README.md#<anchor>.`, and its
+  Returns line names its columns page, `docs/datasets/<dataset>.md`. A dataset docstring runs
+  about 15 to 25 lines: the summary, what a row is and what is unusual, one Args line per
+  argument, Returns, exact Raises, and one or two example lines. `tests/test_docs.py` fails on a
+  cited anchor or page that does not exist.
+- **User documentation is one file.** Everything hand-written for users goes in `README.md`;
+  `docs/datasets/` is generated; contributor material goes in `CONTRIBUTING.md` or `docs/dev/`.
+  Every Python block in the README runs in `tests/test_docs.py`, so an example is real code.
 - **Examples** are real code that runs against the documented API. **Never** restate the
   signature, use filler ("This function…"), or leave a term undefined.
 - **Configuration text is documentation too**: config comments, pytest marker descriptions
@@ -184,3 +196,4 @@ These prevent deadlocks and leaks.
 | PR descriptions | `docs/dev/pull-requests.md` |
 | Vendor changes and drift | `docs/dev/spec-refresh.md` |
 | Live tests | `docs/live-tests.md` |
+| User docs and the dataset reference | `README.md`, `docs/datasets/README.md`, `CONTRIBUTING.md` |
