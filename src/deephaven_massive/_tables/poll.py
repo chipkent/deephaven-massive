@@ -45,8 +45,10 @@ table, and `SchemaDrift` from each page's drift.
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
 (`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
-row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
-rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks a
+page whose every row was dropped because a key could not be read, or a row that, in any mode,
+has a null poll key, which would merge unrelated rows; one odd row is dropped and counted, or
+its odd value read as null, and the table goes on), `UnsupportedParameterError` (a symbol of a
+reactive table routed to a path that lacks a
 parameter the caller set), `SymbolRowError` (a symbol table's row that is not Massive's
 ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the
 cycle's `Error` lists it), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose

@@ -37,11 +37,12 @@ rows are no longer queued.
 
 The module also holds the session's `DriftRegistry`, the policy half of runtime schema drift.
 The wire package detects drift (each decoder returns a `DriftReport` of the fields a payload had
-beyond its documented schema, and the documented fields it lacked); every transport hands those
-reports to the registry, which logs one WARNING per (dataset, transport, field) and keeps the
-`SchemaDrift` text of each stream and connection, a column of both tables. Drift never fails a
-read: a missing key, a value that does not convert, or a timestamp out of bounds fails loudly
-where it is found, and never reaches the registry.
+beyond its documented schema, the documented fields it lacked, the fields that held a value that
+does not fit their type, and the rows it dropped because a key could not be read); every
+transport hands those reports to the registry, which logs one WARNING per (dataset, transport,
+field) and per dataset with dropped rows, and keeps the `SchemaDrift` text of each stream and
+connection, a column of both tables. Drift never fails a read: only a payload whose every row
+was dropped fails, where it is found, as the sign of a change in Massive's format.
 """
 
 from __future__ import annotations
@@ -313,8 +314,9 @@ class ConnectionRow:
         updated_at: When the row was written.
         last_error: The last error text.
         schema_drift: The drift seen on the connection, as `DriftRegistry.record` writes it
-            (`channel:field+` for an extra field, `channel:field-` for a missing one); null
-            while there is none.
+            (`channel:field+` for an extra field, `channel:field-` for a missing one,
+            `channel:field?` for one that held a value that does not fit); null while there is
+            none.
     """
 
     transport: Transport
@@ -366,8 +368,9 @@ class StreamRow:
             options contracts, a poll cycle's error).
         created_at: When the stream was created.
         schema_drift: The stream's drift, as `DriftRegistry.record` writes it
-            (`transport:field+` for an extra field, `transport:field-` for a missing one);
-            null while there is none. Separate from `error`, so drift never hides a failure.
+            (`transport:field+` for an extra field, `transport:field-` for a missing one,
+            `transport:field?` for one that held a value that does not fit); null while there
+            is none. Separate from `error`, so drift never hides a failure.
         skipped: The symbol-table values the stream or poll skips because they are not
             Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
             is. Not a column of its own: the `Error` column shows it after `error` while the
@@ -588,6 +591,14 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
     return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
+_EXTRA: Final = "is not in the schema; it is dropped"
+"""What a drift WARNING says of a field the schema does not declare."""
+_MISSING: Final = "is missing; it reads as null"
+"""What a drift WARNING says of a vendor-required field a payload lacked."""
+_UNCONVERTIBLE: Final = "held a value that does not fit its type; it reads as null"
+"""What a drift WARNING says of a field that held a value its type cannot hold."""
+
+
 def _drift_context(drift: DriftReport, field: str, *, where: str, symbol: str | None) -> str:
     """Return where a drifted field was seen, for its WARNING.
 
@@ -599,7 +610,8 @@ def _drift_context(drift: DriftReport, field: str, *, where: str, symbol: str | 
 
     Returns:
         `where`, then `; symbol <symbol>` when one is known and `; first value <value>` for an
-        extra field's sample, such as `"wss://h/stocks channel T; symbol AAPL; first value 1"`.
+        extra field's or an odd value's sample, such as
+        `"wss://h/stocks channel T; symbol AAPL; first value 1"`.
     """
     sample = drift.samples.get(field)
     parts = [where]
@@ -615,26 +627,31 @@ class DriftRegistry:
     """The session's record of runtime schema drift: the WARNINGs and the `SchemaDrift` text.
 
     Massive's data can differ from the documented schema until the library's schemas are
-    regenerated. The wire decoders report each payload's differences as a `DriftReport`: the
-    fields it had that the schema does not declare (dropped) and the declared fields it lacked
-    (null). Every transport routes those reports here:
+    regenerated. The wire decoders, and the timestamp routine after them, report each
+    payload's differences as a `DriftReport`: the fields it had that the schema does not
+    declare (dropped), the declared fields it lacked (null), the fields that held a value that
+    does not fit their type (null), and the rows dropped because a key could not be read. Every
+    transport routes those reports here:
 
-    - `report` logs one WARNING per (dataset, transport, field) for the life of the session.
-      A static verb (`fetch()`, `history()`) reports drift only this way.
+    - `report` logs one WARNING per (dataset, transport, field) for the life of the session,
+      and one WARNING per dataset the first time a row of it is dropped, with the running count
+      of dropped rows at DEBUG after that. A static verb (`fetch()`, `history()`) reports drift
+      only this way.
     - `report_statuses` logs one WARNING per (REST path, status) for a REST envelope status
       outside the documented ones; the page's rows are kept.
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
       the owner's new `SchemaDrift` text when it changed, for the caller to write into the
       owner's diagnostics row. `forget` drops an owner once it has left its registry.
 
-    Drift is never a failure: a missing key, a value that does not convert, and a timestamp out
-    of bounds fail where they are found and never reach the registry.
+    Drift is never a failure: one odd value or row never costs the rest of a payload. Only a
+    payload whose every row was dropped fails where it is found, before it reaches the
+    registry, since that is the sign of a change in Massive's format.
 
     `SessionCore` creates one per session, and any library thread calls it. Thread-safe: one
-    leaf lock guards its sets, held for set operations and for building a text, never for
-    logging, a Deephaven call, or a wait. `record` and `forget` may therefore be called with
-    the session's `registry_lock` held. `report` and `report_statuses` must not be: they log,
-    and a log handler may do I/O.
+    leaf lock guards its sets and counts, held for set operations and for building a text,
+    never for logging, a Deephaven call, or a wait. `record` and `forget` may therefore be
+    called with the session's `registry_lock` held. `report` and `report_statuses` must not
+    be: they log, and a log handler may do I/O.
 
     Every text `record` returns is built under the lock from the owner's entries at that
     moment, but two calls for one owner can still return in either order, so the row write
@@ -649,16 +666,16 @@ class DriftRegistry:
             from deephaven_massive._massive import DriftReport, Transport
             from deephaven_massive._tables.diagnostics import DriftRegistry
 
-            drift = DriftReport(extra=frozenset({"halted"}), missing=frozenset({"trf_id"}))
+            drift = DriftReport(extra=frozenset({"halted"}), unconvertible=frozenset({"x"}))
             registry = DriftRegistry()
             where = "GET /v3/trades/{stockTicker}"
             registry.report("stocks.trades", Transport.REST, drift, where=where)  # two WARNINGs
             registry.report("stocks.trades", Transport.REST, drift, where=where)  # no log
-            registry.record(7, "REST", drift)  # "REST:halted+, REST:trf_id-"
+            registry.record(7, "REST", drift)  # "REST:halted+, REST:x?"
             registry.record(7, "REST", drift)  # unchanged: None
     """
 
-    __slots__ = ("_lock", "_owners", "_statuses", "_warned")
+    __slots__ = ("_dropped", "_lock", "_owners", "_statuses", "_warned")
 
     def __init__(self) -> None:
         """Start with no drift seen."""
@@ -666,6 +683,7 @@ class DriftRegistry:
         self._warned: set[tuple[str, Transport, str]] = set()
         self._statuses: set[tuple[str, str]] = set()
         self._owners: dict[Hashable, frozenset[str]] = {}
+        self._dropped: dict[str, int] = {}
 
     def report(
         self,
@@ -676,49 +694,68 @@ class DriftRegistry:
         where: str,
         symbol: str | None = None,
     ) -> None:
-        """Log a WARNING for each field of `drift` not yet reported for the dataset and transport.
+        """Log a WARNING for each field of `drift` not yet reported, and count dropped rows.
 
-        Each WARNING names the dataset, the transport, and the field, then where the payload
-        came from, the symbol of the first row that showed the field, and for an extra field
-        that row's value (`DriftReport.samples`), so the log says enough to reproduce it: `...
-        (schema drift) at wss://delayed.massive.com/stocks channel T; symbol AAPL; first value
-        182.33`. A field is reported once per process and dataset; the first sample is the one
-        a fix needs. Ignores `drift.statuses`; see `report_statuses`.
+        Each field's WARNING names the dataset, the transport, and the field, then where the
+        payload came from, the symbol of the first row that showed the field, and for an extra
+        field or a value that does not fit that row's value (`DriftReport.samples`), so the
+        log says enough to reproduce it: `... (schema drift) at wss://delayed.massive.com/stocks
+        channel T; symbol AAPL; first value 182.33`. A field is reported once per session and
+        dataset; the first sample is the one a fix needs. The first rows of a dataset dropped
+        because a key could not be read log one WARNING with the reason of the first of them;
+        every later drop logs the running count of the dataset's dropped rows at DEBUG. Ignores
+        `drift.statuses`; see `report_statuses`.
 
         Args:
             dataset: The dataset name, such as `"stocks.trades"`.
             transport: The transport the payload arrived on.
-            drift: The payload's drift, as a wire decoder returned it.
+            drift: The payload's drift, as a wire decoder returned it, with the drift of its
+                timestamps added.
             where: Where the payload came from: the REST request (`"GET /v3/trades/AAPL"`),
                 the WebSocket URL and channel, or the flat file.
             symbol: The symbol the payload is about when its sample cannot say (a REST
                 request for one symbol), or None.
         """
-        changes = [(field, True) for field in drift.extra]
-        changes += [(field, False) for field in drift.missing]
+        changes = [(field, _EXTRA) for field in drift.extra]
+        changes += [(field, _MISSING) for field in drift.missing]
+        changes += [(field, _UNCONVERTIBLE) for field in drift.unconvertible]
         with self._lock:
-            new = [
-                (f, extra) for f, extra in changes if (dataset, transport, f) not in self._warned
-            ]
+            new = [(f, kind) for f, kind in changes if (dataset, transport, f) not in self._warned]
             self._warned.update((dataset, transport, f) for f, _ in new)
-        for field, extra in sorted(new):
+            before = self._dropped.get(dataset, 0)
+            total = before + drift.dropped_rows
+            if drift.dropped_rows:
+                self._dropped[dataset] = total
+        for field, kind in sorted(new):
             context = _drift_context(drift, field, where=where, symbol=symbol)
-            if extra:
-                logger.warning(
-                    "%s: %s field %r is not in the schema; it is dropped (schema drift) at %s",
-                    dataset,
-                    transport.value,
-                    field,
-                    context,
-                )
-            else:
-                logger.warning(
-                    "%s: %s field %r is missing; it reads as null (schema drift) at %s",
-                    dataset,
-                    transport.value,
-                    field,
-                    context,
-                )
+            logger.warning(
+                "%s: %s field %r %s (schema drift) at %s",
+                dataset,
+                transport.value,
+                field,
+                kind,
+                context,
+            )
+        if drift.dropped_rows and not before:
+            logger.warning(
+                "%s: dropped %d %s row(s) whose key cannot be read, the first at %s: %s; such "
+                "rows are dropped and counted, and the running count is logged at DEBUG",
+                dataset,
+                drift.dropped_rows,
+                transport.value,
+                where,
+                drift.dropped_reason,
+            )
+        elif drift.dropped_rows:
+            logger.debug(
+                "%s: dropped %d more %s row(s) whose key cannot be read at %s (%d so far): %s",
+                dataset,
+                drift.dropped_rows,
+                transport.value,
+                where,
+                total,
+                drift.dropped_reason,
+            )
 
     def report_statuses(self, path: str, statuses: frozenset[str]) -> None:
         """Log a WARNING for each undocumented REST envelope status not yet seen for the path.
@@ -740,8 +777,10 @@ class DriftRegistry:
     def record(self, owner: Hashable, prefix: str, drift: DriftReport) -> str | None:
         """Add a report to one owner's drift and return its new `SchemaDrift` text, if changed.
 
-        Each extra field becomes the entry `<prefix>:<field>+` and each missing one
-        `<prefix>:<field>-`. An owner's entries only accumulate: drift seen once stays shown.
+        Each extra field becomes the entry `<prefix>:<field>+`, each missing one
+        `<prefix>:<field>-`, and each field that held a value that does not fit
+        `<prefix>:<field>?`. An owner's entries only accumulate: drift seen once stays shown.
+        Dropped rows are logged by `report` and add no entry.
 
         Args:
             owner: The stream's id, or the connection's key (a tuple), whose row shows the
@@ -756,6 +795,7 @@ class DriftRegistry:
         """
         entries = {f"{prefix}:{field}+" for field in drift.extra}
         entries |= {f"{prefix}:{field}-" for field in drift.missing}
+        entries |= {f"{prefix}:{field}?" for field in drift.unconvertible}
         with self._lock:
             seen = self._owners.get(owner, frozenset())
             if entries <= seen:

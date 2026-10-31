@@ -123,8 +123,8 @@ class UnconvertibleError(ValueError):
 
     `convert_field` raises it with the shared message (the field, the expected type and any
     named conversion, and the value's excerpt); the decoder that called it puts that message
-    after its own context in its own error (a `WireError` or a `Reject`). `convert` raises it
-    with no message, since it knows no field.
+    after its own context, in the log line of a value it reads as null or in the reason of a
+    row it drops. `convert` raises it with no message, since it knows no field.
     """
 
 
@@ -483,8 +483,8 @@ def field_converter(field: Field) -> Callable[[object], object]:
 def unconvertible_message(field: Field, value: object) -> str:
     """Return the clause for a value that does not fit its field.
 
-    Every decoder that fails a row for it (REST raises, WebSocket rejects the row) puts this
-    clause after its own context, so the failure reads the same on every transport.
+    Every decoder that reads such a value as null, or drops a row for it, puts this clause
+    after its own context, so the problem reads the same on every transport.
 
     Args:
         field: The field.
@@ -555,8 +555,8 @@ def row_excerpt(row: object) -> str:
 def missing_key_message(field: Field) -> str:
     """Return the clause for a row that lacks a key the dataset needs, or holds it as null.
 
-    Every decoder that fails a row for it (REST raises, WebSocket rejects the row) puts this
-    clause after its own context, so the failure reads the same on every transport.
+    Every decoder that drops a row for it puts this clause after its own context, so the
+    reason reads the same on every transport.
 
     Args:
         field: The field the dataset needs.

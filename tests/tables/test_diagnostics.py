@@ -613,6 +613,65 @@ def test_drift_is_recorded_per_owner_and_only_changes_are_returned() -> None:
     assert registry.record(7, "REST", DriftReport(extra=frozenset({"y"}))) == "REST:y+"
 
 
+def test_a_value_that_does_not_fit_warns_once_and_shows_with_a_question_mark(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = DriftRegistry()
+    drift = DriftReport(
+        unconvertible=frozenset({"x"}), samples={"x": DriftSample("C:EURUSD", '"4.8"')}
+    )
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        registry.report("forex.trades", Transport.WS, drift, where=WHERE)
+        registry.report("forex.trades", Transport.WS, drift, where=WHERE)
+    assert drift_warnings(caplog) == [
+        (
+            "forex.trades: WS field 'x' held a value that does not fit its type; it reads as null "
+            f'(schema drift) at {WHERE}; symbol C:EURUSD; first value "4.8"'
+        )
+    ]
+    assert registry.record(3, "WebSocket", drift) == "WebSocket:x?"
+
+
+def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = DriftRegistry()
+    first = DriftReport(dropped_rows=2, dropped_reason="row 0: no Ticker")
+    later = DriftReport(dropped_rows=3, dropped_reason="row 4: no Ticker")
+    with caplog.at_level(logging.DEBUG, logger=DRIFT_LOGGER):
+        registry.report("stocks.trades", Transport.REST, first, where=WHERE)
+        registry.report("stocks.trades", Transport.WS, later, where="wss://h/stocks channel T")
+        registry.report("stocks.trades", Transport.REST, DriftReport(), where=WHERE)
+        registry.report("stocks.quotes", Transport.REST, first, where=WHERE)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                f"stocks.trades: dropped 2 REST row(s) whose key cannot be read, the first at "
+                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted, and the running "
+                "count is logged at DEBUG"
+            ),
+        ),
+        (
+            logging.DEBUG,
+            (
+                "stocks.trades: dropped 3 more WS row(s) whose key cannot be read at "
+                "wss://h/stocks channel T (5 so far): row 4: no Ticker"
+            ),
+        ),
+        (
+            logging.WARNING,
+            (
+                f"stocks.quotes: dropped 2 REST row(s) whose key cannot be read, the first at "
+                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted, and the running "
+                "count is logged at DEBUG"
+            ),
+        ),
+    ]
+    # Dropped rows add no entry to a row's drift: the log counts them.
+    assert registry.record(1, "REST", first) is None
+
+
 def test_schema_drift_text_is_cut_at_its_limit() -> None:
     registry = DriftRegistry()
     fields = frozenset(f"field_{n:03}" for n in range(30))

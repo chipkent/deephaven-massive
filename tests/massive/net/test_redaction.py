@@ -371,7 +371,8 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         fake_ws_server.url(),
         api_key=PLANTED_KEY,
         sources=(trades,),
-        on_open=lambda _generation: None,
+        # On the loop thread, before any frame: a row without its ticker is dropped.
+        on_open=lambda _generation: client.set_required("T", frozenset({"Ticker"})),
         on_status=lambda _generation, status: received.append(status),
         on_data=on_data,
         on_state=lambda *_: None,
@@ -385,8 +386,10 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         frame = (
             f'[{{"ev":"status","status":"error","message":"refused for {spelled}"}},'
             f'{{"ev":"T","sym":"{spelled}"}},'
-            # A rejected row, whose whole text is logged and kept, with a drifted field.
-            f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}}]'
+            # A row with a value that does not fit, whose whole text is logged, and an extra
+            # field; then a row dropped for its required key, whose whole text is kept.
+            f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}},'
+            f'{{"ev":"T","p":1,"echo":"{spelled}"}}]'
         )
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         fake_ws_server.send(frame)
@@ -395,14 +398,18 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         client.close()
         assert client.join(10.0)
     assert received == [Status(kind=StatusKind.REFUSED, message=f"refused for {REDACTED}")]
-    assert rows == [{"Ticker": REDACTED, "Price": None}]
-    [reject] = rejects
-    assert reject.raw == '{"ev":"T","sym":"AAPL","p":"bad","echo":"***"}'
+    assert rows == [{"Ticker": REDACTED, "Price": None}, {"Ticker": "AAPL", "Price": None}]
     assert drifts[0].samples["echo"].value == '"***"'
+    [reject] = rejects
+    assert reject.raw == '{"ev":"T","p":1,"echo":"***"}'
+    assert any(
+        record.getMessage().endswith('the row: {"ev":"T","sym":"AAPL","p":"bad","echo":"***"}')
+        for record in every_logger_at_debug.records
+    )
     _assert_no_secret(every_logger_at_debug)
 
 
-def test_a_rejected_rest_row_echoing_the_api_key_is_logged_cleaned(
+def test_an_odd_rest_row_echoing_the_api_key_is_logged_cleaned(
     rest: RestClient, fake_rest: FakeRestServer, every_logger_at_debug: pytest.LogCaptureFixture
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"v": "bad", "note": PLANTED_KEY}])))
@@ -412,10 +419,10 @@ def test_a_rejected_rest_row_echoing_the_api_key_is_logged_cleaned(
         fields=(Field(wire_key="v", column="V", wire_type=WireType.LONG),),
         params=_TRADES.params,
     )
-    with pytest.raises(WireError) as info:
-        to_batch(page.rows, path, required=())
+    _, drift = to_batch(page.rows, path, required=())
+    assert drift.samples["note"].value == '"***"'
     assert any('"note":"***"' in record.getMessage() for record in every_logger_at_debug.records)
-    _assert_no_secret(every_logger_at_debug, info.value)
+    _assert_no_secret(every_logger_at_debug)
 
 
 def _flat_files() -> FlatFileClient:

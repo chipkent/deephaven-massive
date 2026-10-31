@@ -255,15 +255,17 @@ def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
     return rows
 
 
-def test_a_13f_row_without_its_filer_fails_the_request(
+def test_a_13f_row_without_its_filer_is_dropped(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     path = "/stocks/filings/vX/13-F"
     body = json.loads(load_fixture(FIXTURES, "filings_institutional_holdings.json"))
+    count = len(body["results"])
     del body["results"][1]["filer_cik"]
     fake_rest.reply(path, Reply(body=body))
-    with pytest.raises(dm.MassiveError, match="FilerCik"):
-        rest_session.stocks.filings.institutional_holdings().fetch()
+    rows = table_rows(rest_session.stocks.filings.institutional_holdings().fetch())
+    assert len(rows) == count - 1
+    assert None not in [row["FilerCik"] for row in rows]
 
 
 def _other(value: object, wire_type: WireType) -> object:

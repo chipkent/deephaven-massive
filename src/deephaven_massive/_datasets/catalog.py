@@ -124,8 +124,8 @@ class KeySpec:
             about); False keeps its generated column (a filer CIK stays `FilerCik`). Only a
             `fanout` key may set it False, and such a key comes from the source's rows, never
             from the request (`DatasetSpec` rejects both, when it is created).
-        required: Whether every row must carry the key. True, the default, makes a row
-            without it a loud failure (`RowDataError`), never a null key. False lets such a
+        required: Whether every row must carry the key. True, the default, drops a row
+            without it, counted in its payload's drift, never a null key. False lets such a
             row through with a null key column; it is for a symbol Massive documents as
             present only "if available", such as a filing's `ticker`, and for an underlying
             only some rows have, such as the options rows of the unified snapshot. Only a

@@ -10,7 +10,7 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.spec.types import DriftReport
+from deephaven_massive._massive.spec.types import DriftReport, DriftSample
 from deephaven_massive._types import override
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
@@ -38,8 +38,8 @@ FUTURES_COLUMNS = (
 )
 
 
-def identity(values: pa.Array) -> pa.Array:
-    return values
+def identity(values: pa.Array) -> tuple[pa.Array, str]:
+    return values, ""
 
 
 def plan(
@@ -48,8 +48,7 @@ def plan(
     symbols: pa.Array | None = None,
     time_header: str = "sip_timestamp",
     window_ns: tuple[int, int] | None = None,
-    to_ns: Callable[[pa.Array], pa.Array] = identity,
-    session: tuple[str, date] | None = None,
+    to_ns: Callable[[pa.Array], tuple[pa.Array, str]] = identity,
     block_size: int = 1 << 20,
     required: frozenset[str] | None = None,
 ) -> ReadPlan:
@@ -60,7 +59,6 @@ def plan(
         time_header=time_header,
         window_ns=window_ns,
         to_ns=to_ns,
-        session=session,
         block_size=block_size,
         required=frozenset({"ticker", time_header}) if required is None else required,
     )
@@ -147,9 +145,9 @@ def test_the_symbol_filter_keeps_only_the_requested_symbols(trades: FlatFile) ->
 def test_the_window_is_half_open_on_the_converted_time(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> pa.Array:
+    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
         converted.append(len(values))
-        return pc.multiply(values, 1)
+        return pc.multiply(values, 1), ""
 
     window = (1741012200000002000, 1741035600000000000)
     result = table(trades, plan(window_ns=window, to_ns=to_ns))
@@ -161,9 +159,9 @@ def test_the_window_is_half_open_on_the_converted_time(trades: FlatFile) -> None
 def test_the_window_follows_the_symbol_filter(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> pa.Array:
+    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
         converted.append(len(values))
-        return values
+        return values, ""
 
     symbols = pa.array(["SPY"], pa.string())
     result = table(trades, plan(symbols=symbols, window_ns=(0, 2**62), to_ns=to_ns))
@@ -171,15 +169,67 @@ def test_the_window_follows_the_symbol_filter(trades: FlatFile) -> None:
     assert converted == [1]  # only the surviving symbol's rows were converted
 
 
-def test_an_error_of_the_time_converter_propagates(trades: FlatFile) -> None:
-    class UnitError(Exception):
-        pass
+def test_the_window_converts_the_time_of_a_plan_whose_time_is_no_key(trades: FlatFile) -> None:
+    window = (1741012200000002000, 1741035600000000000)
+    result = table(trades, plan(window_ns=window, required=frozenset({"ticker"})))
+    assert result["Id"].to_pylist() == ["2", "3"]
 
-    def to_ns(values: pa.Array) -> pa.Array:
-        raise UnitError
 
-    with pytest.raises(UnitError):
-        table(trades, plan(window_ns=(0, 1), to_ns=to_ns))
+def test_a_row_whose_time_cannot_be_placed_is_dropped_and_counted(trades: FlatFile) -> None:
+    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+        # The converter places every time but the second row's.
+        placed = pc.if_else(pc.equal(values, 1741012200000002000), None, values)
+        return placed, "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
+
+    with trades:
+        [(batch, report)] = list(trades.batches(plan(to_ns=to_ns)))
+    assert batch["Id"].to_pylist() == ["1", "3", "4"]
+    assert report.dropped_rows == 1
+    assert report.dropped_reason == (
+        f"{KEY}: timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
+    )
+
+
+def test_a_block_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
+    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+        return pa.nulls(len(values), pa.int64()), "timestamp unit mismatch for x: 5 ns"
+
+    with pytest.raises(WireError) as info:
+        table(trades, plan(to_ns=to_ns))
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of 4 rows of "
+        "a block was dropped, so the file's format may have changed; the first: timestamp unit "
+        "mismatch for x: 5 ns"
+    )
+    assert info.value.unreadable
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        (",,4,1,1,1.5,1,,10,1,AAPL,,\n", "a row has no sip_timestamp"),
+        (",,4,1,1,1.5,1,4.0,10,1,AAPL,,\n", "sip_timestamp holds '4.0', which is not int64"),
+        (",,4,1,1,1.5,1,1741012200000000000,10,1,,,\n", "a row has no ticker"),
+    ],
+)
+def test_a_row_whose_key_cannot_be_read_is_dropped(
+    row: str, reason: str, opened: Callable[[str, str | bytes], FlatFile]
+) -> None:
+    good = ",,4,2,1,1.5,1,1741012200000000000,10,1,MSFT,,\n"
+    with opened(KEY, TRADE_HEADER + row + good) as file:
+        [(batch, report)] = list(file.batches(plan()))
+    assert batch["Id"].to_pylist() == ["2"]
+    assert (report.dropped_rows, report.dropped_reason) == (1, f"{KEY}: {reason}")
+
+
+def test_rows_the_symbol_filter_removes_never_fail_a_block(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    odd = ",,4,1,1,1.5,1,4.0,10,1,AAPL,,\n"
+    with opened(KEY, TRADE_HEADER + odd) as file:
+        read = plan(symbols=pa.array(["MSFT"], pa.string()))
+        [(batch, report)] = list(file.batches(read))
+    assert (batch.num_rows, report.dropped_rows) == (0, 0)
 
 
 def test_every_block_yields_a_batch_even_when_empty(
@@ -195,48 +245,32 @@ def test_every_block_yields_a_batch_even_when_empty(
     assert batches[0].schema.names == [column.column for column in TRADE_COLUMNS]
 
 
-def test_a_futures_file_must_hold_only_its_session(
+def test_a_futures_file_keeps_each_rows_own_session(
     *, opened: Callable[[str, str | bytes], FlatFile], load_fixture: Callable[[str, str], bytes]
 ) -> None:
+    # The reader never judges a row's session; the library keeps and warns by it.
     text = load_fixture(OWNER, "us_futures_trades_v1_2025-03-04.csv").decode()
-    futures = plan(
-        columns=FUTURES_COLUMNS,
-        time_header="timestamp",
-        session=("session_end_date", date(2025, 3, 4)),
-    )
+    futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp")
     result = table(opened(FUTURES_KEY, text), futures)
     assert result["ReportSequence"].to_pylist() == [31, 32, 33]
-    wrong = replace_session(futures, date(2025, 3, 5))
-    with pytest.raises(WireError) as info:
-        table(opened(FUTURES_KEY, text), wrong)
-    assert info.value.message == (
-        f"{FUTURES_KEY} holds session_end_date 2025-03-04, not 2025-03-05: futures flat files "
-        "are not keyed by trading session as this library assumes, so their rows cannot be "
-        "assigned to sessions"
-    )
-    assert (info.value.path, info.value.host) == (FUTURES_KEY, "files.massive.com")
-    assert info.value.unreadable
+    assert set(result["SessionEndDate"].to_pylist()) == {date(2025, 3, 4)}
 
 
-def test_a_missing_session_date_fails_the_session_check(
+def test_a_futures_row_without_a_session_is_dropped(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    text = "ticker,timestamp,report_sequence,session_end_date\nESH5,1,1,\n"
-    futures = plan(
-        columns=FUTURES_COLUMNS,
-        time_header="timestamp",
-        session=("session_end_date", date(2025, 3, 4)),
+    text = (
+        "ticker,timestamp,report_sequence,session_end_date\n"
+        "ESH5,1,1,\nESH5,2,2,2025-03-04\nESH5,3,3,2025-13-45\n"
     )
-    with pytest.raises(WireError, match="holds session_end_date empty, not 2025-03-04"):
-        table(opened(FUTURES_KEY, text), futures)
-
-
-def replace_session(read: ReadPlan, day: date) -> ReadPlan:
-    assert read.session is not None
-    return plan(
-        columns=read.columns,
-        time_header=read.time_header,
-        session=(read.session[0], day),
+    required = frozenset({"ticker", "timestamp", "session_end_date"})
+    futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp", required=required)
+    with opened(FUTURES_KEY, text) as file:
+        [(batch, report)] = list(file.batches(futures))
+    assert batch["ReportSequence"].to_pylist() == [2]
+    assert (report.dropped_rows, report.dropped_reason) == (
+        2,
+        f"{FUTURES_KEY}: a row has no session_end_date",
     )
 
 
@@ -249,8 +283,7 @@ def replace_session(read: ReadPlan, day: date) -> ReadPlan:
             gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
         ),
         pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
-        pytest.param(TRADE_HEADER + "12,,4,1,1,1.5,1,12:30,10,1,AAPL,,\n", id="unparseable-value"),
-        pytest.param(TRADE_HEADER + '"12,x",,4,1,1,1.5,1,1,10,1,AAPL,,\n', id="non-integer-list"),
+        pytest.param(TRADE_HEADER + "12,,4,1,1,1.5,1,12:30,10,1,AAPL,,\n", id="no-row-readable"),
     ],
 )
 def test_a_malformed_file_is_a_wire_error(
@@ -466,18 +499,17 @@ def test_a_byte_order_mark_before_the_header_is_dropped(
         assert drift(opened(KEY, "\ufeff" + text), plan()) == drift(opened(KEY, text), plan())
 
 
-def test_a_list_element_that_does_not_convert_names_its_header(
+def test_a_list_that_does_not_convert_is_null_and_reported(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
     for conditions in ("12,abc", "12,99999999999999999999", "12,,3"):
+        good = '"12,37",,4,2,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         row = f'"{conditions}",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
-        with pytest.raises(WireError) as info:
-            table(opened(KEY, TRADE_HEADER + row), plan())
-        assert info.value.message.startswith(
-            f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: conditions is not "
-            "list<item: int64>: "
-        )
-        assert isinstance(info.value.__cause__, pa.ArrowInvalid)
+        with opened(KEY, TRADE_HEADER + good + row) as file:
+            [(batch, report)] = list(file.batches(plan()))
+        assert batch["Conditions"].to_pylist() == [[12, 37], None]
+        assert report.unconvertible == {"conditions"}
+        assert report.samples["conditions"] == DriftSample(None, conditions)
 
 
 def test_a_header_longer_than_a_block_is_a_wire_error(
@@ -501,18 +533,19 @@ def test_a_header_that_is_not_utf8_is_a_wire_error() -> None:
     assert isinstance(info.value.__cause__, UnicodeDecodeError)
 
 
-def test_a_value_that_does_not_convert_names_its_header(
+def test_a_value_that_does_not_convert_is_null_and_reported_by_its_header(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
     # Reordered, so the header named is found by name, not by its documented position.
-    text = reorder(TRADE_HEADER + "12,,4,1,1,1.5,1,1,10,1,AAPL,,x\n", list(reversed(TRADE_NAMES)))
-    with pytest.raises(WireError) as info:
-        table(opened(KEY, text), plan())
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: trf_timestamp is not "
-        "int64: In CSV column #0: "
-    )
-    assert "'x'" in info.value.message
+    rows = "12,,4,1,1,1.5,1,1,10,1,AAPL,,x\n12,,4,2,1,x" + "y" * 300 + ",1,1,10,1,AAPL,,5\n"
+    text = reorder(TRADE_HEADER + rows, list(reversed(TRADE_NAMES)))
+    with opened(KEY, text) as file:
+        [(batch, report)] = list(file.batches(plan()))
+    assert batch["TrfTimestamp"].to_pylist() == [None, 5]
+    assert batch["Price"].to_pylist() == [1.5, None]
+    assert report.unconvertible == {"trf_timestamp", "price"}
+    assert report.samples["trf_timestamp"] == DriftSample(None, "x")
+    assert report.samples["price"] == DriftSample(None, "x" + "y" * 199)  # cut to 200
 
 
 def test_a_row_of_the_wrong_width_keeps_arrows_message(

@@ -68,10 +68,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses, or 90 s while the
   thread holds the update graph's lock), which becomes `MassiveError("rate limited: ...")`
-  with status 429 (the first 429 of each subscription has already logged its INFO notice). A row
-  that breaks the schema (a missing required key, a value that does not convert, a timestamp out
-  of bounds) raises `RowDataError`, a defect of the library. Static verbs raise each error, and
-  log it at DEBUG, or at ERROR for a defect.
+  with status 429 (the first 429 of each subscription has already logged its INFO notice). One
+  odd row never fails a read: a value that does not fit is null and a row whose key cannot be
+  read is dropped, both reported as drift; a page whose every row was dropped raises
+  `RowDataError`, a defect of the library. Static verbs raise each error, and log it at DEBUG,
+  or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -784,8 +785,8 @@ class RestReader:
         Returns:
             The rows, in call order and then page order, and the number of requests made.
 
-        Errors: the public error of each `WireError` (`_public`), `RowDataError` for a row
-        that breaks the schema, and the `MassiveError` of `_call` for a page on another
+        Errors: the public error of each `WireError` (`_public`), `RowDataError` for a page
+        whose every row was dropped, and the `MassiveError` of `_call` for a page on another
         adjustment basis or a symbol whose data was cut short. A closed
         session raises `MassiveError("... is closed")`.
         """

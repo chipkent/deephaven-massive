@@ -885,7 +885,8 @@ class StreamQuery(QueryBase):
     channel family streams in the session), connects if no connection to that host exists, and
     subscribes; the verb returns once the stream's tables exist, without waiting for the
     server's acknowledgement. A failure the server reports later (a refused topic, a rejected
-    key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
+    key) fails the stream's tables and shows in `m.streams()`, while a row that does not decode
+    is dropped and logged and the stream goes on; a
     verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
     and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
     options contracts that would put more than 1,000 topics on the session's `/options`

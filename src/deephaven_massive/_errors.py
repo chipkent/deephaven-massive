@@ -284,8 +284,7 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
         error: The wire error.
         cause: Whose problem it is, or `None` (absent) to take it from the wire error:
             `ErrorCause.LIBRARY_DEFECT` for data the client could not read (`unreadable`), and
-            `ErrorCause.EXPECTED` otherwise. A WebSocket row the client rejected is a library
-            defect too, which only the caller knows.
+            `ErrorCause.EXPECTED` otherwise.
 
     Returns:
         `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
@@ -435,11 +434,12 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
 
 
 class RowDataError(PermanentError):
-    """A REST row that breaks its dataset's schema.
+    """REST rows that break their dataset's schema.
 
-    A row that lacks a key the dataset requires, a value that does not convert to its field's
-    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
-    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
+    A page whose every row was dropped because a key could not be read (one odd row is dropped
+    and counted, never raised), a symbol spelling the library cannot read under
+    `unreadable_symbols=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
+    dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
     a `poll()` table fails with it, since the next cycle would fail alike. Data from Massive
     that the library cannot read is the library's to fix, so its cause is
     `ErrorCause.LIBRARY_DEFECT`.
