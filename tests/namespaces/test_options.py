@@ -32,6 +32,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
 from deephaven_massive._namespaces.query_building import Namespace
@@ -195,7 +196,13 @@ def test_query_class_of_each_dataset(spec: DatasetSpec, expected: type) -> None:
 
 
 def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
-    sizes = {spec.name: spec.page_size for spec in options.DATASETS}
+    # A stream-only dataset reads no REST path, so it has no page size either.
+    sizes = {
+        spec.name: page_size(spec, CATALOG.rest_path(spec.rest_paths[0]))
+        if spec.rest_paths
+        else None
+        for spec in options.DATASETS
+    }
     assert sizes == {
         "options.trades": 50_000,
         "options.last_trade": None,

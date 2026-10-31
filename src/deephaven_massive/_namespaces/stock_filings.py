@@ -107,7 +107,7 @@ def _filing(
     poll_keys: tuple[str, ...],
     nullable_poll_keys: Mapping[str, str] | None = None,
     keys: SourceKeys | None = None,
-    page_size: int,
+    page_size: int | None = None,
 ) -> DatasetSpec:
     """Return the spec of one filings dataset: axis `filing_date`, appended when polled.
 
@@ -121,8 +121,8 @@ def _filing(
         nullable_poll_keys: The poll keys the vendor leaves empty on some rows, each with
             its reason; a null there is a value, not a data failure. None for no such key.
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
-        page_size: The largest `limit` the path documents, or less for rows that carry long
-            text.
+        page_size: A page size below the largest `limit` the path documents, for rows that
+            carry long text; None, the default, requests that largest `limit`.
 
     Returns:
         The spec.
@@ -158,7 +158,6 @@ FILINGS_INDEX: Final = _filing(
     # EDGAR's index lists a filing once under each filer (a Form 4 under the issuer and each
     # reporting owner, a joint filing under each co-registrant), and so can this one.
     poll_keys=("Cik", "AccessionNumber"),
-    page_size=10_000,
     summary="The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.",
 )
 
@@ -167,7 +166,6 @@ SECTIONS_10K: Final = _filing(
     _SECTIONS_10K,
     symbol_param="ticker.any_of",
     poll_keys=("FilingUrl", "Section"),
-    page_size=100,
     summary="The text of sections of 10-K annual reports, one row per filing and section.",
 )
 
@@ -178,7 +176,6 @@ TEXT_8K: Final = _filing(
     # A joint 8-K of several co-registrants can come once under each filer's CIK, as the
     # index lists it.
     poll_keys=("Cik", "AccessionNumber"),
-    page_size=100,
     summary="The item text of 8-K current reports, one row per filing and filer.",
 )
 
@@ -188,7 +185,6 @@ DISCLOSURES_8K: Final = _filing(
     symbol_param="tickers.any_of",
     poll_keys=("AccessionNumber", *_CATEGORIES, "SupportingText"),
     keys=_NO_KEYS,
-    page_size=1_000,
     summary="Disclosures in 8-K current reports, classified by category, one row per disclosure.",
 )
 
@@ -234,7 +230,6 @@ INSTITUTIONAL_HOLDINGS: Final = _filing(
         **dict.fromkeys(_13F_AMOUNTS, "Massive marks the field optional"),
     },
     keys=SourceKeys(fanout=KeySpec("FilerCik", instrument=False)),
-    page_size=1_000,
     summary="Holdings that institutional managers report on Form 13-F, one row per position.",
 )
 
@@ -245,7 +240,6 @@ INITIAL_INSIDER_OWNERSHIP: Final = _filing(
     poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
     nullable_poll_keys={**_INDIRECT, **_DERIVATIVE, "ExerciseDate": _DERIVATIVE_ONLY},
     keys=_NO_KEYS,
-    page_size=10_000,
     summary="Initial insider ownership statements (SEC Form 3), one row per reported holding.",
 )
 
@@ -286,7 +280,6 @@ INSIDER_TRANSACTIONS: Final = _filing(
         ),
     },
     keys=_NO_KEYS,
-    page_size=10_000,
     summary="Insider transactions (SEC Form 4), one row per reported transaction or holding.",
 )
 
@@ -302,7 +295,6 @@ INSIDER_ACTIVITY: Final = DatasetSpec(
     # later for the same day revises that row's totals and `LastFilingDate`, so the row is
     # replaced, not appended.
     poll_keys=("IssuerCik", "TransactionDate"),
-    page_size=10_000,
 )
 
 INSIDER_HOLDINGS: Final = DatasetSpec(
@@ -316,7 +308,6 @@ INSIDER_HOLDINGS: Final = DatasetSpec(
     # One row is one reporting owner's current position in one issuer; each new filing by
     # that owner updates the row in place.
     poll_keys=("IssuerCik", "OwnerCik"),
-    page_size=10_000,
 )
 
 RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
@@ -324,7 +315,6 @@ RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
     summary="The taxonomy that classifies filing risk factors, one row per category.",
     fetch_path=_RISK_TAXONOMY,
     poll_keys=("Taxonomy", *_CATEGORIES),
-    page_size=1_000,
 )
 
 DISCLOSURE_TAXONOMY: Final = DatasetSpec(
@@ -332,7 +322,6 @@ DISCLOSURE_TAXONOMY: Final = DatasetSpec(
     summary="The taxonomy that classifies 8-K disclosures, one row per category.",
     fetch_path=_DISCLOSURE_TAXONOMY,
     poll_keys=("Taxonomy", *_CATEGORIES),
-    page_size=1_000,
 )
 
 

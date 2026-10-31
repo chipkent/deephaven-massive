@@ -34,6 +34,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import (
     RestPath,
     Transport,
@@ -50,6 +51,7 @@ from deephaven_massive._query import (
     StreamQuery,
     query_class,
 )
+from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.liveness import new_scope
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
@@ -154,7 +156,8 @@ def test_the_wire_details_of_the_specs() -> None:
     assert crypto.TRADES.time_axis == ("timestamp.gte", "timestamp.lt")
     assert crypto.BARS.channels == {dm.Timespan.SECOND: "XAS", dm.Timespan.MINUTE: "XA"}
     assert set(crypto.BARS.flat_file_prefixes) == {dm.Timespan.MINUTE, dm.Timespan.DAY}
-    assert (crypto.TRADES.page_size, crypto.BARS.page_size) == (50_000, 50_000)
+    trades, bars = (CATALOG.rest_path(spec.rest_paths[0]) for spec in (crypto.TRADES, crypto.BARS))
+    assert (page_size(crypto.TRADES, trades), page_size(crypto.BARS, bars)) == (50_000, 50_000)
     assert crypto.FMV.family is ChannelFamily.FMV
     assert crypto.QUOTES.family is ChannelFamily.TICK
     assert crypto.SNAPSHOTS.symbol_param == "tickers"

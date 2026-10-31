@@ -99,14 +99,9 @@ _QUOTE_FILES: Final = "us_options_opra/quotes_v1"
 _MINUTE_FILES: Final = "us_options_opra/minute_aggs_v1"
 _DAY_FILES: Final = "us_options_opra/day_aggs_v1"
 
-_TICK_PAGE: Final = 50_000
-"""The largest page the trades, quotes, and aggregates endpoints return."""
-
-_SNAPSHOT_PAGE: Final = 250
-"""The largest page the chain and the unified snapshot return."""
-
-_CONTRACTS_PAGE: Final = 1_000
-"""The largest page the contracts endpoint returns."""
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
 
 
 def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) -> SourceKeys:
@@ -164,7 +159,6 @@ TRADES: Final = DatasetSpec(
         (_FLAT, _TRADE_FILES): _keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_TICK_PAGE,
 )
 
 # Each one-row dataset joins the kind of its stream and history dataset, so its rows have the
@@ -194,7 +188,6 @@ QUOTES: Final = DatasetSpec(
         (_FLAT, _QUOTE_FILES): _keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_TICK_PAGE,
 )
 
 BARS: Final = DatasetSpec(
@@ -213,7 +206,7 @@ BARS: Final = DatasetSpec(
         (_FLAT, _MINUTE_FILES): _keys("Ticker", "WindowStart"),
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
-    page_size=_TICK_PAGE,
+    page_size=_AGGREGATES_PAGE,
     column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
@@ -249,7 +242,6 @@ CHAIN: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CHAIN,
     keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
-    page_size=_SNAPSHOT_PAGE,
     revision_keys=_SNAPSHOT_REVISION,
 )
 
@@ -261,7 +253,6 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
-    page_size=_SNAPSHOT_PAGE,
     revision_keys=_SNAPSHOT_REVISION,
 )
 
@@ -277,7 +268,6 @@ CONTRACTS: Final = DatasetSpec(
         (_REST, _CONTRACT): _keys("Ticker", fanout="UnderlyingTicker"),
     },
     symbol_param="ticker",
-    page_size=_CONTRACTS_PAGE,
 )
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
@@ -644,7 +634,7 @@ class _Options(Namespace):
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
                 README.md#filters.
 
@@ -702,7 +692,7 @@ class _Options(Namespace):
                 README.md#symbols.
             sort: `"ticker"`. See README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
                 `ticker_lte`. See README.md#filters.
 
@@ -771,7 +761,8 @@ class _Options(Namespace):
             expired: True lists expired contracts only; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: See README.md#sort-order-limit.
-            limit: Per contract with `symbols`, so no effect there. See README.md#sort-order-limit.
+            limit: The most rows in total without `symbols`; per contract with them, so no
+                effect there. See README.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
                 README.md#filters.
 

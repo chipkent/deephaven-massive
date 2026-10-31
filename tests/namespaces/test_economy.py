@@ -14,6 +14,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import Transport, source, to_batch
 from deephaven_massive._namespaces import economy
 from deephaven_massive._namespaces.query_building import Namespace
@@ -94,7 +95,7 @@ def test_each_series_is_a_date_axis_list_endpoint(series: Series) -> None:
     assert spec.keys == {}
     assert spec.poll_mode is dm.PollMode.REPLACE
     assert spec.poll_keys == ("Date",)
-    assert spec.page_size == 50_000
+    assert page_size(spec, CATALOG.rest_path(series.path)) == 50_000
     schema = CATALOG.dataset_schema(spec)
     assert "Symbol" not in schema.column_names
     assert "Timestamp" not in schema.column_names

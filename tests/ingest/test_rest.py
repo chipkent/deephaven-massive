@@ -1204,6 +1204,46 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     )
 
 
+def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive refuses the maker's request just as its background read is released: the
+    # refusal is Massive's answer, not the stop's cancellation, so the waiter raises a copy of
+    # it rather than asking again.
+    m, clock = _manual_session(fake_rest, monkeypatch)
+    client = cast("rest.RestEndpoints", m._core.rest_transport())._state.client
+    claimed = threading.Event()
+    refuse = threading.Event()
+    stop = Cancel()
+    requests: list[object] = []
+
+    def refused(*args: object, **kwargs: object) -> Iterator[_massive.Page]:
+        requests.append(args)
+        claimed.set()
+        assert refuse.wait(TIMEOUT)
+        stop.set()  # the maker's table is released as the refusal arrives
+        raise _massive.WireError("HTTP 403 for GET /v3/reference/tickers", status=403)
+
+    monkeypatch.setattr(client, "pages", refused)
+    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    try:
+        maker = _Caller(
+            m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
+        )
+        assert claimed.wait(TIMEOUT)
+        joiner = _Caller(m, _split_dot(m), console=False)
+        clock.wait_for_deadlines([math.inf])  # the joiner waits on the maker's lookup
+        refuse.set()
+        made, copied = maker.join(), joiner.join()
+    finally:
+        m.close()
+    assert isinstance(made, dm.MassiveError)
+    assert isinstance(copied, dm.MassiveError)
+    assert copied is not made
+    assert (type(copied), str(copied), copied.status) == (type(made), str(made), 403)
+    assert len(requests) == 1  # the waiter copied the refusal and asked nothing itself
+
+
 def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1682,6 +1722,7 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
     )
     requests = dict(fake_rest.get_queries())
     assert requests["/v1/indicators/sma/AAPL"] == {
+        "limit": ["5000"],
         "timespan": ["day"],
         "window": ["50"],
         "timestamp.gte": ["1704067200000"],  # the indicators count milliseconds
@@ -2145,7 +2186,7 @@ def futures_trade(moment: datetime, session: str, ticker: str = "ESH5") -> dict[
 
 
 def session_target(ticker: str, day: str) -> str:
-    return f"/futures/v1/trades/{ticker}?sort=timestamp.asc&session_end_date={day}"
+    return f"/futures/v1/trades/{ticker}?limit=50000&sort=timestamp.asc&session_end_date={day}"
 
 
 def test_futures_trades_by_date_read_each_session_by_its_date(
@@ -2164,7 +2205,7 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     path = FUTURES_TRADES_PATH.format(ticker="ESH5")
     # `sort` lists no values: the time axis's field, ascending.
     assert fake_rest.get_queries() == [
-        (path, {"sort": ["timestamp.asc"], "session_end_date": ["2025-01-21"]})
+        (path, {"limit": ["50000"], "sort": ["timestamp.asc"], "session_end_date": ["2025-01-21"]})
     ]
     # A row of another session is dropped.
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]

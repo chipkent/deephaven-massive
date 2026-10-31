@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, TypeAlias, cast
 
+import numpy as np
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
@@ -15,6 +16,7 @@ from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from deephaven.table_listener import listen
+from deephaven.time import to_j_instant, to_j_local_date, to_j_time_zone
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
@@ -41,6 +43,7 @@ from deephaven_massive._query import (
     HistoryQuery,
     Query,
     QueryBase,
+    QueryCall,
     StreamHistoryQuery,
     StreamQuery,
     _shown,
@@ -324,6 +327,29 @@ def test_query_repr_writes_values_as_a_user_types_them() -> None:
     assert _shown(frozenset({"b", "a"})) == "{'a', 'b'}"
     assert _shown(("x", "y")) == "['x', 'y']"
     assert _shown(1.5) == "1.5"
+
+
+def test_query_repr_writes_java_and_numpy_times_as_text(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # A day argument the request does not hold parsed is written as the caller's value.
+    day = to_j_local_date("2025-01-02")
+    assert day is not None
+    assert repr(massive_session.stocks.daily_open_close("AAPL", day)) == (
+        "m.stocks.daily_open_close('AAPL', '2025-01-02')"
+    )
+    assert _shown(np.datetime64("2025-01-02")) == "'2025-01-02'"
+    assert _shown(to_j_instant("2025-01-02T03:04:00Z")) == "'2025-01-02T03:04:00+00:00'"
+    # A Java object of another class, and a time no parser reads, keep their repr.
+    other = to_j_time_zone("UTC")
+    assert _shown(other) == repr(other)
+    assert _shown(np.datetime64("NaT", "D")) == repr(np.datetime64("NaT", "D"))
+
+
+def test_query_repr_falls_back_to_the_symbols_passed() -> None:
+    # A request that does not store its symbols shows them as the caller passed them.
+    assert QueryCall("m.x.y", (("symbols", "AAPL"),)).text(Request()) == "m.x.y('AAPL')"
+    assert QueryCall("m.x.y", (("symbols", ("B", "A")),)).text(Request()) == "m.x.y(['B', 'A'])"
 
 
 def test_class_hierarchy() -> None:
@@ -1608,9 +1634,10 @@ def test_wait_false_reads_in_the_background(
         _join_reads(massive_session)
     assert fetched.is_refreshing
     assert history.is_refreshing
-    # The parameters were checked on the calling thread, then the transport ran with a token.
+    # The parameters were checked on the calling thread, in call order, then each read ran on
+    # its own background thread with a token, so the reads may finish in either order.
     assert [check[0] for check in rest.checks] == ["fetch", "history"]
-    assert [call[0] for call in rest.calls] == ["fetch", "history"]
+    assert sorted(call[0] for call in rest.calls) == ["fetch", "history"]
     assert all(isinstance(call[3]["stop"], threading.Event) for call in rest.calls)
     rows = stream_rows()
     assert [(r["StreamId"], r["Kind"], r["State"], r["Transport"]) for r in rows] == [

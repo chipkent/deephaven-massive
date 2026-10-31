@@ -26,6 +26,7 @@ from deephaven_massive._datasets.dates import (
     day_zone,
     instant_bound,
     is_trading_day,
+    midnight,
     parse_date_like,
 )
 from deephaven_massive._datasets.futures_sessions import (
@@ -383,6 +384,17 @@ def test_each_class_has_its_day_zone_and_day_start() -> None:
     assert day_start(AssetClass.FOREX, date(2025, 3, 3)) == datetime(2025, 3, 3, tzinfo=UTC)
     assert day_start(ClassFromPrefix.ANY, date(2025, 3, 3)) == datetime(2025, 3, 3, 5, tzinfo=UTC)
     assert day_start(AssetClass.FUTURES, date(2025, 3, 4)) == futures_session_open(date(2025, 3, 4))
+
+
+def test_day_starts_and_ends_come_in_utc_whatever_the_day_zone() -> None:
+    # One zone for every instant these return, so no caller mixes a New York midnight with a
+    # UTC one when it compares, prints, or offsets them.
+    day = date(2025, 3, 3)
+    classes = (AssetClass.STOCKS, AssetClass.INDICES, AssetClass.FUTURES, AssetClass.CRYPTO)
+    for asset_class in classes:
+        assert day_start(asset_class, day).tzinfo is UTC
+        assert day_end(asset_class, day).tzinfo is UTC
+    assert midnight(day, NEW_YORK).tzinfo is UTC
 
 
 def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
