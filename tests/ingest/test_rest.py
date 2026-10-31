@@ -1474,8 +1474,11 @@ def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
     kind: str,
 ) -> None:
     # A waiter that tries again must claim a fresh lookup, never find the failed one, so the
-    # claim is removed before its future completes.
-    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    # claim is removed before its future completes. A refused host check is not a failure
+    # (the WebSocket server decides then), so the host lookup fails on a rejected key.
+    refused = Reply(
+        {"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403 if kind == "crypto" else 401
+    )
     fake_rest.reply(LIST_TARGET if kind == "crypto" else "/v3/snapshot", refused)
     name = "crypto_future" if kind == "crypto" else "host_future"
     owner = rest.RestState if kind == "crypto" else HostDecisionCache
@@ -2335,13 +2338,13 @@ def test_a_failed_decision_is_not_cached(
     load_fixture: Callable[[str, str], bytes],
     dh_to_pylist: ToPylist,
 ) -> None:
-    fake_rest.reply("/v3/snapshot", Reply(b'{"status":"ERROR","request_id":"x1"}', status=403))
+    fake_rest.reply("/v3/snapshot", Reply(b'{"status":"ERROR","request_id":"x1"}', status=401))
     transport = session._core.rest_transport()
-    with pytest.raises(dm.EntitlementError, match="stocks plan has no WebSocket access"):
+    with pytest.raises(dm.AuthenticationError):
         transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     (row,) = connection_rows(session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert "HTTP 403" in row["LastError"]
+    assert "HTTP 401" in row["LastError"]
     assert "x1" in row["LastError"]
     fake_rest.reply_first(
         "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_real_time.json"))

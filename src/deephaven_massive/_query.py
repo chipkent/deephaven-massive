@@ -888,7 +888,7 @@ class StreamQuery(QueryBase):
     key, a row that does not decode) fails the stream's tables and shows in `m.streams()`; a
     verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,
     and once a stream has failed the next verb of an equal query opens a fresh one. Explicit
-    options contracts that would put more than 1,000 topics on the session's `/options`
+    options contracts that would put more than 1,000 contracts on the session's `/options`
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
     instead (`Deferred` in `m.streams()`).
 
@@ -1005,10 +1005,9 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 contracts on the session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
-            EntitlementError: If the plan has no WebSocket access for the asset class.
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1039,10 +1038,9 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 contracts on the session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
-            EntitlementError: If the plan has no WebSocket access for the asset class.
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1076,11 +1074,10 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 contracts on the session's `/options` connection.
                 Also if `capacity` is outside 1 to 2**31 - 1.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
-            EntitlementError: If the plan has no WebSocket access for the asset class.
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
@@ -1162,12 +1159,11 @@ class StreamQuery(QueryBase):
                 listener); if a static symbol table holds no symbol, or a symbol table only
                 rows that are not Massive's exact tickers, or any such row under
                 `noncanonical_symbols=OnError.RAISE`; or if explicit options contracts would put
-                more than 1,000 topics on the session's `/options` connection.
+                more than 1,000 contracts on the session's `/options` connection.
                 Also if `by` is empty, repeats a column, or names a column the dataset does
                 not have.
             AuthenticationError: If Massive rejects the API key on the request that decides
                 the WebSocket host.
-            EntitlementError: If the plan has no WebSocket access for the asset class.
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.

@@ -42,9 +42,6 @@ class FakeSender:
     def unsubscribe(self, generation: int, topics: Sequence[str]) -> None:
         self.calls.append(("unsubscribe", generation, tuple(topics)))
 
-    def reconnect(self) -> None:
-        self.calls.append(("reconnect", 0, ()))
-
     def take(self) -> list[tuple[str, int, tuple[str, ...]]]:
         calls, self.calls = self.calls, []
         return calls
@@ -92,22 +89,7 @@ class Loop:
     changes: list[tuple[int, int, int, int]]
 
 
-class NoAcked:
-    """The session's record of `NO_ACK` topics, as `WsConnections.first_no_ack` keeps it."""
-
-    def __init__(self) -> None:
-        self.topics: set[str] = set()
-
-    def first(self, topic: str) -> bool:
-        first = topic not in self.topics
-        self.topics.add(topic)
-        return first
-
-
-def make_loop(
-    *, cap: int | None = None, verdict: bool = False, no_acked: NoAcked | None = None
-) -> Loop:
-    no_acked = no_acked or NoAcked()
+def make_loop(*, cap: int | None = None, verdict: bool = False) -> Loop:
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
     verdicts: list[Status] = []
@@ -124,7 +106,6 @@ def make_loop(
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_step_refused=step_refused,
-        first_no_ack=no_acked.first,
         on_change=lambda: changes.append(subs.counts()),
     )
     return Loop(subs, sender, timers, refused, verdicts, changes)
@@ -275,7 +256,7 @@ def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
     loop.timers.fire()  # T.MSFT: the single re-send
     assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
     loop.timers.fire()  # T.MSFT: NO_ACK resolves it, and the wildcard can go
-    assert loop.sender.take() == [("reconnect", 0, ()), ("unsubscribe", 1, ("T.*",))]
+    assert loop.sender.take() == [("unsubscribe", 1, ("T.*",))]
 
 
 def test_a_wildcard_removed_before_its_acknowledgement_leaves_after_the_step() -> None:
@@ -291,34 +272,42 @@ def test_a_wildcard_removed_before_its_acknowledgement_leaves_after_the_step() -
     ]
 
 
-def test_a_missing_acknowledgement_is_resent_once_then_no_ack_reconnects() -> None:
+def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconnect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL", "T.MSFT"])
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(ack("T.MSFT"))
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.subscriptions"):
+        loop.timers.fire()
+    # No reconnect: that would cut T.MSFT, and every other stream on the connection, over one
+    # late answer. The topic stays wanted and subscribed, and counts as NO_ACK.
+    assert loop.sender.take() == []
+    assert loop.subs.counts() == (2, 1, 0, 1)
+    assert loop.refused == []
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "no acknowledgement for T.AAPL in generation 1 after 10.0 s and one re-send; it stays "
+        "subscribed and counts in NoAckTopics of m.connections(), and the connection is not "
+        "reconnected for it"
+    )
+
+
+def test_a_late_acknowledgement_clears_a_no_ack() -> None:
     loop = make_loop()
     loop.subs.add(["T.AAPL"])
     loop.subs.opened(1)
-    loop.sender.take()
     loop.timers.fire()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
     loop.timers.fire()
-    assert loop.sender.take() == [("reconnect", 0, ())]
-    assert loop.subs.counts() == (1, 0, 0, 1)  # still desired; the stream never fails
-    assert loop.refused == []
-
-
-def test_a_second_no_ack_of_a_topic_does_not_reconnect(caplog: pytest.LogCaptureFixture) -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    for generation in (1, 2):
-        loop.subs.opened(generation)
-        loop.timers.fire()
-        loop.timers.fire()
-        loop.subs.ended()
-    calls = loop.sender.take()
-    assert [c for c in calls if c[0] == "reconnect"] == [("reconnect", 0, ())]
-    # A topic Massive never acknowledges leaves its data missing: a WARNING, never an ERROR.
-    assert [r.levelno for r in caplog.records if "no acknowledgement" in r.message] == [
-        logging.WARNING,
-        logging.WARNING,
-    ]
+    assert loop.subs.counts() == (1, 0, 0, 1)
+    loop.subs.status(ack("T.AAPL"))
+    assert loop.subs.counts() == (1, 1, 0, 0)
+    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",)), ("subscribe", 1, ("T.AAPL",))]
 
 
 def test_a_watchdog_of_an_ended_generation_does_not_escalate() -> None:
@@ -422,7 +411,7 @@ def test_the_cap_admits_contracts_in_sorted_order_and_defers_the_rest() -> None:
     loop.subs.opened(1)
     assert loop.sender.take() == [("subscribe", 1, ("Q.*", "T.O:A", "T.O:B"))]
     assert loop.subs.deferred == {"T.O:C"}
-    assert loop.subs.explicit == 3
+    assert loop.subs.contracts == 3
     loop.subs.status(ack("Q.*", "T.O:A", "T.O:B"))
     loop.subs.remove(["T.O:A"])  # room frees: the deferred contract is admitted
     loop.subs.reconcile()
@@ -431,6 +420,39 @@ def test_the_cap_admits_contracts_in_sorted_order_and_defers_the_rest() -> None:
         ("subscribe", 1, ("T.O:C",)),
         ("unsubscribe", 1, ("T.O:A",)),
     ]
+
+
+def test_the_cap_counts_each_contract_once_across_channels() -> None:
+    # Massive's limit is "1,000 option contracts": a contract's trades and quotes count once.
+    loop = make_loop(cap=2)
+    loop.subs.add(["T.O:A", "Q.O:A", "T.O:B"], static=True)
+    loop.subs.add(["Q.O:B", "Q.O:C", "T.O:C"])
+    loop.subs.opened(1)
+    assert loop.sender.take() == [("subscribe", 1, ("Q.O:A", "Q.O:B", "T.O:A", "T.O:B"))]
+    assert loop.subs.deferred == {"Q.O:C", "T.O:C"}
+    assert loop.subs.contracts == 3
+    loop.subs.remove(["T.O:A", "Q.O:A"], static=True)  # a whole contract leaves
+    loop.subs.reconcile()
+    loop.subs.status(ack("Q.O:A", "Q.O:B", "T.O:A", "T.O:B"))
+    assert loop.subs.deferred == frozenset()
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("Q.O:C", "T.O:C")),
+        ("unsubscribe", 1, ("Q.O:A", "T.O:A")),
+    ]
+
+
+def test_a_refusal_fails_only_the_refused_topics_of_an_admitted_contract() -> None:
+    # If the server counts topics after all, it refuses some: those fail with its message,
+    # and the contract's other topic keeps running.
+    loop = make_loop(cap=1)
+    loop.subs.add(["T.O:A", "Q.O:A"], static=True)
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(ack("T.O:A"))
+    loop.subs.status(refusal("Q.O:A", message="Maximum number of subscriptions exceeded"))
+    assert loop.refused == [(("Q.O:A",), "Maximum number of subscriptions exceeded")]
+    assert loop.subs.counts() == (1, 1, 0, 0)
+    assert loop.sender.take() == []
 
 
 def test_covered_contracts_count_against_the_cap() -> None:
@@ -513,18 +535,6 @@ def test_static_contracts_beyond_the_cap_are_deferred_too() -> None:
     loop.subs.opened(1)
     assert loop.sender.take() == [("subscribe", 1, ("T.O:A",))]
     assert loop.subs.deferred == {"T.O:B"}
-
-
-def test_a_no_ack_reconnects_once_per_session_across_connections() -> None:
-    session = NoAcked()
-    for _connection in range(2):
-        loop = make_loop(no_acked=session)
-        loop.subs.add(["T.AAPL"])
-        loop.subs.opened(1)
-        loop.timers.fire()
-        loop.timers.fire()
-        reconnects = [c for c in loop.sender.take() if c[0] == "reconnect"]
-        assert len(reconnects) == (1 if _connection == 0 else 0)
 
 
 def test_topic_helpers() -> None:

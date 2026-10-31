@@ -621,10 +621,11 @@ In a live table, `last_by()` drops the row of a symbol that leaves the watchlist
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
 `m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
 fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`. One session's options
-connection carries at most 1,000 topics, and each stream of a contract is one (its trades and
-its quotes are two). A list or static table of contracts over that cap raises `ValueError`; a
-live watchlist that grows past it defers the extra contracts, counted in `m.streams()`'s
-`Deferred` column, until room frees up.
+connection carries at most 1,000 contracts, as Massive counts its limit; a contract's trades
+and its quotes count once. A list or static table of contracts over that cap raises
+`ValueError`; a live watchlist that grows past it defers the extra contracts, counted in
+`m.streams()`'s `Deferred` column, until room frees up. If Massive refuses a subscription
+anyway, only the refused streams fail, with Massive's message.
 
 A schedule is a watchlist too: a symbol table that is empty outside the hours you care about
 stops the stream, and makes a poll send no requests, outside them. This one is live only during
@@ -774,8 +775,7 @@ this section) and look at what the library did.
 | `timespan must be dm.Timespan` | Arguments that pick from a set take an enum member: `dm.Timespan.DAY`, not `"day"`. |
 | `ValueError` naming a symbol | Not Massive's spelling. See [`symbols`](#symbols) for the converters. |
 | `AttributeError` naming a verb | The dataset cannot serve that verb; the message names the one that can. |
-| `... plan has no WebSocket access` | Your plan for that class reads REST only. Read `history()`, or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. |
-| `... refused the subscription to ...` | Your plan includes some streams of the class but not this one. Stream bars instead of trades, or use the REST counterpart. |
+| `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the class, or read the class over REST only. Stream bars instead of trades, or read `history()` or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |
 | `the plan does not include these flat files` | Pass `source=dm.HistorySource.REST`; the message says when REST can serve the read. |

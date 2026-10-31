@@ -268,15 +268,26 @@ def test_an_opening_stream_cancels_the_idle_close(ws_session: WsSession) -> None
         connection.leases -= 1
 
 
-def test_a_missing_acknowledgement_reconnects(
-    fake_ws_server: FakeMassiveServer, make_ws_session: Callable[..., WsSession]
+def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     custom_session = make_ws_session(ack_timeout=0.05)
     fake_ws_server.silent.add("T.AAPL")
-    result = custom_session.query(TRADES, ["AAPL"]).blink()
-    custom_session.wait(lambda s: s.opens >= 2)
-    assert [json.loads(f)["params"] for f in fake_ws_server.frames(0)] == ["T.AAPL", "T.AAPL"]
-    del result
+    quiet = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.wait(lambda s: s.opens == 1)
+    wait_for(lambda: connections_of(custom_session, dh_to_pylist)[0]["NoAckTopics"] == 1)
+    healthy = custom_session.query(TRADES, ["MSFT"]).blink()
+    custom_session.subscribed("T.MSFT")
+    # The topic was sent, re-sent once, and is counted; the connection, and the other stream
+    # on it, stays up.
+    params = [json.loads(f)["params"] for f in fake_ws_server.frames(0)]
+    assert params == ["T.AAPL", "T.AAPL", "T.MSFT"]
+    [row] = connections_of(custom_session, dh_to_pylist)
+    assert (row["State"], row["NoAckTopics"], row["AckedTopics"]) == ("CONNECTED", 1, 1)
+    assert custom_session.opens == 1
+    del quiet, healthy
 
 
 def unknown_futures(*_: object) -> HostDecision:
@@ -1152,7 +1163,7 @@ def test_a_moved_options_stream_counts_against_the_cap_until_adopted(
     successor = ws_session.connection("wss://delayed.test/options")
     with group.lock:
         assert successor.cap_pending == {1: frozenset({f"T.{contract}"})}
-    with pytest.raises(ValueError, match="1 new option topics and 1 in use exceed"):
+    with pytest.raises(ValueError, match="1 new option contracts and 1 in use exceed"):
         ws_session.query(OPTIONS, ["O:SPY251219C00610000"]).blink()  # the cap still holds
     release.set()
     wait_for(lambda: not successor.awaiting)
@@ -1234,12 +1245,6 @@ def test_a_hand_over_applies_what_the_old_flusher_queued(
     successor.close()
     assert successor.join(TIMEOUT)
     del refused
-
-
-def test_a_topic_reconnects_once_per_cluster(ws_session: WsSession) -> None:
-    assert ws_session.connections.group.first_no_ack("/stocks", "T.AAPL")
-    assert not ws_session.connections.group.first_no_ack("/stocks", "T.AAPL")
-    assert ws_session.connections.group.first_no_ack("/options", "T.AAPL")
 
 
 def join(ws_session: WsSession) -> dm.MassiveSession:

@@ -24,6 +24,7 @@ from deephaven_massive._ingest.futures_calendar import (
     FuturesCalendar,
 )
 from deephaven_massive._namespaces import futures
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -149,14 +150,42 @@ def calendar(fetch: FakeFetch, clock: Clock) -> Iterator[FuturesCalendar]:
     sessions.close()
 
 
+class _Misses(logging.Handler):
+    # Gathers the miss WARNINGs one `correct` call logs, as `(symbol, message)`.
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.found: list[tuple[str, str]] = []
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage().removeprefix("test: ")
+        if message.startswith("futures session of "):
+            self.found.append((message.split()[3], message))
+
+
 def correct(
     calendar: FuturesCalendar, rows: list[tuple[str | None, str | None, str | None]]
 ) -> tuple[list[str | None], list[tuple[str, str]]]:
+    # The dates, and the misses this call logged (each is logged once per key and rule date).
     symbols = pa.array([s for s, _, _ in rows], pa.string())
     instants = pa.array([None if t is None else instant(t) for _, t, _ in rows], pa.int64())
     dates = pa.array([d for _, _, d in rows], pa.string())
-    fixed, misses = calendar.correct(symbols, instants, dates)
-    return fixed.to_pylist(), misses
+    handler = _Misses()
+    owner = logging.getLogger("deephaven_massive._ingest.futures_calendar")
+    owner.addHandler(handler)
+    try:
+        fixed = calendar.correct(symbols, instants, dates)
+    finally:
+        owner.removeHandler(handler)
+    return fixed.to_pylist(), handler.found
+
+
+def null_date(symbol: str, why: str, day: str) -> str:
+    return (
+        f"futures session of {symbol} not confirmed: {why}; its rows get a null Date, since "
+        f"the 17:00 Chicago rule's {day} may be wrong (a holiday or an early pre-open moves the "
+        "session); their Timestamp and every other column are kept, and the stream keeps running"
+    )
 
 
 def idle(calendar: FuturesCalendar) -> None:
@@ -188,9 +217,9 @@ def test_watch_looks_up_products_then_loads_their_schedules(
         "limit": 1000,
     }
     # ESM4 takes ES (the first row naming it), whose Monday session opened on Thursday; ESU4
-    # has no product in the answer, so its rows are misses.
+    # has no product in the answer, so its rows are misses, with no date.
     dates, misses = correct(calendar, [FOLDED, ("ESU4", "2024-03-28T15:00:00", "2024-03-28")])
-    assert dates == ["2024-04-01", "2024-03-28"]
+    assert dates == ["2024-04-01", None]
     assert [symbol for symbol, _ in misses] == ["ESU4"]
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
 
@@ -314,22 +343,17 @@ def test_a_lookup_still_loading_after_a_minute_makes_misses(
     assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
     clock.now += PATIENCE - 1
     assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
-    # A minute after it was asked for, its rows are misses, logged once.
+    # A minute after it was asked for, its rows are misses, logged once: the rule's date may be
+    # wrong without the schedule, so they get none.
     clock.now += 1
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [FOLDED, FOLDED])
-    assert dates == ["2024-03-29", "2024-03-29"]
+    assert dates == [None, None]
     assert misses == [
-        (
-            "ESM4",
-            (
-                "futures session of ESM4 not confirmed: its schedule was not loaded after 60 s; "
-                "its rows keep the session the 17:00 Chicago rule gives them, 2024-03-29"
-            ),
-        )
+        ("ESM4", null_date("ESM4", "its schedule was not loaded after 60 s", "2024-03-29"))
     ]
     assert caplog.text.count("not loaded after 60 s") == 1
-    # The rows keep a date, so a miss is stale data to know about, not a broken result.
+    # The stream keeps running with every other column: something to know, not a failure.
     assert {r.levelno for r in caplog.records} == {logging.WARNING}
     # Once it loads, the rows place again.
     fetch.release.set()
@@ -345,18 +369,10 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [row, row])
         again = correct(calendar, [row])
-    assert dates == ["2024-04-02", "2024-04-02"]
-    assert misses == [
-        (
-            "ESM4",
-            (
-                "futures session of ESM4 not confirmed: its loaded schedule (ES) ends with the "
-                "session of 2024-04-01; its rows keep the session the 17:00 Chicago rule gives "
-                "them, 2024-04-02"
-            ),
-        )
-    ]
-    assert again == (["2024-04-02"], misses)  # every batch shows it; the log once
+    assert dates == [None, None]
+    why = "its loaded schedule (ES) ends with the session of 2024-04-01"
+    assert misses == [("ESM4", null_date("ESM4", why, "2024-04-02"))]
+    assert again == ([None], [])  # every batch's rows have no date; the log is once
     assert caplog.text.count("not confirmed") == 1
     # The miss asked for a reload, which the spacing allows once the schedule's own load aged:
     # misses within `RELOAD_SPACING` of the load make no request, one after it makes one.
@@ -383,7 +399,7 @@ def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesCa
     # close of the last loaded session lies past every loaded session.
     watched(calendar, "ESM4")
     dates, misses = correct(calendar, [("ESM4", "2024-04-01T21:00:00", "2024-04-01")])
-    assert dates == ["2024-04-01"]
+    assert dates == [None]
     assert "its loaded schedule (ES) ends with the session of 2024-04-01" in misses[0][1]
     # A second earlier, the row is inside it.
     assert correct(calendar, [("ESM4", "2024-04-01T20:59:59", "2024-04-01")]) == (
@@ -403,16 +419,8 @@ def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
 ) -> None:
     watched(calendar, "NOPE5")
     _, misses = correct(calendar, [("NOPE5", "2024-03-28T15:00:00", "2024-03-28")])
-    assert misses == [
-        (
-            "NOPE5",
-            (
-                "futures session of NOPE5 not confirmed: Massive's futures contracts do not "
-                "list it; its rows keep the session the 17:00 Chicago rule gives them, "
-                "2024-03-28"
-            ),
-        )
-    ]
+    why = "Massive's futures contracts do not list it"
+    assert misses == [("NOPE5", null_date("NOPE5", why, "2024-03-28"))]
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH]  # asked within the spacing: no request
     clock.now += SPACING
@@ -620,7 +628,7 @@ def test_the_worker_outlives_an_unexpected_error(
     # An answer the calendar cannot read (here a defect's ValueError) is a failed lookup: its
     # rows are misses, and the worker keeps serving later lookups.
     fetch.answers[CONTRACTS_PATH] = ValueError("bad answer")
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert "futures schedules: a lookup failed. This is a bug in deephaven-massive." in caplog.text

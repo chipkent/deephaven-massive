@@ -420,18 +420,20 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
 @pytest.mark.settles("11")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
-def test_the_options_topic_cap_counts_topics_or_contracts(
+def test_the_options_cap_counts_contracts_or_topics(
     probe: OpenProbe, *, live_rest: RestClient, evidence: Evidence
 ) -> None:
-    """Whether Massive's options cap of 1,000 counts topics or contracts.
+    """Whether Massive's options cap of 1,000 counts contracts or topics.
 
-    The library counts topics, the stricter reading. Subscribes 501 far-dated SPY contracts
-    (expiring a year or more out, so their quote streams are quiet) on both `T` and `Q`, 1,002
-    topics, and records the acknowledgements and refusals, stopping as soon as every topic is
-    answered; rows are not kept. Reading it: a refusal past 1,000 topics confirms that topics
-    count; all 1,002 acknowledged means contracts count and the library's cap could be relaxed.
-    Needs an options plan with real-time trades and quotes on the WebSocket: refused ones (a
-    Business plan without the expansion) skip, naming the plan.
+    The library counts contracts, as Massive documents the cap ("1,000 option contracts"), so
+    it lets one connection carry the trades and the quotes of 1,000 contracts. This subscribes
+    exactly that: 1,000 far-dated SPY contracts (expiring a year or more out, so their quote
+    streams are quiet) on both `T` and `Q`, 2,000 topics, and records the acknowledgements and
+    refusals, stopping as soon as every topic is answered; rows are not kept. Reading it: all
+    2,000 acknowledged confirms contracts count; refusals past 1,000 topics mean topics count,
+    and then the refused topics' streams fail with Massive's message while the rest keep
+    running. Needs an options plan with real-time trades and quotes on the WebSocket: refused
+    ones (a Business plan without the expansion) skip, naming the plan.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(
@@ -440,10 +442,10 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
         {"underlying_ticker": "SPY", "expiration_date.gte": far, "limit": 1000},
         bucket="options",
     ).rows
-    tickers = [str(row["ticker"]) for row in contracts][:501]
+    tickers = [str(row["ticker"]) for row in contracts][:1000]
     topics = [f"T.{t}" for t in tickers] + [f"Q.{t}" for t in tickers]
-    if len(topics) <= 1000:
-        pytest.skip(f"only {len(topics)} topics: the cap of 1,000 would not be exceeded")
+    if len(tickers) < 1000:
+        pytest.skip(f"only {len(tickers)} far-dated SPY contracts listed; the test needs 1,000")
     made = probe("options", _STATUSES)
     made.send("subscribe", topics)
     records = made.wait(lambda r: r.answered(topics), 30.0)

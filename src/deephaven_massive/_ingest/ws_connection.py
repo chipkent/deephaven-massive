@@ -18,13 +18,14 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
-- **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
+- **The options cap.** An `/options` connection carries the topics of at most `OPTIONS_CAP`
+  contracts.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
 `ConnectionGroup` is what sessions share: sessions in one process with the same API key and
 equal connection settings (`CONNECTION_SETTINGS`, and the same Deephaven update graph) attach
 to one group, so their streams ride the same connections, and a connection is leased per
-stream. The group also holds the shared futures calendar and the record of `NO_ACK` topics.
+stream. The group also holds the shared futures calendar.
 Each session's own registry of streams and leases, and its `StreamTransport`, are `ws.py`'s
 (`WsConnections`, `WsTransport`); a `ClientFactory` builds each connection's client.
 
@@ -41,7 +42,6 @@ the same leases under the group's one lock, and a move to another host acts on b
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import itertools
 import logging
@@ -71,6 +71,7 @@ from deephaven_massive._ingest.subscriptions import (
     Timer,
     channel_of,
     stream_topics,
+    symbol_of,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list, log_failure
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
@@ -115,9 +116,10 @@ IDLE_GRACE: Final = 30.0
 """Seconds a connection with no stream attached stays open before it closes itself."""
 
 OPTIONS_CAP: Final = 1000
-"""The most explicit topics one `/options` connection carries. Massive allows 1,000 option
-contracts per connection; whether it counts contracts or topics is not documented, so the
-library counts topics (`T.X` and `Q.X` are two), the stricter reading. Wildcards count zero."""
+"""The most contracts one `/options` connection carries topics for. Massive documents "1,000
+option contracts" per connection, so the library counts contracts as written: `T.X` and `Q.X`
+count once together. Wildcards count zero. If the server counts otherwise and refuses topics,
+only the refused topics' streams fail, with Massive's message."""
 
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
@@ -399,7 +401,6 @@ class Connection:
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
             on_step_refused=self._step_refused,
-            first_no_ack=functools.partial(group.first_no_ack, self.path),
             on_change=self._changed,
         )
         # Loop-confined from here on.
@@ -1223,8 +1224,11 @@ class Connection:
         Returns:
             The text, with the topics wanted and deferred now.
         """
-        deferred = len(self.subscriptions.deferred)
-        return f"over capacity: {self.subscriptions.explicit}/{OPTIONS_CAP}; {deferred} deferred"
+        deferred = len({symbol_of(t) for t in self.subscriptions.deferred})
+        return (
+            f"over capacity: {self.subscriptions.contracts}/{OPTIONS_CAP} contracts; "
+            f"{deferred} deferred"
+        )
 
     # --- loop thread: diagnostics --------------------------------------------------------------
 
@@ -1471,9 +1475,9 @@ class ConnectionGroup:
     stream (`attach`) and detaches when the session closes or is freed (`detach`); the group
     leaves the process's registry with its last session. The group owns what belongs to the
     connections rather than to a session: the connections by URL, the connection and the
-    session of each stream, the record of `NO_ACK` topics, the crypto pairs its sessions
-    looked up, and the server's real-time verdict (`reroute`), which moves a connection with
-    every session's streams and is kept by (class, family) for every session's later streams.
+    session of each stream, the crypto pairs its sessions looked up, and the server's real-time
+    verdict (`reroute`), which moves a connection with every session's streams and is kept by
+    (class, family) for every session's later streams.
     It holds no session core. Its lock, a leaf lock (`lock`), guards all of it and each
     connection's leases, users, failure, and options-cap bookkeeping; no Deephaven call,
     network call, or wait happens under it, and a session's `registry_lock` is never taken
@@ -1525,7 +1529,6 @@ class ConnectionGroup:
         self.streams: dict[int, Connection] = {}
         self.owners: dict[int, WsConnections] = {}
         self.sessions: set[WsConnections] = set()
-        self._no_acked: set[tuple[str, str]] = set()
         self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
@@ -1670,24 +1673,6 @@ class ConnectionGroup:
         if not open_:
             raise MassiveError("every session of the WebSocket connection group has closed")
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
-
-    def first_no_ack(self, path: str, topic: str) -> bool:
-        """Record a topic's `NO_ACK`; tell whether it is the topic's first on the cluster.
-
-        Kept here, not per connection, so a topic reconnects at most once for the group, also
-        across an idle close or a verdict's move. Takes the lock briefly.
-
-        Args:
-            path: The cluster path of the connection, such as `/stocks`.
-            topic: The topic.
-
-        Returns:
-            True for the first `NO_ACK` of the topic on the cluster.
-        """
-        with self.lock:
-            first = (path, topic) not in self._no_acked
-            self._no_acked.add((path, topic))
-        return first
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:
         """Take a connection out of the registry, so the next stream opens a new one.

@@ -702,31 +702,34 @@ def test_static_options_beyond_the_cap_raise(
     monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 2)
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "O:SPY251219C00620000"]
-    with pytest.raises(ValueError, match="3 new option topics and 0 in use exceed the 2"):
+    with pytest.raises(ValueError, match="3 new option contracts and 0 in use exceed the 2"):
         ws_session.query(OPTIONS, contracts).blink()
     first = ws_session.query(OPTIONS, contracts[:2]).blink()
-    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+    with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
         ws_session.query(OPTIONS, contracts[2:]).blink()
     every = ws_session.query(OPTIONS, dm.ALL).blink()  # a wildcard counts zero
     ws_session.session.release(first)
     ws_session.session.release(every)
 
 
-def test_the_cap_message_counts_topics_not_contracts(
+def test_the_cap_counts_contracts_not_topics(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Quotes of the contracts already traded are new topics, though no contract is new.
-    monkeypatch.setattr(ws, "OPTIONS_CAP", 3)
-    monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 3)
+    # Massive counts "option contracts": quotes of contracts already traded add no contract.
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
+    monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 2)
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
     trades = ws_session.query(OPTIONS, contracts).blink()
+    quotes = ws_session.query(OPTION_QUOTES, contracts).blink()
+    ws_session.subscribed("Q.O:SPY251219C00610000")
     with pytest.raises(
         ValueError,
-        match=r"^test.option_quotes: 2 new option topics and 2 in use exceed the 3 topics one "
-        r"/options connection carries; a topic is one contract on one channel",
+        match=r"^test.option_quotes: 1 new option contracts and 2 in use exceed the 2 contracts "
+        r"one /options connection carries; a contract's trades and quotes count once",
     ):
-        ws_session.query(OPTION_QUOTES, contracts).blink()
+        ws_session.query(OPTION_QUOTES, ["O:SPY251219C00620000"]).blink()
     ws_session.session.release(trades)
+    ws_session.session.release(quotes)
 
 
 def test_reactive_options_beyond_the_cap_are_deferred(
@@ -747,7 +750,7 @@ def test_reactive_options_beyond_the_cap_are_deferred(
     assert (row["State"], row["Deferred"], row["Error"]) == (
         "RUNNING",
         1,
-        "over capacity: 2/1; 1 deferred",
+        "over capacity: 2/1 contracts; 1 deferred",
     )
     watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
     ws_session.subscribed("T.O:SPY251219C00610000")
@@ -1046,7 +1049,7 @@ def test_contracts_of_opening_streams_count_against_the_cap(
     connection = ws_session.connection("wss://socket.test/options")
     with ws_session.connections.group.lock:
         connection.cap_pending[99] = frozenset({"T.O:SPY251219C00610000"})  # still opening
-        with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+        with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
             ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
         del connection.cap_pending[99]
     ws_session.session.release(first)
@@ -1167,7 +1170,7 @@ def test_contracts_a_wildcard_covers_still_count_against_the_cap(
     first = ws_session.query(OPTIONS, ["O:SPY251219C00600000", "O:SPY251219C00610000"]).blink()
     connection = ws_session.connection("wss://socket.test/options")
     ws_session.on_loop(connection, lambda: None)
-    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+    with pytest.raises(ValueError, match="1 new option contracts and 2 in use"):
         ws_session.query(OPTIONS, ["O:SPY251219C00620000"]).blink()
     assert connection.cap_pending == {}  # the opened stream counts through the admitted set
     ws_session.session.release(first)
@@ -1242,7 +1245,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
-    cap = "over capacity: 2/1; 1 deferred"
+    cap = "over capacity: 2/1 contracts; 1 deferred"
     wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == cap)
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
@@ -1285,7 +1288,7 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     def error() -> object:
         return streams_of(ws_session, dh_to_pylist)[0]["Error"]
 
-    cap = "over capacity: 2/1; 1 deferred"
+    cap = "over capacity: 2/1 contracts; 1 deferred"
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     fake_ws_server.auth_replies.append("max_connections")
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
@@ -1323,7 +1326,7 @@ def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
         ws_session.on_loop(connection, lambda: None)
         return streams_of(ws_session, dh_to_pylist)[0]["Error"]
 
-    cap = "over capacity: 2/1; 1 deferred"
+    cap = "over capacity: 2/1 contracts; 1 deferred"
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
     wait_for(lambda: error() == cap)  # fixing the row keeps the cap's warning

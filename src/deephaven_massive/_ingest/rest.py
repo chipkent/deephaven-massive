@@ -1513,11 +1513,10 @@ class RestEndpoints:
         Returns:
             The decision.
 
-        Errors: `EntitlementError` when the plan has no WebSocket access for the class,
-        `AuthenticationError` for a rejected key, and `MassiveError` for an undocumented
-        timeframe or a failed request; each is logged by the deciding caller, at DEBUG, or at
-        ERROR for a defect of the library. A
-        waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
+        Errors: `AuthenticationError` for a rejected key and `MassiveError` for a failed
+        request (a refused one is not an error; see `host_decision.decide`); each is logged by
+        the deciding caller, at DEBUG, or at ERROR for a defect of the library. A waiting
+        caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
         known = self._state.hosts.known_host(key)

@@ -34,7 +34,7 @@ become `Date`.
 
 - **Tick.** `Date` is the day zone's date of `Timestamp`; for futures it is Massive's
   `session_end_date`, or on the WebSocket, which sends none, the 17:00 Chicago rule corrected
-  by the schedules (`SessionDates`).
+  by the schedules (`SessionDates`), null for a row they cannot place.
 - **Intraday bar of n units.** `TimestampStart` is Massive's start and `TimestampEnd` the start
   plus n units (for a futures one-second WebSocket bar, the later of that and Massive's `e`).
   `Date` is the start's date, null when the bar ends on a later date; for futures it is the
@@ -244,7 +244,8 @@ class SessionDates(Protocol):
             dates: The rule's session dates, ISO text.
 
         Returns:
-            The dates to keep, ISO text, one per row.
+            The dates to keep, ISO text, one per row; null where the schedules cannot place
+            the row.
         """
         ...
 

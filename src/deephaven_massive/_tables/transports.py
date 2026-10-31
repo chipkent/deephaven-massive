@@ -133,10 +133,10 @@ class RestTransport(Protocol):
             The pair's decision: its host, its recency, and the evidence it rests on.
 
         Raises:
-            EntitlementError: The plan has no WebSocket access for the asset class.
             AuthenticationError: Massive rejected the API key.
-            MassiveError: The request failed, or Massive answered with a timeframe the
-                library does not know.
+            MassiveError: The request failed. A refused request is not an error: the class
+                then streams from the real-time host with `UNKNOWN` recency, and the WebSocket
+                server's own answer decides.
         """
         ...
 
@@ -336,12 +336,10 @@ class StreamTransport(Protocol):
             The stream's handle, carrying `stream_id`, its blink table, and its scope.
 
         Raises:
-            ValueError: If explicit options contracts would put more than 1,000 topics on the
+            ValueError: If explicit options contracts would put more than 1,000 contracts on the
                 session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides the
                 WebSocket host.
-            EntitlementError: If the plan has no WebSocket access for the class (the request
-                that decides the host is refused).
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
         """

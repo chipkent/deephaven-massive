@@ -35,6 +35,7 @@ __all__ = [
     "channel_of",
     "is_wildcard",
     "stream_topics",
+    "symbol_of",
     "wildcard",
 ]
 
@@ -79,6 +80,21 @@ def channel_of(topic: str) -> str:
     return topic.partition(".")[0]
 
 
+def symbol_of(topic: str) -> str:
+    """Return the symbol of a topic, in the wire's spelling.
+
+    On `/options` the symbol is the contract, so the topics of one contract on every channel
+    (`T.O:SPY251219C00650000`, `Q.O:SPY251219C00650000`) share it; the options cap counts it once.
+
+    Args:
+        topic: An exact topic, such as `T.AAPL`.
+
+    Returns:
+        The part after the first dot, such as `AAPL`; `*` for a wildcard.
+    """
+    return topic.partition(".")[2]
+
+
 def stream_topics(
     asset_class: AssetClass,
     channel: str,
@@ -115,10 +131,6 @@ class Sender(Protocol):
         """Send unsubscribe frames for `topics` in the generation."""
         ...
 
-    def reconnect(self) -> None:
-        """Close the current socket so the client reconnects under its backoff rules."""
-        ...
-
 
 class Timer(Protocol):
     """A scheduled call that can be cancelled (`asyncio.TimerHandle`)."""
@@ -147,28 +159,32 @@ class Subscriptions:
       send until each of its topics is acknowledged, refused, or `NO_ACK`. Unsubscriptions
       are not awaited.
 
-    **The options cap.** With a `cap`, at most that many explicit topics are admitted to the
-    wire; the rest are deferred, not failed. Topics of a static symbol list (`add(...,
+    **The options cap.** With a `cap`, the explicit topics of at most that many contracts are
+    admitted to the wire; the rest are deferred, not failed. Massive documents its limit as
+    "1,000 option contracts" per connection, so the cap counts contracts (`symbol_of`): the
+    trades and quotes of one contract count once. Contracts of a static symbol list (`add(...,
     static=True)`) are admitted first, since their verb already checked them against the cap;
-    a reactive table's topics then take the room left, the ones admitted before keeping their
-    place and the new ones entering in sorted order. The admitted set outlives a generation,
+    a reactive table's contracts then take the room left, the ones admitted before keeping
+    their place and the new ones entering in sorted order. A contract admitted on one channel
+    admits its other channels' topics too, at no cost. The admitted set outlives a generation,
     so a reconnect never reshuffles it. Every wanted explicit topic counts, also one covered by
     an acknowledged wildcard of its channel and so not on the wire meanwhile: the wildcard may
-    go at any time, and a static contract must never be deferred then.
+    go at any time, and a static contract must never be deferred then. If the server counts
+    otherwise and refuses topics, only the refused topics fail, with its message (`on_refused`).
 
     Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
-    an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`,
-    logs a WARNING (the topic's data is missing), and asks the client to reconnect if
-    `first_no_ack(topic)` says this is the topic's first `NO_ACK` (the session keeps that
-    record, so it survives this connection). A watchdog whose topic has left the wire or whose
-    generation has ended does nothing more.
+    an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`
+    and logs a WARNING (the topic's data may be missing). The topic stays wanted and on the
+    wire, an acknowledgement that arrives later still counts, and the connection is never
+    reconnected for it: a reconnect would cut every other stream on the connection over one
+    late answer. A watchdog whose topic has left the wire or whose generation has ended does
+    nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused,
     `on_step_refused(status)` for a refusal naming no topic of a step none of whose topics was
     resolved (returning True when the connection handles it as the server's real-time
-    verdict), `first_no_ack(topic)`, and `on_change()` after every change the connection's
-    diagnostics row shows.
+    verdict), and `on_change()` after every change the connection's diagnostics row shows.
 
     Example:
         ::
@@ -180,7 +196,6 @@ class Subscriptions:
                 cap=None,
                 on_refused=lambda topics, message: None,
                 on_step_refused=lambda status: False,
-                first_no_ack=lambda topic: True,
                 on_change=lambda: None,
             )
             subscriptions.add(["T.AAPL"])
@@ -196,7 +211,6 @@ class Subscriptions:
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
         on_step_refused: Callable[[Status], bool],
-        first_no_ack: Callable[[str], bool],
         on_change: Callable[[], None],
     ) -> None:
         """Start with no topic wanted and no generation open.
@@ -206,11 +220,10 @@ class Subscriptions:
             call_later: Schedules a watchdog: `call_later(delay, callback, *args)` returning a
                 cancellable handle (the loop's `call_later`).
             ack_timeout: Seconds to wait for each acknowledgement (`MassiveConfig.ack_timeout`).
-            cap: The most explicit topics on the wire (1,000 for `/options`), or None.
+            cap: The most contracts whose explicit topics are on the wire (1,000 for
+                `/options`), or None.
             on_refused: Called with refused topics and the server's message.
             on_step_refused: Called for a refusal of a whole step that names no topic.
-            first_no_ack: Records a topic's `NO_ACK` for the session and tells whether it was
-                the topic's first.
             on_change: Called after every change of the counts or the deferred topics.
         """
         self._sender = sender
@@ -219,7 +232,6 @@ class Subscriptions:
         self._cap = cap
         self._on_refused = on_refused
         self._on_step_refused = on_step_refused
-        self._first_no_ack = first_no_ack
         self._on_change = on_change
         self.generation: int | None = None
         self._refs: Counter[str] = Counter()
@@ -291,7 +303,7 @@ class Subscriptions:
 
     @property
     def deferred(self) -> frozenset[str]:
-        """The options contracts the cap keeps off the wire, as of the last reconcile."""
+        """The topics of the contracts the options cap defers, as of the last reconcile."""
         return self._deferred
 
     @property
@@ -300,9 +312,14 @@ class Subscriptions:
         return frozenset(self._acked)
 
     @property
-    def explicit(self) -> int:
-        """How many explicit topics streams want and the server has not refused."""
-        return sum(1 for t in self._refs if not is_wildcard(t) and t not in self._refused)
+    def contracts(self) -> int:
+        """How many symbols have an explicit topic streams want and the server has not refused.
+
+        On `/options` these are the contracts the cap counts.
+        """
+        return len(
+            {symbol_of(t) for t in self._refs if not is_wildcard(t) and t not in self._refused}
+        )
 
     def counts(self) -> tuple[int, int, int, int]:
         """Return the counts a connection's diagnostics row shows.
@@ -495,13 +512,17 @@ class Subscriptions:
         """
         if self._cap is None:
             return
-        explicit = sorted(t for t in self._refs if not is_wildcard(t) and t not in self._refused)
-        static = [t for t in explicit if t in self._static][: self._cap]
-        room = self._cap - len(static)
-        kept = [t for t in explicit if t in self._admitted and t not in self._static][:room]
+        explicit = [t for t in self._refs if not is_wildcard(t) and t not in self._refused]
+        contracts = sorted({symbol_of(t) for t in explicit})
+        static = {symbol_of(t) for t in explicit if t in self._static}
+        before = {symbol_of(t) for t in self._admitted}
+        first = [c for c in contracts if c in static][: self._cap]
+        room = self._cap - len(first)
+        kept = [c for c in contracts if c in before and c not in static][:room]
         room -= len(kept)
-        new = [t for t in explicit if t not in self._admitted and t not in self._static][:room]
-        self._admitted = frozenset((*static, *kept, *new))
+        new = [c for c in contracts if c not in before and c not in static][:room]
+        admitted = {*first, *kept, *new}
+        self._admitted = frozenset(t for t in explicit if symbol_of(t) in admitted)
         self._deferred = frozenset(explicit) - self._admitted
 
     def _wire(self) -> set[str]:
@@ -553,6 +574,8 @@ class Subscriptions:
     def _fire(self, topic: str, generation: int, attempt: int) -> None:
         """A topic's acknowledgement is overdue: re-send it once, then mark it `NO_ACK`.
 
+        A `NO_ACK` topic stays wanted and subscribed, and nothing reconnects (see the class).
+
         Args:
             topic: The topic.
             generation: The generation the watchdog is bound to.
@@ -569,12 +592,12 @@ class Subscriptions:
             return
         self._pending.discard(topic)
         self._noack.add(topic)
-        first = self._first_no_ack(topic)
         logger.warning(
-            "no acknowledgement for %s after a re-send; %s",
+            "no acknowledgement for %s in generation %d after %.1f s and one re-send; it stays "
+            "subscribed and counts in NoAckTopics of m.connections(), and the connection is "
+            "not reconnected for it",
             topic,
-            "reconnecting" if first else "it stays wanted (it already caused a reconnect)",
+            generation,
+            2 * self._ack_timeout,
         )
-        if first:
-            self._sender.reconnect()
         self.reconcile()

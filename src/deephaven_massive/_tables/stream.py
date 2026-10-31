@@ -29,9 +29,10 @@ widened to the dataset schema, and the library's time columns filled (`row_times
 a bar's end, and `TimestampInsert`, the instant each row's frame arrived. Futures messages carry no
 session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected by the connection's
 `FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits; a row its
-schedules do not cover keeps the rule's date, and the streams that receive it show the miss in their
-`m.streams()` row. A row whose timestamp fails the bound fails only the streams that would have
-received it, and is dropped from the batch. The batch becomes one static Deephaven table
+schedules cannot place gets a null `Date` (the calendar logs it at WARNING), since the rule's date
+can be wrong there, and the stream keeps running with its `Error` untouched. A row whose
+timestamp fails the bound fails only the streams that would have received it, and is dropped
+from the batch. The batch becomes one static Deephaven table
 (`deephaven.arrow.to_table`), shared by the dataset's streams on the channel (`SharedBatch`). Each
 `dm.ALL` stream, and each symbol stream that holds every symbol of the batch, gets the whole batch;
 a symbol stream that holds none of them gets nothing. A symbol stream that holds exactly one of
@@ -206,14 +207,11 @@ class FuturesSessionDates(Protocol):
 
     The WebSocket transport gives a futures connection's flusher one
     (`_ingest/futures_calendar.py`); `ChannelPlan.convert` hands it the rule's dates of every
-    futures row. It never waits on the network: what its schedules do not cover yet keeps the
-    rule's date.
+    futures row. It never waits on the network.
     """
 
-    def correct(
-        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
-    ) -> tuple[pa.Array, list[tuple[str, str]]]:
-        """Return the rows' session dates, corrected by the schedules, and the new misses.
+    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
+        """Return the rows' session dates, corrected by the schedules.
 
         Args:
             symbols: The rows' canonical symbols, `string`.
@@ -222,8 +220,8 @@ class FuturesSessionDates(Protocol):
             dates: The 17:00 Chicago rule's session dates, ISO text.
 
         Returns:
-            The dates to keep, one per row; and each miss reported for the first time, as
-            `(symbol, message)`: a row its schedules cannot place, which keeps the rule's date.
+            The dates to keep, ISO text, one per row; null for a row the schedules cannot
+            place, whose rule date may be wrong.
         """
         ...
 
@@ -256,15 +254,12 @@ class Converted:
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
         null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
-        misses: The futures rows whose session the schedules could not place, reported for the
-            first time, as `(symbol, message)`; they keep the 17:00 Chicago rule's date.
     """
 
     batch: pa.Table
     failures: list[RowFailure]
     symbols: frozenset[str] = frozenset()
     null_symbols: bool = False
-    misses: tuple[tuple[str, str], ...] = ()
 
 
 class SharedBatch:
@@ -462,8 +457,7 @@ class ChannelPlan:
 
         Returns:
             The batch without the failing rows, one `RowFailure` per failing row in row order,
-            the batch's distinct symbols, and the futures session misses reported for the
-            first time.
+            and the batch's distinct symbols.
         """
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
@@ -491,17 +485,10 @@ class ChannelPlan:
                 failed = bad if failed is None else pc.call_function("or", [failed, bad])
             arrays[name] = widen(values, column_type.arrow_type)
         batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        misses: list[tuple[str, str]] = []
-
-        def corrected(symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
-            fixed, found = cast("FuturesSessionDates", sessions).correct(symbols, instants, dates)
-            misses.extend(found)
-            return fixed
-
         batch = self.times.fill(
             batch,
             received=pa.array(arrived, pa.int64()),
-            session_dates=None if sessions is None else corrected,
+            session_dates=None if sessions is None else sessions.correct,
         )
         rejected: list[RowFailure] = []
         if failed is not None:
@@ -517,7 +504,6 @@ class ChannelPlan:
             rejected,
             symbols=frozenset(s for s in distinct if s is not None),
             null_symbols=None in distinct,
-            misses=tuple(misses),
         )
 
     def _read_symbols(
@@ -1002,7 +988,6 @@ class Flusher:
         "_flush_lock",
         "_interval",
         "_sessions",
-        "_shown",
         "_stop",
         "_symbols",
         "_thread",
@@ -1038,8 +1023,6 @@ class Flusher:
         # Flush-lock state: the raw-to-canonical symbol map of each routed plan, at most
         # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
-        # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
-        self._shown: dict[int, str] = {}
         # Guarded by the backlog lock, a leaf lock.
         self._backlog_lock = threading.Lock()
         self._backlog = 0
@@ -1217,9 +1200,6 @@ class Flusher:
                         )
             _report_updates(updates)
             routed = [sink for sinks in routes.values() for sink in sinks]
-            if self._shown:  # forget the misses of streams no longer routed
-                live = {sink.stream_id for sink in routed}
-                self._shown = {i: m for i, m in self._shown.items() if i in live}
             if self._symbols:  # forget the spellings of datasets no longer routed
                 plans = {sink.plan for sink in routed}
                 self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
@@ -1271,7 +1251,7 @@ class Flusher:
             rows: The channel's rows of this flush, in arrival order.
             sinks: The channel's streams.
             arrived: When each row's frame arrived, epoch nanoseconds, one per row.
-            updates: Receives each stream's new published-row total and session-date misses.
+            updates: Receives each stream's new published-row total.
         """
         by_plan: dict[ChannelPlan, list[StreamSink]] = {}
         for sink in sinks:
@@ -1303,28 +1283,14 @@ class Flusher:
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
-        A futures session-date miss (a row the schedules cannot place, which keeps the 17:00
-        Chicago rule's date) is shown in the `Error` of every stream that receives its symbol,
-        written again only when the message changes; it does not fail the stream. A stream
-        whose next published rows all place clears it.
-
         Args:
             plan: The dataset's plan for the channel.
             rows: The channel's rows of this flush.
             readers: The dataset's streams on the channel.
             arrived: When each row's frame arrived, epoch nanoseconds, one per row.
-            updates: Receives each stream's new published-row total and session-date misses.
+            updates: Receives each stream's new published-row total.
         """
         converted = self._convert(plan, rows, arrived=arrived)
-        missed: set[int] = set()
-        for symbol, message in converted.misses:
-            for sink in readers:
-                if sink.receives(symbol):
-                    missed.add(sink.stream_id)
-                    if self._shown.get(sink.stream_id) != message:
-                        self._shown[sink.stream_id] = message
-                        found = updates.get(sink, StreamUpdate())
-                        updates[sink] = replace(found, error=message)
         for failure in converted.failures:  # one refused failure never fails another stream
             failing = [s for s in readers if failure.every_stream or s.receives(failure.symbol)]
             # A row the library cannot convert or read is its own defect, never expected.
@@ -1341,12 +1307,7 @@ class Flusher:
         for sink in readers:
             if sink.publish(shared):
                 found = updates.get(sink, StreamUpdate())
-                cleared = sink.stream_id not in missed and sink.stream_id in self._shown
-                if cleared:
-                    del self._shown[sink.stream_id]
-                updates[sink] = replace(
-                    found, rows_published=sink.rows_published, clear_error=cleared
-                )
+                updates[sink] = replace(found, rows_published=sink.rows_published)
 
     def _convert(
         self, plan: ChannelPlan, rows: list[dict[str, object]], *, arrived: list[int]

@@ -167,7 +167,7 @@ plan keeps its access to the month's end ([S4], [S5]).
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
-| Stocks Advanced; Options Advanced | $199 each | the LULD unit; the options topic cap |
+| Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether the options cap counts contracts or topics |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
 The bar-stamp checks read the most recent half day whose week has ended and the full trading
@@ -226,7 +226,7 @@ the trading day after a half day (its evidence marks that day `half day: yes`).
 
 Only the limit tests need a person: they exceed Massive's limits on purpose, so run them
 apart, after the run above, with no other client of the key. First the wide WebSocket tests
-(one frame of 1,000 crypto topics, 501 far-dated options contracts on two channels, and `XT.*`
+(one frame of 1,000 crypto topics, 1,000 far-dated options contracts on two channels, and `XT.*`
 with `XT.BTC-USD` for 30 s), then, last and alone, the second-connection test, which takes a
 second connection slot with the same key; if Massive drops the older connection instead of
 refusing the newer, the two sessions can drop each other until the test ends:
