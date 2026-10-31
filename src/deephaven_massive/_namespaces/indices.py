@@ -138,6 +138,7 @@ SNAPSHOTS: Final = DatasetSpec(
     summary="The current state of each index: its level, its session so far, and its status.",
     asset_class=AssetClass.INDICES,
     fetch_path=_SNAPSHOT,
+    serves_current_data=True,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,

@@ -573,6 +573,7 @@ def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:
         on_status=lambda *_: None,
         on_data=lambda *_: None,
         on_state=lambda *_: None,
+        reconnect_deadline=lambda: None,
     )
     assert isinstance(client, _massive.WsClient)
     assert client._thread.name == "massive #7 ws socket.test/stocks"
@@ -1502,6 +1503,24 @@ def test_a_reconnect_that_drops_before_every_topic_is_acknowledged_keeps_the_out
     assert _left(ws_session, connection, 2) < msft  # MSFT keeps its timer
     ws_session.session.release(result)
     ws_session.session.release(other)
+
+
+def test_the_reconnect_deadline_is_the_earliest_held_down_stream_less_the_ack_timeout(
+    *, ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    deadline = connection._reconnect_deadline
+    assert ws_session.on_loop(connection, deadline) is None  # nothing held down: no limit
+    fake_ws_server.silent = {"T.AAPL"}  # the reconnect's subscription stays unanswered
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    left = _left(ws_session, connection, 1)
+    seen = cast("float", ws_session.on_loop(connection, deadline))
+    # The stream's time left, less the 5 s acknowledgement timeout, read a moment later.
+    assert left - 5.0 - 1.0 < seen <= left - 5.0
+    ws_session.session.release(result)
 
 
 def test_a_stream_opened_during_an_outage_gets_its_own_limit(

@@ -14,10 +14,13 @@ Every dataset is a method on a namespace grouped by asset class (`stocks`, `opti
 `partners`). Each method returns an immutable query, and a verb on that query picks the table
 shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(interval)`, or
 `history(start, end=None)`. Every query also has `columns()`, a table of its columns and what
-each one means. The same code runs on every Massive plan: the library finds the right WebSocket
-host for your key, and a dataset your plan lacks fails with a message that says what was
-refused and, where the library has another way to read the data, names it. The library runs
-inside an existing Deephaven server (it needs an active `ExecutionContext`) and never starts one.
+each one means. Live data is real-time by default: Massive's Starter and Developer plans
+stream stocks, options, indices, and futures 15 minutes late (10 for futures), so on those plans
+list the subscription in `MassiveConfig(delayed_subscriptions=...)`, or its live tables and its
+current snapshots fail with a message that names that setting. A dataset your plan lacks fails
+with a message that says what was refused and, where the library has another way to read the
+data, names it. The library runs inside an existing Deephaven server (it needs an active
+`ExecutionContext`) and never starts one.
 
 Example:
     In the Deephaven console, with your key in `MASSIVE_API_KEY`::
@@ -26,7 +29,9 @@ Example:
 
         m = dm.MassiveSession()
 
-        # A live table: each symbol's latest trade, updated as trades arrive.
+        # A live table: each symbol's latest trade, updated as trades arrive. On a Stocks
+        # Starter or Developer plan, which streams delayed data, create the session with
+        # dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})).
         latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
 
         # A history table: Apple's daily bars for one week, read once.

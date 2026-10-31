@@ -19,6 +19,12 @@ week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-06-02", "2025-06-06"
 latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
 ```
 
+Live data is real-time unless you ask for delayed data. Massive's Stocks Starter and Developer
+plans stream 15 minutes late, so on them the live line stops with an error that names the fix:
+open the session with
+`dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))`. See
+[real-time or delayed](#real-time-or-delayed).
+
 This README is the whole user guide. The [dataset reference](docs/datasets/README.md) lists
 every dataset with its arguments, its columns, and what each Massive plan includes.
 
@@ -55,16 +61,23 @@ export MASSIVE_S3_SECRET_ACCESS_KEY="your-secret-access-key"
 ```
 
 **Settings in code.** Every setting can also be passed to `dm.MassiveConfig`;
-`help(dm.MassiveConfig)` lists them all. Two matter from the start. `rest_basic_subscriptions`
-names the subscriptions you hold on Massive's free Basic plan, which allows five REST requests a
-minute, so the library paces its requests from the first one instead of learning the limit from
-Massive's first refusal. `max_concurrency` (default 8) is how many requests or file reads run at
-once.
+`help(dm.MassiveConfig)` lists them all. Three matter from the start.
+`rest_basic_subscriptions` names the subscriptions you hold on Massive's free Basic plan, which
+allows five REST requests a minute, so the library paces its requests from the first one instead
+of learning the limit from Massive's first refusal. `delayed_subscriptions` names the
+subscriptions whose live data you accept 15 minutes late (10 for futures): list each one your
+Starter or Developer plan holds, since those plans stream delayed data and the library otherwise
+serves only real-time data (see [real-time or delayed](#real-time-or-delayed)).
+`max_concurrency` (default 8) is how many requests or file reads run at once.
 
 ```python
 import deephaven_massive as dm
 
-config = dm.MassiveConfig(rest_basic_subscriptions={dm.Subscription.STOCKS})
+# Stocks on Basic; options on Starter, which streams delayed data.
+config = dm.MassiveConfig(
+    rest_basic_subscriptions={dm.Subscription.STOCKS},
+    delayed_subscriptions={dm.Subscription.OPTIONS},
+)
 m = dm.MassiveSession(config)
 ```
 
@@ -82,9 +95,12 @@ calls a *verb* that makes the table:
 
 ```python
 import deephaven_massive as dm
-from deephaven.time import dh_today
+from deephaven.time import dh_today, to_j_time_zone
 
 m = dm.MassiveSession()
+
+# Today in New York, the market's day, whatever the server's own time zone.
+today = dh_today(to_j_time_zone("America/New_York"))
 
 # History: Apple's daily bars for one week, a static table.
 bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
@@ -93,16 +109,23 @@ week = bars.history("2025-06-02", "2025-06-06")
 # What each column of those bars means: Name, Type, Description, SuppliedBy.
 columns = bars.columns()
 
-# Live: the latest trade of each symbol (needs a Stocks plan that streams trades).
+# Live: the latest trade of each symbol (needs a Stocks plan that streams trades; on Starter
+# or Developer, open the session with delayed_subscriptions, as the next paragraph says).
 latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
 
 # Live on any plan: re-read today's Apple headlines every five minutes.
-headlines = m.reference.news("AAPL", start=dh_today()).poll(300)
+headlines = m.reference.news("AAPL", start=today).poll(300)
 ```
 
 Click a table's name to open it. `week` has one row per trading day; `latest` changes as AAPL
 and MSFT trade (during market hours); `headlines` grows as articles appear. Hover over a column
 header in the web UI to read what the column means.
+
+`latest` is real-time data, the default. Stocks Starter and Developer plans stream data 15
+minutes late, so on them `latest` stops at once with a `dm.EntitlementError` that names the
+fix: create the session with
+`dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))` and run
+the line again. See [real-time or delayed](#real-time-or-delayed).
 
 Crypto trades around the clock, so it is the easiest market to watch at night or at weekends:
 `m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).last_by()` (a paid Currencies plan).
@@ -168,7 +191,9 @@ naming the verbs the query has and, where one exists, the dataset that has the v
 | `m.partners.etf_global` | ETF Global constituents, fund flows, and analytics |
 | `m.partners.fable` | Fable consumer-spending data |
 | `m.partners.tmx` | TMX corporate events |
-| `m.snapshots` | the current state of any mix of tickers, across asset classes |
+
+`m.snapshots(...)` is a method of the session itself, not a namespace: the current state of any
+mix of tickers across asset classes, such as `m.snapshots(["AAPL", "O:SPY251219C00600000"])`.
 
 `dm.datasets()` lists every dataset in one static table, with no session or key needed; filter
 it to find what you want:
@@ -192,16 +217,107 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 | stream minute bars | `m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()` |
 | keep the current state of symbols without a stream | `m.stocks.snapshots(["AAPL", "MSFT"]).poll(15)`, where your plan includes snapshots |
 | follow a watchlist I can edit | pass a table with a `Symbol` column: see [`symbols`](#symbols) |
-| backfill history, then continue live | the recipe in [split adjustment](#split-adjustment) |
+| backfill history, then continue live | the recipe in [backfill, then live](#backfill-then-live) |
+| start a live board with values before the first trade | the recipe in [seed a live board](#seed-a-live-board) |
+| read an option chain with its greeks | `m.options.chain("SPY").fetch()`: see [option chain](#option-chain) |
 | read a long range without freezing the console | `history(..., wait=False)`: see [live tables](#live-tables) |
 | list a company's dividends | `m.stocks.dividends("AAPL", start="2025-01-01").fetch()` |
-| follow news as it appears | `m.reference.news("AAPL", start=dh_today()).poll(300)` |
+| follow news as it appears | `m.reference.news("AAPL", start=today).poll(300)`, with `today` as [first tables](#first-tables) sets it |
 | stream the contracts of a futures product | `m.futures.trades(m.futures.contracts(product_code="ES").fetch()).last_by()` |
 | find a ticker by name | `m.reference.tickers(search="Nvidia").fetch()` |
 | see what a column means | `query.columns()`, or hover over the column header |
 | see what the library is doing | `m.streams()`, `m.connections()`, `m.rate_limits()`: see [diagnostics](#diagnostics) |
 | stop a live table now | `m.release(table)`: see [live tables](#live-tables) |
 | read the library's log | `dm.enable_debug_logging()`: see [troubleshooting](#troubleshooting) |
+
+<a id="recipes"></a>
+
+## Recipes
+
+<a id="backfill-then-live"></a>
+
+### Backfill, then live
+
+A table that starts with history and continues with the stream: today's minute bars so far,
+then each new one as it closes. The function opens the stream first, so no bar falls between
+the two, and keeps one row per minute:
+
+```python
+from deephaven import merge
+
+
+def history_and_live(symbol, start):
+    """Adjusted minute bars from `start`, then live ones; call it again after a split."""
+    bars = m.stocks.bars(symbol, dm.Timespan.MINUTE)
+    live = bars.append_only()
+    past = bars.history(start)
+    return merge([past, live]).last_by(["Symbol", "TimestampStart"])
+```
+
+A minute both hold shows the stream's bar. Massive recomputes REST bars with trades reported
+late, so a minute's REST bar can differ slightly from the live one. Build the table again after
+a split: see [split adjustment](#split-adjustment).
+
+<a id="seed-a-live-board"></a>
+
+### Seed a live board
+
+`last_by()` starts empty and fills in as each symbol trades, so a quiet symbol stays missing.
+To start every row at once, put a snapshot under the stream: the snapshot's row shows until the
+symbol's first trade replaces it. Both tables need the same columns, so take the few you show:
+
+```python
+from deephaven import merge
+
+watch = ["AAPL", "MSFT", "NVDA"]
+seed = (
+    m.stocks.snapshots(watch)
+    .fetch()
+    .view(["Symbol", "Price = LastTradePrice", "Timestamp = LastTradeSipTimestamp"])
+)
+trades = m.stocks.trades(watch).last_by().view(["Symbol", "Price", "Timestamp"])
+board = merge([seed, trades]).last_by("Symbol")
+```
+
+The snapshot needs a Stocks plan that includes snapshots, and, like the stream, real-time data
+unless the session lists `dm.Subscription.STOCKS` in `delayed_subscriptions`.
+
+<a id="option-chain"></a>
+
+### Option chain with greeks
+
+`m.options.chain(underlying)` returns one row per contract of the underlying: its details, last
+quote and trade, implied volatility, greeks, and open interest. Filter it by expiration or
+strike, and `poll()` it to keep it current:
+
+```python
+from deephaven.time import dh_today, to_j_time_zone
+
+calls = m.options.chain(
+    "SPY",
+    contract_type=dm.ContractType.CALL,
+    filters={"expiration_date_gte": dh_today(to_j_time_zone("America/New_York"))},
+    sort="expiration_date",
+    limit=500,
+)
+greeks = calls.fetch().view(
+    [
+        "Symbol",
+        "DetailsExpirationDate",
+        "DetailsStrikePrice",
+        "ImpliedVolatility",
+        "GreeksDelta",
+        "GreeksGamma",
+        "GreeksTheta",
+        "GreeksVega",
+        "OpenInterest",
+    ]
+)
+```
+
+Massive leaves the greeks out for some contracts, such as those deep in the money; their
+columns are null then. Options Starter and Developer serve the chain 15 minutes late, which the
+session must accept with `delayed_subscriptions={dm.Subscription.OPTIONS}`.
 
 ## Concepts
 
@@ -411,28 +527,12 @@ applies stock dividends (`AdjustmentType` `stock_dividend`) too; Massive does no
 whether its own adjustment does, so the two can differ around one.
 
 **History and live together.** Live bars are as traded, which is also the adjusted basis until
-the next split, so adjusted history and live bars join without a seam. On a split's execution
-date every price moves to the new basis, so a table that runs across a split, or joins adjusted
-history to live bars, shows a step there: build it again after a split. The recipe below
-backfills minute bars, then continues live; it opens the stream first, so no bar falls between
-the two:
-
-```python
-from deephaven import merge
-
-
-def history_and_live(symbol, start):
-    """Adjusted minute bars from `start`, then live ones; call it again after a split."""
-    bars = m.stocks.bars(symbol, dm.Timespan.MINUTE)
-    live = bars.append_only()
-    past = bars.history(start)
-    return merge([past, live]).last_by(["Symbol", "TimestampStart"])
-```
-
-A minute both hold shows the stream's bar. Massive recomputes REST bars with trades reported
-late, so a minute's REST bar can differ slightly from the live one. A long download that runs
-while Massive applies a split overnight can return pages on both bases, which nothing can
-detect: download again after the split. The indicators use Massive's own basis, adjusted.
+the next split, so adjusted history and live bars join without a seam: see
+[backfill, then live](#backfill-then-live). On a split's execution date every price moves to
+the new basis, so a table that runs across a split, or joins adjusted history to live bars,
+shows a step there: build it again after a split. A long download that runs while Massive
+applies a split overnight can return pages on both bases, which nothing can detect: download
+again after the split. The indicators use Massive's own basis, adjusted.
 
 <a id="live-tables"></a>
 
@@ -528,8 +628,11 @@ watched = quotes.natural_join(marks, on="Symbol", joins="Watched").where("Watche
 Massive sells one subscription per asset class: Stocks, Options, Indices, Currencies (forex and
 crypto together), and Futures, each from the free Basic plan up to paid plans. One account can
 hold any mix and upgrade mid-month. Reference data, economic data, and news come with every
-account; partner datasets are sold separately. The same code runs on every plan: the library
-never asks which plan you hold, and when something is out of reach, it says so.
+account; partner datasets are sold separately. The library does not model plans: it reads what
+you ask for, and when something is out of reach, it says so. Two settings tell it what it cannot
+learn on its own: `rest_basic_subscriptions`, the subscriptions on Basic, so it paces their
+requests from the start, and `delayed_subscriptions`, the subscriptions whose delayed data you
+accept, which Starter and Developer plans need (see [real-time or delayed](#real-time-or-delayed)).
 
 What a plan changes, in the library's terms:
 
@@ -578,8 +681,8 @@ stream never moves from one feed to the other.
 - **Not listed, the default: real-time.** When Massive shows that your plan's data is delayed,
   the stream verb raises `dm.EntitlementError` with what Massive reported and the exact line
   to add. A `fetch()` or `poll()` of current data (snapshots, last trades and quotes, movers,
-  and every other dataset of the subscription) fails the same way when Massive labels its
-  answer `DELAYED`, so you never get delayed data you did not ask for. In
+  the option chain) fails the same way when Massive labels its answer `DELAYED`, naming the
+  tickers, so you never get delayed prices you did not ask for. In
   [`m.snapshots()`](docs/datasets/snapshots.md), which mixes classes, each row is held to its
   own class's subscription.
 - **Listed: delayed.** The subscription's streams read the delayed feed, even when your plan is
@@ -587,7 +690,10 @@ stream never moves from one feed to the other.
   `poll()` return whatever your plan serves, and the table's description says so.
 - Forex and crypto are real-time on every plan, so `dm.Subscription.CURRENCIES` cannot be
   listed; fair-market-value streams (Business plans) are real-time only.
-- `history()` reads past data, so this setting does not affect it.
+- Past data is never checked, so this setting does not affect it: `history()`, and the
+  `fetch()` and `poll()` of the previous day's bar, a day's open and close, the indicators,
+  dividends, splits, and the other datasets that are not the market's current state. Massive
+  labels some of them `DELAYED` on Basic and Starter plans, but their rows are final.
 - `m.streams()` shows each live table's `Recency`, and each live table's description, shown in
   the web UI, says what it knows of it. Nothing is shown as real-time without proof: a stream
   is real-time by its feed, and a `poll()` table only once Massive labels its data real-time;

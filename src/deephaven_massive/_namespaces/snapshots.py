@@ -26,6 +26,7 @@ SNAPSHOTS: Final = DatasetSpec(
     name="snapshots",
     summary="The current state of tickers of any asset classes, from Massive's unified snapshot.",
     fetch_path="/v3/snapshot",
+    serves_current_data=True,
     keys={
         (Transport.REST, "/v3/snapshot"): SourceKeys(
             symbol=KeySpec("Ticker"),

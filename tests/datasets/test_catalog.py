@@ -1520,17 +1520,22 @@ def test_the_naming_gate_catches_a_vendor_timestamp_outside_a_key() -> None:
 
 
 @pytest.mark.parametrize(
-    ("asset_class", "path", "subscription"),
+    ("asset_class", "path", "current", "subscription"),
     [
-        (AssetClass.OPTIONS, "/v3/snapshot/options/{u}", Subscription.OPTIONS),
-        (AssetClass.CRYPTO, "/v1/last/crypto/{from}/{to}", Subscription.CURRENCIES),
-        (AssetClass.OPTIONS, "/v3/reference/options/contracts", None),
-        (ClassFromPrefix.ANY, "/v3/snapshot", None),
-        (AssetClass.STOCKS, None, None),
+        (AssetClass.OPTIONS, "/v3/snapshot/options/{u}", True, Subscription.OPTIONS),
+        (AssetClass.CRYPTO, "/v1/last/crypto/{from}/{to}", True, Subscription.CURRENCIES),
+        (ClassFromPrefix.ANY, "/v3/snapshot", True, None),
+        # Past data, which Massive labels DELAYED on a delayed plan though its rows are final.
+        (AssetClass.STOCKS, "/v2/aggs/ticker/{stocksTicker}/prev", False, None),
+        (AssetClass.STOCKS, None, False, None),
     ],
 )
-def test_the_current_subscription_is_the_classes_unless_reference_or_cross_class(
-    asset_class: AssetClass | ClassFromPrefix, path: str | None, subscription: Subscription | None
+def test_the_current_subscription_is_the_classes_unless_past_or_cross_class(
+    *,
+    asset_class: AssetClass | ClassFromPrefix,
+    path: str | None,
+    current: bool,
+    subscription: Subscription | None,
 ) -> None:
     spec = DatasetSpec(
         name="x.y",
@@ -1538,5 +1543,64 @@ def test_the_current_subscription_is_the_classes_unless_reference_or_cross_class
         asset_class=asset_class,
         fetch_path=path,
         history_path=None if path else "/v3/trades/{t}",
+        serves_current_data=current,
     )
     assert spec.current_subscription is subscription
+
+
+@pytest.mark.parametrize(
+    ("fetch_path", "history_path"),
+    [(None, "/v3/trades/{t}"), ("/v3/reference/options/contracts", None)],
+    ids=["no fetch path", "reference"],
+)
+def test_only_a_market_fetch_path_serves_current_data(
+    fetch_path: str | None, history_path: str | None
+) -> None:
+    with pytest.raises(ValueError, match=r"^x\.y: only a dataset with a fetch path that is no"):
+        DatasetSpec(
+            name="x.y",
+            summary="A test dataset.",
+            asset_class=AssetClass.OPTIONS,
+            fetch_path=fetch_path,
+            history_path=history_path,
+            serves_current_data=True,
+        )
+
+
+def test_only_datasets_of_current_data_are_checked_for_delayed_labels() -> None:
+    # Massive labels past data DELAYED on a plan whose current data is delayed, though its rows
+    # are final, so only the market's current state is checked.
+    current = {spec.name for spec in CATALOG.by_name.values() if spec.serves_current_data}
+    assert current == {
+        "crypto.last_trade",
+        "crypto.movers",
+        "crypto.snapshots",
+        "forex.conversion",
+        "forex.last_quote",
+        "forex.movers",
+        "forex.snapshots",
+        "futures.snapshots",
+        "indices.snapshots",
+        "options.chain",
+        "options.last_trade",
+        "options.snapshots",
+        "snapshots",
+        "stocks.last_quote",
+        "stocks.last_trade",
+        "stocks.movers",
+        "stocks.snapshots",
+    }
+
+
+def test_each_refused_alternative_is_a_dataset_that_fetches() -> None:
+    alternatives = {
+        s.name: s.refused_alternative for s in CATALOG.by_name.values() if s.refused_alternative
+    }
+    assert alternatives == {
+        "crypto.last_trade": "crypto.snapshots",
+        "forex.last_quote": "forex.snapshots",
+        "options.last_trade": "options.snapshots",
+        "stocks.last_quote": "stocks.snapshots",
+        "stocks.last_trade": "stocks.snapshots",
+    }
+    assert all(CATALOG.by_name[name].has_fetch for name in alternatives.values())

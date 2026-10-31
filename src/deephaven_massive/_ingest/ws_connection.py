@@ -220,6 +220,7 @@ class ClientFactory(Protocol):
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
         """Return a new, unstarted client of `url` with the given callbacks.
 
@@ -230,6 +231,8 @@ class ClientFactory(Protocol):
             on_status: The connection's `on_status`.
             on_data: The connection's `on_data`.
             on_state: The connection's `on_state`.
+            reconnect_deadline: The connection's `_reconnect_deadline`, which shortens a
+                reconnect wait that would let a held-down stream fail untried.
         """
         ...
 
@@ -338,7 +341,7 @@ class _Episodes:
     lost_at: float | None = None
     lost_warned: bool = False
     down_since: float | None = None
-    down: dict[int, Timer] = field(default_factory=dict)
+    down: dict[int, asyncio.TimerHandle] = field(default_factory=dict)
     published_at_open: dict[int, int] = field(default_factory=dict)
     data_since_open: bool = False
     down_note: str | None = None
@@ -432,6 +435,7 @@ class Connection:
                 channel, rows, rejects=rejects, drift=drift
             ),
             on_state=self._on_state,
+            reconnect_deadline=self._reconnect_deadline,
         )
         self.subscriptions: Final = Subscriptions(
             self._client,
@@ -1167,6 +1171,26 @@ class Connection:
         episodes.down_note = note
         self._show_outage_notes(list(episodes.down) if changed else newly)
 
+    def _reconnect_deadline(self) -> float | None:
+        """Return the seconds by which the next attempt must authenticate to save every stream.
+
+        The client asks before each reconnect wait. A stream held down by the outage fails
+        when its timer fires, so the next attempt must authenticate, and its subscriptions be
+        acknowledged within `ack_timeout`, before the earliest timer: the client shortens its
+        wait to fit (never below the reconnect backoff). The waits alone (30, 60, then 100 to
+        120 seconds) would otherwise put the last attempt before a 300-second `max_outage`
+        too late to save it.
+
+        Returns:
+            The earliest held-down stream's time left, less `ack_timeout`, in seconds; None
+            when no stream is held down.
+        """
+        timers = self._episodes.down.values()
+        if not timers:
+            return None
+        earliest = min(timer.when() for timer in timers)
+        return earliest - self._client.loop.time() - self._group.ack_timeout
+
     def _hold_down(self, stream_id: int, left: float) -> None:
         """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
 
@@ -1542,6 +1566,7 @@ class _WsClientFactory:
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
         """Return a new, unstarted `WsClient` of `url`.
 
@@ -1552,6 +1577,7 @@ class _WsClientFactory:
             on_status: The connection's `on_status`.
             on_data: The connection's `on_data`.
             on_state: The connection's `on_state`.
+            reconnect_deadline: The connection's `_reconnect_deadline`.
 
         Returns:
             The client.
@@ -1565,6 +1591,7 @@ class _WsClientFactory:
             on_data=on_data,
             on_state=on_state,
             reconnect_backoff=self._backoff,
+            reconnect_deadline=reconnect_deadline,
             max_reconnect_backoff=self._max_backoff,
             thread_prefix=self._thread_prefix,
         )

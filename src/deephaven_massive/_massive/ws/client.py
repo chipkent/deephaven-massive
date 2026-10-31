@@ -226,6 +226,7 @@ class WsClient:
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_backoff: float,
         max_reconnect_backoff: float,
+        reconnect_deadline: Callable[[], float | None] = lambda: None,
         clock: Clock = SYSTEM_CLOCK,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         thread_prefix: str = "massive",
@@ -253,6 +254,15 @@ class WsClient:
                 that read; this client never gives up, so honouring an unbounded
                 `Retry-After` would leave its streams silent for as long as the server named,
                 while a capped wait only retries sooner and meets another 429 at worst.
+            reconnect_deadline: Called on the loop thread before each wait: the seconds from now
+                by which the next attempt must have authenticated, or None for no limit. The
+                library passes how long its earliest stream held down by an outage has left,
+                less its acknowledgement timeout, so that stream gets one full attempt before
+                it fails. The wait is shortened so that an attempt taking the whole
+                `HANDSHAKE_TIMEOUT` still authenticates in time, but never below
+                `reconnect_backoff` or an HTTP 429's `Retry-After`: a deadline closer than
+                that cannot be met without risking the account's connection slot. The default
+                sets no limit.
             clock: The time source the wire clients share (`net.retry.Clock`). Its
                 `monotonic()` times each generation for the stable-uptime rule; its `time()`
                 dates the next attempt and reads an HTTP-date `Retry-After`. Its blocking
@@ -282,7 +292,9 @@ class WsClient:
         self._ssl = ssl_context(TlsConsumer.WEBSOCKETS) if parts.scheme == "wss" else None
         self._decoder = FrameDecoder(sources, host=self._host, path=self._path)
         self._backoff = Backoff(reconnect_backoff, max_reconnect_backoff)
+        self._min_wait = reconnect_backoff
         self._max_wait = max_reconnect_backoff
+        self._reconnect_deadline = reconnect_deadline
         self._on_open = on_open
         self._on_status = on_status
         self._on_data = on_data
@@ -499,11 +511,39 @@ class WsClient:
                     self._max_wait,
                 )
             least = min(ended.least_wait, self._max_wait)
-            wait = max(self._backoff.next_wait(ended.uptime), least)
+            wait = self._clamped(max(self._backoff.next_wait(ended.uptime), least), least)
             logger.debug("reconnecting to %s in %.1f s", self._url, wait)
             state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
             self._on_state(state, self._clock.time() + wait)
             await self._sleep(wait)
+
+    def _clamped(self, wait: float, least: float) -> float:
+        """Shorten a reconnect wait so the next attempt can authenticate by the deadline.
+
+        Args:
+            wait: The backoff's wait, in seconds.
+            least: The shortest wait the server allows (an HTTP 429's `Retry-After`), in
+                seconds; 0 when it named none.
+
+        Returns:
+            `wait`, or, when `reconnect_deadline` gives a deadline that an attempt starting
+            after `wait` and taking the whole `HANDSHAKE_TIMEOUT` would miss, the latest start
+            that meets it, but never less than `reconnect_backoff` or `least`.
+        """
+        deadline = self._reconnect_deadline()
+        if deadline is None:
+            return wait
+        clamped = max(min(wait, deadline - HANDSHAKE_TIMEOUT), self._min_wait, least)
+        if clamped < wait:
+            logger.debug(
+                "%s: waiting %.1f s instead of %.1f s, so the next attempt can authenticate "
+                "within %.1f s",
+                self._url,
+                clamped,
+                wait,
+                deadline,
+            )
+        return clamped
 
     async def _attempt(self) -> _Ended | WireError:
         """Open a socket, authenticate, and run one generation until the socket closes.

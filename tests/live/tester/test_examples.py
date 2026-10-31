@@ -186,6 +186,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> _massive.WsClient:
         path = "/" + url.split("/", 3)[3]
         return _massive.WsClient(
@@ -198,6 +199,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
             on_state=on_state,
             reconnect_backoff=0.05,
             max_reconnect_backoff=0.1,
+            reconnect_deadline=reconnect_deadline,
             thread_prefix="tester examples",
         )
 

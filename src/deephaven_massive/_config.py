@@ -230,7 +230,9 @@ class MassiveConfig:
             fails the same way once its cycles have kept failing for this long, counted from
             the first failure since its last good cycle, which it names. `0` fails at the
             first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
-            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage.
+            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage. A reconnect
+            wait is shortened when needed so that a held-down stream always gets one more
+            attempt, acknowledged within `ack_timeout`, before it fails.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -255,10 +257,12 @@ class MassiveConfig:
             when the plan cannot serve it: a stream verb raises `EntitlementError` when
             Massive's snapshot shows the plan's data is delayed, Massive's refusal fails the
             refused streams, and `fetch()` or `poll()` of current data (snapshots, last trade
-            and quote, movers, and every dataset charged to the subscription) fails when
-            Massive labels a response or row `DELAYED`; each message names the evidence and
-            the setting to add. REST cannot ask for delayed data, so a listed subscription's
-            `fetch()` and `poll()` return whatever the plan serves, unchecked. Reference,
+            and quote, movers, the option chain) fails when Massive labels a response or row
+            `DELAYED`; each message names the evidence and the setting to add. Past data, such
+            as the previous day's bar, a day's open and close, indicators, and dividends, is
+            served as it is, though Massive labels it `DELAYED` on such plans. REST cannot
+            ask for delayed data, so a listed subscription's `fetch()` and `poll()` return
+            whatever the plan serves, unchecked. Reference,
             economy, and partner data are never checked, and `history()`, which reads past
             data, is not affected. No stream ever moves between the feeds. Forex and crypto
             (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
