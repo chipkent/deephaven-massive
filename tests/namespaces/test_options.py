@@ -16,7 +16,6 @@ import json
 import logging
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -658,16 +657,6 @@ TSLA = "O:TSLA210903C00700000"
 NS = 10**9
 
 
-@pytest.fixture
-def rest_session(
-    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[dm.MassiveSession]:
-    # A session on the fake REST server; its retry waits are on the `rest_clock` fake clock.
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
 def wire(path: str) -> str:
     # A path as the client sends it: the colon of an `O:` symbol is percent-encoded.
     return path.replace(":", "%3A")
@@ -675,15 +664,6 @@ def wire(path: str) -> str:
 
 def body(load_fixture: Callable[[str, str], bytes], name: str) -> object:
     return json.loads(load_fixture(OWNER, name))
-
-
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its decoded path and query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
 
 
 def rows(table: Table) -> list[dict[str, Any]]:
@@ -745,7 +725,7 @@ def test_last_trade_fetch_reads_the_last_trade(
 ) -> None:
     fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
     out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch())
-    assert sent(fake_rest) == [(f"/v2/last/trade/{TSLA}", {})]
+    assert fake_rest.get_queries() == [(f"/v2/last/trade/{TSLA}", {})]
     assert len(out) == 1
     row = out[0]
     assert (row["Symbol"], row["Timestamp"], row["Price"]) == (TSLA, 1617901342969834000, 115.55)
@@ -754,7 +734,7 @@ def test_last_trade_fetch_reads_the_last_trade(
     assert row["ParticipantTimestamp"] == 1617901342969834000
     with pytest.raises(ValueError, match=r"use m\.options\.chain\(underlying\)\.fetch\(\)"):
         rest_session.options.last_trade(dm.ALL)
-    assert len(sent(fake_rest)) == 1
+    assert len(fake_rest.get_queries()) == 1
 
 
 def test_trades_and_quotes_history_read_a_day_over_rest(
@@ -770,7 +750,7 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     trades = rows(
         rest_session.options.trades(contract).history(day, day, source=HistorySource.REST)
     )
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             f"/v3/trades/{contract}",
             {
@@ -793,7 +773,7 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     quotes = rows(
         rest_session.options.quotes(quote_contract).history(day, day, source=HistorySource.REST)
     )
-    path, query = sent(fake_rest)[-1]
+    path, query = fake_rest.get_queries()[-1]
     assert path == f"/v3/quotes/{quote_contract}"
     assert query["limit"] == ["50000"]
     # The rows are newest first, as the vendor sample gives them; history keeps server order.
@@ -811,7 +791,7 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
 ) -> None:
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
     prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
-    assert sent(fake_rest) == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
+    assert fake_rest.get_queries() == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it.
     assert [
@@ -838,7 +818,7 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
             date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST
         )
     )
-    assert sent(fake_rest)[-1] == (
+    assert fake_rest.get_queries()[-1] == (
         path,
         {"adjusted": ["false"], "limit": ["50000"], "sort": ["asc"]},
     )
@@ -903,7 +883,7 @@ def test_chain_reads_one_underlying(
             filters={"expiration_date_lte": date(2022, 1, 21), "strike_price_gte": 150},
         ).fetch()
     )
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/v3/snapshot/options/AAPL",
             {
@@ -937,7 +917,7 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     contracts = [f"O:NCLH221014C{strike:08d}" for strike in range(1000, 1000 + 251)]
     rest_session.options.snapshots(contracts).fetch()
-    requests = sent(fake_rest)
+    requests = fake_rest.get_queries()
     # The two requests run concurrently, so they arrive in either order.
     chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
     assert chunks == [contracts[-1:], contracts[:250]]
@@ -967,7 +947,7 @@ def test_snapshots_keep_the_error_row_of_a_contract(
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     out = rows(rest_session.options.snapshots(dm.ALL).fetch())
-    assert sent(fake_rest) == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
+    assert fake_rest.get_queries() == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
     found, missing = out
     assert (found["Symbol"], found["Underlying"], found["Error"]) == (
         "O:NCLH221014C00005000",
@@ -998,7 +978,7 @@ def test_contracts_list_or_read_each_contract(
             filters={"strike_price_lte": 90},
         ).fetch()
     )
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/v3/reference/options/contracts",
             {
@@ -1025,7 +1005,7 @@ def test_contracts_list_or_read_each_contract(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
     described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch())
-    assert sent(fake_rest)[-1] == (
+    assert fake_rest.get_queries()[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},
     )
@@ -1041,7 +1021,7 @@ def test_a_list_argument_with_named_contracts_fails_before_any_request(
     q = rest_session.options.contracts(symbols=[CONTRACT], underlying="AAPL")
     with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
         q.fetch()
-    assert sent(fake_rest) == []
+    assert fake_rest.get_queries() == []
 
 
 def test_daily_open_close_reads_one_day_per_contract(
@@ -1055,7 +1035,7 @@ def test_daily_open_close_reads_one_day_per_contract(
     out = rows(
         rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch()
     )
-    assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
+    assert fake_rest.get_queries() == [(path, {"adjusted": ["false"]})]
     assert [(r["Symbol"], r["Date"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
         (TSLA, "2023-01-09", 25.0, 26.35, 26.35)
     ]

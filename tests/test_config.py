@@ -37,8 +37,45 @@ def base() -> MassiveConfig:
 
 
 def test_the_key_comes_from_massive_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MASSIVE_API_KEY", " massive ")
+    monkeypatch.setenv("MASSIVE_API_KEY", "massive")
     assert MassiveConfig().api_key == "massive"
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "MASSIVE_API_KEY",
+        "MASSIVE_S3_ACCESS_KEY_ID",
+        "MASSIVE_S3_SECRET_ACCESS_KEY",
+        "DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS",
+    ],
+)
+def test_an_environment_value_with_surrounding_whitespace_is_refused(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    # Never trimmed; the message names the variable but never the value, which may be a key.
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    monkeypatch.setenv(variable, " secret-value ")
+    with pytest.raises(ValueError, match=f"^{variable} has leading or trailing whitespace") as e:
+        MassiveConfig()
+    assert "secret-value" not in str(e.value)
+
+
+@pytest.mark.parametrize("key", [" massive", "massive\n"])
+def test_an_api_key_with_surrounding_whitespace_is_refused(key: str) -> None:
+    with pytest.raises(ValueError, match=r"^api_key has leading or trailing whitespace") as e:
+        MassiveConfig(api_key=key)
+    assert "massive" not in str(e.value)
+
+
+@pytest.mark.parametrize("value", ["", "  ", " AKIA9", "AKIA9 "])
+@pytest.mark.parametrize("name", ["s3_access_key_id", "s3_secret_access_key"])
+def test_an_s3_credential_must_be_exact(name: str, value: str) -> None:
+    both: dict[str, Any] = {"s3_access_key_id": "AKIA9", "s3_secret_access_key": "AKIA9"}
+    both[name] = value
+    with pytest.raises(ValueError, match=f"^{name} is blank or has leading or trailing") as e:
+        MassiveConfig(api_key="k", **both)
+    assert "AKIA9" not in str(e.value)
 
 
 def test_polygon_api_key_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,7 +197,7 @@ def test_numeric_types(base: MassiveConfig, name: str, value: object) -> None:
 
 
 def test_ws_hosts_are_validated_and_frozen() -> None:
-    hosts = {AssetClass.STOCKS: " FullMarket-Business.massive.com "}
+    hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     cfg = MassiveConfig(api_key="k", ws_hosts=hosts)
     assert dict(cfg.ws_hosts) == {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     hosts[AssetClass.OPTIONS] = "x.massive.com"
@@ -181,6 +218,15 @@ def test_ws_hosts_are_validated_and_frozen() -> None:
 )
 def test_ws_hosts_must_be_bare_hostnames(host: str) -> None:
     with pytest.raises(ValueError, match="bare hostname"):
+        MassiveConfig(api_key="k", ws_hosts={AssetClass.STOCKS: host})
+
+
+@pytest.mark.parametrize(
+    "host", [" delayed.massive.com", "delayed.massive.com ", "Delayed.Massive.com"]
+)
+def test_ws_hosts_are_taken_exactly_as_written(host: str) -> None:
+    # Never trimmed or lower-cased; the message names the hostname to write.
+    with pytest.raises(ValueError, match=r"; write 'delayed\.massive\.com'$"):
         MassiveConfig(api_key="k", ws_hosts={AssetClass.STOCKS: host})
 
 
@@ -246,7 +292,7 @@ _SYMBOL_SETTINGS = [
     ("text", "expected"),
     [
         ("raise", dm.OnError.RAISE),
-        (" RAISE ", dm.OnError.RAISE),
+        ("RAISE", dm.OnError.RAISE),
         ("log", dm.OnError.LOG),
         ("Ignore", dm.OnError.IGNORE),
     ],

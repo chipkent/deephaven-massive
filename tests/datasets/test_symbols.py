@@ -1,5 +1,6 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
+import json
 import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
@@ -24,6 +25,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolRows, read_symbols
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -63,8 +65,6 @@ CANONICAL = [
     (FUT, "CL:BF Q6-U6-V6"),
     (FUT, "CL:BZ U6-V6"),
     (FUT, "6A:XF:AUDUSD:Q6"),
-    (FUT, "10YF5-10YG5XXX"),  # spreads, as Massive's contracts list writes them
-    (FUT, "1Y:SA 03M F6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
@@ -115,9 +115,10 @@ NOT_CANONICAL = [
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("esz5", r"^'esz5' is not a Massive futures ticker: a contract is upper-case letters"),
+        ("esz5", r"^'esz5' is not a Massive futures ticker: a contract is a root of upper-case"),
+        ("ESZ", r"^'ESZ' is not a Massive futures ticker: a contract is"),
         ("hello world", r"^'hello world' is not a Massive futures ticker: a contract is"),
-        ("BOB 2-1 U6", r"^'BOB 2-1 U6' is not a Massive futures ticker: a contract is"),
+        ("GC  Z6", r"^'GC  Z6' is not a Massive futures ticker: a contract is"),
         (" ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
         ("X:ESZ5", "is a crypto ticker"),
     ],
@@ -132,10 +133,40 @@ def test_the_general_converter_is_as_strict_for_futures_as_the_contract_one(
     assert str(general.value) == str(contract.value)
 
 
-def test_a_dataset_takes_futures_text_the_converters_refuse() -> None:
-    # A dataset takes any futures ticker as Massive writes it; only the converters check forms.
-    for text in ("esz5", "hello world", "BOB 2-1 U6"):
-        assert check_symbol(FUT, text) == text
+@pytest.mark.parametrize("text", ["esz5", "ESZ", "hello world", "ESZ5-", "GC  Z6", "GCQ6--GCZ6"])
+def test_a_dataset_refuses_futures_text_the_converter_refuses(text: str) -> None:
+    # A dataset takes a contract or a combo, the forms dm.canonical_symbol checks, and refuses
+    # everything else with the converter's reason: lower case, a contract with no year, doubled
+    # or dangling separators, another class's prefix.
+    with pytest.raises(ValueError, match="is not a Massive futures ticker") as converter:
+        dm.canonical_symbol(text, FUT)
+    with pytest.raises(ValueError, match="is not a Massive futures ticker") as dataset:
+        check_symbol(FUT, text)
+    assert str(dataset.value) == f"{converter.value}; symbols must be Massive's exact tickers"
+    assert not is_canonical(FUT, text)
+
+
+@pytest.mark.parametrize("text", [" ESZ5", "ESZ5 "])
+def test_a_futures_ticker_with_surrounding_whitespace_is_refused(text: str) -> None:
+    with pytest.raises(ValueError, match="has surrounding whitespace; write 'ESZ5'"):
+        check_symbol(FUT, text)
+
+
+def test_every_futures_ticker_massive_writes_round_trips(
+    load_fixture: Callable[[str, str], bytes], dh_exec_ctx: object
+) -> None:
+    # Every ticker of the vendored samples and of the live evidence (combo strips, packs, and
+    # bundles included) is taken as symbols= input, as a symbol-table row, and from a row, as
+    # written; so is a combo form made up here, since combo forms are not enumerated.
+    tickers = json.loads(load_fixture("datasets/symbols", "futures_tickers.json"))
+    every = [*tickers["vendor_samples"], *tickers["live_evidence"], "SR3:PK H7"]
+    assert normalize(FUT, every) == tuple(sorted(set(every)))
+    rule = SymbolRowRule("futures.trades", FUT, as_written=False, noncanonical=OnError.RAISE)
+    rows = read_symbols(rule, new_table([string_col("Symbol", every)]), stream_id=None)
+    assert rows == SymbolRows(tuple(sorted(set(every))))
+    for text in every:
+        assert canonical_from_wire(FUT, text) == text
+        assert dm.canonical_symbol(text, FUT) == text
 
 
 @pytest.mark.parametrize(("asset_class", "text"), CANONICAL)
@@ -200,8 +231,6 @@ CONVERSIONS = [
     (dm.canonical_symbol_future_spread, "TEX 07-05 U6", "TEX 07-05 U6"),
     (dm.canonical_symbol_future_spread, "CL:BF Z6-H7-M7", "CL:BF Z6-H7-M7"),
     (dm.canonical_symbol_future_spread, "6A:XF:AUDUSD:U6", "6A:XF:AUDUSD:U6"),  # any quote currency
-    (dm.canonical_symbol_future_spread, "10YF5-2YYF5XXX", "10YF5-2YYF5XXX"),
-    (dm.canonical_symbol_future_spread, "1Y:SA 03M F8", "1Y:SA 03M F8"),
     (dm.canonical_symbol_crypto, "ABCUS-DT", "X:ABCUSDT"),  # the codes joined as written
     (dm.canonical_symbol_stock_yahoo, "BRK-B", "BRK.B"),
     (dm.canonical_symbol_stock_yahoo, "BAC-PL", "BACpL"),
@@ -418,34 +447,30 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         (dm.canonical_symbol_option, "BRKB 250117C00400000", "with a real expiry date"),
         (dm.canonical_symbol_future, " ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
         (dm.canonical_symbol_future, "", r"^'' is not a Massive futures ticker: a contract is"),
-        (dm.canonical_symbol_future, "esz5", "a contract is upper-case letters and digits"),
+        (dm.canonical_symbol_future, "esz5", "a contract is a root of upper-case letters"),
+        (dm.canonical_symbol_future, "ESZ", "a contract is a root of upper-case letters"),
         (
             dm.canonical_symbol_future,
             "GCQ6-GCZ6",
             (
-                r"^'GCQ6-GCZ6' is a futures spread, not a single contract; call "
-                r"dm\.canonical_symbol_future_spread$"
+                r"^'GCQ6-GCZ6' is a futures combo \(a spread, strip, pack, or bundle\), not a "
+                r"single contract; call dm\.canonical_symbol_future_spread$"
             ),
         ),
         (
             dm.canonical_symbol_future_spread,
             "ESZ5",
             (
-                r"^'ESZ5' is a single futures contract, not a spread; call "
+                r"^'ESZ5' is a single futures contract, not a combo; call "
                 r"dm\.canonical_symbol_future$"
             ),
         ),
         (
             dm.canonical_symbol_future_spread,
-            "BOB 2-1 U6",
-            r"^'BOB 2-1 U6' is not one of Massive's futures spread spellings: a calendar",
+            "GCQ6--GCZ6",
+            r"^'GCQ6--GCZ6' is not a Massive futures combo ticker: runs of upper-case letters",
         ),
         (dm.canonical_symbol_future_spread, "X:BTCUSD", "is a crypto ticker"),
-        # Near the forms of Massive's contracts list, but none of them: another mark than XXX,
-        # a one-digit month count, and a strip without its start month.
-        (dm.canonical_symbol_future_spread, "10YF5-10YG5XX", "spread spellings"),
-        (dm.canonical_symbol_future_spread, "1Y:SA 3M F6", "spread spellings"),
-        (dm.canonical_symbol_future_spread, "1Y:SA 03M", "spread spellings"),
         (dm.canonical_symbol_future, "X:ESZ5", "is a crypto ticker"),
         (dm.canonical_symbol_index, "S P X", r"^'S P X' is not a Massive index ticker"),
         (dm.canonical_symbol_index, "C:EURUSD", "is a forex ticker"),

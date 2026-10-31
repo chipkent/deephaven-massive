@@ -404,9 +404,9 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
 ) -> None:
     """Which forms futures spread (combo) tickers take on each venue, and how they name their legs.
 
-    Massive documents no grammar for spreads; the library accepts exactly the forms its samples
-    and an earlier live read show (`GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `CL:BZ U6-V6`,
-    `6A:XF:AUDUSD:Q6`, `10YF5-10YG5XXX`, `1Y:SA 03M F6`) and
+    Massive documents no grammar for spreads; the library accepts any combo shape (runs of
+    upper-case letters and digits joined by single `-`, `:`, or spaces, such as `GCQ6-GCZ6`,
+    `BOB 02-01 U6`, `1Y:SA 03M F6`, `10YF5-10YG5XXX`) and
     builds no spread from its legs. Reads every combo product (`/futures/v1/products?type=combo`,
     one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
     COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of
