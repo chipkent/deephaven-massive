@@ -14,6 +14,7 @@ from deephaven_massive._datasets.futures_sessions import (
     futures_session_open,
     session_days,
     weekday_on_or_after,
+    weekday_on_or_before,
     weekday_sessions,
 )
 
@@ -65,6 +66,16 @@ def test_add_weekdays_skips_weekends_both_ways() -> None:
 def test_a_futures_session_is_over_at_17_chicago() -> None:
     assert futures_session_end(date(2025, 3, 3)) == datetime(2025, 3, 3, 17, tzinfo=CHICAGO)
     assert futures_session(futures_session_end(date(2025, 3, 3))) == date(2025, 3, 4)
+    # Across the March clock change the session still ends at 17:00 wall-clock time.
+    assert futures_session_end(date(2025, 3, 9)) == datetime(2025, 3, 9, 17, tzinfo=CHICAGO)
+    assert futures_session_end(date(2025, 3, 9)) == futures_session_open(date(2025, 3, 10))
+
+
+def test_weekday_on_or_before_moves_a_weekend_back_to_friday() -> None:
+    friday = date(2025, 3, 7)
+    assert weekday_on_or_before(friday) == friday
+    assert weekday_on_or_before(date(2025, 3, 8)) == friday
+    assert weekday_on_or_before(date(2025, 3, 9)) == friday
 
 
 def test_the_column_session_rule_agrees_with_the_scalar_one() -> None:

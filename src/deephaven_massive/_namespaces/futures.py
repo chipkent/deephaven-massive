@@ -310,59 +310,32 @@ class _Futures(Namespace):
     ) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
-        Each row is one trade: its price, its size, and the exchange's sequence numbers. Each
-        row also carries its time, `Timestamp`, its session, `Date` (ISO `yyyy-MM-dd` text:
-        Massive's `session_end_date`; on the WebSocket, which sends none, the session that ends
-        at the next 17:00 Chicago time, a weekend's moving to Monday, corrected by Massive's
-        futures schedules, a row they cannot place keeping that date and showing the miss in its
-        stream's `m.streams()` row), and `TimestampInsert`, when the library received it. Live
-        trades stream over the WebSocket `T` channel of the `/futures` cluster. `history()`
-        reads the REST endpoint `/futures/v1/trades/{ticker}`, one contract per request, or the
-        flat files `us_futures_<venue>/trades_v1` of each venue of `venues`, all four by default.
-        A date bound of `history()` is a whole trading session, the session whose `Date` is that
-        date, requested over REST one session at a time (`session_end_date=<date>`, weekdays
-        only, whatever hours a holiday added to it). Datetime bounds are exact instants on
-        `Timestamp`. Futures have no "last trade" endpoint, so there is no `fetch()`;
-        `m.futures.snapshots(symbols).fetch()` gives the latest trade of each contract in one
-        request.
-
-        `dm.ALL` streams every contract and reads every contract from flat files; REST history
-        needs explicit symbols. There is no `limit`: `history()` pages internally.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#trades,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one trade: price, size, and the exchange's sequence numbers. `Date` is the
+        trading session (README.md#time): Massive's `session_end_date`, or on the WebSocket, which
+        sends none, the session ending at the next 17:00 Chicago time, corrected by Massive's
+        futures schedules (a row they cannot place keeps that date and shows in `m.streams()`). A
+        date bound of `history()` is a whole session. There is no `fetch()`: `snapshots(symbols)`
+        gives each contract's latest trade. REST `history()` takes explicit contracts; `dm.ALL`
+        streams every contract and reads the flat files.
 
         Args:
-            symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
-                Deephaven table with a `Symbol` column (streams follow its rows as they
-                change), or `dm.ALL`.
-            venues: The exchanges whose flat files `history()` reads, a set of
-                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
-                NYMEX, COMEX) by default. It does not affect the stream.
+            symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`. See
+                README.md#symbols.
+            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
 
         Returns:
-            A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
-            `last_by()`) and `history()`.
+            A query with the stream verbs and `history()`. Columns: docs/datasets/futures.trades.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`,
-                or `venues` is not a set of `dm.FuturesVenue`.
-            ValueError: If `venues` is empty, or for invalid symbols: none at all (for example
-                from an exhausted generator), None, a ticker that is not Massive's exact
-                ticker, or a table without a `Symbol` column.
+            TypeError: If `symbols` is of another type or `venues` is not a set of
+                `dm.FuturesVenue`.
+            ValueError: If `venues` is empty, `symbols` is None or empty, a ticker is not Massive's
+                exact ticker, or a table has no `Symbol` column.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
-                # ESZ5 and NQZ5 have expired: name current contracts, from m.futures.contracts()
-                live = m.futures.trades(["ESZ5", "NQZ5"]).append_only()
-                past = m.futures.trades("ESZ5", venues={dm.FuturesVenue.CME}).history(
-                    "2025-10-01", "2025-10-03"
-                )
+                past = m.futures.trades("ESZ5").history("2025-10-01", "2025-10-03")
         """
         return cast(
             "StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols, venues=venues)
@@ -374,54 +347,31 @@ class _Futures(Namespace):
     ) -> StreamHistoryQuery:
         """Quotes of futures contracts: every change of the best bid and offer.
 
-        Each row is one top-of-book update: bid and ask prices, sizes, and the time of each
-        side. Each row also carries its time, `Timestamp`, its session, `Date` (ISO `yyyy-MM-dd`
-        text: Massive's `session_end_date`; on the WebSocket, which sends none, the session that
-        ends at the next 17:00 Chicago time, a weekend's moving to Monday, corrected by
-        Massive's futures schedules, a row they cannot place keeping that date and showing the
-        miss in its stream's `m.streams()` row), and `TimestampInsert`, when the library
-        received it. Live quotes stream over the WebSocket `Q` channel of the `/futures`
-        cluster. `history()` reads the REST endpoint `/futures/v1/quotes/{ticker}`, one contract
-        per request, or the flat files `us_futures_<venue>/quotes_v1` of each venue of `venues`,
-        all four by default. A date bound of `history()` is a whole trading session,
-        requested over REST one session at a time as for `trades`. Datetime bounds are exact
-        instants on `Timestamp`. There is no `fetch()`: `m.futures.snapshots(symbols).fetch()`
-        gives the latest quote of each contract in one request.
-
-        `dm.ALL` streams every contract and reads every contract from flat files; REST history
-        needs explicit symbols. There is no `limit`: `history()` pages internally.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#quotes,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one top-of-book update: bid and ask prices, sizes, and the time of each side.
+        `Date` is the trading session, as for `trades()`, and a date bound of `history()` is a whole
+        session. There is no `fetch()`: `snapshots(symbols)` gives each contract's latest quote.
+        REST `history()` takes explicit contracts; `dm.ALL` streams every contract and reads the
+        flat files.
 
         Args:
-            symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
-                Deephaven table with a `Symbol` column (streams follow its rows as they
-                change), or `dm.ALL`.
-            venues: The exchanges whose flat files `history()` reads, a set of
-                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
-                NYMEX, COMEX) by default. It does not affect the stream.
+            symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`. See
+                README.md#symbols.
+            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
 
         Returns:
-            A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
-            `last_by()`) and `history()`.
+            A query with the stream verbs and `history()`. Columns: docs/datasets/futures.quotes.md.
 
         Raises:
-            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`,
-                or `venues` is not a set of `dm.FuturesVenue`.
-            ValueError: If `venues` is empty, or for invalid symbols: none at all (for example
-                from an exhausted generator), None, a ticker that is not Massive's exact
-                ticker, or a table without a `Symbol` column.
+            TypeError: If `symbols` is of another type or `venues` is not a set of
+                `dm.FuturesVenue`.
+            ValueError: If `venues` is empty, `symbols` is None or empty, a ticker is not Massive's
+                exact ticker, or a table has no `Symbol` column.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
-                # CLZ5 has expired: name a current contract, from m.futures.contracts()
-                book = m.futures.quotes("CLZ5").last_by()  # the current top of book, live
+                active = m.futures.contracts(product_code="CL", filters={"active": True}).fetch()
+                book = m.futures.quotes(active).last_by()
         """
         return cast(
             "StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols, venues=venues)
@@ -456,98 +406,36 @@ class _Futures(Namespace):
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
-        Each row is one bar spanning `multiplier` units of `timespan`: its window, from
-        `TimestampStart` (Massive's window start) to the exclusive `TimestampEnd`, its session
-        `Date` (ISO `yyyy-MM-dd` text: Massive's `session_end_date`, or on the WebSocket the
-        session as for `trades`), and `TimestampInsert`, when the library received it.
-        `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
-        table a verb such as `history()` returned) to attach only closed bars:
-        an intraday bar ends its length after its start (a one-second WebSocket bar at the
-        later of that and Massive's `e`); a session bar at 17:00 Chicago time on its session
-        date. Massive does not document whether a bar of several sessions, or of a week or
-        longer, is labelled with its first session or its last, so such a bar ends at the
-        later of the two readings: 17:00 Chicago time on the last weekday its label allows,
-        plus four days for a holiday that moves a session for a bar of several sessions.
-        `Date` is null for a bar of several sessions, a week or longer, or an intraday bar that
-        crosses 17:00 Chicago time. Futures have no corporate actions, so their bars are never
-        adjusted. The timespan decides the transports, and so the query class:
-
-        - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1` stream over the
-          WebSocket `A` (per second) or `AM` (per minute) channel of the `/futures` cluster,
-          and also have `history()`: a `StreamHistoryQuery`.
-        - Every other timespan and multiplier is history only: a `HistoryQuery`.
-
-        `history()` reads the REST endpoint `/futures/v1/aggs/{ticker}`, one contract per
-        request, with `resolution` sent as `<multiplier><unit>` (`5min`, `1session`); the
-        server rejects a multiplier above its unit's maximum (for example `60min`; use
-        `1hour`) with HTTP 400, raised as `MassiveError`. 1-minute and 1-session bars can also
-        come from the flat files `us_futures_<venue>/minute_aggs_v1` and
-        `us_futures_<venue>/session_aggs_v1`. A futures trading day is a session ending at
-        17:00 America/Chicago, so daily bars are `Timespan.SESSION`; there is no
-        `Timespan.DAY`, and unlike the other asset classes futures have no
-        `previous_day_bar()`.
-
-        A date bound of `history()` is a whole trading session. Bars are requested from four
-        days before the first session's regular open (a holiday can open a session early) to
-        18:00 Chicago time on the last date, and kept by their session label: an intraday bar
-        when its session is in the range and it has ended, a bar of a session or a longer period
-        (`WEEK`, Monday to Friday, to `YEAR`) when every session of its period is in the range
-        and has ended. A bar of several sessions or periods is kept only when it fits the range
-        under both readings of its label, as its first session's and as its last's. Every bar
-        must also have ended, by its `TimestampEnd`, by 17:00 Chicago time on the last date and
-        by now. A bar of several sessions ends as late as holidays could push its sessions (one
-        weekday more, and one more for every five further sessions), so
-        `bars(..., Timespan.SESSION, multiplier=2).history("2025-02-03", "2025-02-07")` keeps
-        the bars opening Monday and Tuesday evening: the one opening Wednesday evening could
-        end on the next Monday. Datetimes keep the bars whose whole window, from Massive's
-        window start to `TimestampEnd`, lies in the range.
-
-        `dm.ALL` streams every contract and reads every contract from flat files; REST history
-        needs explicit symbols. There is no `limit`: `history()` pages internally.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#bars,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one bar of `multiplier` times `timespan`. A futures trading day is a session
+        ending at 17:00 Chicago time, so daily bars are `Timespan.SESSION`: there is no `DAY` and no
+        `previous_day_bar()`. One-second and one-minute bars also stream; every other length is
+        history only. A session bar ends at 17:00 Chicago time on its session date; a bar of several
+        sessions or a week or longer ends as late as either reading of its label and holidays allow,
+        and `history()` keeps it only when it fits the range under both (README.md#bars). REST
+        rejects a multiplier above its unit's maximum (`60` minutes; use one hour) with
+        `MassiveError`.
 
         Args:
-            symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
-                Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The bar unit, a `dm.Timespan` other than `DAY`: `SECOND`, `MINUTE`,
-                `HOUR`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`; required, with no
-                default.
-            multiplier: How many units one bar spans; a positive `int`, 1 by default.
-            venues: The exchanges whose flat files `history()` reads, a set of
-                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
-                NYMEX, COMEX) by default. It does not affect the stream.
+            symbols: Contract tickers, a contracts table, or `dm.ALL`. See README.md#symbols.
+            timespan: Any `dm.Timespan` but `DAY`; required. See README.md#timespan-and-multiplier.
+            multiplier: Units per bar; only 1 streams.
+            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
 
         Returns:
-            A `StreamHistoryQuery` for 1-second and 1-minute bars, otherwise a `HistoryQuery`.
+            A query of the class the timespan picks. Columns: docs/datasets/futures.bars.md.
 
         Raises:
-            TypeError: If `timespan` is not a `dm.Timespan`, `venues` is not a set of
-                `dm.FuturesVenue`, `multiplier` is not an `int`, or `symbols` is not a `str`, a
-                sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If `timespan` is `Timespan.DAY` (the message names
-                `Timespan.SESSION`), `venues` is empty, `multiplier` is not positive, or the
-                symbols are invalid: none at all, None, a ticker that is not Massive's exact
-                ticker, or a table without a `Symbol` column.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `timespan` is `DAY` (the message names `SESSION`), `venues` is empty,
+                `multiplier` is below 1, `symbols` is None or empty, a ticker is not Massive's exact
+                ticker, or a table has no `Symbol` column.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
-                # ESZ5 has expired: name a current contract, from m.futures.contracts().
-                # The latest 390 1-minute bars, live.
-                minute = m.futures.bars("ESZ5", dm.Timespan.MINUTE).ring(390)
-                five = m.futures.bars("ESZ5", dm.Timespan.MINUTE, multiplier=5).history(
-                    "2025-10-01", "2025-10-03"
+                sessions = m.futures.bars("ESZ5", dm.Timespan.SESSION).history(
+                    "2025-10-01", "2025-10-31"
                 )
-                sessions = m.futures.bars(
-                    dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
-                ).history("2025-01-02", "2025-03-31")
         """
         query = build_query(
             self._core,
@@ -572,53 +460,32 @@ class _Futures(Namespace):
     ) -> Query:
         """Snapshots of futures contracts: the latest trade, quote, minute bar, and session.
 
-        Each row is one contract's current state from the REST endpoint
-        `/futures/v1/snapshot`: its last trade, its last quote, its last minute bar, and the
-        open, high, low, close, volume, and settlement of its current session. Explicit
-        symbols are sent together as `ticker.any_of`; `dm.ALL` asks for every contract, all
-        pages of it, which with `product_code` is every contract of the products. `fetch()`
-        reads it once, `poll()` re-reads it on an interval; it is the one-request way to get
-        the current state of a set of contracts.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#snapshots,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one contract's current state: its last trade, quote, and minute bar, and the
+        open, high, low, close, volume, and settlement of its current session. It is the one-request
+        way to read the current state of a set of contracts; `dm.ALL` with `product_code` reads
+        every contract of those products.
 
         Args:
-            symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
-                Deephaven table with a `Symbol` column (`poll()` re-reads it each cycle), or
-                `dm.ALL`.
-            product_code: Only contracts of this product, such as `"ES"` (sent as
-                `product_code`), or of these products, such as `["ES", "NQ"]` (sent as
-                `product_code.any_of`); None for every product.
-            sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
-            order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
-                `sort`; it needs `sort`. None for the endpoint's default direction.
-            limit: The most rows to return in total; None for every row.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"ticker_gte": "ES"}` for an alphabetical range
-                of tickers. The `product_code` forms are set through `product_code`.
+            symbols: Contract tickers, a contracts table, or `dm.ALL`. See README.md#symbols.
+            product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
+                for every product.
+            sort: Such as `"ticker"`. See README.md#sort-order-limit.
+            order: Needs `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Such as `{"ticker_gte": "ES"}`. See README.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.snapshots.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
-                `product_code` is neither a `str` nor a sequence of `str`.
-            ValueError: For invalid symbols (None among them), an unknown filter, a filter
-                value of the wrong kind, an `order` without `sort`, or an empty `product_code`
-                sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is
+                neither a `str` nor a sequence of `str`.
+            ValueError: If the symbols are invalid (None among them), a filter key or value does not
+                fit the endpoint, `order` is given without `sort`, or `product_code` is empty.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
-                # ESZ5 and NQZ5 have expired: name current contracts, from m.futures.contracts()
-                now = m.futures.snapshots(["ESZ5", "NQZ5"]).fetch()
                 es_curve = m.futures.snapshots(dm.ALL, product_code="ES").poll(5)
         """
         query = build_query(
@@ -646,64 +513,39 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures contracts: the specification of every listed contract.
 
-        Each row is one contract as of a date (`Date`): its ticker, product, trading venue,
-        first and last trade dates, settlement date, tick sizes, and order-size limits, from
-        the REST endpoint `/futures/v1/contracts`. Use it to find the tickers of a product's
-        contracts, for example the active `ES` contracts. The contract's ticker is the
-        `Symbol` column, as on the market data, so the table, or a part of it, passes straight
-        to `trades()`, `quotes()`, `bars()`, or `snapshots()`; a ticker the library cannot read
-        leaves `Symbol` null and keeps Massive's spelling in `RawSymbol`. Explicit `symbols`
-        are sent together as `ticker.any_of`, 250 to a request; None lists every contract.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#contracts,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one contract as of a date: its product, trading venue, first and last trade
+        dates, settlement date, tick sizes, and order-size limits. Its `Symbol` is the contract's
+        ticker, so the table, or part of it, passes straight to `trades()`, `quotes()`, `bars()`, or
+        `snapshots()`. Explicit symbols go 250 to a request.
 
         Args:
-            symbols: Only these contracts: one ticker such as `"ESZ5"`, a sequence of tickers,
-                or a Deephaven table with a `Symbol` column (`poll()` re-reads it each cycle);
-                None, the default, for every contract. `dm.ALL` is refused: leave `symbols`
-                out instead.
-            product_code: Only contracts of this product, such as `"ES"` (sent as
-                `product_code`), or of these products, such as `["ES", "NQ"]` (sent as
-                `product_code.any_of`); None for every product.
-            as_of: The day whose contract specifications to list, sent as the wire parameter
-                `date`: an ISO-8601 date, a `date`, Deephaven date text such as `"2025-3-3"`, a
-                Java `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an
-                instant raises `ValueError`: it is a calendar date); None for Massive's
-                default, today.
-            sort: The field to sort by, such as `"ticker"`; None for the endpoint's default
-                (`product_code`).
-            order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
-                `sort`; it needs `sort`. None for the endpoint's default direction.
-            limit: The most rows to return in total; None for every row.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"active": True}` or
-                `{"last_trade_date_gte": "2026-01-01"}`.
+            symbols: Only these contracts; None, the default, lists every contract. `dm.ALL` is
+                refused. See README.md#symbols.
+            product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
+                for every product.
+            as_of: The day whose specifications to list; None for today. See README.md#as-of.
+            sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
+                README.md#sort-order-limit.
+            order: Needs `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. See
+                README.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.contracts.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`,
-                `product_code` is neither a `str` nor a sequence of `str`, or `symbols` or
-                `as_of` is of another type.
-            ValueError: For `dm.ALL` or an invalid symbol, an `as_of` that is a `datetime` or
-                not a date, an unknown filter or one a typed argument sets (`ticker_any_of` is
-                set through `symbols`), a filter value of the wrong kind, an `order` without
-                `sort`, or an empty `product_code` sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
+                neither a `str` nor a sequence of `str`, or `symbols` or `as_of` is of another type.
+            ValueError: If `symbols` is `dm.ALL` or holds an invalid ticker, `as_of` is a `datetime`
+                or not a date, a filter key or value does not fit the endpoint (`ticker_any_of` is
+                set through `symbols`), `order` is given without `sort`, or `product_code` is empty.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
-                es = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
-                front = m.futures.trades(es.sort("LastTradeDate").head(1)).last_by()
-                listed = m.futures.contracts(["ESZ5", "NQZ5"], as_of="2025-06-02").fetch()
+                active = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
+                es = m.futures.trades(active).last_by()
         """
         params = {
             **_product_codes(product_code),
@@ -736,52 +578,32 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures products: the specification of every product, the family of its contracts.
 
-        Each row is one product as of a date (`Date`), such as `ES` (E-mini S&P 500): its
-        name, trading and clearing venues, sector and asset class, settlement method and
-        currency, price quotation, and unit of measure, from the REST endpoint
-        `/futures/v1/products`. The dataset takes no symbols and has no `Symbol` column.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#products,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one product as of a date, such as `ES` (E-mini S&P 500): its name, trading and
+        clearing venues, sector and asset class, settlement method and currency, price quotation,
+        and unit of measure. It takes no symbols and has no `Symbol` column.
 
         Args:
-            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
-                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
-                None for every product.
-            as_of: The day whose product specifications to list, sent as the wire parameter
-                `date`: an ISO-8601 date, a `date`, Deephaven date text such as `"2025-3-3"`, a
-                Java `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an
-                instant raises `ValueError`: it is a calendar date); None for Massive's
-                default, today.
-            sort: The field to sort by, such as `"name"`; None for the endpoint's default
-                (`date`).
-            order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
-                `sort`; it needs `sort`. None for the endpoint's default direction.
-            limit: The most rows to return in total; None for every row.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"sector": "precious"}` or
-                `{"trading_venue": "XCME"}`.
+            product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
+                product.
+            as_of: The day whose specifications to list; None for today. See README.md#as-of.
+            sort: Such as `"name"`; the endpoint sorts by `date`. See README.md#sort-order-limit.
+            order: Needs `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`. See
+                README.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.products.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`,
-                `product_code` is neither a `str` nor a sequence of `str`, or `as_of` is of
-                another type.
-            ValueError: For an `as_of` that is a `datetime` or not a date, an unknown filter, a
-                filter value of the wrong kind (a `sector` outside the endpoint's values, for
-                example), an `order` without `sort`, or an empty `product_code` sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
+                neither a `str` nor a sequence of `str`, or `as_of` is of another type.
+            ValueError: If `as_of` is a `datetime` or not a date, a filter key or value does not fit
+                the endpoint, `order` is given without `sort`, or `product_code` is empty.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
                 energy = m.futures.products(filters={"asset_sub_class": "energy"}).fetch()
         """
         params = {
@@ -804,22 +626,14 @@ class _Futures(Namespace):
         """Futures exchanges: the exchanges and trading venues of US futures.
 
         Each row is one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
-        market identifier codes (MIC and operating MIC), type, locale, and web site, from the
-        REST endpoint `/futures/v1/exchanges`. The endpoint has no filter or sort parameter,
-        so the method takes no `filters`, `sort`, or `order`. The dataset takes no symbols and
-        has no `Symbol` column.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#exchanges,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        market identifier codes, type, locale, and web site. The endpoint has no filter or sort, so
+        neither has this method. It takes no symbols and has no `Symbol` column.
 
         Args:
-            limit: The most rows to return in total; None for every row.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.exchanges.md.
 
         Raises:
             TypeError: If `limit` is not an `int`.
@@ -828,9 +642,6 @@ class _Futures(Namespace):
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
                 venues = m.futures.exchanges().fetch()
         """
         return cast("Query", build_query(self._core, EXCHANGES, limit=limit))
@@ -844,39 +655,27 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures market status: whether each futures product is trading right now.
 
-        Each row is one product's current market event (`MarketEvent`, such as `open`,
-        `pause`, or `close`), its trading venue, the session it belongs to, and the time the
-        status was evaluated, from the REST endpoint `/futures/v1/market-status`. `poll()`
-        keeps the table current. The endpoint's only filter is the product code, which
-        `product_code` sets, and it has no sort parameter, so the method takes no `filters`,
-        `sort`, or `order`. The dataset takes no symbols and has no `Symbol` column.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#market_status,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        Each row is one product's current market event (`MarketEvent`, such as `open`, `pause`, or
+        `close`), its trading venue, its session, and when the status was evaluated; `poll()` keeps
+        it current. The endpoint's only filter is the product code and it has no sort, so the method
+        takes no `filters`, `sort`, or `order`. It takes no symbols and has no `Symbol` column.
 
         Args:
-            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
-                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
-                None for every product.
-            limit: The most rows to return in total; None for every row.
+            product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
+                product.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
 
         Raises:
-            TypeError: If `product_code` is not a `str` or a sequence of `str`, or `limit` is
-                not an `int`.
+            TypeError: If `product_code` is not a `str` or a sequence of `str`, or `limit` is not an
+                `int`.
             ValueError: If `product_code` is an empty sequence, or `limit` is not positive.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
                 status = m.futures.market_status(product_code=["ES", "CL"]).poll(30)
         """
         query = build_query(
@@ -899,53 +698,35 @@ class _Futures(Namespace):
         """Futures schedules: the timed events of each product's trading sessions.
 
         Each row is one scheduled event of one product's session (`Event`, such as `pre_open`,
-        `open`, or `close`), at its instant (`Timestamp`), with the session it belongs to
-        (`SessionEndDate`, ISO `yyyy-MM-dd` text) and the trading venue, from the REST endpoint
-        `/futures/v1/schedules`. It shows session hours, intraday breaks, and holiday
-        adjustments. The dataset takes no symbols and has no `Symbol` column.
-
-        `start` and `end` select sessions by their `SessionEndDate`, both inclusive (sent as
-        `session_end_date.gte` and `session_end_date.lte`); None leaves that side open. Every
-        other form of `session_end_date` is set through them, never through `filters`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-
-        The columns are described in the column reference,
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md#schedules,
-        in the web UI's column-header tooltips, and by `columns()` on the query.
+        `open`, or `close`) at its instant, with its session (`SessionEndDate`) and trading venue:
+        session hours, intraday breaks, and holiday changes. It takes no symbols and has no `Symbol`
+        column.
 
         Args:
-            product_code: Only this product, such as `"ES"` (sent as `product_code`), or
-                these products, such as `["ES", "NQ"]` (sent as `product_code.any_of`);
-                None for every product.
-            start: The first session, as an ISO date string or a `date` (a `datetime` raises
-                `ValueError`); None for no lower bound.
-            end: The last session, in the same forms. None (the default) sends no upper bound, so
-                rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by; None for the endpoint's default (`product_code`).
-            order: The sort direction, a `dm.Order`, sent as the `.asc` or `.desc` suffix of
-                `sort`; it needs `sort`. None for the endpoint's default direction.
-            limit: The most rows to return in total; None for every row.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"trading_venue": "XCME"}`.
+            product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
+                product.
+            start: The first session, by `SessionEndDate`, inclusive; a calendar date. See
+                README.md#start-and-end.
+            end: The last session, inclusive; None also returns future sessions.
+            sort: The endpoint sorts by `product_code`. See README.md#sort-order-limit.
+            order: Needs `sort`. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: Such as `{"trading_venue": "XCME"}`; never `session_end_date`, which `start`
+                and `end` set. See README.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`.
+            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.schedules.md.
 
         Raises:
-            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
-                `product_code` is neither a `str` nor a sequence of `str`.
-            ValueError: For an `end` before `start`, an unparseable bound, a `datetime` bound
-                (`session_end_date` is a calendar date), a `session_end_date` filter, an unknown
-                filter, a filter value of the wrong kind, an `order` without `sort`, or an empty
-                `product_code` sequence.
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is
+                neither a `str` nor a sequence of `str`.
+            ValueError: If `end` is before `start`, a bound is a `datetime` or cannot be read, a
+                filter key or value does not fit the endpoint, `order` is given without `sort`, or
+                `product_code` is empty.
 
         Example:
             ::
 
-                import deephaven_massive as dm
-
-                m = dm.MassiveSession()
                 week = m.futures.schedules(
                     product_code="ES", start="2025-12-22", end="2025-12-26"
                 ).fetch()

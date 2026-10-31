@@ -316,7 +316,8 @@ def test_rename_refuses_two_keys_on_one_column() -> None:
     with pytest.raises(ValueError, match=message):
         rename(overlapping, source(*contracts))
     # The gate reports it, and nothing raises past it.
-    assert Catalog((overlapping,)).problems() == (message[1:-1].replace("\\", ""),)
+    paged = dataclasses.replace(overlapping, page_size=1000)
+    assert Catalog((paged,)).problems() == (message[1:-1].replace("\\", ""),)
 
 
 def test_rename_refuses_a_repeated_column() -> None:

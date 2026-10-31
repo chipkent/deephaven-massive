@@ -225,7 +225,8 @@ class _Traffic:
         rejects: The rows rejected in the window.
         last_data: When each channel last had rows, in nanoseconds since the epoch.
         acknowledged: The acknowledged topics at the last summary.
-        published: Each stream's `StreamSink.rows_published` at the last summary, by stream id.
+        published: Each stream's `StreamSink.rows_published` at the last summary, or at its
+            adoption from another connection, by stream id.
     """
 
     batches: int = 0
@@ -837,6 +838,8 @@ class Connection:
             return
         for stream in streams:
             self._register_stream(stream)
+            # Its rows so far came through the old connection: the next summary counts from here.
+            self._traffic.published[stream.stream_id] = stream.sink.rows_published
         update = StreamUpdate(host=self.decision.host, path=self.path)
         self._update_streams({s.stream_id: update for s in streams})
         for stream in streams:
@@ -940,7 +943,8 @@ class Connection:
             ages = ", ".join(
                 f"{c} {(now - at) / 1e9:.0f} s ago" for c, at in sorted(traffic.last_data.items())
             )
-            # A stream attached during the window counts from zero: its sink is new.
+            # A stream opened during the window counts from zero, as its sink is new; one
+            # adopted from another connection counts from its total at the adoption (`adopt`).
             got = {sid: n - traffic.published.get(sid, 0) for sid, n in sorted(published.items())}
             logger.debug(
                 "%s: last %.0f s: %d data batches, rows %s, %d rejected; rows per stream %s, "

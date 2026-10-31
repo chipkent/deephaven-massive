@@ -1045,7 +1045,7 @@ def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> Non
     for spec, method in _dataset_methods():
         parameters = inspect.signature(method).parameters
         found = re.search(
-            r"^ {4}limit:(.*?)(?=^ {4}\S|\Z)",
+            r"^ {4}limit:(.*?)(?=^ {0,4}\S|\Z)",
             inspect.getdoc(method) or "",
             re.MULTILINE | re.DOTALL,
         )
@@ -1055,7 +1055,7 @@ def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> Non
         # `limit` caps the total on a dataset that sends its symbols together, and on one that
         # caps each symbol when the symbols are optional and left out.
         total = not each or symbols is None or symbols.default is not inspect.Parameter.empty
-        says_each = re.search(r"\b(each|per)\b", text) is not None
+        says_each = re.search(r"\b(each|per)\b", text, re.IGNORECASE) is not None
         says_total = re.search(r"\btotal\b", text) is not None
         if (says_each, says_total) != (each, total):
             wrong.append(f"{spec.name}: each={each} total={total}: {text!r}")

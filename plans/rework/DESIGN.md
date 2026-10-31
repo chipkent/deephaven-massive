@@ -149,7 +149,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
 | column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column the library computes ([section 19.4](#194-generated-schemas)). |
-| column reference | The generated, committed pages `docs/datasets/<namespace>.md` (and `snapshots.md` for `m.snapshots`), one section per dataset ([section 7.4](#74-column-descriptions)). |
+| dataset reference | The generated, committed pages under `docs/datasets/`: an index, `README.md`, and one page per dataset, `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), with its call, verbs, filters, Massive's plan tables, and columns ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
@@ -344,8 +344,8 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
   source_columns.py      SourceColumn: the key rename, required fields, widen
   column_descriptions.py the description rules of dataset columns, the transport labels and
                          their order (section 7.4)
-  column_reference.py    the column reference: render(catalog, provenance) -> {file name:
-                         Markdown} (pure); sync(directory, pages) owns docs/datasets/
+  column_reference.py    the dataset reference: render(catalog, provenance, calls) -> {file
+                         name: Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
   symbols.py             the canonical ticker grammar and its checks (check_symbol(),
                          normalize()), the public scalar converters, option_roots(),
@@ -361,6 +361,8 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          hours, no holiday calendar), for the no-frames WARNING
   bar_periods.py         intraday spans, bar periods, bar starts, days and sessions
   timestamps.py          the one epoch-unit routine (section 12), the FMV magnitude rule
+  epoch.py               the epoch, a day in nanoseconds, and the conversions between aware
+                         datetimes and epoch nanoseconds
   row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
                          TimestampInsert; RowTimes, TimeRule, and the bar-stamp rule (section 12)
   history_source.py      the history window, partition dates, publication and its grace, REST
@@ -442,8 +444,8 @@ Supporting files outside the package:
 |---|---|
 | `scripts/check.sh [fast\|full] [--no-fix]` | The single verification entry point (lint, format, type check; `full` adds the test suite with coverage). |
 | `python -m deephaven_massive._massive.refresh [--check \| --fetch]` | The refresh command, run from a source checkout ([section 19.6](#196-refresh-and-drift)). |
-| `uv run python scripts/render_reference.py` | Regenerates the column reference, `docs/datasets/`, the whole directory and nothing else ([section 7.4](#74-column-descriptions)). |
-| `docs/datasets/<namespace>.md` | The generated column reference, committed, never edited by hand. |
+| `uv run python scripts/render_reference.py` | Regenerates the dataset reference, `docs/datasets/`, the whole directory and nothing else ([section 7.4](#74-column-descriptions)). |
+| `docs/datasets/README.md`, `docs/datasets/<dataset>.md` | The generated dataset reference, committed, never edited by hand. |
 | `vendor/massive/` | The vendored spec snapshot the refresh reads ([section 19](#19-wire-clients-and-the-spec-snapshot)). It is Massive's published content, vendored as generation input: not covered by the repository's license, and in neither the wheel nor the sdist. `vendor/README.md` says so beside it. |
 | `.github/workflows/spec-drift.yml` | The advisory weekly drift job ([section 20](#20-quality-gates)). |
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
@@ -530,10 +532,12 @@ others:
   ([section 19](#19-wire-clients-and-the-spec-snapshot)) and the library's layer rules
   ([section 4.3](#43-layers)), with a negative test per rule: `tests/massive/` may import any
   `_massive` module, and the rest of `tests/` only the interface.
-- `tests/test_readme.py`: runs the Python examples of `README.md` in the embedded JVM against
-  the fakes, today those of its "Split adjustment" section ([section 21](#21-examples) example
-  7), and every example of section 21 once the README carries them. It mirrors `README.md`, not
-  a source module.
+- `tests/test_docs.py`: the user documentation's tests. It runs every Python block of
+  `README.md`, in order, in the embedded JVM against the fakes (and the first-tables and split
+  adjustment sections alone against scripted data), checks that every `README.md#<anchor>` and
+  `docs/datasets/<dataset>.md` a source file cites exists and that every link inside the README
+  resolves, and checks the README's namespace table against the catalog. It mirrors
+  `README.md`, not a source module.
 - `_` helper directories, of which there are two, `HELPER_PACKAGES` in `tests/test_layout.py`
   (a new one needs owner approval). The second, `tests/_live/` (`plans.py`, `probe.py`,
   `classes.py`, `calendar.py`, `contracts.py`, `events.py`, `streams.py`, `week_windows.py`,
@@ -778,11 +782,13 @@ update cycle to finish: the diagnostics writer, a poller, or another caller's st
 diagnostics rows, a poll's first cycle) therefore shows once the command is over, which is
 Deephaven's normal behavior for anything done in a console command. A long blocking call in a
 command, such as a `history()` of many requests on a rate-limited key, holds every live table
-of the worker still for its duration, as any long console command does. The first verb of a
-session that runs 5 seconds or longer there logs one WARNING after it returns, "MassiveSession
-#1: stocks.bars history() ran for 12 s inside a Deephaven console command, which holds the
-update graph's lock: live tables do not update until the command ends; pass wait=False to
-fetch() or history() to read in the background (logged once per session)", and a paced REST
+of the worker still for its duration, as any long console command does. A verb that runs 5
+seconds or longer there logs one WARNING after it returns, "MassiveSession #1: stocks.bars
+history() ran for 12 s inside a Deephaven console command, which holds the update graph's lock:
+live tables do not update until the command ends; pass wait=False to fetch() or history() to
+read in the background", once per pause: a later long verb in the same pause (no update cycle
+has run since the warning) logs it at DEBUG, so a command of several long verbs warns once and
+the next command that pauses the tables warns again, and a paced REST
 read warns before its first request how long it will pause them
 ([section 13.4](#134-rest)). An application script runs under the lock too, so the remedy is
 `wait=False`, a read on a library thread of its own ([section 7](#7-query-classes-and-verbs)),
@@ -1591,23 +1597,32 @@ same descriptions, plus each column's type and the transports that supply it, as
 table built from the dataset schema with no network call. The tooltip only exists in the web
 UI; `columns()` serves a notebook, an IDE, or a script.
 
-**3. The column reference documents them on GitHub.** `docs/datasets/<namespace>.md` holds
-one generated page per namespace module (`stocks.md`, …, `partners.md`), and one page of its
-own for `m.snapshots`, a dataset of the session itself with no namespace (`snapshots.md`), with
-one section per dataset in declaration order. Under each page's guide, one paragraph gives the
-recipe that merges tables of two asset classes on the columns they share:
-`merge([t.view(common) for t in tables])`, or, to keep every column, a typed null added for
-each missing one first (`update("Tape = NULL_LONG")`). Each section starts with an explicit
-anchor, `<a id="<dataset>"></a>`, where `<dataset>` is the dataset's name below its namespace
-with dots written as hyphens (`trades`, `financials-ratios`, `benzinga-news`), or the whole
-name of a dataset with no namespace (`snapshots`); a heading naming the dataset
-(`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
-result order. The table's columns are **Column**, **Deephaven type**, **Description**,
-**Supplied by** (the transports of `columns()`'s `SuppliedBy`, in the same spelling), and one
-**Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
-`WebSocket field`). A wire-field cell lists the distinct wire keys of that
-transport's sources that feed the column, in source order and before any projection, or
-`request` for a key filled from the request. Under the table, a list headed "Massive's
+**3. The dataset reference documents them on GitHub.** `docs/datasets/` holds an index,
+`README.md`, which GitHub shows when a reader opens the directory, and one generated page per
+dataset, named after its dotted name (`stocks.trades.md`, `stocks.financials.ratios.md`, and
+`snapshots.md` for `m.snapshots`, a dataset of the session itself). The index has a grid of
+the dataset names two or more asset-class namespaces share (`trades`, `bars`, `snapshots`, …)
+by asset class, each mark linking that class's page; the recipe that merges tables of two
+asset classes on the columns they share, `merge([t.view(common) for t in tables])`, or, to
+keep every column, a typed null added for each missing one first
+(`update("Tape = NULL_LONG")`); and one table per namespace listing each dataset's page,
+summary, and verbs. A dataset's page has its call path as title (`m.stocks.trades`), its
+`DatasetSpec.summary`, its call with every argument's default (`DatasetCall.signature`), and a
+table of facts: its verbs, the transports that serve it, the wire parameters its `start` and
+`end` are sent as, its default `poll()` mode and keys (for a dataset with `fetch()`), the
+`sort` values it takes (an enum's values, or any REST field for a free-text `sort`) and the
+`filters` keys it accepts (`filters.filter_keys`, minus the families of the method's own
+arguments), each only where the method takes `sort` or `filters`. Then come **Plan access**,
+the plan tables of Massive's pages that document its sources (`Provenance.plans`, read by the
+refresh from each page's "Plan Access", "Plan Recency", and "Plan History" sections, so they
+follow every refresh): one row per plan, one column per page, each cell the plan's recency and
+history, or "Not included"; and **Columns**, one row per column in result order, with
+**Column**, **Deephaven type**, **Description**, and **Supplied by** (the transports of
+`columns()`'s `SuppliedBy`, in the same spelling), a note on `RawSymbol` where the dataset has
+it, and, folded in `<details>`, one **Wire field** column per transport the dataset uses
+(`REST field`, `Flat-file field`, `WebSocket field`). A wire-field cell lists the distinct
+wire keys of that transport's sources that feed the column, in source order and before any
+projection, or `request` for a key filled from the request. Then a list headed "Massive's
 documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
 distinct, from the `Provenance` passed to the renderer ([section 19.4](#194-generated-schemas));
 a dataset whose sources have no URLs gets no list. A source several asset classes share (the
@@ -1616,16 +1631,21 @@ with an `asset_class`, only the pages whose URL path has a segment equal to that
 (`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
 of the source's pages when none matches, so a dataset never loses its links to a change in the
 vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
-`snapshots` or `reference.tickers`) lists every class's page. The page ends with a
-footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
-timestamp is an `Instant`, and **Supplied by** with the description already says when a
-column is null. Readers can see what each table holds before they install.
+`snapshots` or `reference.tickers`) lists every class's page; the plan table uses the same
+pages. Every page ends with a footer naming the generator command and the snapshot's fetch
+date. Units and nullability get no columns: every timestamp is an `Instant`, and **Supplied by**
+with the description already says when a column is null. Readers can see what each table holds
+and which plan serves it before they install.
 
-- **The renderer** is `column_reference.render(catalog: Catalog, provenance: Provenance) ->
-  dict[str, str]` in `_datasets/column_reference.py`, a pure function from the `catalog` (the
-  `Catalog` of `_datasets/catalog.py`: every declared `DatasetSpec`, by name) and `provenance`
-  it is given, and the dataset schemas, to `{file name: page text}`; it reads no
-  other state, so tests pass a synthetic catalog and `Provenance`. A **Deephaven type** cell is
+- **The renderer** is `column_reference.render(catalog: Catalog, provenance: Provenance,
+  calls: Mapping[str, DatasetCall]) -> dict[str, str]` in `_datasets/column_reference.py`, a
+  pure function from the `catalog` (the `Catalog` of `_datasets/catalog.py`: every declared
+  `DatasetSpec`, by name), `provenance`, and `calls` it is given, and the dataset schemas, to
+  `{file name: page text}`; it reads no other state, so tests pass a synthetic catalog,
+  `Provenance`, and calls. Each `DatasetCall` (signature, verbs, argument names, and the wire
+  parameter each argument sets) comes from the API layer, `dataset_calls()` in
+  `_dataset_list.py`, which walks the namespace classes, since the dataset layer may not import
+  the dataset methods. A **Deephaven type** cell is
   the column's `ColumnType` value (`Instant`, `long`, …), so the renderer imports no
   Deephaven. It escapes `|` in cells, emits no trailing whitespace, and ends every page with one
   newline, so the pages pass the commit hooks unchanged. `column_reference.sync(directory,
@@ -1636,11 +1656,11 @@ column is null. Readers can see what each table holds before they install.
   `sync` is the only function of `_datasets` that touches the file system; it makes no network
   call and no Deephaven call, and keeping it in the module keeps it under the unit tests and
   the coverage gate, which the script is not.
-- **The command** `uv run python scripts/render_reference.py` regenerates the whole column
+- **The command** `uv run python scripts/render_reference.py` regenerates the whole dataset
   reference and nothing else. The script starts the embedded Deephaven server (the API imports
   Deephaven, and the library never imports `deephaven_server`), imports the library, takes the
   catalog the session module builds from every namespace module, calls
-  `render(catalog, _massive.provenance())`, prints which columns each dataset gained or lost
+  `render(catalog, _massive.provenance(), dataset_calls())`, prints which columns each dataset gained or lost
   against the committed pages (`column_changes`), then calls `sync()` on `docs/datasets/` and
   prints what it wrote and deleted. Run after every refresh, the column report is how a refresh
   shows what it does to each dataset's table (the wire package cannot see datasets). It holds no logic of its own. A renamed or removed namespace or dataset therefore never leaves an
@@ -1649,18 +1669,31 @@ column is null. Readers can see what each table holds before they install.
 - **The parity test**, `tests/datasets/test_column_reference.py`, renders the pages in the test
   JVM and fails on a stale page (bytes differ), a missing page, and any extra file or directory
   under `docs/datasets/`, naming the command that fixes it. A catalog change or a refresh that moves
-  a description therefore lands with its regenerated pages in the same pull request.
+  a description or a plan table therefore lands with its regenerated pages in the same pull
+  request.
 - **Dataset method docstrings link, never list.** A column list in a docstring is a
   hand-written schema and goes stale. Each dataset method's docstring starts with its
-  `DatasetSpec.summary`, explains the dataset, states its transports, `limit`, and `ALL`, and
-  points to its section,
-  `https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/<namespace>.md#<dataset>`,
-  to the web UI's column tooltips, and to `columns()`. `tests/datasets/test_column_reference.py`
-  checks that every declared dataset's docstring names `docs/datasets/<namespace>.md#<dataset>`
-  for its own namespace and dataset. The summary is the docstring's whole first line: ruff's
+  `DatasetSpec.summary`, explains what is unusual about the dataset, and names its page,
+  `docs/datasets/<dataset>.md`. `tests/datasets/test_column_reference.py` checks that every
+  declared dataset's docstring names its own page. The summary is the docstring's whole first line: ruff's
   D205 requires a blank line after that line, so a sentence too long to fit on it, after the
   method's indentation and the opening quotes, within the 100-character line length, is
   shortened in the spec, never wrapped in the docstring.
+- **Dataset and verb docstrings link the README, never repeat it** (owner decision, 2026-10-30).
+  `README.md` holds all hand-written user documentation and defines once each shared argument
+  (`symbols`, `start` and `end`, `as_of`, `sort`, `order`, `limit`, `filters`, `adjusted`,
+  `timespan`, `multiplier`, `venues`, and the verb arguments) and each concept (table shapes,
+  time, bars, history sources, split adjustment, live-table lifetime, plans and errors,
+  diagnostics), each under an explicit `<a id>` anchor. A dataset docstring runs about 15 to 25
+  lines: the summary; what a row is and what is unusual about the dataset (its `poll()` mode
+  where not the plain default, a per-symbol `limit`, a refused `dm.ALL`, vendor quirks); one
+  Args line per argument, a shared one giving only this dataset's difference and `See
+  README.md#<anchor>.`; a one-line Returns naming `docs/datasets/<dataset>.md`; exact Raises;
+  and one or two example lines. A verb docstring stays within 40 lines. `tests/test_docs.py`
+  fails on any cited `README.md#<anchor>` or `docs/datasets/<dataset>.md` that does not exist,
+  runs every Python block of the README against the fakes, and checks the README's namespace
+  table against the catalog. The tests that pinned the old repeated sentences check only that a
+  docstring names its own page.
 
 ### 7.5 One-row datasets
 
@@ -1734,7 +1767,7 @@ description:
 | `Summary` | String | `DatasetSpec.summary`, the first sentence of the method's docstring. |
 | `Verbs` | String[] | The verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`, `ring`, `last_by`, `history`; a `bars` dataset lists the stream verbs, which only its streaming timespans have. |
 | `Transports` | String[] | The transports that serve it, spelled as `columns()` spells them: `REST`, `flat files`, `WebSocket`. |
-| `Documentation` | String | The web address of its section of the column reference. |
+| `Documentation` | String | The web address of its page of the dataset reference. |
 
 `Verbs` and `Transports` are arrays, so a filter tests membership:
 ``dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")``. The function is a module-level
@@ -1786,7 +1819,7 @@ Notation:
   (the indicators) or a symbol parameter that takes one ticker
   (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. Every docstring says so. The cap is
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
@@ -2285,7 +2318,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `Symbol` column holds exactly that form.
 - **The grammar** of each class: a stock is an upper-case root of letters and digits followed
   by the CQS suffixes Massive keeps, `.X` (a class or another dotted suffix, `BRK.B`,
-  `NTEST.Q`), `p` and an optional series (`KIMpL`), and the markers `r` and `w`; an option is
+  `NTEST.Q`, one or more, as in the NYSE warrants `AAC.WS` and `NE.WS.A`), `p` and an optional series (`KIMpL`), and the markers `r` and `w`; an option is
   `O:` and an OCC symbol whose root is 1 to 6 letters or digits (no dot) and whose `YYMMDD`
   expiry is a real date; a single futures contract is upper-case letters and digits with at
   least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
@@ -2704,14 +2737,17 @@ windows:
 - An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
   units of UTC time (whole hours in every zone the library uses).
 - A 1-day bar is its calendar day in the class day zone (to 01:00 New York time after it for
-  indices). A bar of `multiplier` days spans that many trading days for stocks, options, and
-  indices, and calendar days for forex and crypto. Whether Massive counts calendar or trading
-  days is not documented, and trading days end later whenever a holiday falls inside the bar;
-  with no holiday calendar, the bar ends after the latest day its days can reach,
-  `bar_periods.last_trading_day`: `n - 1` weekdays after its first day plus one weekday, and
-  one more for every five further days (`add_weekdays(first, n + (n - 1) // 5)`). That allowance covers
-  every run of the NYSE and CME calendars of 2024 to 2026 (a test checks every start date), the
-  tightest being six sessions over eight weekdays from 2024-12-24. Datetime bounds therefore
+  indices). A bar of `multiplier` days spans that many calendar days, weekends included, for
+  every class but futures: the live check of [section 23](#23-open-verification-items) item 63
+  found Massive's 2-day AAPL bars stamped on Friday, Sunday, and Tuesday, the Friday bar
+  holding Friday's volume alone and the Sunday bar Monday's. Only stocks were observed;
+  options and indices read the same aggregates endpoint and count the same way. A futures bar
+  of several sessions counts weekdays, and with no holiday calendar it ends after the latest
+  day its sessions can reach, `bar_periods.last_trading_day`: `n - 1` weekdays after its
+  first day plus one weekday, and one more for every five further days
+  (`add_weekdays(first, n + (n - 1) // 5)`). That allowance covers every run of the NYSE and
+  CME calendars of 2024 to 2026 (a test checks every start date), the tightest being six
+  sessions over eight weekdays from 2024-12-24. Datetime bounds therefore
   keep only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
   returns Tuesday to Thursday, so daily bars are asked for with dates.
 - Massive starts a week on Sunday, at 00:00 in the class day zone, and stamps the week's bar
@@ -2853,7 +2889,7 @@ first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `Timestam
 | Tick | (none: `Timestamp`) | (none) | the day zone's date of `Timestamp`; futures: `session_end_date` from REST and flat files, the WebSocket rule below on streams |
 | Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: the later of that and Massive's `e` | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
 | 1-day bar | 00:00 of the day | 00:00 of the next day; indices 01:00 New York time (`dates.day_end`) | the day |
-| n-day, week, month, quarter, year bar | 00:00 of the window's first day: for stocks and options a week's Monday and a month's, quarter's, or year's first weekday; for indices, forex, and crypto its first calendar day (a week's Sunday) | the end of the window's last day: n days count as trading days with the holiday allowance (`bar_periods.last_trading_day`) for stocks, options, and indices; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
+| n-day, week, month, quarter, year bar | 00:00 of the window's first day: for stocks and options a week's Monday and a month's, quarter's, or year's first weekday; for indices, forex, and crypto its first calendar day (a week's Sunday) | the end of the window's last day: n days count calendar days, weekends included, as Massive counts them; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
 | Futures session bar | Massive's `window_start` | 17:00 Chicago time on its session date | `session_end_date` |
 | Futures bar of several sessions | `window_start` | 17:00 Chicago time on the latest day its sessions can end on, counted from its start's session date plus one session (a folded first session opens before its holiday), with the holiday allowance (`bar_periods.last_trading_day`), or on its label if that is later | null |
 | Futures week, month, quarter, year bar | `window_start` | 17:00 Chicago time on the last weekday of the latest period its label allows | null |
@@ -2866,11 +2902,10 @@ is not verified ([section 23](#23-open-verification-items) item 52); Massive doe
 whether a futures bar of several sessions, or a week or longer, is labelled with its first or
 its last session (item 40), so its end is the later of the two readings, and a holiday can move
 a session later. A 1-day index bar keeps its `Date` although its end is an hour into the next
-day. A stock, option, or index bar of several days counts trading days with the holiday
-allowance: whether Massive counts calendar or trading days is not documented ([section
-23](#23-open-verification-items) item 63), and trading days end later, so a 2-day bar from a
-Friday ends at 00:00 on Wednesday, after the Tuesday a Monday holiday would carry it into. A
-futures bar of several sessions counts its sessions the same way, from the session date of its
+day. A stock, option, or index bar of several days counts calendar days, as Massive does
+([section 23](#23-open-verification-items) item 63), so a 2-day bar stamped on a Friday ends at
+00:00 on Sunday, and the next one, stamped on that Sunday, at 00:00 on Tuesday. A futures bar
+of several sessions counts its sessions with the holiday allowance, from the session date of its
 `window_start`, plus one session: a first session a holiday folded opens on the evening before
 the holiday, so that date is the holiday itself (Christmas 2024 and 2025 for 5-session bars from
 12-26). The fixed four-day margin it replaces fell a full session short for a 17-session bar
@@ -2975,7 +3010,7 @@ futures bars have no corporate actions and take no `adjusted`.
   recipe); the description of every price and volume column of `stocks.bars`, `options.bars`,
   and both daily open-close datasets, through a library note (`DatasetSpec.column_notes`), so
   `columns()`, the tooltips, and the column reference show it; and the README's "Split
-  adjustment" section, whose examples run in `tests/test_readme.py`.
+  adjustment" section, whose examples run in `tests/test_docs.py`.
 
 **One-day parameters.** A dataset parameter that names one calendar day (`daily_open_close`'s
 `date`, `options.contracts`' `as_of`, `reference.tickers`' and `ticker_details`' `date`)
@@ -3720,14 +3755,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   no row without a valid symbol) gets the whole batch with no filter, so the common
   single-stream case costs one `add`. One that holds exactly one of them gets that symbol's
   rows from `batch.partition_by("Symbol")`, built once per flush the first time a stream needs
-  it and shared by every stream of the flush (`SharedBatch`): a Java filter costs a few
-  milliseconds whatever its rows, so a hundred single-symbol streams filtering the batch each
-  would spend most of a flush there. One that holds two or more of them gets
+  it and shared by every stream of the flush (`SharedBatch`), when the batch holds at least
+  5,000 rows and at least 8 of the flush's streams take one symbol each. A filter scans the
+  whole batch (about 0.25 ms at 2,000 rows, 1.5 ms at 20,000), while the partition costs work
+  for each distinct symbol of the batch and then about 0.3 ms per stream, so below either
+  threshold each such stream filters; a non-gating benchmark records both paths. Every other
+  stream that holds some of them gets
   `publisher.add(batch.where_in(stream.filter_table, "Symbol"))`, which keeps arrival order
   across its symbols, where `filter_table` is a cached static one-column table rebuilt only when
-  the stream's symbol set changes. Target: Python work is O(rows) per channel per flush and
-  independent of the number of streams; per-stream work is at most one Java lookup or filter
-  and one `add`, O(rows) in Java with no Python per-row cost. A non-gating
+  the stream's symbol set changes. Target: Python work is O(rows) per channel per flush plus a
+  set intersection per stream; Java work is at most one partition per flush, which grows with
+  the batch's distinct symbols, plus one lookup or filter and one `add` per stream, with no
+  Python per-row cost. A non-gating
   benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
   2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping. The default
   run records only 10 streams at 2,000 rows; the other points are marked `benchmark` and
@@ -4612,6 +4651,8 @@ refresh/             build time only; excluded from the wheel; may import any of
                      prefix tables, "Columns" tables, and "Example Data" headers
   knowledge_base.py  ARTICLES (slug -> what the library takes from it), the knowledge-base
                      articles the library relies on; the Markdown of an article's HTML page
+  plan_access.py     each vendor page's "Plan Access", "Plan Recency", and "Plan History"
+                     sections -> PlanAccess, stored in descriptions.json by page URL
   openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
   plain_text.py      the four fixed rules that turn a vendor description into plain text
   naming.py          the naming policy shared by every transport: PascalCase columns, snake
@@ -5507,8 +5548,10 @@ checks.
   schema lacks, raises, so `sources` and `provenance` reject the same files. A description
   belongs to a `(source, wire key)`, so a projected field keeps the description of its wire
   key.
-  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]])`
-  exposes the fetch date and the URLs of each source, for the footer of the column reference;
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]], plans: Mapping[str, PlanAccess])`
+  exposes the fetch date, the URLs of each source, and each vendor page's plan tables (by page
+  URL: its title, the access, recency, and history summaries, and one `PlanTerms` per plan,
+  which the refresh's `plan_access` reads into `descriptions.json`), for the dataset reference;
   it loads every transport the file gives URLs for. Each file is read once under the lock,
   whichever of `sources` and `provenance` comes first. No other name is added to the interface.
 
@@ -5920,9 +5963,9 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
   and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used ⊎ deferred) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
-- **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
+- **Dataset reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
-  dataset method's docstring names its own section; `tests/namespaces/test_query_building.py` passes:
+  dataset method's docstring names its own page; `tests/namespaces/test_query_building.py` passes:
   every dataset method's docstring starts with its `DatasetSpec.summary`
   ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
@@ -6062,7 +6105,7 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 ## 21. Examples
 
 Every example below runs in the embedded test JVM against fake REST and WebSocket servers, as
-a test in `tests/test_readme.py` ([section 4.2](#42-test-layout)).
+a test in `tests/test_docs.py` ([section 4.2](#42-test-layout)).
 
 **1. Stocks Starter (15-minute delayed).**
 
@@ -6172,7 +6215,7 @@ t = merge([q.history("2026-10-20", "2026-10-23"), q.append_only()])
 
 **7. Split adjustment.** The README's "Split adjustment" section explains the bases
 ([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment") and holds these
-examples; `tests/test_readme.py` runs every Python block of that section, in order, against the
+examples; `tests/test_docs.py` runs every Python block of that section, in order, against the
 fake REST server.
 
 ```python
@@ -6492,8 +6535,9 @@ document already reflects them.
     contract or product still loading a minute after it was asked for is such a miss, and a
     spread is never looked up. The ends are conservative where Massive's labels are not
     verified: an index bar of a day or longer ends at 01:00 New York time, and an index week or
-    longer after its calendar period, weekend included; a bar of several trading days (stocks,
-    options, indices) or futures sessions ends after the latest day they can reach with one
+    longer after its calendar period, weekend included; a bar of several futures sessions
+    (revised 2026-10-30: a stock, option, or index bar of several days counts calendar days,
+    as the live check of item 63 found) ends after the latest day they can reach with one
     holiday allowed, and one more per five further days (`bar_periods.last_trading_day`, which
     holds for every run of the NYSE and CME calendars of 2024 to 2026); a futures week or longer at
     17:00 Chicago on the last weekday of the latest period its label allows; a futures
@@ -6919,7 +6963,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on their `session_end_date` (`Date`); bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: minute bars of ES around the 2026-01-20 session, and `YEAR` candles from a year start and from mid-year; record the first bar's time and whether the candles arrive |
 | 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
 | 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
-| 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |
+| 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | Settled by the live check of 2026-10-30: it does not. Of 130 conditions, Massive lists stocks `quote_condition` 30 twice, and the evidence does not say which column tells the two apart. `reference.conditions` is therefore keyed by every column Massive sends (`AssetClass`, `Type`, `Id` first), its optional fields nullable keys, so a `poll()` table keeps every distinct condition and merges only rows equal in every column; nothing depends on guessing the distinguishing column | `tests/namespaces/test_reference.py`: the poll keys are every vendor column, and a poll of two conditions sharing one id keeps both | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record, for each repeated `(AssetClass, Type, Id)`, the columns its rows differ in; fail if two rows are equal in every column |
 | 33 | The day a week bar starts on, for stocks, options, indices, forex, and crypto: Monday, or the Sunday before (forex trades from Sunday evening UTC) | Settled by the live check of 2026-10-30: Massive stamps every week bar at Sunday 00:00 in the class day zone (UTC for crypto and forex, New York time for stocks), and the bar holds that Sunday-to-Saturday week. Every week is named by its Sunday and the REST `{from}` is that Sunday; a stock or option week's window is its Monday to Friday, and an index, forex, or crypto week's is its whole Sunday-to-Saturday week. A week bar stamped on any other day than its Sunday is served in the week that day falls in, with a WARNING | `tests/datasets/test_bar_periods.py`, `tests/datasets/test_row_times.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_indices.py`: Sunday-stamped week bars of every class are kept for their week; a Monday-stamped crypto week is served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: two weeks of week bars each; record each `TimestampStart` and the first and last trade each bar holds |
 | 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside, and on which day a month bar is stamped | `{from}` is the first instant that belongs to the first bar that fits wholly (a week's Sunday, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped; a month, quarter, or year bar stamped on another day than its 1st is served in the period that day falls in, with a WARNING | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins; a crypto month bar stamped on the 2nd is served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
 | 35 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start, and a multi-week or multi-month bar must still be stamped on a day its period starts | `tests/datasets/test_bar_periods.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
@@ -6930,7 +6974,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`session_end_date` of its first or last session), and how such bars are aligned | Named by dates, such a bar is kept only when it fits the range under both readings of its label, and its `Date` is null; its `TimestampEnd` is the later of the two readings (17:00 Chicago on the latest day its sessions can end on, counted from the session date of `window_start`, plus one session for a fold, with one holiday allowed and one more per five further sessions, or on its label if later; for a week or longer, the last weekday of the latest period its label allows), and a bar is kept only when that end is no later than the range's end and now | `tests/datasets/test_bar_periods.py`, `tests/datasets/test_row_times.py`, `tests/namespaces/test_futures.py`: 2-session, 2-week, and 2-month bars kept under both readings, with their conservative ends; the allowance holds for every start date of the CME calendar of 2024 to 2026; a 2-session bar that could still be open is left out | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `TimestampStart`, its label, and the first and last minute bar it holds |
 | 41 | Whether Massive keeps an IPO's `issuer_name` unchanged while the offering moves through its statuses (rumor or pending, new, history, postponed, withdrawn); the vendor documents it only as "Name of issuer" | `stocks.ipos` upserts by `Symbol` and `IssuerName`, so two issuers of one ticker stay apart; were Massive to revise a name, the row under the old name would stay beside the new one, since `UPSERT` never deletes | `tests/namespaces/test_stocks.py`: two issuers of one ticker poll as two rows | `tests/namespaces/test_stocks_integration.py`: a year of IPOs; record every ticker whose rows carry more than one `issuer_name` |
 | 42 | Whether `IssuerCik` and `TransactionDate` identify one row of the insider activity, and `IssuerCik` and `OwnerCik` one row of the insider holdings; the vendor documents one row per issuer and transaction date, and one per reporting owner per issuer, but marks none of the four fields required | Both datasets replace their `poll()` table keyed by those columns; a null key fails the table, and two rows sharing a key would keep only one | `tests/namespaces/test_stocks.py`: each key column is needed to tell the fixture's rows apart | `tests/namespaces/test_stocks_integration.py`: a year of NVDA's activity and NVDA's holdings; record and refuse any key shared by two rows |
-| 43 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unreadable_symbols` (kept in `RawSymbol` and logged by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
+| 43 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | Stock part settled by the live check of 2026-10-30: of the `WARRANT`, `UNIT`, `RIGHT`, and `PFD` tickers, the only spellings outside a root and one suffix were 61 NYSE warrants, 60 written `ROOT.WS` (`AAC.WS`) and one `ROOT.WS.A` (`NE.WS.A`), which the canonical grammar already reads: an upper-case root and the CQS suffixes `.X` (one or more dotted parts), `pX`, `r`, and `w`. The live check had used a stricter pattern of its own; it now asks the library's converter. The partner datasets were not entitled on the test keys, so their spellings stay open. The conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unreadable_symbols` (kept in `RawSymbol` and logged by default) | `tests/datasets/test_symbols.py`: the grammar, `AAC.WS` and `NE.WS.A` among the canonical tickers, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling `dm.canonical_symbol_stock` refuses |
 | 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_wire_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
 | 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
 | 46 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
@@ -6950,7 +6994,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served, labelled by the day it falls on, with a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
 | 62 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | A symbol with no data returns no rows; a 404 after the first page of a request series raises `MassiveError`; a futures session is its own series, so a 404 on a later session drops that session with its own WARNING | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises; a later futures session's 404 is left out with a per-session WARNING | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |
-| 63 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Its days count as trading days, the later reading: with no holiday calendar it ends after the latest day they can reach, one weekday more and one more per five further days (`bar_periods.last_trading_day`), and `history()` keeps it only when that end lies in the range; a forex or crypto bar counts calendar days | `tests/datasets/test_row_times.py`, `tests/datasets/test_bar_periods.py`: a 2-day bar from a Friday ends at 00:00 on Wednesday; the allowance holds for every start date of the NYSE calendar of 2024 to 2026 | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; record which days each bar's volume sums |
+| 63 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Settled by the live check of 2026-10-30: calendar days. AAPL's 2-day bars were stamped on Monday, Wednesday, Friday, Sunday, Tuesday, and Thursday; the Friday bar's volume was Friday's alone and the Sunday bar's Monday's. A bar of `n` days spans `n` calendar days from its stamp, weekends included, and `history()` keeps it when that end lies in the range. Only stocks were observed; options and indices read the same aggregates endpoint and are treated alike. Forex and crypto bars count calendar days too | `tests/datasets/test_row_times.py`, `tests/datasets/test_bar_periods.py`, `tests/namespaces/test_stocks.py`: 2-day bars stamped Friday, Sunday, and Tuesday end two calendar days later, and `history()` of Friday to Wednesday keeps all three | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; fail unless each 2-day bar's volume is that of its two calendar days |
 | 64 | Whether Massive publishes forex flat files for a Saturday and a Sunday (forex trades from Sunday evening to Friday evening UTC) | A forex Saturday is a day without trading (`dates.is_trading_day`): its missing file is skipped silently and never raises "not yet published", and REST grouped daily does not request it; a missing Sunday file warns like a missing weekday | `tests/datasets/test_dates.py`, `tests/ingest/test_flatfiles.py`, `tests/ingest/test_rest.py`: a missing Saturday file is silent even within its publication grace, a Sunday's warns, and grouped daily skips the Saturday | `tests/namespaces/test_forex_integration.py`: `global_forex/day_aggs_v1` for a Saturday and a Sunday; record whether each file exists and its row count |
 | 65 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/massive/rest/test_client_integration.py` (a class on Basic): seven requests within a minute; record each answer's status, rate-limit headers, and message |
 | 66 | Whether reference data and the other datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count in a bucket of their own, as Massive's knowledge base says ("What is the request limit for Massive's RESTful APIs?": reference and cross-asset endpoints are "counted in their own bucket"), rather than against a subscription's limit, and whether that bucket has the Basic limit of 5 per minute | They go to the `other` bucket, every reference endpoint included (options contracts, IPOs, and reference reads filtered by market); `other` cannot be declared and is paced once a 429 names the per-minute limit | `tests/ingest/test_rest.py`: such a request, filtered by market or not, is charged to `other`; `tests/ingest/test_rate_limits.py`: a Basic-worded refusal paces `other` | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |

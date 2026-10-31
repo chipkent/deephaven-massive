@@ -19,9 +19,9 @@ library itself never starts a server) and then:
 2. imports every module the wheel ships, and checks that the refresh package, which runs only
    from a checkout, is not among them;
 3. resolves every public name of the package and of its wire package;
-4. renders the column reference from the installed catalog, which loads every generated
-   schema and description the wheel carries as package data, and compares it with the
-   committed pages in the directory given as the only argument;
+4. renders the dataset reference from the installed catalog and dataset methods, which loads
+   every generated schema, description, and plan table the wheel carries as package data, and
+   compares it with the committed pages in the directory given as the only argument;
 5. opens a session and closes it; nothing reaches the network.
 
 Exit status: 0 when every check passes; 1 when one fails, after the script has printed the
@@ -50,7 +50,7 @@ from deephaven_massive import _massive
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from deephaven_massive import _session
+    from deephaven_massive import _dataset_list, _session
     from deephaven_massive._datasets import column_reference
 
 _CHECKOUT_SOURCE = Path(__file__).resolve().parent.parent / "src"
@@ -113,18 +113,19 @@ def main() -> None:
     # Imported only once the server runs, since both import Deephaven. The type checker reads
     # the static imports above instead, so a renamed module or function fails the type check.
     if TYPE_CHECKING:
-        session, reference = _session, column_reference
+        session, reference, dataset_list = _session, column_reference, _dataset_list
     else:
         session = importlib.import_module("deephaven_massive._session")
         reference = importlib.import_module("deephaven_massive._datasets.column_reference")
-    pages = reference.render(session.CATALOG, _massive.provenance())
+        dataset_list = importlib.import_module("deephaven_massive._dataset_list")
+    pages = reference.render(session.CATALOG, _massive.provenance(), dataset_list.dataset_calls())
     on_disk = {path.name: path.read_text(encoding="utf-8") for path in committed.glob("*.md")}
     if pages != on_disk:
         differ = sorted(n for n in pages.keys() | on_disk.keys() if pages.get(n) != on_disk.get(n))
         raise WheelCheckError(
             f"the installed catalog renders pages that differ from {committed}: {differ}"
         )
-    _report(f"rendered the column reference of {len(session.CATALOG.by_name)} datasets")
+    _report(f"rendered the dataset reference of {len(session.CATALOG.by_name)} datasets")
 
     m = deephaven_massive.MassiveSession(deephaven_massive.MassiveConfig(api_key="wheel-check"))
     m.close()

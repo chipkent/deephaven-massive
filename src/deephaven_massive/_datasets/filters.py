@@ -12,7 +12,8 @@ every rule about them:
 - `takes_instants`: whether a date parameter compares instants or calendar days, read from the
   generated field it is named after;
 - `check_filters`: the validation a query runs when it is built, which puts each value in the
-  form that is sent and checks it with the wire package's own encoder.
+  form that is sent and checks it with the wire package's own encoder;
+- `filter_keys`: the keys a dataset accepts, which the generated dataset reference lists.
 
 The rules read the catalog's generated REST paths (`Catalog.rest_path`) and the dataset's
 declaration; they make no I/O, start no thread, and keep no state, so every function is safe on
@@ -26,7 +27,8 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
-from deephaven_massive._massive import ParamKind, WireType, encode_value
+from deephaven_massive._datasets.source_columns import INSTANT_WIRE_TYPES
+from deephaven_massive._massive import ParamKind, encode_value
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
 __all__ = [
     "check_filters",
     "filter_key",
+    "filter_keys",
+    "param_base",
     "param_family",
     "symbol_family",
     "takes_instants",
@@ -59,8 +63,17 @@ _FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 _EQUALITY_SUFFIXES: Final = ("any_of", "all_of")
 """The suffixes that, like the base name, select rows by equal values (`tickers.any_of`)."""
 
-_INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
-"""Wire types of a row field that holds an instant rather than a calendar date."""
+
+def param_base(name: str) -> str:
+    """Return a wire parameter's base name: the text before its first dot.
+
+    Args:
+        name: A wire parameter name, such as `"timestamp.gte"`, `"ticker.any_of"`, or `"date"`.
+
+    Returns:
+        The base, such as `"timestamp"`, `"ticker"`, or `"date"`.
+    """
+    return name.partition(".")[0]
 
 
 def param_family(name: str) -> frozenset[str]:
@@ -76,7 +89,7 @@ def param_family(name: str) -> frozenset[str]:
         The base (`"timestamp"`) and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and
         `.all_of` forms.
     """
-    base = name.split(".", 1)[0]
+    base = param_base(name)
     return frozenset({base, *(f"{base}.{suffix}" for suffix in _FILTER_SUFFIXES)})
 
 
@@ -92,7 +105,7 @@ def symbol_family(name: str) -> frozenset[str]:
     Returns:
         The base (`"ticker"`) and its `.any_of` and `.all_of` forms.
     """
-    base = name.split(".", 1)[0]
+    base = param_base(name)
     return frozenset({base, *(f"{base}.{suffix}" for suffix in _EQUALITY_SUFFIXES)})
 
 
@@ -130,8 +143,8 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
         return True
     if kind is not ParamKind.DATE:
         return False
-    base = name.partition(".")[0]
-    return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
+    base = param_base(name)
+    return any(f.wire_key == base and f.wire_type in INSTANT_WIRE_TYPES for f in rest_path.fields)
 
 
 def _list_items(
@@ -170,7 +183,7 @@ def _list_items(
         value = (value,)
     if not isinstance(value, tuple):
         return value
-    stem = name.rpartition(".")[0]
+    stem = param_base(name)
     base = next((p for p in rest_path.params if p.name == stem), None)
     kind = None if base is None else base.kind
     texts: list[str] = []
@@ -282,6 +295,53 @@ def _sent_value(
     return value
 
 
+def filter_keys(
+    catalog: Catalog, spec: DatasetSpec, *, typed: Iterable[str] = ()
+) -> tuple[str, ...]:
+    """Return every key a dataset's `filters` accepts, as `check_filters` decides.
+
+    Args:
+        catalog: The catalog, whose generated REST paths declare the filters.
+        spec: The dataset.
+        typed: The wire names of the dataset method's typed parameters, reserved as in
+            `check_filters`.
+
+    Returns:
+        The keys, sorted; empty for a dataset without REST paths or filters.
+
+    An unknown REST path raises the `KeyError` of `Catalog.source`.
+    """
+    return tuple(sorted(_declared(catalog, spec, typed)))
+
+
+def _declared(
+    catalog: Catalog, spec: DatasetSpec, typed: Iterable[str]
+) -> dict[str, list[tuple[RestPath, int]]]:
+    """Return every filter key of a dataset with each path that declares it.
+
+    Args:
+        catalog: The catalog, whose generated REST paths declare the filters.
+        spec: The dataset.
+        typed: The wire names of the dataset method's typed parameters, whose families are
+            reserved.
+
+    Returns:
+        Each accepted key mapped to the REST paths that take it, with the parameter's
+        position in each, in path order.
+    """
+    symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
+    fixed = (form for name in spec.fixed_params for form in param_family(name))
+    families = (form for name in typed for form in param_family(name))
+    reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families, *fixed}
+    params: dict[str, list[tuple[RestPath, int]]] = {}
+    for path in spec.rest_paths:
+        rest_path = catalog.rest_path(path)
+        for index, param in enumerate(rest_path.params):
+            if not param.in_path and param.name not in reserved:
+                params.setdefault(filter_key(param.name), []).append((rest_path, index))
+    return params
+
+
 def check_filters(
     catalog: Catalog,
     spec: DatasetSpec,
@@ -343,17 +403,7 @@ def check_filters(
     """
     if not filters:
         return ()
-    symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
-    fixed = (form for name in spec.fixed_params for form in param_family(name))
-    families = (form for name in typed for form in param_family(name))
-    reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families, *fixed}
-    # Every path that declares a filter, with the parameter's position in it.
-    params: dict[str, list[tuple[RestPath, int]]] = {}
-    for path in spec.rest_paths:
-        rest_path = catalog.rest_path(path)
-        for index, param in enumerate(rest_path.params):
-            if not param.in_path and param.name not in reserved:
-                params.setdefault(filter_key(param.name), []).append((rest_path, index))
+    params = _declared(catalog, spec, typed)
     checked: list[tuple[str, ParamValue]] = []
     for key, value in filters.items():
         if isinstance(value, datetime):

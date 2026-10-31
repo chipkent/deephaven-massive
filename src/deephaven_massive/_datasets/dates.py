@@ -47,6 +47,7 @@ reads a numpy time as UTC.
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import logging
 import re
@@ -57,6 +58,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from deephaven_massive._datasets.epoch import EPOCH, epoch_ns
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     futures_session,
@@ -157,8 +159,6 @@ _INDEX_DAY_END: Final = timedelta(hours=1)
 Chicago, since whether an index day bar covers the New York or the Chicago day is not
 verified."""
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
-_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
-_SATURDAY: Final = 5
 _WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
 """The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""
 
@@ -363,7 +363,7 @@ def _rounded(attoseconds: int, name: str, value: object, *, upper: bool) -> date
     """
     micros, rest = divmod(attoseconds, _ATTOSECONDS["us"])
     try:
-        moment = _EPOCH + timedelta(microseconds=micros)
+        moment = EPOCH + timedelta(microseconds=micros)
     except OverflowError:
         raise ValueError(f"{name}={value} {_OUTSIDE_DATETIME}") from None
     return _outward(moment, rest, name=name, value=value, upper=upper)
@@ -499,12 +499,12 @@ class TimeRange:
     @property
     def start_ns(self) -> int:
         """`start` as nanoseconds since the Unix epoch."""
-        return _epoch_ns(self.start)
+        return epoch_ns(self.start)
 
     @property
     def end_ns(self) -> int:
         """`end` as nanoseconds since the Unix epoch."""
-        return _epoch_ns(self.end)
+        return epoch_ns(self.end)
 
     @property
     def empty(self) -> bool:
@@ -569,19 +569,6 @@ class DaySpan:
             The half-open range, in UTC.
         """
         return TimeRange(midnight(self.first, zone), midnight(self.last + _ONE_DAY, zone))
-
-
-def _epoch_ns(moment: datetime) -> int:
-    """Convert an aware `datetime` to nanoseconds since the Unix epoch, exactly.
-
-    Args:
-        moment: An aware `datetime`.
-
-    Returns:
-        The epoch nanoseconds.
-    """
-    delta = moment - _EPOCH
-    return (delta.days * 86_400 + delta.seconds) * 10**9 + delta.microseconds * 1_000
 
 
 def bounds(
@@ -658,8 +645,8 @@ def is_trading_day(asset_class: AssetClass | ClassFromPrefix, day: date) -> bool
     if asset_class is AssetClass.CRYPTO:
         return True
     if asset_class is AssetClass.FOREX:
-        return day.weekday() != _SATURDAY
-    return day.weekday() < _SATURDAY
+        return day.weekday() != calendar.SATURDAY
+    return day.weekday() < calendar.SATURDAY
 
 
 def trades_at_weekends(asset_class: AssetClass | ClassFromPrefix) -> bool:
@@ -696,10 +683,8 @@ def day_end(asset_class: AssetClass | ClassFromPrefix, day: date) -> datetime:
     """
     if asset_class is AssetClass.FUTURES:
         return futures_session_end(day)
-    zone = day_zone(asset_class)
-    after = day + _ONE_DAY
-    midnight = datetime(after.year, after.month, after.day, tzinfo=zone)
-    return midnight + _INDEX_DAY_END if asset_class is AssetClass.INDICES else midnight
+    after = day_start(asset_class, day + _ONE_DAY)
+    return after + _INDEX_DAY_END if asset_class is AssetClass.INDICES else after
 
 
 def day_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
@@ -806,7 +791,7 @@ def day_start(asset_class: AssetClass | ClassFromPrefix, day: date) -> datetime:
     """
     if asset_class is AssetClass.FUTURES:
         return futures_session_open(day)
-    return datetime(day.year, day.month, day.day, tzinfo=day_zone(asset_class))
+    return datetime.combine(day, time(), tzinfo=day_zone(asset_class))
 
 
 def instant_bound(

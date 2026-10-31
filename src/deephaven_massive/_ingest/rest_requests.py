@@ -28,7 +28,7 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
-from deephaven_massive._datasets.filters import filter_key, takes_instants
+from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
 from deephaven_massive._datasets.history_source import session_date_param
 from deephaven_massive._datasets.symbols import forex_codes, symbol_class
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
@@ -579,7 +579,7 @@ def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict
     if {"sort", "order"} & dict(request.params).keys():
         return {}
     sort = params.get("sort")
-    axis = None if spec.time_axis is None else spec.time_axis[0].partition(".")[0]
+    axis = None if spec.time_axis is None else param_base(spec.time_axis[0])
     if "order" in params:
         fields = sort.values if sort is not None else ()
         field = axis if axis in fields else fields[0] if len(fields) == 1 else None

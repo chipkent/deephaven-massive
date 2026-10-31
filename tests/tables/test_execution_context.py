@@ -2,6 +2,7 @@
 
 import threading
 import types
+from collections.abc import Callable
 from typing import cast
 
 import pytest
@@ -12,6 +13,7 @@ from deephaven_massive._tables.execution_context import (
     entered,
     holds_update_graph_lock,
     refuse_update_graph_thread,
+    update_cycle,
 )
 
 TIMEOUT = 30.0
@@ -25,7 +27,7 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
     update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
     # The refusal names the recipe that does a listener's usual job without one.
-    with pytest.raises(ValueError, match=r"update-graph thread.*docs/guides/schedules\.md$"):
+    with pytest.raises(ValueError, match=r"update-graph thread.*README\.md#symbols$"):
         refuse_update_graph_thread(cast("ExecutionContext", update_thread))
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         refuse_update_graph_thread(dh_exec_ctx)
@@ -40,6 +42,17 @@ def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:
     with exclusive_lock(update_graph):
         assert holds_update_graph_lock(dh_exec_ctx)
     assert not holds_update_graph_lock(dh_exec_ctx)
+
+
+def test_the_update_cycle_stands_still_while_the_lock_is_held(
+    dh_exec_ctx: ExecutionContext, next_update_cycle: Callable[[], None]
+) -> None:
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        held = update_cycle(dh_exec_ctx)
+        dh_exec_ctx.update_graph.j_update_graph.requestRefresh()
+        assert update_cycle(dh_exec_ctx) == held  # no cycle can run under the lock
+    next_update_cycle()
+    assert update_cycle(dh_exec_ctx) > held
 
 
 def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionContext) -> None:

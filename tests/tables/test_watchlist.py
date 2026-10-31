@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, cast
 
@@ -267,7 +268,10 @@ def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
     assert skipped == []
 
 
-def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_failing_watch_is_refused_and_logged_only_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The stream the refusal fails logs it at ERROR; the watch adds only a DEBUG record.
     refused: list[str] = []
     counter = _SymbolCounter(
         spanning(),
@@ -276,13 +280,16 @@ def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture)
         on_invalid=refused.append,
         on_skipped=lambda _: None,
     )
-    counter.on_error(RuntimeError("table broke"))
+    with caplog.at_level(logging.DEBUG, logger=WATCHLIST_LOG):
+        counter.on_error(RuntimeError("table broke"))
     expected = (
         "the symbol table passed to snapshots failed upstream, so the result can no longer "
         "follow it: table broke. Fix that table and call snapshots again; a table made by "
         "dm.canonicalize_symbols fails on a row it cannot convert unless on_error=dm.OnError.LOG"
     )
-    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [("ERROR", expected)]
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("DEBUG", f"snapshots stream 7: {expected}")
+    ]
     assert refused == [expected]
 
 

@@ -298,6 +298,16 @@ the one the library assumes. A skip names what was missing: a plan, a key, S3 cr
 history beyond the plan's window, or an open market. Everything else is evidence: read each test's docstring for what it
 means. The smoke tier ends with its coverage: passed, not entitled, otherwise skipped, failed.
 
+One answer comes from `stream-day`'s `debug.log` rather than a test: **does Massive send
+frames on a quiet connection?** A connection with acknowledged subscriptions logs a WARNING
+after 5 minutes without any frame during its market's regular hours (`no frame for ... during
+... trading hours`). Whether that threshold is right depends on whether Massive sends a status
+frame while no data flows. From 03:45 to 04:00 New York time the stocks connection holds its
+subscriptions and receives no data, since stocks trade from 04:00: note the `status` lines of
+that connection (`wss://.../stocks status ...`) in those 15 minutes and the longest stretch
+without one, and report every `no frame for` WARNING with its time and connection. The
+threshold and its gate change only on that evidence.
+
 `live-evidence.log` and `live-checks.log` are git-ignored. They hold raw licensed rows
 (quotes, partner data such as Benzinga and ETF Global): attach them only where the audience may
 see that data, and redact those rows before sharing them anywhere public.

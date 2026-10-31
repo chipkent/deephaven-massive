@@ -39,11 +39,12 @@ from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import StreamQuery
+from deephaven_massive._query import QueryCall, StreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import transports as _transports
 from deephaven_massive._tables.columns import describe
 from deephaven_massive._tables.diagnostics import (
+    QUERY_SHOWN,
     ConnectionRow,
     Diagnostics,
     StreamRow,
@@ -1150,16 +1151,17 @@ def test_the_update_graph_check_precedes_the_closed_check(
     errors.clear()  # their tracebacks hold the session too
 
 
-def test_a_long_verb_in_a_console_command_is_reported_once(
+def test_a_long_verb_in_a_console_command_is_reported_once_per_pause(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     *,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     console_command: Callable[[Callable[[], None]], None],
+    next_update_cycle: Callable[[], None],
 ) -> None:
     # While a console command holds the update graph's lock, no live table updates: a verb that
-    # runs long there says so, once per session. Every verb counts as long here.
+    # runs long there says so, once per pause. Every verb counts as long here.
     q = stream_query(massive_session)
     made: list[Table] = []
     monkeypatch.setattr(_core, "PAUSED_TABLES_WARNING_SECONDS", 0.0)
@@ -1170,11 +1172,21 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
         made.append(q.append_only())
         made.append(q.ring(5))
 
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"):
         console_command(command)
-    (message,) = caplog.messages
-    assert message.startswith(f"{label(massive_session)}: m.test.trades().append_only() ran for ")
-    assert "until the command ends; pass wait=False to fetch() or history() to read in" in message
+        paused = [r for r in caplog.records if "inside a Deephaven console command" in r.message]
+        # The command's two verbs share one pause: the second logs only at DEBUG.
+        assert [r.levelno for r in paused] == [logging.WARNING, logging.DEBUG]
+        message = paused[0].getMessage()
+        assert message.startswith(
+            f"{label(massive_session)}: m.test.trades().append_only() ran for "
+        )
+        assert "until the command ends; pass wait=False to fetch() or history() to read" in message
+        caplog.clear()
+        next_update_cycle()  # the live tables updated again: the pause ended
+        console_command(lambda: made.append(q.ring(7)))
+        paused = [r for r in caplog.records if "inside a Deephaven console command" in r.message]
+        assert [r.levelno for r in paused] == [logging.WARNING]  # a new pause warns again
     for result in made:
         massive_session.release(result)
     made.clear()
@@ -1712,6 +1724,25 @@ def test_the_stream_lifecycle_is_logged(
         "stream 1: a hold released, 1 left",
         "stream 1: a hold released, 0 left; its stream scope is released",
     ]
+
+
+def test_a_stream_log_line_cuts_a_long_query(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A query's text can grow with its arguments; the open and reuse lines cut it as the
+    # `Query` column does, so one line never carries thousands of characters.
+    q = dataclasses.replace(stream_query(massive_session), _call=QueryCall("m." + "x" * 500))
+    with caplog.at_level(logging.DEBUG, logger=_core.__name__):
+        first = q.blink()
+        second = q.append_only()
+        massive_session.release(first)
+        massive_session.release(second)
+    cut = "m." + "x" * (QUERY_SHOWN - 3) + "…"
+    lines = [m for m in caplog.messages if "stream 1 opened" in m or "stream 1 reused" in m]
+    assert [cut in line for line in lines] == [True, True]
+    assert all(len(line) < QUERY_SHOWN + 200 for line in lines)
 
 
 @pytest.mark.parametrize(

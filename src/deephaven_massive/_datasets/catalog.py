@@ -34,13 +34,15 @@ so the declarations and the gates that keep them true read whole only side by si
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
-from deephaven_massive._datasets.filters import param_family
-from deephaven_massive._datasets.row_times import INSERT, RowTimes
+from deephaven_massive._datasets.dates import DAY_ZONES
+from deephaven_massive._datasets.filters import param_base, param_family
+from deephaven_massive._datasets.row_times import DATE, INSERT, RowTimes
 from deephaven_massive._datasets.schema import dataset_schema, filled_columns
 from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import (
@@ -83,6 +85,10 @@ _LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.LONG_ARRAY, WireTyp
 """Wire types of a field that holds several values, such as a filing's list of tickers."""
 
 _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
+
+_LIBRARY_TIME_NAME: Final = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")
+"""`Timestamp` alone or with a qualifier (`TimestampEnd`): the names of the library's time
+columns, which no vendor field keeps outside a declared key."""
 
 _DEFAULT_POLL_KEYS: Final = ("Symbol",)
 """The `poll()` key of a dataset that declares none: one row per symbol."""
@@ -344,6 +350,8 @@ class DatasetSpec:
             lowered where the rows are long (article bodies, quoted filing text, financial
             statements), so one page decompresses to some tens of megabytes at most, far below
             the REST client's cap on a response body. `limit` is a separate total-row cap.
+            None for a dataset none of whose REST paths takes `limit`; the `page size` gate
+            requires it on every other one, so no request falls back to Massive's default.
         fixed_params: Query parameters the library sets itself on every REST request, by wire
             name, such as the indicators' `{"expand_underlying": False}`; they have no
             argument of their own. Every REST path of the dataset must take each one (the catalog's
@@ -413,7 +421,8 @@ class DatasetSpec:
                 the request, or makes a key optional other than a `symbol` or `fanout` key read from
                 a REST path's rows, declares an `end` key outside a bars dataset or a `date` key on
                 a dataset without row times, or, for a daily summary, leaves a source without its
-                `date` key; `poll_keys` holds the `Symbol` of an optional symbol key or
+                `date` key; a daily summary has an asset class without a calendar day zone
+                (futures, or none); `poll_keys` holds the `Symbol` of an optional symbol key or
                 `TimestampInsert`, is empty on an `APPEND` dataset or one whose symbols overlap,
                 is empty together with `revision_keys`, or shares a column with `revision_keys`;
                 a dataset whose symbols overlap has `nullable_poll_keys`;
@@ -451,6 +460,12 @@ class DatasetSpec:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
         self._check_keys()
+        if self.times is RowTimes.DAY and self.asset_class not in DAY_ZONES:
+            raise ValueError(
+                f"{self.name}: a daily summary needs an asset class whose days are calendar "
+                f"days of one zone ({', '.join(c.value for c in DAY_ZONES)}), so its window "
+                "and its descriptions can name that zone"
+            )
         self._check_poll_keys()
         self._check_flat_files()
         self._check_verbs()
@@ -546,9 +561,10 @@ class DatasetSpec:
     def axis_params(self) -> frozenset[str]:
         """The wire parameters of the time axis, which only `start` and `end` may set.
 
-        Each name of `time_axis`, its base name, and every `.gt`, `.gte`, `.lt`, `.lte`, and
-        `.any_of` form of the base: `("timestamp.gte", "timestamp.lt")` reserves `timestamp`
-        and all of its forms, so no filter can send a second bound beside `start` and `end`.
+        Each name of `time_axis`, its base name, and every form of the base `param_family`
+        lists (`.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, `.all_of`): `("timestamp.gte",
+        "timestamp.lt")` reserves `timestamp` and all of its forms, so no filter can send a
+        second bound beside `start` and `end`.
         """
         return frozenset(name for axis in self.time_axis or () for name in param_family(axis))
 
@@ -599,10 +615,9 @@ class DatasetSpec:
                 a daily summary (`DAY`) leaves a source without its `date` key; or a key other than
                 `fanout` is marked as no instrument, a fan-out key that is no instrument is filled
                 from the request (it would have no column to keep), or a key other than a `symbol`
-                or `fanout` key read from a REST path's rows is optional (`KeySpec.required` False),
-                or a keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an optional
-                symbol key, where every row without a symbol would share the null key. The message
-                names the dataset.
+                or `fanout` key read from a REST path's rows is optional (`KeySpec.required`
+                False). The message names the dataset. A `poll()` keyed on the `Symbol` of an
+                optional symbol key is refused by `_check_poll_keys`.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -870,12 +885,8 @@ class Catalog:
         for index, spec in enumerate(self._by_name.values()):
             if spec.kind != kind:
                 continue
-            positions = [
-                m.position
-                for transport, key in spec.sources
-                for m in self.source(transport, key).memberships
-                if m.kind == kind and m.group == spec.group
-            ]
+            memberships = (self.source(t, k).membership(kind, spec.group) for t, k in spec.sources)
+            positions = [m.position for m in memberships if m is not None]
             ranked.append((ranks[str(spec.group)], min(positions, default=0), index, spec))
         return tuple(spec for *_, spec in sorted(ranked, key=lambda r: r[:3]))
 
@@ -896,8 +907,9 @@ class Catalog:
                 False for a session whose `unreadable_symbols` is `RAISE`, which has none.
 
         Returns:
-            The schema: `Symbol` and `Timestamp` first where the dataset
-            declares them, then the derived columns, then every other column of the kind.
+            The schema: `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd`
+            first where the dataset has them, then the derived columns, then every other column
+            some transport of the dataset fills, and `TimestampInsert` last.
 
         Raises:
             LookupError: If `spec` has a kind but is not one of this catalog's datasets.
@@ -1049,6 +1061,10 @@ class Catalog:
           the `fanout` keys agree on `KeySpec.instrument` across the dataset's sources and
           across the members of its kind.
         - **unique columns:** after the rename, no source has a repeated column.
+        - **library names:** no vendor field keeps, under its own name and outside a declared
+          key, the name of a library time column: `Timestamp` or `Timestamp<Qualifier>`, nor
+          `Date` on a dataset whose rows carry the library's `Date`. Each such column comes
+          from a declared key or is one the library fills.
         - **member types:** across the members of a kind, one column gets one wire type, up to
           the lattice joins.
         - **kind membership:** a kind dataset reads only sources holding a membership of its
@@ -1060,6 +1076,9 @@ class Catalog:
           of the fetch path when there is none), each key filled from the request, which
           names a parameter of its own path, and each `fixed_params` name, a query parameter
           of every REST path of the dataset.
+        - **page size:** a dataset sets `page_size` exactly when one of its REST paths takes a
+          `limit` query parameter, so no request falls back to Massive's default page and no
+          setting goes unread.
         - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own
           `poll_keys`, not the default `("Symbol",)`. The gate checks only that the key is
           explicit; the dataset's tests check that it is unique per row.
@@ -1088,6 +1107,7 @@ class Catalog:
             found.extend(keys)
             found.extend(self._kind_problems(spec))
             found.extend(self._parameter_problems(spec))
+            found.extend(self._page_size_problems(spec))
             if spec.poll_mode is PollMode.APPEND and spec.poll_keys == _DEFAULT_POLL_KEYS:
                 found.append(
                     f"append keys: {spec.name}: an APPEND dataset declares its own poll_keys, "
@@ -1123,7 +1143,7 @@ class Catalog:
             spec: The dataset; every source is generated.
 
         Returns:
-            The `declared keys` and `unique columns` failures.
+            The `declared keys`, `unique columns`, and `library names` failures.
         """
         needed: tuple[str, ...] = ()
         if spec.kind is not None:
@@ -1140,9 +1160,23 @@ class Catalog:
                     f"{' or '.join(lacking)} key"
                 )
             try:
-                rename(spec, self.source(transport, key))
+                columns = rename(spec, self.source(transport, key))
             except ValueError as error:
                 found.append(str(error))
+                continue
+            claimed = {k.column for _, k in spec.keys_for(transport, key).declared()}
+            dated = spec.times is not RowTimes.NONE
+            for column in columns:
+                kept = column.field is not None and column.field.column == column.column
+                owned = _LIBRARY_TIME_NAME.fullmatch(column.column) or (
+                    dated and column.column == DATE
+                )
+                if kept and owned and column.column not in claimed:
+                    found.append(
+                        f"library names: {spec.name}: {transport.value} {key}: the vendor field "
+                        f"{column.column!r} has the name of a library time column but is no "
+                        "declared key"
+                    )
         return found + self._fanout_problems(spec)
 
     def takes_symbols(self, spec: DatasetSpec) -> bool:
@@ -1175,7 +1209,7 @@ class Catalog:
         primary = spec.history_path or spec.fetch_path
         if spec.symbol_param is None or primary is None:
             return False
-        stem = spec.symbol_param.split(".", 1)[0].removesuffix("s")
+        stem = param_base(spec.symbol_param).removesuffix("s")
         filtered = [
             f for f in self.rest_path(primary).fields if f.wire_key.removesuffix("s") == stem
         ]
@@ -1234,7 +1268,7 @@ class Catalog:
             (transport, key)
             for transport in Transport
             for key, source in self._sources(transport).items()
-            if any(m.kind == spec.kind and m.group == spec.group for m in source.memberships)
+            if source.membership(spec.kind, spec.group) is not None
         }
         found = []
         if outside := set(spec.sources) - expected:
@@ -1258,6 +1292,26 @@ class Catalog:
                 listed = sorted(f"{t.value} {k}" for t, k in names)
                 found.append(f"kind membership: {spec.name}: {what} the sources {listed}")
         return found
+
+    def _page_size_problems(self, spec: DatasetSpec) -> list[str]:
+        """Check that a dataset sets `page_size` exactly when a REST path of it takes `limit`.
+
+        Args:
+            spec: The dataset; every source is generated.
+
+        Returns:
+            The `page size` failures.
+        """
+        paged = [
+            path
+            for path in spec.rest_paths
+            if any(p.name == "limit" and not p.in_path for p in self.rest_path(path).params)
+        ]
+        if paged and spec.page_size is None:
+            return [f"page size: {spec.name}: {paged[0]} takes limit, but page_size is unset"]
+        if not paged and spec.page_size is not None:
+            return [f"page size: {spec.name}: page_size is set, but no REST path takes limit"]
+        return []
 
     def _parameter_problems(self, spec: DatasetSpec) -> list[str]:
         """Check that every wire name the dataset declares is a parameter of its path.

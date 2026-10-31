@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 
+from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
@@ -192,19 +193,6 @@ class ScheduledSession:
     day: date
     opens: int
     closes: int
-
-
-def _ns(text: str) -> int:
-    """Return an ISO-8601 instant of a schedule as epoch nanoseconds.
-
-    Args:
-        text: Such as `2024-06-09T21:00:00+00:00`.
-
-    Returns:
-        The instant, to the microsecond.
-    """
-    moment = datetime.fromisoformat(text)
-    return (moment - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 1000
 
 
 class FuturesCalendar:
@@ -654,7 +642,9 @@ class FuturesCalendar:
                 row.get(k) for k in ("product_code", "session_end_date", "timestamp")
             )
             if product in events and isinstance(day, str) and isinstance(stamp, str):
-                events[product].setdefault(date.fromisoformat(day), []).append(_ns(stamp))
+                events[product].setdefault(date.fromisoformat(day), []).append(
+                    epoch_ns(datetime.fromisoformat(stamp))
+                )
         loaded = {
             product: tuple(
                 ScheduledSession(day, min(stamps), max(stamps))

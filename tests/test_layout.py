@@ -15,7 +15,7 @@ mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
 `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
 The only other test files that mirror no module are `conftest.py`, this file, and
-`test_readme.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
+`test_docs.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
 paths, so none of their directories starts with `_` either.
 
 The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
@@ -117,7 +117,7 @@ APPROVED_EXCEPTIONS = frozenset(
     {
         PurePosixPath("conftest.py"),  # embedded JVM and fixtures
         PurePosixPath("test_layout.py"),  # this file
-        PurePosixPath("test_readme.py"),  # mirrors README.md
+        PurePosixPath("test_docs.py"),  # the user docs: README.md and the docstrings' links
     }
 )
 
@@ -444,15 +444,15 @@ def test_test_catalog_is_a_plain_mirror() -> None:
 
 
 def test_the_approved_exceptions_need_no_module() -> None:
-    test_files = _paths("conftest.py", "test_layout.py", "test_readme.py")
+    test_files = _paths("conftest.py", "test_layout.py", "test_docs.py")
     assert orphans([], test_files) == []
 
 
 def test_an_approved_exception_counts_only_at_the_top_of_tests() -> None:
-    test_files = _paths("namespaces/conftest.py", "namespaces/test_readme.py")
+    test_files = _paths("namespaces/conftest.py", "namespaces/test_docs.py")
     assert orphans([], test_files) == [
         "tests/namespaces/conftest.py",
-        "tests/namespaces/test_readme.py",
+        "tests/namespaces/test_docs.py",
     ]
 
 

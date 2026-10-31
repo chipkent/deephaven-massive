@@ -14,6 +14,8 @@ from deephaven_massive._massive.spec.types import (
     Membership,
     Param,
     ParamKind,
+    PlanAccess,
+    PlanTerms,
     Provenance,
     RestPath,
     Source,
@@ -257,6 +259,16 @@ def test_a_source_in_several_kinds_is_accepted() -> None:
     assert source.memberships == memberships
 
 
+def test_a_source_finds_its_membership_by_kind_and_group() -> None:
+    stocks = Membership(kind="trades", group="stocks", position=0)
+    crypto = Membership(kind="trades", group="crypto", position=2)
+    source = Source(key="T", transport=Transport.WS, fields=(), memberships=(stocks, crypto))
+    assert source.membership("trades", "crypto") is crypto
+    assert source.membership("trades", "stocks") is stocks
+    assert source.membership("quotes", "stocks") is None
+    assert source.membership(None, None) is None  # a dataset in no kind
+
+
 def test_a_websocket_key_names_the_cluster_and_channel() -> None:
     stocks = Source(key="stocks/T", transport=Transport.WS, fields=(_price(),))
     options = Source(key="options/T", transport=Transport.WS, fields=(_price(),))
@@ -406,6 +418,24 @@ def test_provenance_urls_are_copied_and_read_only() -> None:
     assert provenance.urls == {(Transport.WS, "stocks/T"): (_URL,)}
     with pytest.raises(TypeError):
         cast("dict[tuple[Transport, str], str]", provenance.urls)[Transport.WS, "x"] = _URL
+
+
+def test_provenance_plans_are_copied_and_read_only() -> None:
+    page = PlanAccess(
+        title="Trades",
+        access="Included in select Stocks plans",
+        recency="Real-time",
+        history="Not applicable to websockets",
+        plans=(PlanTerms(plan="Stocks Advanced", access="Included", recency="Real-time"),),
+    )
+    plans = {_URL: page}
+    provenance = Provenance(fetched=dt.date(2026, 10, 27), urls={}, plans=plans)
+    plans.clear()
+    assert provenance.plans == {_URL: page}
+    assert page.plans[0].history is None
+    with pytest.raises(TypeError):
+        cast("dict[str, PlanAccess]", provenance.plans)["x"] = page
+    assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).plans == {}
 
 
 def test_provenance_refuses_a_single_string_of_urls() -> None:

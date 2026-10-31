@@ -122,11 +122,45 @@ EXCHANGES: Final = DatasetSpec(
     fetch_path="/v3/reference/exchanges",
     poll_keys=("AssetClass", "Id"),
 )
+_UPDATE_RULES: Final = tuple(
+    f"UpdateRules{scope}Updates{what}"
+    for scope in ("Consolidated", "MarketCenter")
+    for what in ("HighLow", "OpenClose", "Volume")
+)
+"""The condition columns that say whether a trade with the condition updates a bar's values."""
 CONDITIONS: Final = DatasetSpec(
     name="reference.conditions",
     summary="The trade and quote condition codes, with what each means and how it updates bars.",
     fetch_path="/v3/reference/conditions",
-    poll_keys=("AssetClass", "Type", "Id"),
+    # Massive lists two different conditions as stocks `quote_condition` 30, and no column is
+    # known to tell them apart, so a row is identified by every column Massive sends: a keyed
+    # poll() table keeps every distinct condition and merges only exact repeats.
+    poll_keys=(
+        "AssetClass",
+        "Type",
+        "Id",
+        "Name",
+        "DataTypes",
+        "Abbreviation",
+        "Description",
+        "Exchange",
+        "Legacy",
+        "SipMappingCta",
+        "SipMappingOpra",
+        "SipMappingUtp",
+        *_UPDATE_RULES,
+    ),
+    nullable_poll_keys={
+        **dict.fromkeys(
+            ("Abbreviation", "Description", "Legacy", *_UPDATE_RULES),
+            "Massive marks the field optional",
+        ),
+        "Exchange": "present only for a condition whose data comes from one exchange alone",
+        **dict.fromkeys(
+            ("SipMappingCta", "SipMappingOpra", "SipMappingUtp"),
+            "empty for a SIP that has no code for the condition",
+        ),
+    },
     page_size=_LIST_PAGE,
 )
 MARKET_STATUS: Final = DatasetSpec(
@@ -264,45 +298,40 @@ class _Reference(Namespace):
     ) -> Query:
         """Every ticker Massive supports, across asset classes, with its listing details.
 
-        Served over REST (`/v3/reference/tickers`); `fetch()` returns every matching ticker
-        and `poll()` re-fetches them, keyed by `Symbol`. The endpoint takes one ticker per
-        request, so a symbol list fans out to one request per symbol; `symbols=None` lists
-        every ticker, and `dm.ALL` is not accepted (use `symbols=None`). Its columns, and what
-        each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#tickers,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        Each row is one ticker. `poll()` re-fetches the list, keyed by `Symbol`. The endpoint takes
+        one ticker per request, so named tickers are one request each and `limit` then caps each
+        ticker's rows; `symbols=None` lists every ticker in one request series.
 
         Args:
-            symbols: The tickers to look up, of any asset classes, or a Deephaven table with a
-                `Symbol` column; None for every ticker.
+            symbols: Tickers of any classes; None for every ticker (`dm.ALL` is refused). See
+                README.md#symbols.
             market: The market to list; None for every market.
-            ticker_type: The ticker type, such as `dm.TickerType.CS` for common stock
-                (`ticker_types()` lists them with descriptions), sent as the wire
-                parameter `type`; None for every type.
+            ticker_type: The type, such as `dm.TickerType.CS` (`ticker_types()` lists them),
+                sent as the wire parameter `type`; None for every type.
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            as_of: The day the listing is as of, sent as the wire parameter `date`: a `date`,
-                ISO-8601 date text, Deephaven date text such as `"2025-3-3"`, a Java
-                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
-                raises `ValueError`: it is a calendar date); None for today.
-            active: True lists tickers traded on `as_of`; False lists delisted ones.
+            as_of: The day the listing is as of, sent as `date`; None for today. See
+                README.md#as-of.
+            active: True (the default) lists tickers traded on `as_of`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
-            sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
-            order: The sort direction; None for the endpoint's default.
-            limit: The most rows to return: in total for `symbols=None`, and for each symbol
-                otherwise, since each named ticker is its own request; None for every row.
-                The page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"ticker_gte": "A", "ticker_lt": "B"}`.
+            sort: See README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: Per ticker when tickers are named, else in total. See README.md#sort-order-limit.
+            filters: See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.tickers.md.
 
         Raises:
             TypeError: If `active` is not a `bool`, or another argument has the wrong type.
             ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown
                 filter.
+
+        Example:
+            ::
+
+                etfs = m.reference.tickers(ticker_type=dm.TickerType.ETF, limit=100).fetch()
         """
         if not isinstance(active, bool):
             raise TypeError(f"active must be a bool, not {type(active).__name__}")
@@ -336,28 +365,27 @@ class _Reference(Namespace):
     def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
         """One ticker's company and listing details: address, branding, shares, and more.
 
-        Served over REST (`/v3/reference/tickers/{ticker}`), one request per symbol; a symbol
-        Massive does not know is dropped with a WARNING. `fetch()` returns one row per symbol
-        and `poll()` re-fetches them, keyed by `Symbol`. `dm.ALL` is not accepted (use
-        `tickers()` to list every ticker). Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#ticker_details,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per symbol, one request each; a symbol Massive does not know is left out with a
+        WARNING. `poll()` re-fetches them, keyed by `Symbol`.
 
         Args:
-            symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
-                column.
-            as_of: The day the details are as of, sent as the wire parameter `date`: a `date`,
-                ISO-8601 date text, Deephaven date text such as `"2025-3-3"`, a Java
-                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
-                raises `ValueError`: it is a calendar date); None for the latest.
+            symbols: Tickers of any classes (`dm.ALL` is refused: `tickers()` lists every
+                ticker). See README.md#symbols.
+            as_of: The day the details are as of, sent as `date`; None for the latest. See
+                README.md#as-of.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.ticker_details.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
             ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `as_of`. Also for
                 `symbols` of None, with a message that names the forms it takes.
+
+        Example:
+            ::
+
+                details = m.reference.ticker_details(["AAPL", "MSFT"]).fetch()
         """
         query = build_query(
             self._core,
@@ -377,23 +405,24 @@ class _Reference(Namespace):
     ) -> Query:
         """The ticker type codes Massive uses, such as `CS` for common stock, with their names.
 
-        Served over REST (`/v3/reference/tickers/types`); `fetch()` returns every type and
-        `poll()` re-fetches them, keyed by `AssetClass`, `Locale`, and `Code`. The dataset
-        takes no symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#ticker_types,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per type; `poll()` re-fetches them, keyed by `AssetClass`, `Locale`, and `Code`.
 
         Args:
-            asset_class: The class whose types to list (forex is sent as `fx`); None for
-                every class. The endpoint has no futures types.
+            asset_class: The class whose types to list (forex is sent as `fx`); None for every
+                class. The endpoint has no futures types.
             locale: The locale whose types to list; None for both.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.ticker_types.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
             ValueError: For an `asset_class` the endpoint does not accept (`FUTURES`).
+
+        Example:
+            ::
+
+                types = m.reference.ticker_types(asset_class=dm.AssetClass.STOCKS).fetch()
         """
         params = {
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
@@ -405,27 +434,26 @@ class _Reference(Namespace):
     def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> Query:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
-        Served over REST (`/vX/reference/tickers/{id}/events`), one request per symbol; the
-        symbol may also be a CUSIP or a Composite FIGI, and `Symbol` is the identifier asked
-        about. `fetch()` returns every event and `poll()` re-fetches them, keyed by `Symbol`,
-        `Date`, and `Type`. `dm.ALL` is not accepted: the endpoint takes one ticker per
-        request. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#ticker_events,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One request per symbol; the symbol may also be a CUSIP or a Composite FIGI, and `Symbol` is
+        the identifier asked about. `poll()` re-fetches them, keyed by `Symbol`, `Date`, and `Type`.
 
         Args:
-            symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
-                column.
+            symbols: Tickers of any classes (`dm.ALL` is refused). See README.md#symbols.
             types: The event types to include, such as `["ticker_change"]` (one `str` is one
                 type); None for every type.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.ticker_events.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
             ValueError: For `dm.ALL`, an invalid symbol, or an empty `types`. Also for `symbols` of
                 None, with a message that names the forms it takes.
+
+        Example:
+            ::
+
+                events = m.reference.ticker_events("META").fetch()
         """
         query = build_query(
             self._core,
@@ -440,24 +468,25 @@ class _Reference(Namespace):
     def related_companies(self, symbols: Symbols) -> Query:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
-        Served over REST (`/v1/related-companies/{ticker}`), one request per symbol. Each row
-        names one peer: `Symbol` is the related company and `Underlying` the ticker asked
-        about. `fetch()` returns every peer and `poll()` re-fetches them, keyed by
-        `Underlying` and `Symbol`. `dm.ALL` is not accepted: the endpoint takes one ticker per
-        request. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#related_companies,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One request per symbol. Each row names one peer: `Symbol` is the related company and
+        `Underlying` the ticker asked about. `poll()` re-fetches them, keyed by `Underlying` and
+        `Symbol`.
 
         Args:
-            symbols: The tickers to find peers of, or a Deephaven table with a `Symbol` column.
+            symbols: The tickers to find peers of (`dm.ALL` is refused). See README.md#symbols.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.related_companies.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
             ValueError: For `dm.ALL` or an invalid symbol. Also for `symbols` of None, with a
                 message that names the forms it takes.
+
+        Example:
+            ::
+
+                peers = m.reference.related_companies("AAPL").fetch()
         """
         query = build_query(
             self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
@@ -478,63 +507,38 @@ class _Reference(Namespace):
     ) -> Query:
         """News articles about tickers, with their publishers and sentiment insights.
 
-        Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
-        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range
-        for every ticker, so `poll()` needs `start` or `limit` and raises `ValueError` without
-        either; give it a recent `start`, a `limit`, or both, since a fixed `start` keeps
-        widening the window of a poll that runs for days. Massive documents `published_utc`
-        as the endpoint's default sort and descending as its default order, so each ticker's
-        newest articles come first; a poll of the latest headlines:
-        `m.reference.news(["AAPL", "MSFT"], limit=50).poll(60)`. An article
-        lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
-        (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
-        articles that name one, and `table.ungroup("Tickers")` gives a row per article and
-        ticker), and `symbols` selects the articles that mention any of its tickers.
-
-        The endpoint takes one ticker per request, so the library sends one request per
-        ticker and keeps an article that mentions several of them once, by its `Id`. In
-        `fetch()`, an article without an `Id` is kept, never merged with another; a `poll()`
-        table fails on one, since `Id` is its key. Rows come ticker by ticker, the tickers in
-        alphabetical order. `limit`, `sort`, and `order` apply to each
-        ticker's request, not to the whole table: `limit=10` reads up to ten articles per
-        ticker, and `order` sorts within each ticker's articles. For one order across tickers,
-        sort the result, such as `table.sort_descending("PublishedUtc")`. A watchlist table is
-        followed: `fetch()` reads its rows once, and `poll()` re-reads them every cycle, so a
-        ticker added to the table is read from the next cycle; the articles of a ticker removed
-        from it stay, since a `poll()` table only appends.
-        Each ticker costs one request a cycle or more: on a plan limited to 5 requests a
-        minute, `poll(60)` of a 50-ticker watchlist cannot keep up, and the table logs the
-        slow-poll WARNING. `symbols=None` reads every article in one request series;
-        `dm.ALL` is not accepted (use `symbols=None`). Its columns, and what each means, are
-        in https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per article. An article names several tickers, so the table has no `Symbol`
+        but a `Tickers` array: `t.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps one
+        ticker's articles. The endpoint takes one ticker per request, so each ticker is its own
+        request, `limit`, `sort`, and `order` apply to each ticker's request (newest first by
+        default), and an article several tickers share is kept once, by `Id`. `poll()` appends
+        new articles and needs `start` or `limit`; it re-reads a watchlist table every cycle,
+        and a fixed `start` widens the window of a poll that runs for days.
 
         Args:
-            symbols: The tickers whose articles to read: one symbol, a list, or a Deephaven
-                table with a `Symbol` column (a watchlist); None for every article.
-            start: The earliest publication (`DateLike`): a date is its 00:00 in New York, an
-                instant (an aware `datetime`, a Java `Instant`) is used as is; None for no
-                lower bound, which reads the whole archive and which `poll()` refuses unless
-                `limit` is set.
-            end: The end of the range, of the same kind as `start` (mixing a date with a
-                `datetime` raises `ValueError`): a date includes that whole day, a
-                `datetime` is exclusive; None for no upper bound.
-            sort: The field each ticker's request sorts by (`"published_utc"`); None for the
-                endpoint's default, `published_utc`.
-            order: The sort direction of each ticker's request; None for the endpoint's
-                default, descending (newest first).
-            limit: The maximum number of articles per ticker, or in total without `symbols`;
-                None for every article. The page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the publication axis is set only through `start` and `end`.
+            symbols: The tickers whose articles to read; None for every article (`dm.ALL` is
+                refused). See README.md#symbols.
+            start: The earliest publication. See README.md#start-and-end.
+            end: The end of the range. See README.md#start-and-end.
+            sort: Each ticker's sort field, `"published_utc"` by default. See
+                README.md#sort-order-limit.
+            order: Each ticker's order, newest first by default. See README.md#sort-order-limit.
+            limit: Articles per ticker, or in total without `symbols`. See
+                README.md#sort-order-limit.
+            filters: See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.news.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: For `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a
                 range that ends before it starts, or an unknown filter.
+
+        Example:
+            ::
+
+                headlines = m.reference.news(["AAPL", "MSFT"], limit=50).poll(60)
         """
         query = build_query(
             self._core,
@@ -555,23 +559,24 @@ class _Reference(Namespace):
     ) -> Query:
         """The exchanges, trade reporting facilities, and SIPs Massive knows, with their codes.
 
-        Served over REST (`/v3/reference/exchanges`); `fetch()` returns every exchange and
-        `poll()` re-fetches them, keyed by `AssetClass` and `Id`. The dataset takes no
-        symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#exchanges,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per exchange; `poll()` re-fetches them, keyed by `AssetClass` and `Id`.
 
         Args:
-            asset_class: The class whose exchanges to list (forex is sent as `fx`); None for
-                every class. The endpoint has no indices exchanges.
+            asset_class: The class whose exchanges to list (forex is sent as `fx`); None for every
+                class. The endpoint has no indices exchanges.
             locale: The locale whose exchanges to list; None for both.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.exchanges.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
             ValueError: For an `asset_class` the endpoint does not accept (`INDICES`).
+
+        Example:
+            ::
+
+                venues = m.reference.exchanges(asset_class=dm.AssetClass.STOCKS).fetch()
         """
         params = {
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
@@ -594,33 +599,33 @@ class _Reference(Namespace):
     ) -> Query:
         """The trade and quote condition codes, with what each means and how it updates bars.
 
-        Served over REST (`/v3/reference/conditions`); `fetch()` returns every condition and
-        `poll()` re-fetches them, keyed by `AssetClass`, `Type`, and `Id`. The dataset takes no
-        symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#conditions,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per condition. Massive lists two different conditions under one stocks quote id,
+        so a `poll()` table is keyed by every column Massive sends and merges only exact repeats.
 
         Args:
-            asset_class: The class whose conditions to list (forex is sent as `fx`); None for
-                every class. The endpoint has no futures or indices conditions.
+            asset_class: The class whose conditions to list (forex is sent as `fx`); None for every
+                class. The endpoint has no futures or indices conditions.
             data_type: The kind of data the conditions apply to; None for every kind.
-            condition_id: One condition's id, sent as the wire parameter `id`; None for
-                every condition.
+            condition_id: One condition's id, sent as the wire parameter `id`; None for every
+                condition.
             sip: The SIP whose condition mapping to list; None for every SIP.
-            sort: The field to sort by, such as `"id"`; None for the endpoint's default.
-            order: The sort direction; None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores.
+            sort: See README.md#sort-order-limit.
+            order: See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            filters: See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.conditions.md.
 
         Raises:
-            TypeError: If `condition_id` is neither None nor an `int`, or another argument has
-                the wrong type.
+            TypeError: If `condition_id` is neither None nor an `int`, or another argument has the
+                wrong type.
             ValueError: For an `asset_class` the endpoint does not accept, or an unknown filter.
+
+        Example:
+            ::
+
+                codes = m.reference.conditions(asset_class=dm.AssetClass.STOCKS).fetch()
         """
         if condition_id is not None and (
             isinstance(condition_id, bool) or not isinstance(condition_id, int)
@@ -648,28 +653,30 @@ class _Reference(Namespace):
     def market_status(self) -> Query:
         """Whether the markets are open now, by exchange, currency market, and index group.
 
-        One row, with the nested exchange, currency, and index-group maps flattened into
-        columns. Served over REST (`/v1/marketstatus/now`); `fetch()` returns the current
-        status and `poll()` keeps only the latest in one row (`REPLACE`, `UPSERT`). It takes no
-        symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#market_status,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row, with the nested exchange, currency, and index-group maps flattened into columns.
+        `poll()` keeps only the latest status in its one row.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.market_status.md.
+
+        Example:
+            ::
+
+                status = m.reference.market_status().poll(60)
         """
         return cast("Query", build_query(self._core, MARKET_STATUS))
 
     def market_holidays(self) -> Query:
         """The upcoming market holidays and early closes, one row per exchange and day.
 
-        Served over REST (`/v1/marketstatus/upcoming`); `fetch()` returns every upcoming
-        holiday and `poll()` re-fetches them, keyed by `Exchange` and `Date`. The dataset takes
-        no symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#market_holidays,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        `poll()` re-fetches them, keyed by `Exchange` and `Date`.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A `Query`. Columns: docs/datasets/reference.market_holidays.md.
+
+        Example:
+            ::
+
+                holidays = m.reference.market_holidays().fetch()
         """
         return cast("Query", build_query(self._core, MARKET_HOLIDAYS))

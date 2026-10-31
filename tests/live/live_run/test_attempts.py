@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import _thread
 import json
+import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,13 +23,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests._live.calendar import NEW_YORK
-from tests._live.live_run import attempts, outcomes
+from tests._live.live_run import attempts, children, outcomes
 from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunContext, RunMemory
 from tests._live.live_run.secret_scrub import SecretFilter
 from tests._live.live_run.state import Attempt, RunState, check_of, entitlement_id, record
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tests._live.live_run.machine_checks import Item
     from tests._live.live_run.run_probe import ProbeResult
 
@@ -263,17 +267,55 @@ def test_a_child_that_ignores_the_interrupt_is_killed(harness: Harness) -> None:
     assert harness.state.attempts[-1].exit_code == -9
 
 
-def test_control_c_stops_the_child_and_records_the_attempt_interrupted(harness: Harness) -> None:
+def test_control_c_stops_the_child_and_records_the_attempt_interrupted(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The child's "hanging" line arrives on the output thread, which may run before the main
+    # thread reaches the wait: the interrupt is sent only once the wait has begun.
+    waiting = threading.Event()
+    real_wait = children.wait
+
+    def wait(
+        child: children.Child, *, deadline: datetime, now: Callable[[], datetime], grace: float
+    ) -> tuple[int, bool]:
+        waiting.set()
+        return real_wait(child, deadline=deadline, now=now, grace=grace)
+
     def interrupt(line: str) -> None:
         if line.endswith("hanging"):
+            waiting.wait()
             _thread.interrupt_main()
 
+    monkeypatch.setattr(children, "wait", wait)
     harness.ctx.echo = interrupt
     harness.script(collection={A: {"items": [], "requests": 1}}, hang=True)
     with pytest.raises(KeyboardInterrupt):
         _run(harness)
     assert harness.state.attempts[-1].status == "interrupted"
     assert harness.check("evidence", A).status == "not run"
+
+
+def test_control_c_before_the_wait_still_stops_the_child(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempt = attempts.new_attempt(harness.ctx, harness.state, "evidence")
+
+    def interrupted_save(_out: Path, _state: RunState) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_state, "save", interrupted_save)
+    with pytest.raises(KeyboardInterrupt):
+        attempts.run_child(
+            harness.ctx,
+            harness.state,
+            attempt,
+            argv=[sys.executable, "-c", "import signal; signal.pause()"],
+            env={},
+            until=NOW + timedelta(hours=1),
+        )
+    assert attempt.status == "interrupted"
+    with pytest.raises(ProcessLookupError):  # stopped and reaped, not left running
+        os.kill(attempt.pid, 0)
 
 
 def test_a_built_in_group_reports_through_its_results_file(harness: Harness) -> None:

@@ -36,14 +36,17 @@ received it, and is dropped from the batch. The batch becomes one static Deephav
 `dm.ALL` stream, and each symbol stream that holds every symbol of the batch, gets the whole batch;
 a symbol stream that holds none of them gets nothing. A symbol stream that holds exactly one of
 them gets that symbol's rows from a partition of the batch by `Symbol`, built once per flush the
-first time a stream needs it (`Table.partition_by`), so many single-symbol streams cost one
-partition and a lookup each rather than one filter each; a filter costs a few milliseconds
-whatever its rows, which a hundred streams would pay a hundred times per flush. A stream that
-holds two or more of the batch's symbols gets `batch.where_in(filter, "Symbol")`, which keeps the
+first time a stream needs it (`Table.partition_by`), when the batch holds at least
+`SPLIT_MIN_ROWS` rows and at least `SPLIT_MIN_STREAMS` streams take one symbol each: many
+single-symbol streams of a large batch then cost one partition and a lookup each rather than one
+scan of the batch each, while a lone single-symbol stream beside a busy channel filters, since
+the partition's cost grows with the batch's distinct symbols. Every other stream that holds
+some but not all of the batch's symbols gets `batch.where_in(filter, "Symbol")`, which keeps the
 rows in arrival order across its symbols, where `filter` is a static one-column table cached per
 stream and rebuilt only when the stream's symbols change. So the Python work is O(rows) per
-channel and flush, independent of the number of streams, and the per-stream work is at most one
-Java lookup or filter and one `add`. Each flush ends with one `SessionCore.update_streams` call per
+channel and flush plus a set intersection per stream; the Java work is one partition at most,
+which grows with the batch's distinct symbols, plus one lookup or filter and one `add` per
+stream. Each flush ends with one `SessionCore.update_streams` call per
 session, carrying the published-row total of each of its streams.
 
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
@@ -119,6 +122,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BACKLOG_WARNING_ROWS",
+    "SPLIT_MIN_ROWS",
+    "SPLIT_MIN_STREAMS",
+    "SYMBOL_CACHE_LIMIT",
     "ChannelPlan",
     "Flusher",
     "FuturesSessionDates",
@@ -150,8 +156,30 @@ A flush thread reads each distinct wire symbol once and remembers its canonical 
 stream's steady traffic costs no symbol reading. A `dm.ALL` stream of options, crypto, or forex
 meets new spellings every day (new contracts are listed, old ones expire), so the memory would
 grow for as long as the connection lives. Past this many spellings the memory is emptied after
-the flush and refilled from the next flushes' rows: some tens of megabytes at most, and
-one extra reading of each spelling still trading.
+the flush and refilled from the next flushes' rows. A full memory of options spellings measures
+about 10 to 12 megabytes, and starting over costs one extra reading of each spelling still
+trading.
+"""
+
+SPLIT_MIN_ROWS: Final = 5_000
+"""Rows a batch must hold before streams that take one symbol each may share a split of it.
+
+A stream that holds exactly one of a flush's symbols takes that symbol's rows either from a
+split of the batch by `Symbol` (`Table.partition_by`), shared by every such stream of the flush,
+or from a filter of its own (`Table.where_in`). A filter scans the whole batch, about 0.25 ms
+at 2,000 rows and 1.5 ms at 20,000; the split costs work for each distinct symbol of the batch
+and then about 0.3 ms per stream. Below this many rows a filter costs no more than a stream's
+share of the split, however many streams there are, so the batch is never split.
+`test_benchmark_symbol_split` in the stream tests records both paths.
+"""
+
+SPLIT_MIN_STREAMS: Final = 8
+"""Streams that must each take one symbol of a batch before the batch is split by symbol.
+
+With fewer such streams the split's own cost, which grows with the batch's distinct symbols,
+outweighs the filters it saves, so each stream filters (`SPLIT_MIN_ROWS` says what each path
+costs). This keeps a lone `m.stocks.trades("AAPL")` beside a busy `dm.ALL` channel on one
+filter per flush.
 """
 
 _SYMBOL: Final = "Symbol"
@@ -245,27 +273,34 @@ class SharedBatch:
     The flush thread creates one per dataset and channel in each flush, after converting the
     rows, and hands it to every stream of the dataset on the channel (`StreamSink.publish`);
     it is dropped when the flush ends. Each stream takes the whole table, nothing, the rows of
-    one symbol (`rows_of`), or a filter of the table. The rows of one symbol come from a
-    partition of the table by `Symbol`, built the first time a stream asks for them and reused
-    by every later stream of the flush, so its cost is paid once per flush however many
-    streams read it. Used by the one flush thread that created it, so it needs no lock.
+    one symbol (`rows_of`), or a filter of the table. When the flush counted enough streams
+    that take one symbol each (`splits`), their rows come from a partition of the table by
+    `Symbol`, built the first time a stream asks for them and reused by every later stream of
+    the flush, so its cost is paid once per flush however many streams read it; otherwise such
+    a stream filters. Used by the one flush thread that created it, so it needs no lock.
 
     Attributes:
         table: The static table of the batch's rows, in the dataset's schema.
         converted: The batch's conversion, for its distinct symbols.
+        splits: Whether a stream that takes one symbol reads it from the shared partition
+            (`rows_of`) rather than filtering the table.
     """
 
-    __slots__ = ("_partition", "converted", "table")
+    __slots__ = ("_partition", "converted", "splits", "table")
 
-    def __init__(self, table: Table, converted: Converted) -> None:
+    def __init__(self, table: Table, converted: Converted, *, splits: bool) -> None:
         """Wrap a flush's batch; nothing is computed until a stream asks for one symbol's rows.
 
         Args:
             table: The static table of the batch's rows (`columns.dataset_table`).
             converted: The batch's conversion (`ChannelPlan.convert`).
+            splits: Whether streams that take one symbol share a partition of the table: the
+                flush passes True when the batch holds at least `SPLIT_MIN_ROWS` rows and at
+                least `SPLIT_MIN_STREAMS` of its streams take one symbol each.
         """
         self.table: Final = table
         self.converted: Final = converted
+        self.splits: Final = splits
         self._partition: PartitionedTable | None = None
 
     def rows_of(self, symbol: str) -> Table:
@@ -668,8 +703,8 @@ class StreamSink:
         No Python work per row: a `dm.ALL` stream gets the whole batch; a symbol stream gets
         nothing when it holds none of the batch's symbols, the whole batch when it holds all of
         them (the common single-stream case), the rows of the one batch symbol it holds from the
-        batch's shared partition (`SharedBatch.rows_of`), and otherwise a `where_in` against its
-        cached filter table, rebuilt only when its symbols changed.
+        batch's shared partition (`SharedBatch.rows_of`) when the batch is split, and otherwise
+        a `where_in` against its cached filter table, rebuilt only when its symbols changed.
 
         Runs under the publish lock; the class docstring says why that is safe for a caller
         that holds the update graph's lock.
@@ -690,6 +725,25 @@ class StreamSink:
                 self.rows_published += added
             return added
 
+    def takes_one_symbol(self, converted: Converted) -> bool:
+        """Tell whether the stream would take one symbol's rows of a batch, and no other rows.
+
+        The flush counts these streams to choose between a shared partition of the batch and a
+        filter per stream (`SPLIT_MIN_STREAMS`). Any thread; never blocks.
+
+        Args:
+            converted: The batch's conversion, for its distinct symbols.
+
+        Returns:
+            True for a symbol stream that holds exactly one of the batch's symbols, unless that
+            symbol is the batch's only one and every row has it, which takes the whole batch.
+        """
+        with self._lock:
+            symbols = self._symbols
+        if symbols is None or len(symbols & converted.symbols) != 1:
+            return False
+        return len(converted.symbols) > 1 or converted.null_symbols
+
     def _select(self, batch: SharedBatch) -> Table | None:
         """Choose the rows of a batch the stream receives; the publish lock is held.
 
@@ -709,7 +763,7 @@ class StreamSink:
             return None
         if len(held) == len(converted.symbols) and not converted.null_symbols:
             return batch.table
-        if len(held) == 1:
+        if len(held) == 1 and batch.splits:
             (symbol,) = held
             return batch.rows_of(symbol)
         if version != self._filter_version:
@@ -1274,7 +1328,13 @@ class Flusher:
             self._fail_each(failing, MassiveError(failure.message, cause=ErrorCause.LIBRARY_DEFECT))
         if not converted.batch.num_rows:
             return
-        shared = SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
+        splits = (
+            converted.batch.num_rows >= SPLIT_MIN_ROWS
+            and sum(sink.takes_one_symbol(converted) for sink in readers) >= SPLIT_MIN_STREAMS
+        )
+        shared = SharedBatch(
+            dataset_table(converted.batch, plan.date_columns), converted, splits=splits
+        )
         for sink in readers:
             if sink.publish(shared):
                 found = updates.get(sink, StreamUpdate())
@@ -1305,9 +1365,10 @@ class Flusher:
         converted = plan.convert(rows, known, arrived=arrived, sessions=self._sessions)
         if len(known) > SYMBOL_CACHE_LIMIT:
             logger.debug(
-                "%s: the %s symbol cache passed %d spellings and starts over",
+                "%s: the %s symbol cache holds %d spellings, past its limit of %d; starts over",
                 plan.dataset,
                 plan.channel,
+                len(known),
                 SYMBOL_CACHE_LIMIT,
             )
             known.clear()

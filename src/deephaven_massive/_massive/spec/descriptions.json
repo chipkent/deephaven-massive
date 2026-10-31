@@ -2939,5 +2939,6936 @@
   },
   "WS": {},
   "FLAT_FILES": {}
+ },
+ "plans": {
+  "https://massive.com/docs/flat-files/crypto/day-aggregates.md": {
+   "title": "Day Aggregates",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/crypto/minute-aggregates.md": {
+   "title": "Minute Aggregates",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/crypto/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/forex/day-aggregates.md": {
+   "title": "Day Aggregates",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/forex/minute-aggregates.md": {
+   "title": "Minute Aggregates",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/forex/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Currencies plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md": {
+   "title": "Minute Aggregates - CBOT",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md": {
+   "title": "Minute Aggregates - CME",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md": {
+   "title": "Minute Aggregates - COMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md": {
+   "title": "Minute Aggregates - NYMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/quotes/cbot.md": {
+   "title": "Quotes Aggregates - CBOT",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/quotes/cme.md": {
+   "title": "Quotes Aggregates - CME",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/quotes/comex.md": {
+   "title": "Quotes Aggregates - COMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/quotes/nymex.md": {
+   "title": "Quotes Aggregates - NYMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md": {
+   "title": "Session Aggregates - CBOT",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/session-aggregates/cme.md": {
+   "title": "Session Aggregates - CME",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/session-aggregates/comex.md": {
+   "title": "Session Aggregates - COMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md": {
+   "title": "Session Aggregates - NYMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/trades/cbot.md": {
+   "title": "Trades Aggregates - CBOT",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/trades/cme.md": {
+   "title": "Trades Aggregates - CME",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/trades/comex.md": {
+   "title": "Trades Aggregates - COMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/futures/trades/nymex.md": {
+   "title": "Trades Aggregates - NYMEX",
+   "access": "Included in select Futures plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/indices/day-aggregates.md": {
+   "title": "Day Aggregates",
+   "access": "Included in select Indices plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/indices/minute-aggregates.md": {
+   "title": "Minute Aggregates",
+   "access": "Included in select Indices plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/indices/values.md": {
+   "title": "Values",
+   "access": "Included in select Indices plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/options/day-aggregates.md": {
+   "title": "Day Aggregates",
+   "access": "Included in select Options plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/options/minute-aggregates.md": {
+   "title": "Minute Aggregates",
+   "access": "Included in select Options plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/options/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Options plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to March 7, 2022",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/options/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Options plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/stocks/day-aggregates.md": {
+   "title": "Day Aggregates",
+   "access": "Included in select Stocks plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/stocks/minute-aggregates.md": {
+   "title": "Minute Aggregates",
+   "access": "Included in select Stocks plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/stocks/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Stocks plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/flat-files/stocks/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Stocks plans",
+   "recency": "Updated at 11a ET to include the previous day",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/alternative/consumer-spending/merchant-aggregates.md": {
+   "title": "Merchant Aggregates",
+   "access": "Included in select Consumer Spending expansion plans",
+   "recency": "Included in select Consumer Spending expansion plans (updated daily)",
+   "history": "Records date back to January 1, 2016",
+   "plans": [
+    {
+     "plan": "European Consumer Spending by Merchant",
+     "access": "Included",
+     "recency": "30-day delayed",
+     "history": "All history"
+    },
+    {
+     "plan": "European Consumer Spending by Merchant Business",
+     "access": "Included",
+     "recency": "7-day delayed",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/alternative/consumer-spending/merchant-hierarchy.md": {
+   "title": "Merchant Hierarchy",
+   "access": "Included in select Consumer Spending expansion plans",
+   "recency": "Included in select Consumer Spending expansion plans (updated weekly)",
+   "history": "Records date back to November 1, 2021",
+   "plans": [
+    {
+     "plan": "European Consumer Spending by Merchant",
+     "access": "Included",
+     "recency": "30-day delayed",
+     "history": "All history"
+    },
+    {
+     "plan": "European Consumer Spending by Merchant Business",
+     "access": "Included",
+     "recency": "7-day delayed",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/aggregates/custom-bars.md": {
+   "title": "Custom Bars (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/aggregates/daily-market-summary.md": {
+   "title": "Daily Market Summary (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/aggregates/daily-ticker-summary.md": {
+   "title": "Daily Ticker Summary (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/aggregates/previous-day-bar.md": {
+   "title": "Previous Day Bar (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/market-operations/condition-codes.md": {
+   "title": "Condition Codes",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/market-operations/exchanges.md": {
+   "title": "Exchanges",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/market-operations/market-holidays.md": {
+   "title": "Market Holidays",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/snapshots/full-market-snapshot.md": {
+   "title": "Full Market Snapshot",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/snapshots/top-market-movers.md": {
+   "title": "Top Market Movers",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md": {
+   "title": "Unified Snapshot",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/technical-indicators/exponential-moving-average.md": {
+   "title": "Exponential Moving Average (EMA)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/technical-indicators/moving-average-convergence-divergence.md": {
+   "title": "Moving Average Convergence/Divergence (MACD)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/technical-indicators/relative-strength-index.md": {
+   "title": "Relative Strength Index (RSI)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/technical-indicators/simple-moving-average.md": {
+   "title": "Simple Moving Average (SMA)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/tickers/all-tickers.md": {
+   "title": "All Tickers",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/tickers/ticker-overview.md": {
+   "title": "Ticker Overview",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/trades/last-trade.md": {
+   "title": "Last Trade",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/crypto/trades/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Records date back to November 1, 2013",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/economy/funding-conditions.md": {
+   "title": "Funding Conditions",
+   "access": "Included in all plans",
+   "recency": "Updated daily",
+   "history": "Records date back to July 1, 1954",
+   "plans": [
+    {
+     "plan": "All Stocks plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Options plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Indices plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Currencies plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/economy/inflation-expectations.md": {
+   "title": "Inflation Expectations",
+   "access": "Included in all plans",
+   "recency": "Updated monthly",
+   "history": "Records date back to January 1, 1982",
+   "plans": [
+    {
+     "plan": "All Stocks plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Options plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Indices plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Currencies plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/economy/inflation.md": {
+   "title": "Inflation",
+   "access": "Included in all plans",
+   "recency": "Updated monthly",
+   "history": "Records date back to January 1, 1947",
+   "plans": [
+    {
+     "plan": "All Stocks plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Options plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Indices plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Currencies plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/economy/labor-market.md": {
+   "title": "Labor Market",
+   "access": "Included in all plans",
+   "recency": "Updated monthly",
+   "history": "Records date back to January 1, 1948",
+   "plans": [
+    {
+     "plan": "All Stocks plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Options plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Indices plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "All Currencies plans",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated monthly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/economy/treasury-yields.md": {
+   "title": "Treasury Yields",
+   "access": "Included in all plans",
+   "recency": "Updated daily",
+   "history": "Records date back to January 2, 1962",
+   "plans": [
+    {
+     "plan": "All Stocks plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Options plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Indices plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "All Currencies plans",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/aggregates/custom-bars.md": {
+   "title": "Custom Bars (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/aggregates/daily-market-summary.md": {
+   "title": "Daily Market Summary (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/aggregates/previous-day-bar.md": {
+   "title": "Previous Day Bar (OHLC)",
+   "access": "Included in all Currencies plans",
+   "recency": "End-of-day or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/currency-conversion.md": {
+   "title": "Currency Conversion",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/market-operations/exchanges.md": {
+   "title": "Exchanges",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/market-operations/market-holidays.md": {
+   "title": "Market Holidays",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/quotes/last-quote.md": {
+   "title": "Last Quote",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/quotes/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/snapshots/full-market-snapshot.md": {
+   "title": "Full Market Snapshot",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/snapshots/top-market-movers.md": {
+   "title": "Top Market Movers",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md": {
+   "title": "Unified Snapshot",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/tickers/all-tickers.md": {
+   "title": "All Tickers",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated hourly",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/forex/tickers/ticker-overview.md": {
+   "title": "Ticker Overview",
+   "access": "Included in all Currencies plans",
+   "recency": "Updated hourly",
+   "history": "Records date back to September 25, 2009",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "2 years"
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/aggregates.md": {
+   "title": "Aggregate Bars (OHLC)",
+   "access": "Included in all Futures plans",
+   "recency": "8-hour historical, 10-minute delayed, or real-time",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "8-hour historical",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/contracts.md": {
+   "title": "Contracts",
+   "access": "Included in all Futures plans",
+   "recency": "Updated daily",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/market-operations/exchanges.md": {
+   "title": "Exchanges",
+   "access": "Included in all Futures plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Futures plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/products.md": {
+   "title": "Products",
+   "access": "Included in all Futures plans",
+   "recency": "Updated daily",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/schedules.md": {
+   "title": "Schedules",
+   "access": "Included in all Futures plans",
+   "recency": "Updated daily",
+   "history": "Records date back to March 17, 2025",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md": {
+   "title": "Futures Contracts Snapshot",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/trades-quotes/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/futures/trades-quotes/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/aggregates/custom-bars.md": {
+   "title": "Custom Bars (OHLC)",
+   "access": "Included in all Indices plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/aggregates/daily-ticker-summary.md": {
+   "title": "Daily Ticker Summary (OHLC)",
+   "access": "Included in all Indices plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/aggregates/previous-day-bar.md": {
+   "title": "Previous Day Bar (OHLC)",
+   "access": "Included in all Indices plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/market-operations/market-holidays.md": {
+   "title": "Market Holidays",
+   "access": "Included in all Indices plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Indices plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/snapshots/indices-snapshot.md": {
+   "title": "Indices Snapshot",
+   "access": "Included in select Indices plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md": {
+   "title": "Unified Snapshot",
+   "access": "Included in select Indices plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/tickers/all-tickers.md": {
+   "title": "All Tickers",
+   "access": "Included in all Indices plans",
+   "recency": "Updated hourly",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/indices/tickers/ticker-overview.md": {
+   "title": "Ticker Overview",
+   "access": "Included in all Indices plans",
+   "recency": "Updated hourly",
+   "history": "Records date back to February 14, 2023",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/aggregates/custom-bars.md": {
+   "title": "Custom Bars (OHLC)",
+   "access": "Included in select Options plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md": {
+   "title": "Daily Ticker Summary (OHLC)",
+   "access": "Included in select Options plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/aggregates/previous-day-bar.md": {
+   "title": "Previous Day Bar (OHLC)",
+   "access": "Included in select Options plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/contracts/all-contracts.md": {
+   "title": "All Contracts",
+   "access": "Included in all Options plans",
+   "recency": "Updated daily",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/contracts/contract-overview.md": {
+   "title": "Contract Overview",
+   "access": "Included in all Options plans",
+   "recency": "Updated daily",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/market-operations/condition-codes.md": {
+   "title": "Condition Codes",
+   "access": "Included in all Options plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/market-operations/exchanges.md": {
+   "title": "Exchanges",
+   "access": "Included in all Options plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/market-operations/market-holidays.md": {
+   "title": "Market Holidays",
+   "access": "Included in all Options plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Options plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md": {
+   "title": "Option Chain Snapshot",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/snapshots/unified-snapshot.md": {
+   "title": "Unified Snapshot",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/trades-quotes/last-trade.md": {
+   "title": "Last Trade",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/trades-quotes/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Options plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to March 7, 2022",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/options/trades-quotes/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Options plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to June 2, 2014",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "4 years"
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/analyst-details.md": {
+   "title": "Analyst Details",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated every 2 hours",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Benzinga Analyst Ratings",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Insights",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Ratings Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Insights Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/analyst-insights.md": {
+   "title": "Analyst Insights",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated in real time",
+   "history": "Records date back to January 2, 2020",
+   "plans": [
+    {
+     "plan": "Benzinga Analyst Insights",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga Analyst Insights Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md": {
+   "title": "Analyst Ratings",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated in real time",
+   "history": "Records date back to December 8, 2011",
+   "plans": [
+    {
+     "plan": "Benzinga Analyst Ratings",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga Analyst Ratings Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md": {
+   "title": "Bulls Bears Say",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Benzinga Bulls Bears Say",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Bulls Bears Say Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/consensus-ratings.md": {
+   "title": "Consensus Ratings",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated every 2 hours",
+   "history": "Records date back to December 8, 2011",
+   "plans": [
+    {
+     "plan": "Benzinga Analyst Ratings",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga Analyst Ratings Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/corporate-guidance.md": {
+   "title": "Corporate Guidance",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated every 2 hours",
+   "history": "Records date back to September 12, 2011",
+   "plans": [
+    {
+     "plan": "Benzinga Corporate Guidance",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga Corporate Guidance Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/earnings.md": {
+   "title": "Earnings",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated in real time",
+   "history": "Records date back to April 30, 2010",
+   "plans": [
+    {
+     "plan": "Benzinga Earnings",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga Earnings Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/firm-details.md": {
+   "title": "Firm Details",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated every 2 hours",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Benzinga Analyst Ratings",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Insights",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Ratings Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    },
+    {
+     "plan": "Benzinga Analyst Insights Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/benzinga/news.md": {
+   "title": "Real-time Benzinga News",
+   "access": "Included in select Benzinga expansion plans",
+   "recency": "Updated in real time",
+   "history": "Records date back to April 27, 2009",
+   "plans": [
+    {
+     "plan": "Benzinga News",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    },
+    {
+     "plan": "Benzinga News Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/etf-global/analytics.md": {
+   "title": "ETF Analytics",
+   "access": "Available to existing subscribers only",
+   "recency": "Updated daily",
+   "history": "",
+   "plans": []
+  },
+  "https://massive.com/docs/rest/partners/etf-global/constituents.md": {
+   "title": "ETF Constituents",
+   "access": "Included in select ETF Global expansion plans",
+   "recency": "Updated daily",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "ETF Global Constituents",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "ETF Global Constituents Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/etf-global/fundflows.md": {
+   "title": "ETF Fund Flows",
+   "access": "Included in select ETF Global expansion plans",
+   "recency": "Updated daily",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "ETF Global Fund Flows",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "ETF Global Fund Flows Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/etf-global/profiles.md": {
+   "title": "ETF Profiles & Exposure",
+   "access": "Included in select ETF Global expansion plans",
+   "recency": "Updated daily",
+   "history": "Records date back to April 3, 2017",
+   "plans": [
+    {
+     "plan": "ETF Global Profiles & Exposure",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "ETF Global Profiles & Exposure Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/etf-global/taxonomies.md": {
+   "title": "ETF Taxonomies",
+   "access": "Included in select ETF Global expansion plans",
+   "recency": "Updated daily",
+   "history": "Records date back to November 1, 2021",
+   "plans": [
+    {
+     "plan": "ETF Global Taxonomies",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "ETF Global Taxonomies Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/partners/tmx/corporate-events.md": {
+   "title": "Corporate Events",
+   "access": "Included in select TMX expansion plans",
+   "recency": "Updated every 2 hours",
+   "history": "Records date back to January 1, 2018",
+   "plans": [
+    {
+     "plan": "TMX Corporate Events",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    },
+    {
+     "plan": "TMX Corporate Events Business",
+     "access": "Included",
+     "recency": "Updated every 2 hours",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/aggregates/custom-bars.md": {
+   "title": "Custom Bars (OHLC)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md": {
+   "title": "Daily Market Summary (OHLC)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/aggregates/daily-ticker-summary.md": {
+   "title": "Daily Ticker Summary (OHLC)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md": {
+   "title": "Previous Day Bar (OHLC)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/corporate-actions/dividends.md": {
+   "title": "Dividends",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to January 15, 2000",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/corporate-actions/ipos.md": {
+   "title": "Initial Public Offerings (IPOs)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to December 11, 2008",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/corporate-actions/splits.md": {
+   "title": "Splits",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to October 25, 1978",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/corporate-actions/ticker-events.md": {
+   "title": "Ticker Events",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/10-k-sections.md": {
+   "title": "Annual Report Sections (10-K)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/13-f-filings.md": {
+   "title": "Institutional Holdings (13-F)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md": {
+   "title": "Material Event Disclosures (8-K)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/8-k-text.md": {
+   "title": "Material Event Text (8-K)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/disclosure-categories.md": {
+   "title": "Disclosure Categories",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/form-3.md": {
+   "title": "Initial Insider Ownership (Form 3)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/form-4.md": {
+   "title": "Insider Transactions (Form 4)",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/index.md": {
+   "title": "SEC EDGAR Index",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/insider-activity.md": {
+   "title": "Insider Trading Activity",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/insider-holdings.md": {
+   "title": "Insider Holdings",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/risk-categories.md": {
+   "title": "Risk Categories",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/filings/risk-factors.md": {
+   "title": "Risk Factors",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/balance-sheets.md": {
+   "title": "Balance Sheets",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day (updated daily)",
+   "history": "Records date back to March 29, 2009",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Financials & Ratios Expansion",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Financials & Ratios Expansion Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/cash-flow-statements.md": {
+   "title": "Cash Flow Statements",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day (updated daily)",
+   "history": "Records date back to March 29, 2009",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Financials & Ratios Expansion",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Financials & Ratios Expansion Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/float.md": {
+   "title": "Float",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/income-statements.md": {
+   "title": "Income Statements",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day (updated daily)",
+   "history": "Records date back to March 29, 2009",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Financials & Ratios Expansion",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Financials & Ratios Expansion Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/ratios.md": {
+   "title": "Ratios",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day (updated daily)",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Financials & Ratios Expansion",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Financials & Ratios Expansion Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/short-interest.md": {
+   "title": "Short Interest",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated every 2 weeks",
+   "history": "Records date back to December 29, 2017",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated every 2 weeks",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated every 2 weeks",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated every 2 weeks",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated every 2 weeks",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated every 2 weeks",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/fundamentals/short-volume.md": {
+   "title": "Short Volume",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to February 6, 2024",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/market-operations/condition-codes.md": {
+   "title": "Condition Codes",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/market-operations/exchanges.md": {
+   "title": "Exchanges",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/market-operations/market-holidays.md": {
+   "title": "Market Holidays",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/market-operations/market-status.md": {
+   "title": "Market Status",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated in real time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated in real time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/news.md": {
+   "title": "News",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated hourly",
+   "history": "Records date back to June 22, 2016",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated hourly",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md": {
+   "title": "Full Market Snapshot",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/snapshots/top-market-movers.md": {
+   "title": "Top Market Movers",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md": {
+   "title": "Unified Snapshot",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/technical-indicators/exponential-moving-average.md": {
+   "title": "Exponential Moving Average (EMA)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/technical-indicators/moving-average-convergence-divergence.md": {
+   "title": "Moving Average Convergence/Divergence (MACD)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/technical-indicators/relative-strength-index.md": {
+   "title": "Relative Strength Index (RSI)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/technical-indicators/simple-moving-average.md": {
+   "title": "Simple Moving Average (SMA)",
+   "access": "Included in all Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "5 years"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/tickers/all-tickers.md": {
+   "title": "All Tickers",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/tickers/related-tickers.md": {
+   "title": "Related Tickers",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/tickers/ticker-overview.md": {
+   "title": "Ticker Overview",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated daily",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "2 years"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated daily",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/tickers/ticker-types.md": {
+   "title": "Ticker Types",
+   "access": "Included in all Stocks plans",
+   "recency": "Updated as needed",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Updated as needed",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md": {
+   "title": "Last Quote",
+   "access": "Included in select Stocks plans",
+   "recency": "Real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md": {
+   "title": "Last Trade",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to this endpoint",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/trades-quotes/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/rest/stocks/trades-quotes/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Stocks plans",
+   "recency": "End-of-day, 15-minute delayed, or real-time",
+   "history": "Records date back to September 10, 2003",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": "Not included"
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": "10 years"
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "End-of-day",
+     "history": "All history"
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": "All history"
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/crypto/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/crypto/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/crypto/fair-market-value.md": {
+   "title": "Fair Market Value",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/crypto/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/crypto/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/forex/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/forex/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/forex/fair-market-value.md": {
+   "title": "Fair Market Value",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/forex/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Currencies plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Currencies Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Currencies Starter",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Currencies Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/futures/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/futures/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/futures/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/futures/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Futures plans",
+   "recency": "10-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Futures Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Futures Developer",
+     "access": "Included",
+     "recency": "10-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Futures Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CME",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business CBOT",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business NYMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Futures Business COMEX",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/indices/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Indices plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/indices/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Indices plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/indices/value.md": {
+   "title": "Value",
+   "access": "Included in select Indices plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Indices Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Indices Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Indices Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Indices Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/options/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/options/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/options/fair-market-value.md": {
+   "title": "Fair Market Value",
+   "access": "Included in select Options plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/options/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Options plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/options/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Options plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Options Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Options Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Options Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Options Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/aggregates-per-minute.md": {
+   "title": "Aggregates (Per Minute)",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/aggregates-per-second.md": {
+   "title": "Aggregates (Per Second)",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/fair-market-value.md": {
+   "title": "Fair Market Value",
+   "access": "Included in select Stocks plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/imbalances.md": {
+   "title": "Net Order Imbalance (NOI)",
+   "access": "Included in select Stocks plans",
+   "recency": "Real-time",
+   "history": "Not applicable",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Imbalances Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Imbalances Expansion Business",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/luld.md": {
+   "title": "Limit Up - Limit Down (LULD)",
+   "access": "Included in select Stocks plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/quotes.md": {
+   "title": "Quotes",
+   "access": "Included in select Stocks plans",
+   "recency": "Real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  },
+  "https://massive.com/docs/websocket/stocks/trades.md": {
+   "title": "Trades",
+   "access": "Included in select Stocks plans",
+   "recency": "15-minute delayed or real-time",
+   "history": "Not applicable to websockets",
+   "plans": [
+    {
+     "plan": "Stocks Basic",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Starter",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Developer",
+     "access": "Included",
+     "recency": "15-minute delayed",
+     "history": null
+    },
+    {
+     "plan": "Stocks Advanced",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business",
+     "access": "Not included",
+     "recency": "Not included",
+     "history": null
+    },
+    {
+     "plan": "Stocks Business + Expansion",
+     "access": "Included",
+     "recency": "Real-time",
+     "history": null
+    }
+   ]
+  }
  }
 }

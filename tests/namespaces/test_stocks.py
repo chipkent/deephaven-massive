@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
-DOCS = "docs/datasets/stocks.md#"
+DOCS = "docs/datasets/stocks."
 # Whole New York days in epoch milliseconds: 2020-01-02 00:00 through 2020-01-03 23:59:59.999.
 RANGE_PATH = "/v2/aggs/ticker/AAPL/range/1/day/1577941200000/1578113999999"
 SNAPSHOTS_PATH = "/v2/snapshot/locale/us/markets/stocks/tickers"
@@ -251,14 +251,11 @@ def test_the_namespace_alone_passes_every_catalog_gate() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_every_dataset_docstring_links_its_column_reference(
+def test_every_dataset_docstring_names_its_own_page(
     massive_session: dm.MassiveSession, name: str
 ) -> None:
     doc = inspect.getdoc(factory(massive_session, name)) or ""
-    assert f"{DOCS}{name.replace('.', '-')}," in doc
-    assert "limit" in doc
-    assert "dm.ALL" in doc
-    assert "columns()" in doc
+    assert f"{DOCS}{name}.md" in doc
 
 
 # --- Schemas -------------------------------------------------------------------------------------
@@ -1622,6 +1619,28 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date(
     out = table_rows(month.history("2024-06-03", "2024-06-28", source=dm.HistorySource.REST))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (None, new_york_midnight_ns(date(2024, 6, 3)), new_york_midnight_ns(date(2024, 6, 29)))
+    ]
+
+
+def test_bars_of_several_days_count_calendar_days_as_massive_does(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive stamps 2-day stock bars on Friday, Sunday, and Tuesday: the Friday bar holds
+    # Friday and Saturday, so Friday's trading alone, and the Sunday bar holds Monday's. Each
+    # ends two calendar days after its stamp, so every bar of Friday to Wednesday is kept.
+    days = [date(2026, 10, 16), date(2026, 10, 18), date(2026, 10, 20)]
+    stamps = [new_york_midnight_ns(day) // 10**6 for day in days]
+    last = new_york_midnight_ns(date(2026, 10, 22)) // 10**6 - 1
+    results = [{"t": t, "c": 1.0, "v": v} for t, v in zip(stamps, [59.9, 34.6, 71.5], strict=True)]
+    fake_rest.reply(
+        f"/v2/aggs/ticker/AAPL/range/2/day/{stamps[0]}/{last}",
+        Reply({"status": "OK", "adjusted": True, "results": results}),
+    )
+    query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, multiplier=2)
+    out = table_rows(query.history("2026-10-16", "2026-10-21", source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (None, new_york_midnight_ns(day), new_york_midnight_ns(day + timedelta(days=2)))
+        for day in days
     ]
 
 

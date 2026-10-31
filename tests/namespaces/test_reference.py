@@ -49,6 +49,28 @@ NAMES = [
     "market_status",
     "market_holidays",
 ]
+CONDITION_COLUMNS = (
+    "AssetClass",
+    "Type",
+    "Id",
+    "Name",
+    "DataTypes",
+    "Abbreviation",
+    "Description",
+    "Exchange",
+    "Legacy",
+    "SipMappingCta",
+    "SipMappingOpra",
+    "SipMappingUtp",
+    "UpdateRulesConsolidatedUpdatesHighLow",
+    "UpdateRulesConsolidatedUpdatesOpenClose",
+    "UpdateRulesConsolidatedUpdatesVolume",
+    "UpdateRulesMarketCenterUpdatesHighLow",
+    "UpdateRulesMarketCenterUpdatesOpenClose",
+    "UpdateRulesMarketCenterUpdatesVolume",
+)
+"""Every column Massive sends for a condition, its first three the documented identity: a
+condition is keyed by all of them, since Massive lists two stocks quote conditions 30."""
 
 
 def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
@@ -143,7 +165,7 @@ def test_news_keeps_its_tickers_and_appends() -> None:
     [
         (reference.TICKER_TYPES, ("AssetClass", "Locale", "Code")),
         (reference.EXCHANGES, ("AssetClass", "Id")),
-        (reference.CONDITIONS, ("AssetClass", "Type", "Id")),
+        (reference.CONDITIONS, CONDITION_COLUMNS),
         (reference.MARKET_STATUS, ()),
         (reference.MARKET_HOLIDAYS, ("Exchange", "Date")),
     ],
@@ -174,9 +196,10 @@ def test_market_holidays_hours_are_instants() -> None:
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_the_summary_opens_the_docstring(name: str) -> None:
+def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> None:
     doc = getattr(reference._Reference, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"reference.{name}"].summary
+    assert f"docs/datasets/reference.{name}.md" in doc
 
 
 # --- Factories -------------------------------------------------------------------------------
@@ -865,6 +888,28 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
     clock.advance(60)
     _until(lambda: [r["Market"] for r in dh_to_pylist(table)] == ["closed"])
     massive_session.release(table)
+
+
+def test_a_conditions_poll_keeps_two_conditions_massive_lists_under_one_id(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToRows
+) -> None:
+    # Massive lists two stocks `quote_condition` 30 rows. A keyed poll() table keeps both,
+    # whatever column tells them apart, and the optional fields left out are no null key.
+    assert {*CONDITION_COLUMNS, "TimestampInsert"} == set(_types(reference.CONDITIONS))
+    quote = {"asset_class": "stocks", "type": "quote_condition", "id": 30, "data_types": ["nbbo"]}
+    rows = [
+        {**quote, "name": "Slow Quote", "sip_mapping": {"CTA": "S"}},
+        {**quote, "name": "Slow Quote", "sip_mapping": {"UTP": "S"}, "exchange": 10},
+    ]
+    fake_rest.reply("/v3/reference/conditions", Reply(envelope(rows)))
+    table = rest_session.reference.conditions().poll(60)
+    _until(lambda: len(dh_to_pylist(table)) == 2)
+    kept = sorted(dh_to_pylist(table), key=lambda row: row["SipMappingCta"] or "")
+    assert [(r["Id"], r["SipMappingCta"], r["SipMappingUtp"], r["Exchange"]) for r in kept] == [
+        (30, None, "S", 10),
+        (30, "S", None, None),
+    ]
+    rest_session.release(table)
 
 
 def test_the_current_state_datasets_revise_on_their_update_times() -> None:

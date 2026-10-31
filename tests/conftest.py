@@ -41,6 +41,7 @@ import time
 import types
 import weakref
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
@@ -392,6 +393,33 @@ def dh_exec_ctx() -> ExecutionContext:
 
 
 @pytest.fixture
+def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
+    """Return a function that asks the update graph for a cycle and returns once one has run.
+
+    For a test that needs the live tables to have updated between two steps, such as two
+    console commands that must count as two pauses. The function fails the test when no cycle
+    runs within 30 seconds; it must not be called while the thread holds the update graph's
+    lock, under which no cycle can run.
+
+    Returns:
+        The function.
+    """
+
+    def run() -> None:
+        graph = dh_exec_ctx.update_graph.j_update_graph
+        first = graph.clock().currentStep()
+        graph.requestRefresh()
+        pause = threading.Event()  # never set; only paces the loop
+        for _ in range(1500):
+            if graph.clock().currentStep() != first:
+                return
+            pause.wait(0.02)
+        pytest.fail("no update cycle ran within 30 s")
+
+    return run
+
+
+@pytest.fixture
 def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     """Return a function that snapshots a Deephaven table into a list of row dictionaries.
 
@@ -504,6 +532,187 @@ def string_objects() -> Callable[[Table, str], int]:
             scope.release()
 
     return count
+
+
+class _Heard:
+    """How many failures one table's listener heard.
+
+    Written on an update-graph thread and read on the test thread, under a lock. It refers to
+    nothing else, so the listener's callback, which the JVM holds, keeps no table or session
+    alive.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def add(self, _error: Exception) -> None:
+        with self._lock:
+            self._count += 1
+
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+
+@pytest.fixture
+def failures_heard() -> Iterator[Callable[[Table], Callable[[], int]]]:
+    """Return a function that counts the failures a live table delivers to a listener.
+
+    Deephaven delivers a table's failure to each of its listeners once; a table that hears of a
+    second failure ends the process before any count could show it, so each count a test
+    reads is 0 or 1. The function adds a listener to the table and returns a function that
+    reads how many failures that listener has heard so far. Every listener is stopped when the
+    test ends, before its leak check. Watch only tables that fail by then (a session's close
+    fails every live table): the JVM holds a stopped listener until it collects it, and a
+    listener on a table that is still running keeps that table, and its session, alive.
+
+    Returns:
+        A function mapping a table to the reader of its count.
+    """
+    table_listener = importlib.import_module("deephaven.table_listener")
+    dh_table = importlib.import_module("deephaven.table")
+    handles = []
+
+    def watch(table: Table) -> Callable[[], int]:
+        heard = _Heard()
+        # A wrapper of its own: the JVM holds the listener, and through it the wrapper, until
+        # it collects them, and the result's own wrapper would keep its session tracked.
+        own = dh_table.Table(j_table=table.j_table)
+        handles.append(
+            table_listener.listen(own, lambda _update, _replay: None, on_error=heard.add)
+        )
+        return heard.count
+
+    yield watch
+    for handle in handles:
+        handle.stop()
+
+
+@pytest.fixture
+def user_tables(
+    dh_exec_ctx: ExecutionContext,
+) -> Iterator[Callable[[Table, str, str], list[Table]]]:
+    """Return a function that derives a user's tables from a live result.
+
+    Each failure of a result passes on to every table a user builds on it, and each kind of
+    operation hears of it through its own listener. The function builds four, in a liveness
+    scope of the user's own, released (under the update graph's shared lock) when the test
+    ends:
+
+    - a `where` that keeps the symbol `AAPL`;
+    - a `natural_join` that adds a `Mark` column from a static table keyed on the symbol;
+    - an `aj` that adds `Mark` from the static row of the same symbol whose `MarkValue` is at
+      most the result's value in the ordering column;
+    - a `merge` of two `where` branches of the result, so the failure reaches it twice.
+
+    The tables are built through Java calls: the Python wrappers would copy the calling
+    frame's locals into the query scope, where they would live until the JVM collected them,
+    keeping the result (and through it its session) alive.
+
+    Returns:
+        A function of the result, its symbol column, and an ordering column of `double`
+        or `Instant` values, returning the four tables in the order above.
+    """
+    dh_table = importlib.import_module("deephaven.table")
+    column = importlib.import_module("deephaven.column")
+    factory = importlib.import_module("deephaven.table_factory")
+    liveness = importlib.import_module("deephaven.liveness_scope")
+    update_graph = importlib.import_module("deephaven.update_graph")
+    jpy = importlib.import_module("jpy")
+    table_tools = jpy.get_type("io.deephaven.engine.util.TableTools")
+    scope = liveness.LivenessScope()
+
+    def derive(result: Table, symbol: str, ordered: str) -> list[Table]:
+        with scope.open(), update_graph.shared_lock(dh_exec_ctx.update_graph):
+            marks = factory.new_table(
+                [column.string_col(symbol, ["AAPL"]), column.string_col("Mark", ["m"])]
+            ).j_table
+            kind = result.j_table.getDefinition().getColumn(ordered).getDataType().getName()
+            lowest = {"java.time.Instant": "'2020-01-01T00:00:00 ET'", "double": "0.0"}[kind]
+            marked = marks.updateView(f"MarkValue = {lowest}")
+            source = result.j_table
+            tables = [
+                source.where(f"{symbol} = `AAPL`"),
+                source.naturalJoin(marks, symbol, "Mark"),
+                source.aj(marked, f"{symbol}, {ordered} >= MarkValue", "Mark"),
+                table_tools.merge([source.where("true"), source.where("false")]),
+            ]
+            return [dh_table.Table(j_table=t) for t in tables]
+
+    yield derive
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        scope.release()
+
+
+_RACE_TIMEOUT: Final = 30.0
+"""Seconds `race` lets its calls take before it fails the test."""
+
+
+@pytest.fixture
+def race() -> Callable[..., None]:
+    """Return a function that runs calls at the same moment, each on a thread of its own.
+
+    A barrier releases every thread at once, so the calls overlap as closely as threads can
+    (a `close()` against a failure, a `release()` against a refused request). The function
+    returns once every call has, and raises the first error any of them raised; a call still
+    running after 30 seconds fails the test.
+
+    Returns:
+        A function taking the calls, each with no arguments.
+    """
+
+    def run_together(*calls: Callable[[], object]) -> None:
+        start = threading.Barrier(len(calls))
+
+        def run(call: Callable[[], object]) -> None:
+            start.wait(_RACE_TIMEOUT)
+            call()
+
+        # Not a `with` block: its exit would wait for a call that deadlocked, forever, and the
+        # test would never fail. A stuck thread is left behind for the leak check to name.
+        pool = ThreadPoolExecutor(len(calls), thread_name_prefix="racer")
+        try:
+            for future in [pool.submit(run, call) for call in calls]:
+                future.result(_RACE_TIMEOUT)
+        finally:
+            pool.shutdown(wait=False)
+
+    return run_together
+
+
+_CYCLES_TIMEOUT: Final = 30.0
+"""Seconds `cycles_ended` waits for the update graph to run its cycles before failing the test."""
+
+
+@pytest.fixture
+def cycles_ended(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
+    """Return a function that waits until every failure queued so far has been delivered.
+
+    Deephaven delivers a published failure at the start of the next update cycle. The function
+    waits until the update graph's logical clock has moved two steps past its value at the
+    call, so a cycle has started and finished since, and then takes the shared lock, which
+    waits for the running cycle to end: every failure queued before the call has reached every
+    listener, and the process has survived it, once the function returns. A clock that stops
+    for 30 seconds fails the test.
+
+    Returns:
+        The function.
+    """
+    update_graph = importlib.import_module("deephaven.update_graph")
+
+    def wait() -> None:
+        clock = dh_exec_ctx.update_graph.j_update_graph.clock()
+        target = clock.currentStep() + 2
+        deadline = time.monotonic() + _CYCLES_TIMEOUT
+        pause = threading.Event()  # never set; only paces the polling
+        while clock.currentStep() < target:
+            assert time.monotonic() < deadline, "the update graph ran no cycle in 30 s"
+            pause.wait(0.005)
+        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+            pass
+
+    return wait
 
 
 _ROWS_WHEN_TIMEOUT = 15.0
