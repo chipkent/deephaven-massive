@@ -10,12 +10,14 @@ tested without a socket; `ws.client` owns the socket and calls in here:
 - **The handshake.** `handshake_status` reads the `connected` greeting and the reply to the
   authentication frame.
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
-  into `Status` events and per-channel `Data`: rows keyed by long-form column, `Reject`s for the
-  rows dropped because a required key cannot be read, and the `DriftReport` of the channel's
-  objects in the frame. Each value goes through its field's
-  converter (`spec.convert.field_converter`, looked up once per channel), the converter the
-  REST client uses too (a field with a named `conversion` through that conversion), so a value
-  means the same on both transports. Drift is reported as REST reports it: `extra` holds the
+  into `Status` events and per-channel `Data`: the rows (tuples of values in the order of the
+  source's fields), `Reject`s for the rows dropped because a required key cannot be read, and
+  the `DriftReport` of the channel's objects in the frame. Each value goes through its field's
+  converter, the converter the REST client uses too (a field with a named `conversion` through
+  that conversion), so a value means the same on both transports. A channel's objects are read
+  a column at a time, as a REST page is (`spec.convert.column_converter`), and read again one by
+  one only when a column holds a value that reading cannot vouch for; either way the rows,
+  rejects, and drift are the same. Drift is reported as REST reports it: `extra` holds the
   keys a channel does not declare, which are dropped, `missing` only the fields the vendor
   marks required (`Field.required`) that some object lacked or held as null, and
   `unconvertible` the fields that held a value that does not fit, which reads as null. A row
@@ -55,6 +57,7 @@ from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError,
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
+    column_converter,
     excerpt,
     field_converter,
     missing_key_message,
@@ -92,6 +95,15 @@ MAX_TOPICS_PER_FRAME = 1000
 Massive does not document a frame-size limit; 1,000 topics of options contracts make a frame
 of about 25 KB, which is conservative.
 """
+
+COLUMN_MIN_OBJECTS: Final = 4
+"""The fewest objects of one channel in one frame that are read a column at a time.
+
+Reading by column costs a few calls per column whatever the number of objects, so it is
+cheaper than reading the objects one by one only from about four objects of a trade or quote
+on (measured with the generated `stocks/T` source: a lone object takes about 1.7 times as long
+by column, and a frame of 100 objects half as long). Fewer are read one by one, which gives the
+same rows, rejects, and drift."""
 
 # How much of an undecodable frame or element a log message or handshake error quotes.
 _LOG_LIMIT = 200
@@ -171,9 +183,10 @@ class Data:
 
     Attributes:
         channel: The channel, such as `"T"`.
-        rows: The rows in arrival order, each mapping every column of the channel's source to
-            its value (`None` when the wire omitted it, sent null, or sent a value that does
-            not fit), without the rows dropped for a required key.
+        rows: The rows in arrival order, without the rows dropped for a required key: each a
+            tuple of the values of the channel's source's fields, in the order of
+            `Source.fields`, each in the form the field's converter gives it (`spec.convert`),
+            or `None` when the wire omitted it, sent null, or sent a value that does not fit.
         rejects: The rows dropped for a required key, in arrival order.
         drift: The wire keys of these objects that the source does not declare (`extra`),
             the vendor-required fields some object lacked or held as null (`missing`), and the
@@ -181,7 +194,7 @@ class Data:
     """
 
     channel: str
-    rows: list[dict[str, object]]
+    rows: list[tuple[object, ...]]
     rejects: list[Reject]
     drift: DriftReport
 
@@ -321,6 +334,8 @@ class _Step(NamedTuple):
         convert: The field's converter (`spec.convert.field_converter`), which checks and
             converts each non-null value.
         field: The generated field, named in the message of a value that does not fit.
+        read_column: The field's column reader (`spec.convert.column_converter`), which checks
+            and converts the field's values of many objects at once.
     """
 
     wire_key: str
@@ -328,6 +343,7 @@ class _Step(NamedTuple):
     required: bool
     convert: Callable[[object], object]
     field: Field
+    read_column: Callable[[list[object]], list[object] | None]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -366,7 +382,14 @@ class _Channel:
             The plan.
         """
         steps = tuple(
-            _Step(f.wire_key, f.column, f.wire_key in required, field_converter(f), f)
+            _Step(
+                f.wire_key,
+                f.column,
+                f.wire_key in required,
+                field_converter(f),
+                f,
+                column_converter(f),
+            )
             for f in source.fields
         )
         return cls(
@@ -382,7 +405,8 @@ class _Channel:
 class _Accumulator:
     """One channel's decoded objects of the frame being decoded."""
 
-    rows: list[dict[str, object]] = field(default_factory=list)
+    # Each kept row's values, in the order of the channel's source's fields.
+    rows: list[tuple[object, ...]] = field(default_factory=list)
     rejects: list[Reject] = field(default_factory=list)
     extra: set[str] = field(default_factory=set)
     missing: set[str] = field(default_factory=set)
@@ -414,8 +438,8 @@ class FrameDecoder:
             )
             decoder = FrameDecoder([trades], host="socket.massive.com", path="/stocks")
             decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
-            [data] = decoder.decode('[{"ev":"T","sym":"AAPL","p":1}]')
-            assert data.rows == [{"Ticker": "AAPL", "Price": 1.0}]
+            [data] = decoder.decode('[{"ev":"T","sym":"AAPL","p":1.5}]')
+            assert data.rows == [("AAPL", 1.5)]
     """
 
     def __init__(self, sources: Iterable[Source], *, host: str, path: str) -> None:
@@ -512,7 +536,7 @@ class FrameDecoder:
             )
             return []
         order: list[Status | str] = []
-        frame: dict[str, _Accumulator] = {}
+        frame: dict[str, list[dict[str, object]]] = {}  # each channel's objects, in order
         for item in value if isinstance(value, list) else [value]:
             if not isinstance(item, dict) or not isinstance(ev := item.get("ev"), str):
                 logger.log(
@@ -534,12 +558,15 @@ class FrameDecoder:
                         self._host,
                         self._path,
                     )
+            elif ev in frame:
+                frame[ev].append(item)
             else:
-                if ev not in frame:
-                    frame[ev] = _Accumulator()
-                    order.append(ev)
-                self._row(ev, item, frame[ev])
-        return [event if isinstance(event, Status) else self._data(event, frame) for event in order]
+                frame[ev] = [item]
+                order.append(ev)
+        return [
+            event if isinstance(event, Status) else self._data(event, frame[event])
+            for event in order
+        ]
 
     def _drop_level(self) -> int:
         """Count one dropped frame or element, and return the level to log it at.
@@ -612,14 +639,14 @@ class FrameDecoder:
         """
         spec = self._channels[channel]
         self._scan(channel, item, into=into)
-        row: dict[str, object] = {}
+        row: list[object] = []
         odd: list[tuple[str, object, str]] = []
-        for key, column, required, convert, f in spec.steps:
+        for key, _, required, convert, f, _ in spec.steps:
             value = item.get(key)
             problem = None
             if value is not None:
                 try:
-                    row[column] = convert(value)
+                    row.append(convert(value))
                     continue
                 except UnconvertibleError:
                     problem = unconvertible_message(f, value)
@@ -628,18 +655,17 @@ class FrameDecoder:
                 return
             if problem is not None:
                 odd.append((key, value, problem))
-            row[column] = None
+            row.append(None)
         if odd:
             self._odd(channel, item, odd, into=into)
-        into.rows.append(row)
+        into.rows.append(tuple(row))
 
     def _scan(self, channel: str, item: dict[str, object], *, into: _Accumulator) -> None:
-        """Record an object's extra keys and its missing vendor-required fields.
+        """Record an object's extra keys (`_extra`) and its missing vendor-required fields.
 
-        An object of exactly the declared shape, the common case, has no extra key, which one
-        set comparison decides; the vendor-required scan runs only on a channel that has such
-        fields, and covers every object, a dropped one included. Samples are taken only for a
-        key not seen before in this frame, so a drifting frame costs one lookup per key.
+        The vendor-required scan runs only on a channel that has such fields, and covers every
+        object, a dropped one included. Samples are taken only for a key not seen before in
+        this frame, so a drifting frame costs one lookup per key.
 
         Args:
             channel: The object's channel, which has a source.
@@ -647,17 +673,31 @@ class FrameDecoder:
             into: The channel's accumulator for this frame.
         """
         spec = self._channels[channel]
-        keys = item.keys()
-        if keys != spec.shape:
-            for key in keys - spec.shape:
-                if key not in into.extra:
-                    into.extra.add(key)
-                    into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(item[key]))
+        self._extra(channel, item, into=into)
         if spec.vendor_required:
             for key in spec.vendor_required:
                 if item.get(key) is None and key not in into.missing:
                     into.missing.add(key)
                     into.samples[key] = DriftSample(self._symbol(channel, item), None)
+
+    def _extra(self, channel: str, item: dict[str, object], *, into: _Accumulator) -> None:
+        """Record an object's extra keys: the keys its channel's source does not declare.
+
+        An object of exactly the declared shape, the common case, has none, which one set
+        comparison decides. A sample is taken only for a key not seen before in this frame.
+
+        Args:
+            channel: The object's channel, which has a source.
+            item: The object.
+            into: The channel's accumulator for this frame.
+        """
+        shape = self._channels[channel].shape
+        keys = item.keys()
+        if keys != shape:
+            for key in keys - shape:
+                if key not in into.extra:
+                    into.extra.add(key)
+                    into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(item[key]))
 
     def _drop(
         self, channel: str, item: dict[str, object], problem: str, *, into: _Accumulator
@@ -735,18 +775,26 @@ class FrameDecoder:
         symbol = item.get(key) if key is not None else None
         return symbol if isinstance(symbol, str) else None
 
-    @staticmethod
-    def _data(channel: str, frame: dict[str, _Accumulator]) -> Data:
-        """Build the `Data` of one channel from its accumulator.
+    def _data(self, channel: str, items: list[dict[str, object]]) -> Data:
+        """Decode one channel's objects of a frame, column by column when that is certain.
+
+        From `COLUMN_MIN_OBJECTS` objects on, the objects are read a column at a time
+        (`_by_column`); when that reading cannot vouch for a column, they are read again one by
+        one (`_row`), which judges each value on its own, and why is logged at DEBUG. Fewer
+        objects are read one by one at once. Either way the rows, the rejects, and the drift
+        are the same, as for a REST page (`rest.batch`).
 
         Args:
-            channel: The channel.
-            frame: The frame's accumulators by channel.
+            channel: The channel, which has a source.
+            items: Its objects in the frame, in arrival order.
 
         Returns:
             The channel's rows, rejects, and drift.
         """
-        acc = frame[channel]
+        acc = _Accumulator()
+        if len(items) < COLUMN_MIN_OBJECTS or not self._by_column(channel, items, into=acc):
+            for item in items:
+                self._row(channel, item, acc)
         drift = DriftReport(
             extra=frozenset(acc.extra),
             missing=frozenset(acc.missing),
@@ -754,3 +802,62 @@ class FrameDecoder:
             samples=acc.samples,
         )
         return Data(channel=channel, rows=acc.rows, rejects=acc.rejects, drift=drift)
+
+    def _by_column(
+        self, channel: str, items: list[dict[str, object]], *, into: _Accumulator
+    ) -> bool:
+        """Read a channel's objects a column at a time, if that reading can vouch for them.
+
+        The fast path, taken by nearly every frame of `COLUMN_MIN_OBJECTS` objects or more:
+        each field's values are gathered into one list and checked and converted at once
+        (`spec.convert.column_converter`), the reading REST pages share. It never judges an
+        odd row: a required key that is absent or null, or a value the column reading cannot
+        vouch for, makes it log why at DEBUG and return False, having recorded nothing.
+        Otherwise it records the rows, the objects' extra keys, and their missing
+        vendor-required fields in `into`, with the samples `_scan` would take.
+
+        Args:
+            channel: The channel, which has a source.
+            items: Its objects in the frame, in arrival order.
+            into: The channel's accumulator for this frame; changed only when it returns True.
+
+        Returns:
+            True when the objects were read, none dropped and no value found unconvertible;
+            False when they must be read one by one (`_row`).
+        """
+        spec = self._channels[channel]
+        columns: list[list[object]] = []
+        absent: list[tuple[str, int]] = []  # each vendor-required key some object lacks
+        reason = ""
+        for key, column, required, _, f, read_column in spec.steps:
+            values = [item.get(key) for item in items]
+            if None in values:
+                if required:
+                    reason = f"the required column {column} is absent or null in some object"
+                    break
+                if f.required:
+                    absent.append((key, values.index(None)))
+            converted = read_column(values)
+            if converted is None:
+                reason = f"the column {column} holds a value that needs its own check"
+                break
+            columns.append(converted)
+        if reason:
+            logger.debug(
+                "%s%s: reading %d %s rows one by one: %s",
+                self._host,
+                self._path,
+                len(items),
+                channel,
+                reason,
+            )
+            return False
+        if not all(map(spec.shape.issuperset, items)):
+            for item in items:
+                self._extra(channel, item, into=into)
+        for key, index in absent:
+            into.missing.add(key)
+            into.samples[key] = DriftSample(self._symbol(channel, items[index]), None)
+        # A source with no field still has a row, empty, per object.
+        into.rows = list(zip(*columns, strict=True)) if columns else [()] * len(items)
+        return True

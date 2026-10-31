@@ -650,7 +650,7 @@ defined in exactly one place: the field defaults of this class.
 | `max_outage: float` | `300.0` seconds | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long (from its last frame, or 40 s before the drop when that is later), each stream on it that has not recovered fails, so no live table keeps showing rows as current while the rows since the outage began are missing. A `poll()` table whose cycles have failed this long, from the first failure since its last good cycle, fails the same way ([section 13.4](#134-rest)). `0` fails at the first disconnect or failed cycle. Zero is allowed, unlike the other durations; a negative or non-finite value raises `ValueError`, and a non-number `TypeError`. No environment variable: no duration setting reads one. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
-| `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
+| `max_concurrency: int` | `8` | REST fan-out and S3 reads: the threads of one fan-out or `history()` call, and the most REST requests, and the most flat files being read, that the session has at once however many calls overlap. Each client's connection pool holds this many connections, and a request waits for a free one (`_massive/net/slots.py`), so overlapping calls never open and discard extra connections. |
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
 | `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: a delayed feed (any host whose name starts with `delayed.`) for forex, crypto, or a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
@@ -2993,7 +2993,9 @@ logs at WARNING once per product (or contract) and rule date. So that a stream's
 are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
 asks for them and waits, before it subscribes, until their products and schedules are loaded
 or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
-no Deephaven call, so a console command holding the update graph's lock may run it. A wait
+no Deephaven call, so a console command holding the update graph's lock may run it, and such a
+caller waits at most 1 s (`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it
+waits. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
 the gap between one loaded session's close and the next one's first event gets the next
 session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
@@ -3311,7 +3313,8 @@ The client reports to `_ingest/ws_connection.py` through four callbacks, each ca
 - `on_status(generation, status)`: one decoded status object (`Status`: `kind` `ACK`,
   `REFUSED`, `MAX_CONNECTIONS`, or `OTHER`; `topics`; `message`).
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
-  decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
+  decoded against `ws.json`. Each row is a tuple of the values of the channel's source's fields,
+  in the order of `Source.fields`, whose long-form columns name them (the library renames
   them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
   dropped because a required key is absent, null, or does not fit, one
   `Reject(channel, symbol or None, WireError, raw)` each, whose `symbol` is the raw wire value
@@ -3872,7 +3875,8 @@ How a request is built from a `DatasetSpec` and a `Request`:
   [section 7](#7-query-classes-and-verbs); each shape is described last
   ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
-  row buffer once. The rows arrive keyed by long-form column; the flush renames them
+  row buffer once. The rows arrive as tuples of the source's fields; the flush turns them into
+  columns in one call, renames them
   (`rename` in `_datasets/source_columns.py`), converts them (`_datasets/timestamps.py`), builds one
   Arrow batch in the dataset schema, and fills its time columns (`row_times.TimeRule`), each
   row's `TimestampInsert` the instant its frame arrived (each frame is buffered with that
@@ -4156,9 +4160,13 @@ file's surviving rows become one static Deephaven table per 16 blocks of data an
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
 tables are merged.
 
-Memory is bounded per concurrent reader, not per range: Arrow reads about 32 blocks ahead of the
-consumer, so a reader holds about 32 MiB of decompressed text plus at most 16 blocks of
-surviving rows, and at most `max_concurrency` readers run at once.
+Memory is bounded per concurrent reader, not per range: a reader decompresses its file on its
+own thread and cuts the text after a line end into chunks of 16 blocks, which three parse threads
+of its own read with `pyarrow.csv.read_csv` and filter while it decompresses the next, at most
+four chunks ahead of the consumer and handed on in file order. So a reader holds about 64 MiB of
+decompressed text, and the rows parsed from it, plus at most 16 blocks of surviving rows, and
+at most `max_concurrency` readers run at once. The chunks give exactly the rows, drift, and
+dropped rows of reading the file as one stream.
 
 Rows come in partition-date order, then (futures) venue order (CME, CBOT, NYMEX, COMEX), then
 file order. They are not sorted by time across venues, and may differ in order from REST.
@@ -4504,8 +4512,8 @@ without the GIL.
 | futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open, charged to the `futures` bucket, each lookup in a lane of its own that the calendar's close ends; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
-| REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
-| flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
+| REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause, then for one of the client's `max_concurrency` connections; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
+| flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
@@ -4744,6 +4752,9 @@ net/                 shared by every client; imports nothing else in _massive
                      per process, consumer, and certificate setting; proxy from HTTPS_PROXY/NO_PROXY
   cancel.py          Cancel: a one-way threading.Event that follows parent tokens and runs
                      callbacks when set
+  slots.py           ConnectionSlots: one slot per pooled connection, which every REST
+                     attempt and every open flat file takes, so a client never has more
+                     requests in flight than its pool holds; a Cancel ends a wait for one
   origins.py         origin_of(url): the (scheme, host, port) a URL reaches, default port
                      filled in; the REST client's next_url check and the governor registry's
                      key both compare origins with it
@@ -4772,7 +4783,8 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      that holds values of two types, which the refresh and the run-time schema
                      merge both call
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
-                     every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
+                     every JSON decoder (REST to_batch, WebSocket frames); column_converter, the
+                     same check over one field's values of many objects at once; UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
                      shared bad-value message; field_converter gives a decoder each field's
                      converter once, and unconvertible_message, missing_key_message and
@@ -5125,9 +5137,10 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   fields that some row lacked or held as null; an extra nested object is reported by its own
   key, not by each leaf. A page is read a column at a time: each field's values are gathered
   into one list, the types of the whole list are checked at once, and a column of plain values
-  goes to Arrow without a Python call per value. A page that this reading cannot vouch for (a
-  bad row, a value only its converter can judge and refuses, an integer Arrow cannot hold
-  exactly as a double) is read again row by row, which gives the same batch, drift, and error
+  goes to Arrow without a Python call per value; Arrow checks its numbers in one pass, and a
+  column it refuses (an integer outside the 64-bit range, or one a double cannot hold exactly)
+  is checked and converted in Python instead. A page that this reading cannot vouch for (a bad
+  row, or a value its converter refuses) is read again row by row, which gives the same batch, drift, and error
   as before; the fallback logs its reason at DEBUG, once per page.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
@@ -5172,15 +5185,19 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     message names, or is empty when it names none), `MAX_CONNECTIONS`, or `OTHER`. `message` is
     the server's text verbatim.
   - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in
-    the frame. Rows are keyed by **long-form** column (the library renames them) and hold
-    every column of the channel's source, null when absent or when the value does not fit;
-    values are validated and converted to their Python form (an epoch keeps its integer
+    the frame. Each row is a tuple holding every field of the channel's source, in the order
+    of `Source.fields`, whose long-form columns name them (the library renames them), null
+    when absent or when the value does not fit; values are validated and converted to their
+    Python form (an epoch keeps its integer
     count; an ISO-8601 instant becomes exact integer nanoseconds since the epoch), and symbols
     stay as the wire spells them. A row whose required key is absent, null, or does not fit
     becomes a `Reject(channel, symbol or None, WireError, raw)` instead, with the raw value of
     the declared symbol column (`None` when none is declared or the value is missing); the
     frame's other rows are delivered. `drift` is the frame's `DriftReport`
-    ([section 19.5](#195-runtime-drift)).
+    ([section 19.5](#195-runtime-drift)). A channel's objects in a frame are read a column
+    at a time, with the column reader REST pages use (`spec.convert.column_converter`), from
+    four objects on; fewer, or a column holding a value that reader cannot vouch for, are read
+    one object at a time. Both readings give the same rows, rejects, and drift.
 
   No frame text is parsed outside `_massive`.
 - **Sending.** `subscribe` and `unsubscribe` put their frames
@@ -5323,13 +5340,15 @@ safe from any thread.
 
 ```python
 ReadPlan(columns: tuple[ReadColumn, ...], symbol_header, symbols, time_header, window_ns,
-         to_ns, block_size: int, required)
+         to_ns, block_size: int, chunk_size: int, parse_threads: int, required)
 ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 ```
 
 `_ingest/flatfiles.py` builds one plan per call. `block_size` is the reader's block of
 decompressed text, a required field with no default;
-`_ingest/flatfiles.py` always passes its `BLOCK_SIZE` (1 MiB).
+`_ingest/flatfiles.py` always passes its `BLOCK_SIZE` (1 MiB). `chunk_size` and `parse_threads`
+are how the reader parses a file in parallel: `_ingest/flatfiles.py` passes 16 blocks
+(`CHUNK_BLOCKS`) and 3 (`PARSE_THREADS`).
 
 `_ingest/flatfiles.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
 `_datasets/timestamps.py` routine, returning the nanoseconds, null where a value fails, and the first
@@ -6751,7 +6770,8 @@ document already reflects them.
     `/futures/v1/schedules`, a row the schedules cannot place (a spread, which is never looked
     up, a lookup still running or failed, a row outside the loaded sessions) getting a null
     `Date`, never failing the stream and never refusing a subscription; a futures stream verb
-    waits up to 15 s for its contracts' schedules before it subscribes. The ends are conservative where Massive's labels are not
+    waits up to 15 s for its contracts' schedules before it subscribes (1 s when it holds the
+    update graph's lock, as a console command does). The ends are conservative where Massive's labels are not
     verified: an index bar of a day or longer ends at 01:00 New York time, and an index week or
     longer after its calendar period, weekend included; a bar of several futures sessions
     (revised 2026-10-30: a stock, option, or index bar of several days counts calendar days,

@@ -234,8 +234,9 @@ class MassiveConfig:
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
-        max_concurrency: Maximum parallel REST requests of one `poll()` fan-out, and parallel
-            S3 reads: a count of threads. Defaults to 8.
+        max_concurrency: Maximum parallel REST requests of one `poll()` or `fetch()` fan-out,
+            and of the whole session at once, however many fan-outs overlap; and the most
+            flat files the session reads at once. A count of requests. Defaults to 8.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no

@@ -218,7 +218,7 @@ class ClientFactory(Protocol):
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
     ) -> _Client:
         """Return a new, unstarted client of `url` with the given callbacks.
@@ -785,7 +785,7 @@ class Connection:
     def _on_data(
         self,
         channel: str,
-        rows: list[dict[str, object]],
+        rows: list[tuple[object, ...]],
         *,
         rejects: list[Reject],
         drift: DriftReport,
@@ -798,7 +798,8 @@ class Connection:
 
         Args:
             channel: The channel.
-            rows: The decoded rows, without the dropped ones.
+            rows: The decoded rows, each a tuple of the source's fields, without the dropped
+                ones.
             rejects: The rows the client dropped.
             drift: The frame's drift for the channel.
         """
@@ -1540,7 +1541,7 @@ class _WsClientFactory:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
     ) -> _Client:
         """Return a new, unstarted `WsClient` of `url`.

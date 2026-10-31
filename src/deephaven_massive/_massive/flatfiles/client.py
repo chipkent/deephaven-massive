@@ -90,6 +90,7 @@ from urllib3.exceptions import HTTPError, ProtocolError
 from urllib3.exceptions import ReadTimeoutError as ResponseReadTimeoutError
 
 from deephaven_massive._massive.flatfiles.reader import FlatFile
+from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
@@ -105,6 +106,7 @@ from deephaven_massive._massive.net.retry import (
     TRANSIENT_STATUSES,
     transient_wait,
 )
+from deephaven_massive._massive.net.slots import ConnectionSlots
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -238,18 +240,23 @@ class _Body:
     lets some of urllib3's through unwrapped (a TLS failure while reading, which urllib3
     raises as its `SSLError`); this stream raises all of them as `OSError` (chained to the
     original), the error every other stream
-    raises for a failed read. Used by one reader thread; `close()` is safe from any thread.
+    raises for a failed read. It holds one of the client's connection slots until it is
+    closed. Used by one reader thread; `close()` is safe from any thread.
     """
 
-    __slots__ = ("_body",)
+    __slots__ = ("_body", "_lock", "_slots")
 
-    def __init__(self, body: StreamingBody) -> None:
+    def __init__(self, body: StreamingBody, slots: ConnectionSlots) -> None:
         """Wrap a response body.
 
         Args:
             body: The body of a successful `GetObject` response.
+            slots: The client's connection slots, one of which the request took; `close()`
+                gives it back.
         """
         self._body = body
+        self._slots: ConnectionSlots | None = slots
+        self._lock = threading.Lock()
 
     def read(self, size: int = -1, /) -> bytes:
         """Read up to `size` bytes, or the rest of the body when `size` is negative.
@@ -269,8 +276,15 @@ class _Body:
             raise OSError(str(error)) from error
 
     def close(self) -> None:
-        """Close the body, which returns or drops its connection. Idempotent."""
+        """Close the body, which returns or drops its connection, and give its slot back.
+
+        Idempotent: the slot is given back by the first call only.
+        """
         self._body.close()
+        with self._lock:
+            slots, self._slots = self._slots, None
+        if slots is not None:
+            slots.release()
 
 
 class FlatFileClient:
@@ -321,6 +335,7 @@ class FlatFileClient:
         "_proxy",
         "_rereads",
         "_secret_access_key",
+        "_slots",
     )
 
     def __init__(
@@ -343,7 +358,8 @@ class FlatFileClient:
             secret_access_key: The S3 secret access key.
             endpoint_url: The S3 endpoint, such as `"https://files.massive.com"`.
             bucket: The bucket, such as `"flatfiles"`.
-            max_pool: The most connections the client keeps open: one per concurrent reader.
+            max_pool: The most connections the client keeps open, and the most objects it
+                has open at once: a further `open` waits for one to be closed.
             clock: The time source retry waits are taken on. Tests pass a fake; the default is
                 the real clock.
         """
@@ -358,7 +374,11 @@ class FlatFileClient:
         self._client: S3Client | None = None
         # The proxy the client was created with, without its user and password, for messages.
         self._proxy: str | None = None
-        self._closed = threading.Event()
+        self._closed = Cancel()
+        # One per pooled connection: a request takes one before it is sent and an object's
+        # body keeps it until it is closed, so the client never has more requests open than
+        # its pool keeps connections, however many reads overlap.
+        self._slots = ConnectionSlots(max_pool)
         # The cancel event of every `wait_to_reread` in progress, which `close()` sets. A list,
         # since the readers of one call share their event; guarded by `_lock`.
         self._rereads: list[threading.Event] = []
@@ -368,10 +388,12 @@ class FlatFileClient:
         """True once `close()` has run."""
         return self._closed.is_set()
 
-    def open(self, key: str) -> FlatFile | None:
+    def open(self, key: str, *, cancel: Cancel | None = None) -> FlatFile | None:
         """Request one object and return it for reading, or None if it does not exist.
 
-        Blocks the calling thread for the request and any retry waits: one HTTP round trip
+        Blocks the calling thread first while the client already has `max_pool` objects open
+        (requested, or being read), until one of them is closed, then for the request and any
+        retry waits: one HTTP round trip
         when it succeeds, and up to three retries (0.5, 1, then 2 seconds apart, plus up to
         20 % jitter) when it fails before the object's first byte for a reason that may pass,
         such as HTTP 503 `SlowDown` or a reset connection. The body is read later, through the
@@ -391,9 +413,13 @@ class FlatFileClient:
 
         Args:
             key: The object key (`object_key`).
+            cancel: Ends the wait for an open object to be closed when set; None when only
+                `close()` should.
 
         Returns:
-            The object, open for reading, or None if S3 answered 404 `NoSuchKey`.
+            The object, open for reading, or None if S3 answered 404 `NoSuchKey`, or if
+            `cancel` was set while the request waited to be sent (no request is made): a
+            caller that cancels its reads finds them stopped by its own check.
         """
         location = f"s3://{self._bucket}/{key} at {self._endpoint_url}"
 
@@ -425,10 +451,19 @@ class FlatFileClient:
             )
             return answer["Body"]
 
-        body = self._request(get, key=key, location=location, verb="read")
+        with Cancel(*(self._closed,) if cancel is None else (self._closed, cancel)) as stop:
+            if not self._slots.acquire(stop):
+                self._refuse_if_closed(key)
+                return None
+        try:
+            body = self._request(get, key=key, location=location, verb="read")
+        except BaseException:
+            self._slots.release()
+            raise
         if body is None:
+            self._slots.release()
             return None
-        return FlatFile(_Body(body), key, location=location, host=self._host)
+        return FlatFile(_Body(body, self._slots), key, location=location, host=self._host)
 
     def wait_to_reread(self, error: WireError, retry: int, cancel: threading.Event) -> bool:
         """Wait before reading an object again whose body failed part-way, if a reread is left.
@@ -505,12 +540,17 @@ class FlatFileClient:
         found: list[str] = []
         token: str | None = None
         while True:
-            page = self._request(
-                functools.partial(self._list_page, token=token),
-                key="",
-                location=location,
-                verb="list",
-            )
+            if not self._slots.acquire(self._closed):  # one of `max_pool`, as for `open`
+                self._refuse_if_closed("")  # the client closed while it waited: this raises
+            try:
+                page = self._request(
+                    functools.partial(self._list_page, token=token),
+                    key="",
+                    location=location,
+                    verb="list",
+                )
+            finally:
+                self._slots.release()
             found += [entry["Prefix"].removesuffix("/") for entry in page.get("CommonPrefixes", [])]
             # Read as plain data: a server other than S3 may leave either field out.
             fields: Mapping[str, object] = page

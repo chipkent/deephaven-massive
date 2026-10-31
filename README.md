@@ -695,6 +695,17 @@ contracts = m.futures.contracts(product_code="ES").fetch()
 es = m.futures.trades(contracts).last_by()
 ```
 
+**Stream a watchlist as one table.** Put many symbols in one stream rather than opening one
+stream per symbol. Each stream costs the server about 0.2 ms at every flush that brings it rows,
+whatever its size, and flushes come 20 times a second: 300 single-symbol streams of busy symbols
+need about 60 ms a flush, more than the 50 ms between flushes, so every table falls behind. One
+stream of the same 300 symbols pays that cost once. To see one symbol, filter the shared table:
+
+```python
+board = m.stocks.quotes(watchlist).last_by()
+aapl = board.where("Symbol == `AAPL`")
+```
+
 In a live table, `last_by()` drops the row of a symbol that leaves the watchlist, while
 `append_only()` and `ring()` keep the rows it already produced. A watchlist row that is not
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in

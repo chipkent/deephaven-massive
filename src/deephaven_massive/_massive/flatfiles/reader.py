@@ -1,10 +1,12 @@
 """Decoding one flat file: a gzip CSV object streamed into Arrow batches, one per block.
 
 `FlatFile` wraps the body of one S3 object, as a binary stream that `FlatFileClient.open`
-provides, and decodes it with `pyarrow.csv.open_csv` in blocks of `ReadPlan.block_size`
-bytes of decompressed text. Python's `gzip` decompresses on the reader's own read calls; Arrow
-asks for one block per call and reads about 32 blocks ahead of the consumer on its own I/O
-thread, so a reader holds about 32 blocks of text whatever the file's length.
+provides. The reader's own thread decompresses it with Python's `gzip` and cuts the text after
+a line end into chunks of `ReadPlan.chunk_size` bytes; a small pool of `ReadPlan.parse_threads`
+threads parses each chunk with `pyarrow.csv.read_csv`, in blocks of `ReadPlan.block_size`
+bytes, and filters and converts its blocks, while the reader decompresses the next. Blocks
+come out in file order, and at most one chunk more than the pool has threads is read ahead
+of the consumer, so a reader holds a few chunks of text whatever the file's length.
 
 Columns are matched by name, never by position. The reader first reads the header line itself
 and parses it with the `csv` module, then hands Arrow those names and asks for the documented
@@ -51,6 +53,8 @@ import functools
 import gzip
 import threading
 import zlib
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, cast
@@ -64,6 +68,7 @@ from deephaven_massive._massive.spec.types import DriftReport, DriftSample
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
+    from concurrent.futures import Future
     from types import TracebackType
 
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
@@ -176,6 +181,12 @@ class ReadPlan:
             overflows, or lies outside the range the unit allows), and why the first such
             value cannot, or `""` when every value can. Such a row is dropped.
         block_size: Bytes of decompressed CSV per block, and the longest header line read.
+        chunk_size: Bytes of decompressed CSV the reader cuts the file into, after a line
+            end, to parse each piece on its own: a multiple of `block_size`.
+        parse_threads: Threads that parse one file's chunks at once, beside the reader thread
+            that decompresses it. At most one chunk more than this is read ahead of the
+            consumer, so a reader holds about `(parse_threads + 1) * chunk_size` bytes of
+            text, and the rows parsed from it, whatever the file's length.
         required: The key headers every file must have, such as the symbol and time headers;
             a file that lacks one fails before its first block, and a row whose value of one
             is empty or does not parse is dropped.
@@ -188,6 +199,8 @@ class ReadPlan:
     window_ns: tuple[int, int] | None
     to_ns: Callable[[pa.Array], tuple[pa.Array, str]]
     block_size: int
+    chunk_size: int
+    parse_threads: int
     required: frozenset[str]
 
 
@@ -323,15 +336,14 @@ class FlatFile:
                 # to reach the library, so the file is one empty batch.
                 yield _empty(plan), headers
                 return
-            reader = pacsv.open_csv(
-                pa.PythonFile(text, mode="r"),
-                read_options=pacsv.ReadOptions(
+            options = (
+                pacsv.ReadOptions(
                     # The header line is already read: every line Arrow sees is a row.
                     column_names=names,
                     block_size=plan.block_size,
                     use_threads=False,
                 ),
-                convert_options=pacsv.ConvertOptions(
+                pacsv.ConvertOptions(
                     # Every header is read as text and converted afterwards (`_apply`), so a
                     # value that does not parse costs only itself, never its block.
                     column_types=dict.fromkeys(read_types, pa.string()),
@@ -346,8 +358,7 @@ class FlatFile:
             # Rows of the requested symbols the file held, and how many of them were dropped.
             held = dropped = 0
             reason = ""
-            for block in reader:
-                rows, drift, considered = self._apply(block, plan)
+            for rows, drift, considered in self._blocks(text, plan, options):
                 held += considered
                 dropped += drift.dropped_rows
                 reason = reason or drift.dropped_reason
@@ -372,6 +383,68 @@ class FlatFile:
                 # A body that broke off is a transport failure; any other is the file's content.
                 unreadable=not self._dropped.is_set(),
             ) from error
+
+    def _blocks(
+        self,
+        text: gzip.GzipFile,
+        plan: ReadPlan,
+        options: tuple[pacsv.ReadOptions, pacsv.ConvertOptions],
+    ) -> Generator[tuple[pa.RecordBatch, DriftReport, int], None, None]:
+        """Parse and filter the file's rows chunk by chunk on a small pool, in file order.
+
+        The calling thread decompresses the file and cuts the text after a line end into
+        chunks of about `plan.chunk_size` bytes (`_chunk`); `plan.parse_threads` threads of
+        the pool each parse a chunk (`pyarrow.csv.read_csv`, in blocks of `plan.block_size`)
+        and run `_apply` on its blocks. At most `plan.parse_threads + 1` chunks are read
+        ahead of the consumer, so a reader holds about that many chunks of text and their
+        rows whatever the file's length. The pool's threads are named after the calling
+        thread, and end before this generator does, however it ends.
+
+        Args:
+            text: The decompressed file, positioned at its first row.
+            plan: What to read and which rows to keep.
+            options: How Arrow reads the file's rows: its read and convert options.
+
+        Yields:
+            What `_apply` returns for each block, in file order.
+
+        Raises:
+            The errors of decompressing and parsing (`pyarrow.ArrowException`, `OSError`,
+            `EOFError`, `zlib.error`), which `batches` turns into `WireError`. A failure to
+            read or decompress is raised once every block read before it has been handed on,
+            as a reader that reached it block by block would.
+        """
+        read_options, convert_options = options
+
+        def parse(chunk: bytes) -> list[tuple[pa.RecordBatch, DriftReport, int]]:
+            table = pacsv.read_csv(
+                pa.py_buffer(chunk), read_options=read_options, convert_options=convert_options
+            )
+            return [self._apply(block, plan) for block in table.to_batches()]
+
+        name = f"{threading.current_thread().name} parse"
+        pending: deque[Future[list[tuple[pa.RecordBatch, DriftReport, int]]]] = deque()
+        failed: Exception | None = None
+        with ThreadPoolExecutor(plan.parse_threads, name) as pool:
+            try:
+                while True:
+                    try:
+                        chunk = _chunk(text, size=plan.chunk_size, line_limit=plan.block_size)
+                    except (OSError, EOFError, zlib.error) as error:
+                        # The rows read before the failure are handed on first, in order.
+                        failed, chunk = error, b""
+                    if not chunk:
+                        break
+                    pending.append(pool.submit(parse, chunk))
+                    if len(pending) > plan.parse_threads:
+                        yield from pending.popleft().result()
+                while pending:
+                    yield from pending.popleft().result()
+            finally:
+                for future in pending:  # ended early: drop the chunks not yet parsed
+                    future.cancel()
+        if failed is not None:
+            raise failed
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
         """Read and parse the file's header line, and require the plan's key headers.
@@ -499,6 +572,27 @@ class FlatFile:
         block = block.filter(keep)
         dropped = DriftReport(dropped_rows=rows - block.num_rows, dropped_reason=reason)
         return block, dropped, None if nanos is None else nanos.filter(keep)
+
+
+def _chunk(text: gzip.GzipFile, *, size: int, line_limit: int) -> bytes:
+    """Read the next chunk of the decompressed file: about `size` bytes, cut after a line end.
+
+    Arrow reads the files with `newlines_in_values` off, so it ends a row at every line end,
+    even inside quotes: cutting after one never splits a row it would read whole.
+
+    Args:
+        text: The decompressed file.
+        size: The bytes to read before the cut.
+        line_limit: The most bytes read to finish the last line: a row longer than a block,
+            which Arrow refuses anyway ("straddling object"), is not read whole into memory.
+
+    Returns:
+        The chunk; empty at the end of the file.
+    """
+    chunk = text.read(size)
+    if chunk.endswith(b"\n") or not chunk:
+        return chunk
+    return chunk + text.readline(line_limit)
 
 
 def _read_type(plan: ReadPlan, header: str) -> pa.DataType:

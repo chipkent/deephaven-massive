@@ -22,7 +22,7 @@ subscribed; this module owns everything that touches Deephaven for a stream:
   drift), and publishes. A connection may serve the streams of several sessions that share it,
   so the flusher holds no session: each sink reports to its own.
 
-**Fan-out.** Per channel and flush, the rows (keyed by long-form column, symbols as the wire spells
+**Fan-out.** Per channel and flush, the rows (tuples of field values, symbols as the wire spells
 them) are converted once: one Arrow table built from the rows, raw symbols mapped to canonical ones
 per distinct symbol, every epoch run through the timestamp routine as a vectorized mask, columns
 widened to the dataset schema, and the library's time columns filled (`row_times.TimeRule`): `Date`,
@@ -397,6 +397,8 @@ class ChannelPlan:
         channel: The channel, such as `"T"`.
         wire_schema: The Arrow schema of the decoded rows: one field per column of the
             channel's source that the dataset keeps, named by its long-form column.
+        wire_positions: For each field of `wire_schema`, the position of its value in a decoded
+            row: its index in the source's fields.
         columns: Per dataset column, in order: its type, its name, the long-form column of the
             rows that fills it (None for a column the channel does not carry, which is null), and
             the unit of an epoch column (None for any other).
@@ -419,6 +421,7 @@ class ChannelPlan:
     symbols: WireSymbols
     channel: str
     wire_schema: pa.Schema
+    wire_positions: tuple[int, ...]
     columns: tuple[tuple[ColumnType, str, str | None, TimeUnit | None], ...]
     arrow_schema: pa.Schema
     date_columns: tuple[str, ...]
@@ -465,6 +468,8 @@ class ChannelPlan:
             raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
+        # A decoded row holds its values in the order of the source's fields.
+        position = {f.wire_key: i for i, f in enumerate(source.fields)}
         schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         _, symbol_field = fields[key_column(spec, "symbol", symbol)]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
@@ -480,6 +485,7 @@ class ChannelPlan:
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
             ),
+            wire_positions=tuple(position[f.wire_key] for _, f in fields.values()),
             columns=tuple(
                 (c.type, c.name, None, None)
                 if c.name not in fields
@@ -501,7 +507,7 @@ class ChannelPlan:
 
     def convert(
         self,
-        rows: Sequence[Mapping[str, object]],
+        rows: Sequence[Sequence[object]],
         symbols: dict[str, str | None],
         *,
         arrived: Sequence[int],
@@ -509,7 +515,8 @@ class ChannelPlan:
     ) -> Converted:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
-        Pure Arrow apart from the symbol map: the rows become one Arrow table at once, each
+        Pure Arrow apart from the symbol map: the rows become one Arrow table at once (the
+        rows turned into columns in one call, each column converted to Arrow in one call), each
         distinct raw symbol is read once (`WireSymbols.read`, remembered in `symbols`), every
         epoch column runs through the masked timestamp routine, every column is widened to its
         dataset type, the derived columns (`OptionRoot`, `RawSymbol`) are computed, and the
@@ -521,7 +528,8 @@ class ChannelPlan:
         `LOG` and `IGNORE` it is kept with a null `Symbol` and the text in `RawSymbol`.
 
         Args:
-            rows: The decoded rows, keyed by long-form column.
+            rows: The decoded rows, each a tuple of the values of the source's fields, in the
+                order of `Source.fields` (`FrameDecoder` in the wire package).
             symbols: The caller's map from raw to canonical symbol (None for an unreadable
                 spelling), read and extended here; one per flush thread and plan, so it needs
                 no lock.
@@ -534,7 +542,16 @@ class ChannelPlan:
             The batch without the dropped rows, the drift of its timestamps, the failure of
             its unreadable symbols, and the batch's distinct symbols.
         """
-        wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
+        values = list(zip(*rows, strict=True)) if rows else None  # one tuple per source field
+        wire = pa.Table.from_arrays(
+            [
+                pa.array(() if values is None else values[position], type=arrow_type)
+                for position, arrow_type in zip(
+                    self.wire_positions, self.wire_schema.types, strict=True
+                )
+            ],
+            schema=self.wire_schema,
+        )
         count = wire.num_rows
         dropped: pa.Array | None = None
         late: pa.Array | None = None  # the rows whose time column fails the routine
@@ -906,7 +923,7 @@ class StreamSink:
             core.defer(fail)
 
 
-_Frame = tuple[int, list[dict[str, object]]]
+_Frame = tuple[int, list[tuple[object, ...]]]
 """One frame's rows of one channel, with the instant it arrived (epoch nanoseconds)."""
 
 
@@ -1025,14 +1042,14 @@ class _Batch:
     """One channel's rows of one flush, and the rows the client dropped from its frames.
 
     Attributes:
-        rows: The decoded rows, in arrival order.
+        rows: The decoded rows, in arrival order, each a tuple of the source's fields.
         arrived: When each row's frame arrived, epoch nanoseconds, one per row.
         lost: The rows the client dropped from the channel's frames since the last flush,
             because a key could not be read, as the frames' drift merged (`dropped_rows`).
         lost_symbols: How many of those rows each canonical symbol had.
     """
 
-    rows: list[dict[str, object]]
+    rows: list[tuple[object, ...]]
     arrived: list[int]
     lost: DriftReport
     lost_symbols: Mapping[str, int]
@@ -1185,7 +1202,7 @@ class Flusher:
             self._thread.join(timeout)
         return not self._thread.is_alive()
 
-    def rows(self, channel: str, rows: list[dict[str, object]]) -> None:
+    def rows(self, channel: str, rows: list[tuple[object, ...]]) -> None:
         """Buffer one frame's rows of a channel, with the instant they arrived. Never blocks.
 
         The instant, `time.time_ns()` now, on the connection's loop thread as the frame is
@@ -1196,7 +1213,8 @@ class Flusher:
 
         Args:
             channel: The channel.
-            rows: The decoded rows, keyed by long-form column; the flusher keeps the list.
+            rows: The decoded rows, each a tuple of the source's fields; the flusher keeps the
+                list.
         """
         buffer = self.routes.buffer(channel)
         if buffer is None:
@@ -1624,7 +1642,7 @@ class Flusher:
                 self._stale.setdefault(sink.stream_id, {})[symbol] = first
 
     def _convert(
-        self, plan: ChannelPlan, rows: list[dict[str, object]], *, arrived: list[int]
+        self, plan: ChannelPlan, rows: list[tuple[object, ...]], *, arrived: list[int]
     ) -> Converted:
         """Convert a channel's rows for one dataset, with the plan's remembered symbols.
 

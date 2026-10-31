@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import ssl
+import statistics
+import sys
+import time
 from datetime import UTC, date, datetime
 from email.utils import format_datetime
 from typing import TYPE_CHECKING
@@ -13,6 +17,7 @@ from websockets.exceptions import InvalidMessage, InvalidStatus, InvalidURI
 from websockets.http11 import Response
 
 from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
+from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
@@ -109,6 +114,15 @@ def decoder() -> FrameDecoder:
 
 def _frame(*items: object) -> str:
     return json.dumps(list(items))
+
+
+_SOURCES = {s.key.partition("/")[2]: s for s in (TRADES, EVERYTHING, CONVERTED, FOREX)}
+
+
+def _dicts(data: Data) -> list[dict[str, object]]:
+    # The rows as dictionaries by long-form column, so a test reads them by name.
+    columns = [field.column for field in _SOURCES[data.channel].fields]
+    return [dict(zip(columns, row, strict=True)) for row in data.rows]
 
 
 def _decode_one(decoder: FrameDecoder, item: dict[str, object]) -> Data:
@@ -224,16 +238,16 @@ def test_a_status_without_a_message_has_empty_text(decoder: FrameDecoder) -> Non
 def test_rows_use_long_form_columns_and_absent_fields_are_none(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", "p": 100, "c": [1, 2]})
     assert data.channel == "T"
-    assert data.rows == [
+    assert _dicts(data) == [
         {"Ticker": "AAPL", "Price": 100.0, "Size": None, "SipTimestamp": None, "Conditions": [1, 2]}
     ]
-    assert isinstance(data.rows[0]["Price"], float)
+    assert isinstance(_dicts(data)[0]["Price"], float)
     assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset(), 0)
 
 
 def test_a_null_value_is_none(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", "p": None})
-    assert data.rows[0]["Price"] is None
+    assert _dicts(data)[0]["Price"] is None
 
 
 def test_drift_reports_extra_keys_and_only_vendor_required_fields_as_missing(
@@ -251,8 +265,8 @@ def test_drift_reports_extra_keys_and_only_vendor_required_fields_as_missing(
     # and null once, is missing. The extra keys are dropped from the rows.
     assert data.drift == DriftReport(extra=frozenset({"new", "z"}), missing=frozenset({"t"}))
     columns = {"Ticker", "Price", "Size", "SipTimestamp", "Conditions"}
-    assert [set(r) for r in data.rows] == [columns] * 3
-    assert [r["SipTimestamp"] for r in data.rows] == [1, None, None]
+    assert [set(r) for r in _dicts(data)] == [columns] * 3
+    assert [r["SipTimestamp"] for r in _dicts(data)] == [1, None, None]
 
 
 def test_drift_samples_name_the_first_symbol_and_value_of_each_key(decoder: FrameDecoder) -> None:
@@ -298,13 +312,13 @@ def test_a_row_with_an_odd_value_is_logged_whole_at_debug(
     row = {"ev": "T", "sym": "AAPL", "p": "182.33a", "s": 100, "t": 1761660187112}
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
         data = _decode_one(decoder, row)
-    assert data.rows[0]["Price"] is None
+    assert _dicts(data)[0]["Price"] is None
     assert caplog.messages == [
         (
             "read as null in a T row for AAPL from socket.massive.com/stocks: Price (wire key "
             "'p') expects double, got \"182.33a\"; the row: "
             '{"ev":"T","sym":"AAPL","p":"182.33a","s":100,"t":1761660187112}'
-        )
+        ),
     ]
 
 
@@ -315,7 +329,7 @@ def test_a_dropped_row_is_logged_whole_at_debug(
     row = {"ev": "T", "sym": "AAPL", "t": 4.0}
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
         data = _decode_one(decoder, row)
-    assert data.rows == []
+    assert _dicts(data) == []
     [reject] = data.rejects
     assert (reject.channel, reject.symbol) == ("T", "AAPL")
     assert reject.error.message == (
@@ -335,7 +349,7 @@ def test_an_odd_row_is_not_serialized_with_debug_off(
     monkeypatch.setattr(protocol, "row_excerpt", refuse)
     # A dropped row's `Reject` always carries its text; a kept row's odd value needs none.
     data = _decode_one(decoder, {"ev": "T", "p": "x", "t": 1})
-    assert (len(data.rows), data.drift.unconvertible) == (1, frozenset({"p"}))
+    assert (len(_dicts(data)), data.drift.unconvertible) == (1, frozenset({"p"}))
 
 
 def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
@@ -355,7 +369,7 @@ def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
         )
     )
     assert isinstance(data, Data)
-    assert [r["Ticker"] for r in data.rows] == ["A", "B"]
+    assert [r["Ticker"] for r in _dicts(data)] == ["A", "B"]
     assert len(data.rejects) == 1
     # The dropped row's extra key counts; its odd value does not, since no row reads it.
     assert data.drift == DriftReport(
@@ -367,7 +381,7 @@ def test_symbols_pass_through_as_the_wire_spells_them() -> None:
     decoder = FrameDecoder([FOREX], host=HOST, path="/forex")
     decoder.set_required("CA", frozenset({"Pair"}), symbol="Pair")
     data = _decode_one(decoder, {"ev": "CA", "pair": "EUR/USD", "c": "x"})
-    assert data.rows[0]["Pair"] == "EUR/USD"
+    assert _dicts(data)[0]["Pair"] == "EUR/USD"
     assert data.drift.samples["c"].symbol == "EUR/USD"
 
 
@@ -384,14 +398,14 @@ def test_each_channel_is_one_data_event_at_its_first_object(decoder: FrameDecode
     first, _, second = events
     assert isinstance(first, Data)
     assert isinstance(second, Data)
-    assert (first.channel, [r["Flag"] for r in first.rows]) == ("E", [True, False])
+    assert (first.channel, [r["Flag"] for r in _dicts(first)]) == ("E", [True, False])
     assert second.channel == "T"
 
 
 def test_a_single_object_frame_is_decoded(decoder: FrameDecoder) -> None:
     [data] = decoder.decode(json.dumps({"ev": "E", "b": True}).encode())
     assert isinstance(data, Data)
-    assert data.rows == [{"Flag": True, "Day": None, "When": None, "Extra": None}]
+    assert _dicts(data) == [{"Flag": True, "Day": None, "When": None, "Extra": None}]
 
 
 # --- conversions --------------------------------------------------------------------------------
@@ -408,7 +422,7 @@ def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) ->
         "i": "2026-01-02T14:30:00.123456789Z",
         "j": {"a": [1, "é"]},
     }
-    [row] = _decode_one(decoder, item).rows
+    [row] = _dicts(_decode_one(decoder, item))
     assert row == {
         "Flag": False,
         "Day": date(2026, 1, 2),
@@ -432,7 +446,7 @@ def test_an_unconvertible_value_reads_as_null_and_is_drift(
 ) -> None:
     key, column, value, _, quoted = case
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
-    [row] = data.rows
+    [row] = _dicts(data)
     assert row[column] is None
     assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset({key}), 0)
     assert data.drift.samples[key] == DriftSample(None, quoted)  # no symbol column declared
@@ -452,7 +466,7 @@ def test_an_unconvertible_required_key_drops_its_row(
     key, column, value, expects, quoted = case
     decoder.set_required("T", frozenset({column}))
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
-    assert data.rows == []
+    assert _dicts(data) == []
     assert data.drift.unconvertible == frozenset()
     [reject] = data.rejects
     assert reject.channel == "T"
@@ -470,7 +484,10 @@ def test_a_named_conversion_applies_to_its_field() -> None:
     decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
     [data] = decoder.decode(_frame({"ev": "C", "x": "48", "i": 7}, {"ev": "C", "x": 49, "i": "ab"}))
     assert isinstance(data, Data)
-    assert data.rows == [{"Exchange": 48, "TradeId": "7"}, {"Exchange": 49, "TradeId": "ab"}]
+    assert _dicts(data) == [
+        {"Exchange": 48, "TradeId": "7"},
+        {"Exchange": 49, "TradeId": "ab"},
+    ]
     assert data.drift == DriftReport()
 
 
@@ -490,7 +507,7 @@ def test_a_value_its_named_conversion_cannot_read_is_odd(
     decoder = FrameDecoder([CONVERTED], host=HOST, path="/forex")
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
         data = _decode_one(decoder, {"ev": "C", key: value})
-    assert data.rows[0][column] is None
+    assert _dicts(data)[0][column] is None
     assert data.drift.unconvertible == {key}
     assert caplog.messages[0].startswith(
         f"read as null in a C row from socket.massive.com/forex: "
@@ -504,7 +521,7 @@ def test_an_odd_field_keeps_the_sample_of_its_first_row(decoder: FrameDecoder) -
         _frame({"ev": "T", "sym": "A", "p": "x"}, {"ev": "T", "sym": "B", "p": "y"})
     )
     assert isinstance(data, Data)
-    assert [r["Price"] for r in data.rows] == [None, None]
+    assert [r["Price"] for r in _dicts(data)] == [None, None]
     assert data.drift.samples["p"] == DriftSample("A", '"x"')
 
 
@@ -528,7 +545,7 @@ def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
         )
     )
     assert isinstance(data, Data)
-    assert data.rows == [
+    assert _dicts(data) == [
         {"Ticker": "AAPL", "Price": None, "Size": None, "SipTimestamp": 1, "Conditions": None}
     ]
     assert [(r.channel, r.symbol) for r in data.rejects] == [("T", "MSFT"), ("T", None)]
@@ -569,7 +586,7 @@ def test_set_required_replaces_the_earlier_choice(decoder: FrameDecoder) -> None
     decoder.set_required("T", frozenset({"Size"}), symbol="Ticker")
     decoder.set_required("T", frozenset())
     data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "bad"})
-    assert len(data.rows) == 1
+    assert len(_dicts(data)) == 1
     assert data.drift.samples["p"].symbol is None
 
 
@@ -770,3 +787,172 @@ def test_an_unreadable_retry_after_is_logged(caplog: pytest.LogCaptureFixture) -
 def test_an_object_of_exactly_the_declared_shape_has_no_drift(decoder: FrameDecoder) -> None:
     data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": 1, "s": 1, "t": 1, "c": []})
     assert data.drift == DriftReport()
+
+
+# --- reading by column -------------------------------------------------------------------------
+
+# Objects of the three test channels, odd ones included: absent and null keys, extra keys,
+# values of the wrong type or out of range, and values only a named conversion reads.
+_OBJECTS: tuple[dict[str, object], ...] = (
+    {"ev": "T", "sym": "AAPL", "p": 1.5, "s": 100, "t": 1, "c": [12, 37]},
+    {"ev": "T", "sym": "MSFT", "p": 2, "s": 5, "t": 2},
+    {"ev": "T", "sym": "IBM", "p": None, "s": None, "t": None, "c": None},
+    {"ev": "T", "sym": "NVDA", "p": "1.5", "s": 1, "t": 3},
+    {"ev": "T", "sym": "AMD", "p": 1.0, "s": 2**63, "t": 4, "c": [2**63]},
+    {"ev": "T", "sym": "TSLA", "p": 1.0, "s": True, "t": 5.0, "c": [True]},
+    {"ev": "T", "p": 3.5, "s": 1, "t": 6, "x": 4},
+    {"ev": "T", "sym": 7, "p": 2**60 + 1, "s": 1, "t": 7, "zz": {"a": 1}},
+    {"ev": "E", "b": True, "d": "2025-03-03", "i": "2025-03-03T14:30:00.5Z", "j": [1, "a"]},
+    {"ev": "E", "b": 1, "d": "2025-02-30", "i": "2025-03-03T14:30:00", "j": None},
+    {"ev": "E", "d": None, "i": "2025-03-03T14:30:00+01:00", "j": {"k": None}},
+    {"ev": "C", "x": "48", "i": 7},
+    {"ev": "C", "x": 49, "i": "ab"},
+    {"ev": "C", "x": "4.8", "i": 1.5},
+    {"ev": "C", "x": None, "i": None, "y": 1},
+)
+
+
+def _events(decoder: FrameDecoder, frame: str) -> list[object]:
+    # Every event of a frame, compared whole: each value with its exact type, each reject by
+    # its fields, and each drift with its samples, which its equality leaves out.
+    events: list[object] = []
+    for event in decoder.decode(frame):
+        if isinstance(event, Status):
+            events.append(event)
+            continue
+        rows = [[(type(v), v) for v in row] for row in event.rows]
+        rejects = [(r.channel, r.symbol, r.error.message, r.raw) for r in event.rejects]
+        events.append((event.channel, rows, rejects, event.drift, dict(event.drift.samples)))
+    return events
+
+
+def _decoder() -> FrameDecoder:
+    # Only the ticker is required, so a missing `t`, which the vendor marks required, is drift
+    # that the column reading reports itself.
+    decoder = FrameDecoder([TRADES, EVERYTHING, CONVERTED], host=HOST, path=PATH)
+    decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
+    return decoder
+
+
+def test_frames_read_by_column_decode_exactly_as_one_by_one(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The same frames, read by column where the reading can vouch for them and one by one
+    # otherwise, and read one by one throughout: identical rows, rejects, drift, and samples.
+    # Every ordered pair of objects, repeated into frames of five; every run of one to twelve
+    # objects of the list taken in turn; and each object six times alone.
+    frames = [_frame(a, b, b, a, a) for a, b in itertools.product(_OBJECTS, repeat=2)]
+    ring = itertools.cycle(_OBJECTS)
+    frames += [_frame(*itertools.islice(ring, size)) for size in range(1, 13) for _ in range(15)]
+    frames += [_frame(*[item] * 6) for item in _OBJECTS]
+    caplog.set_level(logging.DEBUG, logger=protocol.__name__)
+    by_column = [_events(_decoder(), frame) for frame in frames]
+    read_by_column = sum("rows one by one" in m for m in caplog.messages)
+    monkeypatch.setattr(protocol, "COLUMN_MIN_OBJECTS", 10**9)
+    one_by_one = [_events(_decoder(), frame) for frame in frames]
+    assert by_column == one_by_one
+    assert read_by_column  # some frames needed the reference reading
+
+
+def test_a_frame_of_enough_clean_objects_is_read_by_column(
+    monkeypatch: pytest.MonkeyPatch, decoder: FrameDecoder
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an object was read on its own")
+
+    monkeypatch.setattr(FrameDecoder, "_row", refuse)
+    item = {"ev": "T", "sym": "AAPL", "p": 1, "s": 1, "t": 1, "c": [1]}
+    [data] = decoder.decode(_frame(*[item] * protocol.COLUMN_MIN_OBJECTS))
+    assert isinstance(data, Data)
+    assert data.rows == [("AAPL", 1.0, 1, 1, [1])] * protocol.COLUMN_MIN_OBJECTS
+    assert type(data.rows[0][1]) is float  # as the converter makes it
+
+
+def test_a_frame_of_few_objects_is_read_one_by_one(
+    monkeypatch: pytest.MonkeyPatch, decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("few objects were read by column")
+
+    monkeypatch.setattr(FrameDecoder, "_by_column", refuse)
+    item = {"ev": "T", "sym": "AAPL", "p": 1, "s": 1, "t": 1}
+    few = protocol.COLUMN_MIN_OBJECTS - 1
+    with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
+        [data] = decoder.decode(_frame(*[item] * few))
+    assert isinstance(data, Data)
+    assert data.rows == [("AAPL", 1.0, 1, 1, None)] * few
+    assert caplog.messages == []  # reading few objects one by one is no fallback
+
+
+def test_a_source_without_fields_has_an_empty_row_per_object() -> None:
+    bare = Source(key="stocks/Z", transport=Transport.WS, fields=())
+    for count in (1, protocol.COLUMN_MIN_OBJECTS):
+        [data] = FrameDecoder([bare], host=HOST, path=PATH).decode(_frame(*[{"ev": "Z"}] * count))
+        assert isinstance(data, Data)
+        assert data.rows == [()] * count
+
+
+def test_a_frame_the_column_reading_cannot_vouch_for_says_why_at_debug(
+    decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
+) -> None:
+    decoder.set_required("T", frozenset({"SipTimestamp"}), symbol="Ticker")
+    clean = {"ev": "T", "sym": "AAPL", "p": 1.5, "s": 1, "t": 1}
+    cases = [
+        ({**clean, "p": "x"}, "the column Price holds a value that needs its own check"),
+        ({**clean, "t": None}, "the required column SipTimestamp is absent or null in some object"),
+    ]
+    for odd, reason in cases:
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
+            decoder.decode(_frame(*[clean] * 3, odd))
+        assert caplog.messages[0] == (
+            f"socket.massive.com/stocks: reading 4 T rows one by one: {reason}"
+        )
+
+
+# --- benchmark ----------------------------------------------------------------------------------
+
+
+def _trade_frame(rows: int) -> str:
+    # A frame of real-shaped stock trades: every field of the generated `stocks/T` source.
+    return json.dumps(
+        [
+            {
+                "ev": "T",
+                "sym": f"S{i % 50}",
+                "i": str(i),
+                "x": 4,
+                "p": 100.25 + i,
+                "s": 100,
+                "c": [12, 37],
+                "t": 1_700_000_000_000 + i,
+                "q": i,
+                "z": 3,
+                "pt": 1_700_000_000_000 + i,
+            }
+            for i in range(rows)
+        ]
+    )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("rows", [1, 10, 100, 1_000])
+def test_benchmark_frame_decoding(capsys: pytest.CaptureFixture[str], rows: int) -> None:
+    # Records, never gates: the loop thread's cost of decoding one frame of trades, per row.
+    trades = sources(Transport.WS)["stocks/T"]
+    decoder = FrameDecoder([trades], host=HOST, path=PATH)
+    decoder.set_required("T", frozenset({"Ticker", "SipTimestamp"}), symbol="Ticker")
+    frame = _trade_frame(rows)
+    repeats = max(20, 20_000 // rows)
+    times = []
+    for _ in range(5):
+        started = time.perf_counter()
+        for _ in range(repeats):
+            decoder.decode(frame)
+        times.append((time.perf_counter() - started) / repeats)
+    seconds = statistics.median(times)
+    with capsys.disabled():
+        sys.stderr.write(
+            f"\nframe of {rows} trades: {seconds * 1e6:.1f} us to decode, "
+            f"{seconds * 1e6 / rows:.2f} us a row\n"
+        )

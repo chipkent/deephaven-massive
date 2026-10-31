@@ -29,8 +29,9 @@ to keep.
   not carry is null and a column a kind widens (an integer size in a `double` column) is widened
   (`source_columns.widen`). A file's surviving rows become one static Deephaven table per
   `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at the end.
-  No block is ever converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on
-  its own I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
+  No block is ever converted to Python objects. A reader decompresses its file on its own thread
+  and parses it in chunks of `CHUNK_BLOCKS` blocks on `PARSE_THREADS` threads of its own, so it
+  holds about `PARSE_THREADS + 1` chunks of decompressed text and their rows, plus at most
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
 
 Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NYMEX, COMEX),
@@ -196,8 +197,18 @@ __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 logger = logging.getLogger(__name__)
 
 BLOCK_SIZE: Final = 1024 * 1024
-"""Bytes of decompressed CSV per block. Arrow reads about 32 blocks ahead of the consumer, so
-this sets a reader's memory: about 32 MiB of text in flight per concurrent reader."""
+"""Bytes of decompressed CSV per block: the unit each block of rows is filtered, converted, and
+handed on in."""
+
+CHUNK_BLOCKS: Final = 16
+"""Blocks of decompressed CSV in each chunk a reader cuts its file into to parse in parallel
+(`ReadPlan.chunk_size`): 16 MiB, enough that a chunk's parse outweighs handing it to a thread."""
+
+PARSE_THREADS: Final = 3
+"""Threads that parse one file's chunks beside the reader thread that decompresses it
+(`ReadPlan.parse_threads`). Decompressing takes about a fifth of the time parsing and filtering
+do, so three keep one reader busy; a reader then holds about four chunks (64 MiB) of text, and
+the rows parsed from them, in flight."""
 
 _ONE_DAY: Final = timedelta(days=1)
 
@@ -517,6 +528,8 @@ class _Transform:
             window_ns=_window_ns(window),
             to_ns=to_ns,
             block_size=BLOCK_SIZE,
+            chunk_size=CHUNK_BLOCKS * BLOCK_SIZE,
+            parse_threads=PARSE_THREADS,
             required=frozenset(f.wire_key for f in required_fields(spec, source)),
         )
         return cls(
@@ -999,7 +1012,7 @@ class FlatFileHistory:
                 failed request or read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
-        cancel = threading.Event() if stop is None else stop
+        cancel = Cancel() if stop is None else stop
         current = current_partition(spec)
         unpublished: date | None = None
         tables: list[tuple[date, Table]] = []
@@ -1040,7 +1053,7 @@ class FlatFileHistory:
         current: date,
         prefix: str,
         roll: bool,
-        cancel: threading.Event,
+        cancel: Cancel,
     ) -> list[tuple[date, Table]] | None:
         """Look for the first file after a range's missing last files; see `_after_missing`.
 
@@ -1089,7 +1102,7 @@ class FlatFileHistory:
                 return [(day, table) for table in found]
         return None
 
-    def _opened(self, key: _Key, *, cancel: threading.Event) -> list[Table] | None:
+    def _opened(self, key: _Key, *, cancel: Cancel) -> list[Table] | None:
         """Tell whether a file exists by opening it and closing it unread.
 
         Args:
@@ -1106,11 +1119,12 @@ class FlatFileHistory:
         """
         self._check(cancel)
         try:
-            file = self._client.open(key.key)
+            file = self._client.open(key.key, cancel=cancel)
         except WireError as error:
             public = _public(error, key)
             raise public from error
         if file is None:
+            self._check(cancel)  # a wait for a connection the call's cancel ended
             return None
         with file:
             return []
@@ -1140,9 +1154,7 @@ class FlatFileHistory:
         if cancel.is_set():
             raise _CancelledError
 
-    def _read_key(
-        self, transform: _Transform, key: _Key, *, cancel: threading.Event
-    ) -> list[Table] | None:
+    def _read_key(self, transform: _Transform, key: _Key, *, cancel: Cancel) -> list[Table] | None:
         """Stream one file into static Deephaven tables of its surviving rows.
 
         Runs on a reader thread, inside the session's execution context for the Deephaven
@@ -1197,14 +1209,15 @@ class FlatFileHistory:
             retry += 1
 
     def _read_once(
-        self, transform: _Transform, key: _Key, *, cancel: threading.Event
+        self, transform: _Transform, key: _Key, *, cancel: Cancel
     ) -> list[Table] | WireError | None:
         """Request one file and read it from its start once; `_read_key` reads it again.
 
         Args:
             transform: The request's block transform.
             key: The file to read.
-            cancel: The call's cancel event, checked before the request and after each block.
+            cancel: The call's cancel event, checked before the request and after each block;
+                it also ends a wait for one of the session's connections.
 
         Returns:
             The file's tables; None if the file does not exist; or, when the connection dropped
@@ -1221,8 +1234,9 @@ class FlatFileHistory:
         self._check(cancel)
         file = None
         try:
-            file = self._client.open(key.key)
+            file = self._client.open(key.key, cancel=cancel)
             if file is None:
+                self._check(cancel)  # a wait for a connection the call's cancel ended
                 return None
             with file, contextlib.closing(file.batches(transform.plan_for(key))) as batches:
                 self._check(cancel)

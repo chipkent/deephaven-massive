@@ -317,7 +317,7 @@ def test_publish_waits_for_every_channel_of_a_frame(
 
     def slow_quotes(
         channel: str,
-        rows: list[dict[str, object]],
+        rows: list[tuple[object, ...]],
         *,
         rejects: list[_massive.Reject],
         drift: _massive.DriftReport,
@@ -1580,16 +1580,52 @@ def test_a_futures_stream_loads_its_schedules_before_it_subscribes(
     ws_session.session.release(result)
 
 
+def _slow_schedules(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    # Schedules that never load in time; returns the seconds each verb waited for them.
+    waits: list[float] = []
+
+    def wait_loaded(_calendar: object, _contracts: object, timeout: float) -> bool:
+        waits.append(timeout)
+        return False
+
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", wait_loaded)
+    return waits
+
+
 def test_a_futures_stream_whose_schedules_are_slow_says_so_once(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", lambda *_: False)
+    waits = _slow_schedules(monkeypatch)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"):
         result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert waits == [ws.SCHEDULE_WAIT]
     assert [r.getMessage() for r in caplog.records] == [
         (
             "futures stream 1: the schedules of 1 [ESZ5] did not load within 15 s; their rows "
             "get a null Date until they do"
+        )
+    ]
+    ws_session.session.release(result)
+
+
+def test_a_futures_stream_opened_holding_the_lock_waits_briefly_for_its_schedules(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A console command holds the update graph's lock, so no live table updates while it
+    # waits; its rows get a null Date until the schedules load anyway.
+    waits = _slow_schedules(monkeypatch)
+    graph = ws_session.session._core.exec_ctx.update_graph
+    with (
+        caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"),
+        update_graph.exclusive_lock(graph),
+    ):
+        result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    assert waits == [ws.SCHEDULE_WAIT_HOLDING_LOCK] == [1.0]
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "futures stream 1: the schedules of 1 [ESZ5] did not load within 1 s, the most a "
+            "caller holding the update graph's lock waits; their rows get a null Date until "
+            "they do"
         )
     ]
     ws_session.session.release(result)

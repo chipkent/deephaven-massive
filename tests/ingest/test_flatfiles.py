@@ -891,7 +891,10 @@ def test_every_block_carries_the_instant_it_was_decoded(
     arrived = [row["TimestampInsert"] for row in rows(t, arrival=True)]
     assert len(arrived) == 4000
     assert arrived == sorted(arrived)  # one reader reads the file's blocks in order
-    assert 1 < len(set(arrived)) <= blocks + 1
+    # The reader parses the file in chunks of 16 blocks cut at a line end, each of which may
+    # end in a short block of its own.
+    chunks = blocks // 16 + 1
+    assert 1 < len(set(arrived)) <= blocks + chunks + 1
 
 
 def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
@@ -2035,11 +2038,12 @@ whose reads build no table fails on its own assertions within the 60-second test
 after two held drops."""
 
 
-def hold_each_drop(fake_s3: FakeS3) -> threading.Event:
+def hold_each_drop(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> threading.Event:
     # Holds each dropped read's failure until the returned event is set, and clears the event
-    # at every request, so a test can make each dropped read build a table first. Arrow reads
-    # a file ahead on a thread of its own and can report the drop before the reader has turned
-    # a single block into a table.
+    # at every request, so a test can make each dropped read build a table first. A reader
+    # reads a few chunks ahead of the tables it builds, so chunks of one block keep the first
+    # table well before the drop; with longer chunks the reader would wait out the hold.
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
     built = threading.Event()
     fake_s3.before_answer = lambda _: built.clear()
     fake_s3.before_drop = lambda _: built.wait(_HOLD)
@@ -2058,7 +2062,7 @@ def test_a_dropped_connection_is_read_again_from_the_start(
     many_blocks(TRADES_0303)
     converted: list[int] = []
     convert = columns.dataset_table
-    built = hold_each_drop(fake_s3)
+    built = hold_each_drop(fake_s3, monkeypatch)
 
     def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
@@ -2239,7 +2243,7 @@ def test_a_dropped_reads_tables_are_freed_before_the_wait(
     fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
     partial: list[weakref.ref[Table]] = []
     convert = flatfiles._convert
-    built = hold_each_drop(fake_s3)
+    built = hold_each_drop(fake_s3, monkeypatch)
 
     def recorded(batches: list[pa.RecordBatch], transform: flatfiles._Transform) -> Table:
         table = convert(batches, transform)
@@ -2500,14 +2504,63 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         warnings=WARNINGS,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
-    cancel = threading.Event()
+    cancel = _massive.Cancel()
     cancel.set()
     with pytest.raises(flatfiles._CancelledError):
         transport._read_key(transform, key, cancel=cancel)
     flat_file_client(session).close()
     with pytest.raises(dm.MassiveError, match="is closed"):
-        transport._read_key(transform, key, cancel=threading.Event())
+        transport._read_key(transform, key, cancel=_massive.Cancel())
     assert fake_s3.requests == []
+
+
+def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing(
+    *, fake_s3: FakeS3, put: Callable[[str, str], None]
+) -> None:
+    # The session reads one file at a time; while that file is open, another read waits for
+    # the connection, and stopping its call ends the wait as a cancellation: it never reads
+    # as a missing file, which would send a look for later days on.
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    m = dm.MassiveSession(config(max_concurrency=1))
+    try:
+        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+        transform = flatfiles._Transform.build(
+            CATALOG,
+            STOCK_TRADES,
+            prefix="us_stocks_sip/trades_v1",
+            request=request(dm.ALL),
+            window=whole_days(STOCK_TRADES, "2025-03-03"),
+            unreadable_symbols=dm.OnError.RAISE,
+            warnings=WARNINGS,
+        )
+        key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
+        client = flat_file_client(m)
+        held = client.open(TRADES_0303)
+        assert held is not None
+        waiting = threading.Event()
+        wait = client._slots._ready.wait
+
+        def noted(timeout: float | None = None) -> bool:
+            waiting.set()
+            return wait(timeout)
+
+        client._slots._ready.wait = noted  # type: ignore[method-assign]  # see the wait
+        for read in (
+            lambda cancel: transport._read_key(transform, key, cancel=cancel),
+            lambda cancel: transport._opened(key, cancel=cancel),
+        ):
+            waiting.clear()
+            cancel = _massive.Cancel()
+            with ThreadPoolExecutor(1) as pool:
+                outcome = pool.submit(read, cancel)
+                assert waiting.wait(TIMEOUT)
+                cancel.set()
+                with pytest.raises(flatfiles._CancelledError):
+                    outcome.result(TIMEOUT)
+        held.close()
+    finally:
+        m.close()
+    assert len(fake_s3.requests) == 1  # only the held file was requested
 
 
 def test_a_failure_stops_the_reads_in_progress(
@@ -2830,14 +2883,16 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     clock: Callable[[datetime], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
-    # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
-    # 310 blocks, cheap to build and read, in which that window fills within the first third.
-    # Each block costs the same to read whatever its size, so the block count sets the test's
-    # time; at this count every regression named below still lands well past its slack.
+    # A reader holds a window of its file, not the file: the chunks it reads ahead to parse
+    # (`PARSE_THREADS + 1` chunks of `CHUNK_BLOCKS` blocks), plus at most `_TABLE_BLOCKS` blocks
+    # of gathered rows. Small blocks, in chunks of four, give a file of about 310 blocks, cheap
+    # to build and read, in which that window fills within the first third. Each block costs
+    # the same to read whatever its size, so the block count sets the test's time; at this
+    # count every regression named below still lands well past its slack.
     block = 16 * 1024
-    window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 4)
+    window = (flatfiles.PARSE_THREADS + 1) * 4 + flatfiles._TABLE_BLOCKS
     rows = 64_000
     text = synthetic_trades(rows)
     blocks = len(text) // block
@@ -2869,9 +2924,10 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     finally:
         m.close()
     assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
-    # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
-    # so it varies from run to run by up to about 40 blocks. A reader that kept a Python copy of
-    # each compressed chunk it read rises by about 175 over the last two thirds of the file.
+    # Python's peak includes the read-ahead's decompressed text, taken while the parse threads
+    # work, so it varies from run to run by up to about 40 blocks. A reader that kept a Python
+    # copy of each compressed chunk it read rises by about 175 over the last two thirds of the
+    # file.
     python_slack = 64 * block
     # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
     # and legitimately grow it by about 6 blocks over the last two thirds of the file (about

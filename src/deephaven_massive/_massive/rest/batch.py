@@ -23,12 +23,12 @@ form to its `wire_type`), and stored as:
 A value that does not fit raises `WireError`: values are never coerced.
 
 **Two readings, one result.** A page is read column by column: each field's values are gathered
-into one list, the types of the whole list are checked at once, and the list goes to Arrow in
-one call, so a column of plain numbers or text costs no Python call per value. A page that
-column reading cannot vouch for (an odd row, or a value only its converter can judge and the
-converter refuses) is read again row by row, the reference reading, which judges each value on
-its own. Either way the batch and the drift are the same; a page read row by row logs why at
-DEBUG.
+into one list, `spec.convert.column_converter` checks the whole list at once, and the list goes to
+Arrow in one call, so a column of plain numbers or text costs no Python call per value. The
+WebSocket decoder reads each frame the same way. A page that column reading cannot vouch for
+(an odd row, or a value its converter refuses) is read again row by row, the reference reading,
+which judges each value on its own. Either way the batch and the drift are the same; a page read
+row by row logs why at DEBUG.
 
 **Drift** is reported, not raised, in the returned `DriftReport`:
 
@@ -67,9 +67,9 @@ import pyarrow as pa
 
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
+    column_converter,
     convert_field,
     excerpt,
-    field_converter,
     missing_key_message,
     row_excerpt,
 )
@@ -97,31 +97,6 @@ _ARROW: dict[WireType, pa.DataType] = {
     WireType.STRING_ARRAY: pa.list_(pa.string()),
     WireType.JSON_TEXT: pa.string(),
 }
-
-_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
-    {
-        WireType.LONG: frozenset({int, NoneType}),
-        WireType.EPOCH: frozenset({int, NoneType}),
-        WireType.DOUBLE: frozenset({float, int, NoneType}),
-        WireType.BOOL: frozenset({bool, NoneType}),
-        WireType.STRING: frozenset({str, NoneType}),
-        WireType.LONG_ARRAY: frozenset({list, NoneType}),
-        WireType.STRING_ARRAY: frozenset({list, NoneType}),
-    }
-)
-"""The JSON value types a whole column of each plain wire type may hold (null included) to go
-to Arrow as it is, without a call per value. Arrow refuses the rest of what the converters
-refuse: an integer outside the signed 64-bit range, and an integer that a double cannot hold
-exactly (the converter rounds it; the row-by-row path then does). A `bool` is never an `int`
-here, since the check is on exact types."""
-
-_ITEMS_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
-    {
-        WireType.LONG_ARRAY: frozenset({int, NoneType}),
-        WireType.STRING_ARRAY: frozenset({str, NoneType}),
-    }
-)
-"""The JSON value types the items of a list column may hold to go to Arrow as they are."""
 
 _NO_OBJECT: Final[Mapping[str, object]] = MappingProxyType({})
 """Stands in for an absent or null nested object, whose fields are all absent."""
@@ -287,14 +262,14 @@ def _by_column(
 
     The fast path, taken by nearly every page: each field's values are gathered into one list
     (through the nested objects the fields reach into), the types of a whole list are checked at
-    once, and the list goes to Arrow in one call. A column of a plain wire type whose values are
-    all of the types it accepts as sent (`_AS_SENT`) needs no call per value; any other column
-    calls the field's converter once per value. Undeclared keys are found by one subset test
+    once (`spec.convert.column_converter`), and the list goes to Arrow in one call. A column of
+    plain values of its type needs no call per value; any other column calls the field's
+    converter once per value. Undeclared keys are found by one subset test
     per object, and only an object that has one is walked.
 
     It never judges an odd row: anything it is not sure of (a nested object that is neither an
-    object nor null, a required key that is absent or null, a value of another type, a value
-    Arrow or the converter refuses) makes it return the reason instead, and `to_batch` reads
+    object nor null, a required key that is absent or null, a value the converter refuses, an
+    integer out of its column's range) makes it return the reason instead, and `to_batch` reads
     the page row by row (`_by_row`), which judges each value on its own.
 
     Args:
@@ -374,26 +349,24 @@ def _array(field: Field, values: list[object]) -> pa.Array | None:
         field: The field.
         values: Its value in each row, `None` where absent.
 
+    Arrow checks the numbers in one native pass. When it refuses one (an integer out of the
+    64-bit range, or one a double cannot hold exactly), the column is read again with every
+    number checked and converted in Python, which rounds such an integer in a `double` column as
+    the converter does.
+
     Returns:
-        The array; or None when a value is of a type the column does not accept as sent and the
-        converter refuses it, or Arrow refuses one, so the page must be read row by row.
+        The array; or None when `spec.convert.column_converter` cannot vouch for a value, so the
+        page must be read row by row.
     """
     arrow_type = _ARROW[field.wire_type]
-    as_sent = None if field.conversion is not None else _AS_SENT.get(field.wire_type)
-    try:
-        if as_sent is None:
-            convert = field_converter(field)
-            return pa.array([None if v is None else convert(v) for v in values], type=arrow_type)
-        if not set(map(type, values)) <= as_sent:
-            return None
-        items = _ITEMS_AS_SENT.get(field.wire_type)
-        if items is not None:
-            lists = cast("list[list[object]]", filter(None, values))
-            if not set(map(type, itertools.chain.from_iterable(lists))) <= items:
-                return None
-        return pa.array(values, type=arrow_type)
-    except (UnconvertibleError, OverflowError, pa.ArrowException):
+    converted = column_converter(field, arrow_checks_numbers=True)(values)
+    if converted is None:
         return None
+    try:
+        return pa.array(converted, type=arrow_type)
+    except (OverflowError, pa.ArrowInvalid):
+        checked = column_converter(field)(values)
+        return None if checked is None else pa.array(checked, type=arrow_type)
 
 
 def _by_row(

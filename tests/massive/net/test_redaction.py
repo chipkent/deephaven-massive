@@ -359,11 +359,12 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
     def on_data(
         _generation: int,
         _channel: str,
-        data: list[dict[str, object]],
+        data: list[tuple[object, ...]],
         rejected: list[Reject],
         drift: DriftReport,
     ) -> None:
-        rows.extend(data)
+        columns = [field.column for field in trades.fields]
+        rows.extend(dict(zip(columns, row, strict=True)) for row in data)
         rejects.extend(rejected)
         drifts.append(drift)
 

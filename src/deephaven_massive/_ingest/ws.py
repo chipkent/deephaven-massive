@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 __all__ = [
     "JOIN_TIMEOUT",
     "SCHEDULE_WAIT",
+    "SCHEDULE_WAIT_HOLDING_LOCK",
     "WsConnections",
     "WsTransport",
 ]
@@ -107,9 +108,14 @@ JOIN_TIMEOUT: Final = 5.0
 
 SCHEDULE_WAIT: Final = 15.0
 """Seconds a futures stream's verb waits for its contracts' products and schedules before it
-subscribes, so its first rows are dated by the schedules. Bounded, since the verb may run on a
-console command that holds the update graph's lock; a lookup still running then dates its rows
-once it ends, and they have a null `Date` meanwhile."""
+subscribes, so its first rows are dated by the schedules. A lookup still running then dates its
+rows once it ends, and they have a null `Date` meanwhile."""
+
+SCHEDULE_WAIT_HOLDING_LOCK: Final = 1.0
+"""Seconds the wait of `SCHEDULE_WAIT` lasts instead when the verb's thread holds the update
+graph's lock (a console command): no live table updates while it waits, and its rows get a null
+`Date` until the schedules load anyway, so it waits only long enough for a lookup that is
+already answered."""
 
 
 def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
@@ -384,26 +390,31 @@ class WsConnections:
         return opened.handle
 
     def _load_schedules(self, contracts: frozenset[str], *, stream_id: int) -> None:
-        """Load a futures stream's schedules before it subscribes, waiting `SCHEDULE_WAIT`.
+        """Load a futures stream's schedules before it subscribes, waiting a bounded time.
 
-        Runs on the verb's thread, with no lock held. It waits only on the calendar's worker,
-        which makes no Deephaven call, so a console command holding the update graph's lock
-        may run it. A lookup that does not end in time is logged at WARNING once; its rows get
-        a null `Date` until it ends. A failed lookup logs its own WARNING.
+        Runs on the verb's thread, with no library lock held. It waits only on the calendar's
+        worker, which makes no Deephaven call, so a console command holding the update graph's
+        lock may run it; such a caller waits `SCHEDULE_WAIT_HOLDING_LOCK`, since no live table
+        updates meanwhile, and any other `SCHEDULE_WAIT`. A lookup that does not end in time is
+        logged at WARNING once; its rows get a null `Date` until it ends. A failed lookup logs
+        its own WARNING.
 
         Args:
             contracts: The stream's canonical futures symbols; spreads are never looked up.
             stream_id: The stream, for the log.
         """
+        locked = holds_update_graph_lock(self._exec_ctx)
+        wait = SCHEDULE_WAIT_HOLDING_LOCK if locked else SCHEDULE_WAIT
         calendar = self.futures_calendar()
         calendar.watch(contracts)
-        if not calendar.wait_loaded(contracts, SCHEDULE_WAIT):
+        if not calendar.wait_loaded(contracts, wait):
             logger.warning(
-                "futures stream %d: the schedules of %s did not load within %.0f s; their rows "
-                "get a null Date until they do",
+                "futures stream %d: the schedules of %s did not load within %.0f s%s; their "
+                "rows get a null Date until they do",
                 stream_id,
                 bounded_list(sorted(contracts)),
-                SCHEDULE_WAIT,
+                wait,
+                ", the most a caller holding the update graph's lock waits" if locked else "",
             )
         else:
             logger.debug(
