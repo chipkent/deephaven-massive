@@ -43,6 +43,7 @@ __all__ = [
     "MIN_RECONNECT_BACKOFF",
     "HostMap",
     "MassiveConfig",
+    "environment_text",
     "require_positive_int",
     "require_positive_number",
 ]
@@ -59,16 +60,31 @@ _HOSTNAME: Final = re.compile(
 )
 
 
-def _env(name: str) -> str | None:
-    """Return an environment variable's value with surrounding blanks removed.
+def environment_text(name: str) -> str | None:
+    """Return an environment variable's value exactly as set, or None when it is absent.
+
+    The library takes text exactly as written and never trims it, so a value with surrounding
+    whitespace (a key pasted with a trailing space, say) is refused rather than cleaned.
 
     Args:
-        name: The variable's name.
+        name: The variable's name, such as `"MASSIVE_API_KEY"`.
 
     Returns:
         The value, or None when the variable is unset or blank.
+
+    Raises:
+        ValueError: If the value has leading or trailing whitespace. The message names the
+            variable but never its value, which may be a credential.
     """
-    return os.environ.get(name, "").strip() or None
+    value = os.environ.get(name, "")
+    if not value.strip():
+        return None
+    if value != value.strip():
+        raise ValueError(
+            f"{name} has leading or trailing whitespace; set it without any (its value is "
+            "not shown, since it may be a secret)"
+        )
+    return value
 
 
 def _env_api_key() -> str:
@@ -77,7 +93,7 @@ def _env_api_key() -> str:
     Returns:
         The key, or an empty string when it is unset (rejected by validation).
     """
-    return _env("MASSIVE_API_KEY") or ""
+    return environment_text("MASSIVE_API_KEY") or ""
 
 
 def _env_s3_access_key_id() -> str | None:
@@ -86,7 +102,7 @@ def _env_s3_access_key_id() -> str | None:
     Returns:
         The S3 access key id, or None.
     """
-    return _env("MASSIVE_S3_ACCESS_KEY_ID")
+    return environment_text("MASSIVE_S3_ACCESS_KEY_ID")
 
 
 def _env_s3_secret_access_key() -> str | None:
@@ -95,7 +111,7 @@ def _env_s3_secret_access_key() -> str | None:
     Returns:
         The S3 secret access key, or None.
     """
-    return _env("MASSIVE_S3_SECRET_ACCESS_KEY")
+    return environment_text("MASSIVE_S3_SECRET_ACCESS_KEY")
 
 
 def _env_on_error(name: str) -> OnError:
@@ -111,7 +127,7 @@ def _env_on_error(name: str) -> OnError:
         ValueError: If the variable holds any other text; the message names the variable and
             the three values.
     """
-    text = _env(name)
+    text = environment_text(name)
     if text is None:
         return OnError.LOG
     try:
@@ -274,7 +290,10 @@ class MassiveConfig:
                 `max_reconnect_backoff` is below `reconnect_backoff`, a timeout,
                 backoff, interval, or count is not positive,
                 `flat_file_publish_cutoff` carries a timezone, only one of the two S3
-                credentials is set, or a `ws_hosts` value is not a bare hostname.
+                credentials is set, `api_key` or an S3 credential has leading or trailing
+                whitespace (or an S3 credential is blank), a `ws_hosts` value is not a bare
+                lower-case hostname, or an environment variable read for a default has
+                leading or trailing whitespace (`environment_text`).
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
@@ -282,6 +301,13 @@ class MassiveConfig:
             raise AuthenticationError(
                 "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY"
             )
+        if self.api_key != self.api_key.strip():
+            raise ValueError(
+                "api_key has leading or trailing whitespace; pass the key without any (the key "
+                "is not shown)"
+            )
+        _check_s3_credential("s3_access_key_id", self.s3_access_key_id)
+        _check_s3_credential("s3_secret_access_key", self.s3_secret_access_key)
         if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):
             raise ValueError(
                 "flat files need both s3_access_key_id and s3_secret_access_key "
@@ -411,6 +437,24 @@ def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:
     return frozenset(value)
 
 
+def _check_s3_credential(name: str, value: str | None) -> None:
+    """Refuse an S3 credential that is blank or has surrounding whitespace.
+
+    Args:
+        name: The field's name, for the message.
+        value: The credential, or None when absent.
+
+    Raises:
+        ValueError: If `value` is blank text or has leading or trailing whitespace. The
+            message names the field but never the value, a secret.
+    """
+    if value is not None and (not value.strip() or value != value.strip()):
+        raise ValueError(
+            f"{name} is blank or has leading or trailing whitespace; pass the credential "
+            "exactly, or None for no flat files (the value is not shown)"
+        )
+
+
 def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
     """Validate the `ws_hosts` mapping and return a read-only, normalized copy.
 
@@ -418,12 +462,14 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
         ws_hosts: The value passed as `MassiveConfig.ws_hosts`.
 
     Returns:
-        A read-only mapping with lower-cased hostnames.
+        A read-only mapping of the hostnames as passed.
 
     Raises:
         TypeError: If `ws_hosts` is not a mapping, a key is not a `dm.AssetClass`, or a value
             is not a `str`.
-        ValueError: If a value is not a bare hostname (a scheme, port, or path is present).
+        ValueError: If a value is not a bare lower-case hostname (a scheme, port, path,
+            upper-case letter, or surrounding whitespace is present); nothing is cleaned, and
+            a value that would be a hostname once trimmed and lower-cased names that form.
     """
     if not isinstance(ws_hosts, Mapping):
         raise TypeError("ws_hosts must be a mapping of dm.AssetClass to hostname")
@@ -432,13 +478,17 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
         asset_class = _require_enum(key, AssetClass, "ws_hosts key")
         if not isinstance(value, str):
             raise TypeError(f"ws_hosts[{asset_class}] must be a hostname str")
-        host = value.strip().lower()
-        if not _HOSTNAME.match(host):
+        if value != value.strip().lower() and _HOSTNAME.match(value.strip().lower()):
+            raise ValueError(
+                f"ws_hosts[{asset_class}]={value!r} must be written exactly as a lower-case "
+                f"hostname; write {value.strip().lower()!r}"
+            )
+        if not _HOSTNAME.match(value):
             raise ValueError(
                 f"ws_hosts[{asset_class}] must be a bare hostname such as "
                 f"'delayed.massive.com', got {value!r}"
             )
-        hosts[asset_class] = host
+        hosts[asset_class] = value
     return HostMap(hosts)
 
 

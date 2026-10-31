@@ -224,22 +224,24 @@ def _currency(name: str, value: object) -> str:
 
     Args:
         name: The parameter's name, for messages.
-        value: The code as passed; surrounding whitespace is ignored and letters are
-            upper-cased.
+        value: The code as passed, which must already be exact: nothing is stripped or
+            re-cased.
 
     Returns:
-        The three-letter code, upper case, such as `"EUR"`.
+        The code unchanged, three upper-case letters such as `"EUR"`.
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is not three letters.
+        ValueError: If `value` is not exactly three upper-case letters; when trimming and
+            upper-casing would give a code, the message names it (`write 'USD'`).
     """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
-    code = value.strip().upper()
-    if not is_forex_currency(code):
-        raise ValueError(f"{name}={value!r} is not a three-letter currency code such as 'USD'")
-    return code
+    if is_forex_currency(value):
+        return value
+    meant = value.strip().upper()
+    hint = f"; write {meant!r}" if is_forex_currency(meant) else ", such as 'USD'"
+    raise ValueError(f"{name}={value!r} is not a three-letter upper-case currency code{hint}")
 
 
 class _Forex(Namespace):
@@ -513,8 +515,8 @@ class _Forex(Namespace):
         One row: the converted amount, the amount converted, and the last bid and ask it used.
 
         Args:
-            from_currency: The currency to convert from, a three-letter code such as `"AUD"`; case
-                and surrounding whitespace are ignored.
+            from_currency: The currency to convert from, a three-letter code such as `"AUD"`,
+                written exactly: upper case, nothing around it.
             to_currency: The currency to convert to, such as `"USD"`.
             amount: The amount to convert, a positive, finite `int` or `float`; 1.0 by default.
             precision: The decimal places of the result, 0 to 4; 2 by default.
@@ -525,7 +527,8 @@ class _Forex(Namespace):
         Raises:
             TypeError: If a currency is not a `str`, `amount` is not a number, or `precision` is not
                 an `int` (a `bool` is neither).
-            ValueError: If a currency is not three letters, `amount` is not positive and finite, or
+            ValueError: If a currency is not exactly three upper-case letters (`" usd"` and
+                `"usd"` are refused, naming `'USD'`), `amount` is not positive and finite, or
                 `precision` is not one the endpoint accepts.
 
         Example:

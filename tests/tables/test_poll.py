@@ -27,6 +27,7 @@ import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
 from deephaven_massive._errors import PermanentError, RowDataError
@@ -754,7 +755,8 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     assert script.symbols == [("AAPL",)]  # the bad row is never requested
     (row,) = stream_rows()
     assert row["Error"] == (
-        "skipping 1 symbol-table value that is not Massive's ticker: 'msft'; fix or delete that row"
+        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
+        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
     )
     watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it clears the text
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested

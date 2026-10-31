@@ -3,7 +3,7 @@
 `FakeRestServer` is a `ThreadingHTTPServer` on an ephemeral port, so the REST client is tested
 over real sockets, with real headers, connection reuse, resets, proxies, and TLS, and never
 reaches Massive. A test scripts the replies per path (`reply`), runs the client, and then reads
-what the server received (`requests`).
+what the server received (`requests`, or `get_queries` for each GET's decoded path and query).
 
 Replies are matched by the request's full target (path and query) first, then by its path
 alone. Each match consumes the first scripted reply of its queue; the last one is kept, so a
@@ -39,8 +39,8 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from deephaven_massive._types import override
 
@@ -258,6 +258,31 @@ class FakeRestServer:
         """A copy of every request received so far, in arrival order."""
         with self._lock:
             return list(self._received)
+
+    def get_queries(self, *, one_value: bool = False) -> list[tuple[str, dict[str, Any]]]:
+        """Return every GET received so far, in arrival order: its decoded path and query.
+
+        The form the tests compare a request with, so no test decodes targets itself.
+
+        Args:
+            one_value: False, the default, maps each query parameter to the list of its
+                values, as `urllib.parse.parse_qs` does (`{"limit": ["10"]}`); True maps it
+                to its first value alone (`{"limit": "10"}`), for tests whose requests never
+                repeat a parameter. Blank values are kept either way.
+
+        Returns:
+            `(path, query)` per GET, the path percent-decoded (`/v2/aggs/ticker/C:EURUSD`).
+        """
+        found: list[tuple[str, dict[str, Any]]] = []
+        for received in self.requests:
+            if received.method != "GET":
+                continue
+            parts = urlsplit(received.target)
+            query = parse_qs(parts.query, keep_blank_values=True)
+            found.append(
+                (unquote(parts.path), {k: v[0] for k, v in query.items()} if one_value else query)
+            )
+        return found
 
     def _record(self, received: Received) -> None:
         """Record a request that gets no scripted reply (a `CONNECT`).

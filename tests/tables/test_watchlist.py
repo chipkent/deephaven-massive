@@ -12,6 +12,7 @@ from deephaven.column import int_col, string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._namespaces import crypto, forex, partners
 from deephaven_massive._tables.liveness import new_scope, release_scope
@@ -149,16 +150,18 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
 
 
 def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
+    # The value is not called wrong: Massive may write a form the library does not know yet.
     assert skipped_rows_text(["aapl"]) == (
-        "skipping 1 symbol-table value that is not Massive's ticker: 'aapl'; fix or delete that row"
+        "skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that "
+        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
     )
     assert skipped_rows_text(["g", "f", "e", "d", "c", "b", "a"]) == (
-        "skipping 7 symbol-table values that are not Massive's tickers: 'a', 'b', 'c', 'd', "
-        "'e', and 2 more; fix or delete those rows"
+        "skipping 7 symbol-table values this dataset does not take: 'a', 'b', 'c', 'd', 'e', "
+        f"and 2 more; fix or delete those rows, or report them at {ISSUES_URL} if Massive "
+        "itself writes them"
     )
-    assert skipped_rows_text(["b", "a"]) == (
-        "skipping 2 symbol-table values that are not Massive's tickers: 'a', 'b'; fix or delete "
-        "those rows"
+    assert skipped_rows_text(["b", "a"]).startswith(
+        "skipping 2 symbol-table values this dataset does not take: 'a', 'b'; fix or delete "
     )
 
 
@@ -167,7 +170,8 @@ def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
     assert "tickers are case-sensitive" in message
     assert message.endswith(
         "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
-        "row's own class, since this dataset's rows may mix classes"
+        "row's own class, since this dataset's rows may mix classes. If Massive itself writes "
+        f"'aapl', the library does not know its form yet: report it at {ISSUES_URL}"
     )
 
 

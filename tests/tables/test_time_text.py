@@ -15,7 +15,7 @@ def _bound(text: str) -> date | datetime:
 
 @pytest.mark.parametrize(
     "text",
-    ["2025-03-03", "2025-03-03T09:30:00-05:00", "2025-03-03T14:30:00Z", " 2025-03-03 "],
+    ["2025-03-03", "2025-03-03T09:30:00-05:00", "2025-03-03T14:30:00Z"],
 )
 def test_iso_text_is_left_for_the_dataset_layer(text: str) -> None:
     # The same object comes back, so ISO-8601 parses exactly as before.

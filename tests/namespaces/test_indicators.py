@@ -3,11 +3,10 @@
 import inspect
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import Any, Final, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from deephaven.table import Table
@@ -213,21 +212,6 @@ def test_the_vendor_samples_decode_without_drift(
 # --- End to end through the fake REST server -------------------------------------------------
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
-def sent(server: FakeRestServer) -> dict[str, dict[str, list[str]]]:
-    # Every GET the server received, by decoded path: its decoded query.
-    return {
-        unquote(urlsplit(r.target).path): parse_qs(urlsplit(r.target).query)
-        for r in server.requests
-    }
-
-
 def sample(load_fixture: Callable[[str, str], bytes], name: str) -> Reply:
     # The vendor sample as the reply body, without its `next_url`, which names Massive's host.
     body = json.loads(load_fixture(OWNER, f"{name}.json"))
@@ -268,7 +252,7 @@ def test_each_symbol_class_is_served_by_its_own_path(
     }
     # `adjusted=True`, the default, reaches only the stock path: the crypto path has no such
     # parameter, and a pair has no splits.
-    assert sent(fake_rest) == {
+    assert dict(fake_rest.get_queries()) == {
         "/v1/indicators/sma/AAPL": {**shared, "adjusted": ["true"]},
         "/v1/indicators/sma/X:BTCUSD": shared,
     }
@@ -380,7 +364,7 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
     rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
-    assert sent(fake_rest)["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
     # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
     with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
         rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch()
@@ -421,7 +405,7 @@ def test_macd_returns_its_three_lines(
         "X:BTCUSD", short_window=12, long_window=26, signal_window=9
     )
     out = dh_to_pylist(query.fetch())
-    params = sent(fake_rest)["/v1/indicators/macd/X:BTCUSD"]
+    params = dict(fake_rest.get_queries())["/v1/indicators/macd/X:BTCUSD"]
     assert (params["short_window"], params["long_window"], params["signal_window"]) == (
         ["12"],
         ["26"],
@@ -443,7 +427,7 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
     day = date(2025, 1, 2)
     symbols = ["AAPL", "X:BTCUSD", "C:EURUSD"]
     rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch()
-    requests = sent(fake_rest)
+    requests = dict(fake_rest.get_queries())
     # A crypto or forex day is a UTC day; a stock day is a New York day (UTC-5 in January).
     # Forex takes the stock template, so its zone comes from the symbol, not the path.
     for path in ("/v1/indicators/sma/X:BTCUSD", "/v1/indicators/sma/C:EURUSD"):

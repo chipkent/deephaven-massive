@@ -47,9 +47,12 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven.table_listener import TableListener, TableListenerHandle
 
+from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
+    canonical_symbol,
     check_symbol,
     is_canonical,
+    symbol_class,
 )
 from deephaven_massive._enums import ClassFromPrefix, OnError
 from deephaven_massive._log_limits import BoundedLog
@@ -103,10 +106,12 @@ def invalid_row_message(
 
     Returns:
         The reason (with the canonical form when the class's converter gives one) and the
-        remedy: fix the row, or convert the table. For a dataset of one class the remedy is
-        `dm.canonicalize_symbols` with `on_error=dm.OnError.LOG`; for a dataset that spans
-        classes, whose rows may mix them, it is `dm.canonical_symbol` per row with each row's
-        class.
+        remedy: fix the row, or convert the table; and, unless the class's converter turns the
+        row into a ticker, where to report it, since the value can also be a ticker Massive
+        writes in a form the library does not know yet. For a
+        dataset of one class the remedy is `dm.canonicalize_symbols` with
+        `on_error=dm.OnError.LOG`; for a dataset that spans classes, whose rows may mix them, it
+        is `dm.canonical_symbol` per row with each row's class.
     """
     reason = ""
     try:
@@ -124,7 +129,35 @@ def invalid_row_message(
             f"dm.AssetClass.{asset_class.name}, on_error=dm.OnError.LOG), which converts what "
             "it can and nulls the rest"
         )
-    return f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
+    message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
+    if as_written or _converts(asset_class, symbol):
+        return message
+    return (
+        f"{message}. If Massive itself writes {symbol!r}, the library does not know its form "
+        f"yet: report it at {ISSUES_URL}"
+    )
+
+
+def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
+    """Tell whether a refused row is another spelling the class's converter turns into a ticker.
+
+    Such a row (`EUR/USD`) is the caller's spelling, not an unknown form of Massive's, so its
+    message needs no request to report the form.
+
+    Args:
+        asset_class: The dataset's class, or `ClassFromPrefix.ANY`, where the row's prefix
+            selects it.
+        symbol: The refused row.
+
+    Returns:
+        True when `dm.canonical_symbol` converts the row for its class.
+    """
+    resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
+    try:
+        canonical_symbol(symbol, resolved)
+    except ValueError:
+        return False
+    return True
 
 
 _FAILED_TABLE: Final = (
@@ -144,20 +177,22 @@ def skipped_rows_text(values: Iterable[str]) -> str:
 
     Returns:
         Their count and the first five in sorted order, and what to do, such as
-        `skipping 1 symbol-table value that is not Massive's ticker: 'aapl'; fix or delete
-        that row`.
+        `skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that
+        row, or report it at <issues> if Massive itself writes it`. The value is not called
+        wrong: Massive may write a form the library does not know yet.
     """
     texts = sorted(values)
     shown = ", ".join(repr(text) for text in texts[:_SHOWN])
     more = f", and {len(texts) - _SHOWN} more" if len(texts) > _SHOWN else ""
     if texts[1:]:
         return (
-            f"skipping {len(texts)} symbol-table values that are not Massive's tickers: "
-            f"{shown}{more}; fix or delete those rows"
+            f"skipping {len(texts)} symbol-table values this dataset does not take: "
+            f"{shown}{more}; fix or delete those rows, or report them at {ISSUES_URL} if "
+            "Massive itself writes them"
         )
     return (
-        f"skipping 1 symbol-table value that is not Massive's ticker: {shown}; "
-        "fix or delete that row"
+        f"skipping 1 symbol-table value this dataset does not take: {shown}; fix or delete "
+        f"that row, or report it at {ISSUES_URL} if Massive itself writes it"
     )
 
 

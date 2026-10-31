@@ -506,7 +506,9 @@ class _Futures(Namespace):
 
         Each row is one contract as of a date: its product, trading venue, first and last trade
         dates, settlement date, tick sizes, and order-size limits. Its `Symbol` is the contract's
-        ticker, so the table, or part of it, passes straight to `trades()`, `quotes()`, `bars()`, or
+        ticker: a single contract, or a combo (a spread, strip, pack, or bundle, whose `Type` is
+        `combo`). Every ticker Massive lists is taken as `symbols` exactly as written, so the
+        table, or part of it, can be passed as `symbols` to `trades()`, `quotes()`, `bars()`, or
         `snapshots()`. Explicit symbols go 250 to a request.
 
         Args:
