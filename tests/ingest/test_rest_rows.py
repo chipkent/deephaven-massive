@@ -9,8 +9,12 @@ import pytest
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import HistoryWindow
+from deephaven_massive._enums import OnError
+from deephaven_massive._errors import ErrorCause, RowDataError
 from deephaven_massive._ingest import rest_rows
 from deephaven_massive._ingest.rest_rows import is_error_row
+from deephaven_massive._massive import DriftReport, DriftSample, Transport, source
+from deephaven_massive._session import CATALOG
 
 NS = 10**9
 
@@ -65,3 +69,80 @@ def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:
 )
 def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged: bool) -> None:
     assert is_error_row(row) is flagged
+
+
+# --- Odd values and rows ---------------------------------------------------------------------
+
+TRADES_PATH = "/v3/trades/{stockTicker}"
+WHEN = 1741012200000000000  # 2025-03-03T14:30Z, in nanoseconds
+
+
+def trades_converter() -> rest_rows.RowConverter:
+    return rest_rows.RowConverter.build(
+        CATALOG,
+        CATALOG.by_name["stocks.trades"],
+        source(Transport.REST, TRADES_PATH),
+        unreadable_symbols=OnError.LOG,
+    )
+
+
+def test_a_value_that_does_not_fit_is_null_and_its_row_kept() -> None:
+    rows: list[dict[str, object]] = [
+        {"sip_timestamp": WHEN, "price": "1.5x", "id": "1"},
+        {"sip_timestamp": WHEN + 1, "price": 2.0, "id": "2"},
+    ]
+    [batch], drift, _ = trades_converter().convert(rows, "AAPL")
+    assert batch.column("Price").to_pylist() == [None, 2.0]
+    assert batch.column("Symbol").to_pylist() == ["AAPL", "AAPL"]
+    assert (drift.unconvertible, drift.dropped_rows) == (frozenset({"price"}), 0)
+    assert drift.samples["price"] == DriftSample(None, '"1.5x"')
+
+
+def test_a_row_whose_time_is_out_of_bounds_is_dropped_and_counted() -> None:
+    rows: list[dict[str, object]] = [
+        {"sip_timestamp": WHEN // 10**6, "id": "1"},  # milliseconds: January 1970
+        {"sip_timestamp": WHEN, "id": "2"},
+    ]
+    [batch], drift, _ = trades_converter().convert(rows, "AAPL")
+    assert batch.column("Id").to_pylist() == ["2"]
+    assert (drift.unconvertible, drift.dropped_rows) == (frozenset(), 1)
+    assert drift.dropped_reason == (
+        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 "
+        "to 2100"
+    )
+
+
+def test_another_instant_out_of_bounds_is_null_and_drift() -> None:
+    rows: list[dict[str, object]] = [{"sip_timestamp": WHEN, "participant_timestamp": 5}]
+    [batch], drift, _ = trades_converter().convert(rows, "AAPL")
+    assert batch.column("ParticipantTimestamp").to_pylist() == [None]
+    assert drift.unconvertible == frozenset({"participant_timestamp"})
+    assert drift.dropped_rows == 0
+    assert drift.samples["participant_timestamp"] == DriftSample(None, "5")
+
+
+def test_a_row_without_its_time_is_dropped_with_the_decoders_reason() -> None:
+    rows: list[dict[str, object]] = [{"id": "1"}, {"sip_timestamp": WHEN, "id": "2"}]
+    [batch], drift, _ = trades_converter().convert(rows, "AAPL")
+    assert batch.column("Id").to_pylist() == ["2"]
+    assert drift.dropped_rows == 1
+    assert drift.dropped_reason == (
+        f"{TRADES_PATH}: row 0: no SipTimestamp (wire key 'sip_timestamp'), which the dataset needs"
+    )
+
+
+def test_a_page_whose_every_row_is_dropped_raises() -> None:
+    rows: list[dict[str, object]] = [{"id": "1"}, {"sip_timestamp": 5, "id": "2"}]
+    with pytest.raises(RowDataError) as info:
+        trades_converter().convert(rows, "AAPL")
+    assert str(info.value) == (
+        "stocks.trades: every row of a page of 2 was dropped, so Massive's format may have "
+        f"changed; the first: {TRADES_PATH}: row 0: no SipTimestamp (wire key 'sip_timestamp'), "
+        "which the dataset needs"
+    )
+    assert info.value.cause is ErrorCause.LIBRARY_DEFECT
+
+
+def test_an_empty_page_is_no_error() -> None:
+    batches, drift, flagged = trades_converter().convert([], "AAPL")
+    assert (batches, drift, flagged) == ([], DriftReport(), [])

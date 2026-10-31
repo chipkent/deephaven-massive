@@ -2672,8 +2672,8 @@ FlatFileRows = tuple[list[dict[str, str | None]], frozenset[str]]
 def _raw_plan(prefix: str, tickers: list[str] | None) -> ReadPlan:
     """Return a plan that reads every documented header of a prefix as its CSV text.
 
-    Nothing is converted (no unit, no type) and futures rows are not checked against their
-    session, so the rows show the wire form.
+    Nothing is converted (no unit, no type) and no row is dropped for its key, so the rows show
+    the wire form.
 
     Args:
         prefix: The generated prefix, such as `"us_futures_{venue}/session_aggs_v1"`.
@@ -2689,8 +2689,7 @@ def _raw_plan(prefix: str, tickers: list[str] | None) -> ReadPlan:
         symbols=None if tickers is None else pa.array(tickers, pa.string()),
         time_header=headers[0],
         window_ns=None,
-        to_ns=lambda values: values,
-        session=None,
+        to_ns=lambda values: (values, ""),
         block_size=_FLAT_FILE_BLOCK,
         required=frozenset(),
     )

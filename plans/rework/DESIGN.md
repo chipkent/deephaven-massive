@@ -2671,7 +2671,7 @@ beside the table, and the indicator `timestamp` fields are its first entries.
 | WebSocket stocks `T`/`Q` (`t`, `pt`, `trft`); `A`/`AM` (`s`, `e`); options `T`/`Q`; futures `T`/`Q` (`t`); indices `V` (`t`) and `A`/`AM`; forex `C`/`CA`/`CAS`; crypto `XT`/`XQ`/`XA`/`XAS` (`t`) | ms (documented as Unix ms on each documentation page; 13-digit samples) |
 | WebSocket futures `Q` `bt`, `at`; crypto `XT`/`XQ` received time `r` | ms (the descriptions name no unit; the samples have 13 digits, as do the other times of the same message) |
 | WebSocket `NOI` `t` | ns (documented as Unix ns; the sample has 19 digits) |
-| WebSocket `LULD` `t` | **UNVERIFIED**: documented as Unix ms, but the sample (`1764086430905642800`) has 19 digits, which as ms would overflow; registered as ns. The overflow check and the bound fail loudly on a mismatch. |
+| WebSocket `LULD` `t` | **UNVERIFIED**: documented as Unix ms, but the sample (`1764086430905642800`) has 19 digits, which as ms would overflow; registered as ns. On a mismatch the overflow check or the bound drops every row, and the stream fails after `DROPPED_RUN_LIMIT` of them ([section 19.5](#195-runtime-drift)). |
 | WebSocket `FMV` `t` | Documented as ns; the documentation sample is `1678220098130` (13 digits, ms). Rule, FMV only: `t >= 10**17` means ns, otherwise ms. Every ns value after 1973-03-03 is at least 10^17, and an ms value reaches 10^17 only in the year 3,170,000, so the rule cannot misclassify. Logged once; tested. |
 | REST `/v3/trades`, `/v3/quotes`, `/v2/last/trade`, `/v2/last/nbbo`; snapshot `last_updated`, `fmv_last_updated`; futures `/trades` and `/quotes` (`timestamp`, `bid_timestamp`, `ask_timestamp`); futures aggregates `window_start` (documented as "nanosecond Unix timestamp"); futures snapshot `last_quote` and `last_trade` times; stocks v2 snapshot `updated`, `lastTrade.t`, `lastQuote.t` | ns |
 | REST aggregates `t`; `/prev` `t`; indicators `timestamp`; futures snapshot `last_minute.last_updated`; every v2 snapshot `min.t`; forex and crypto v2 snapshot `updated`, forex `lastQuote.t`, crypto `lastTrade.t` (13-digit documentation samples) | ms |
@@ -2690,9 +2690,13 @@ beside the table, and the indicator `timestamp` fields are its first entries.
    `ask_price` `0`).
 2. **Checked multiply.** The integer is multiplied to nanoseconds from its unit (`s`, `ms`,
    `us`, or `ns`) with an overflow check.
-3. **Bound.** The result must lie in [1990, 2100]; otherwise
-   `MassiveError("timestamp unit mismatch for <dataset>.<field>")` names the dataset, the
-   column, the unit, and the value.
+3. **Bound.** The result must lie in [1990, 2100].
+
+A value that fails step 2 or 3 is null and marked in the routine's mask (`masked_instants`),
+and the text `"timestamp unit mismatch for <dataset>.<column>: <value> <unit> ..."`
+(`mismatch_message`) names the dataset, the column, the unit, and the value. In the time
+column it is a key that cannot be read, so the row is dropped and counted; in any other column
+it is an unconvertible value, null with a WARNING ([section 19.5](#195-runtime-drift)).
 
 The bound applies to epoch-integer `Instant`s only, never to ISO-8601 text, so a pre-1990 ISO
 date stays valid. The overflow check and the bound together catch every unit confusion. For
@@ -3088,10 +3092,18 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
   - **Datetimes** are exact: `timestamp.gte`/`.lt` for trades and quotes, `window_start.gte`/
     `.lt` for bars, with the bars kept by their own window afterwards, since Massive may
     match a candle by its start.
-  - **Flat files** are assumed to be keyed by session date (**UNVERIFIED**: the futures
-    flat-file overview says only "standardized in Central Time"; every block of every futures
-    file is checked against its key, and a `session_end_date` that differs from the key's date,
-    or is empty, fails loudly). Dates read one file per session date and never roll forward:
+  - **Flat files** are read one file per session date (**UNVERIFIED** that a file holds only
+    its own session: the futures flat-file overview says only "standardized in Central Time").
+    Each row keeps its own `session_end_date` in `Date`, whichever file it came from, so no row
+    is ever labeled with a session it does not have; a call named by dates keeps the rows whose
+    own session it requested, and one named by datetimes keeps rows by time. A file that holds
+    rows of another session logs one WARNING per dataset per session, naming the file and the
+    session, and saying that rows of a requested session may then sit in a neighbouring day's
+    file, which a call by dates does not read, and be missing. The call then names those
+    sessions on the table: when a file held an earlier session's rows, the range's last
+    session may be incomplete, and when one held a later session's, its first; the table's
+    description and a WARNING name them (`FlatFileRead.uncertain`); a row whose `session_end_date` is empty or does not parse is dropped and counted
+    ([section 19.5](#195-runtime-drift)). Dates read one file per session date and never roll forward:
     a date names its own session exactly. Datetimes read the sessions from that of `start` to
     that of `end - 1 µs`, so an intraday window reads one file and an evening window only the
     next session's file. Under `AUTO` with REST able to serve the request, a missing weekday
@@ -3287,10 +3299,10 @@ The client reports to `_ingest/ws_connection.py` through four callbacks, each ca
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
   decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
   them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
-  that failed validation, one `Reject(channel, symbol or None, WireError, raw)` each, whose
-  `symbol` is the raw wire value of the channel's declared symbol column and `raw` the whole
-  row's JSON text (up to 2,000 characters); `drift` is the frame's `DriftReport`
-  ([section 19.5](#195-runtime-drift)).
+  dropped because a required key is absent, null, or does not fit, one
+  `Reject(channel, symbol or None, WireError, raw)` each, whose `symbol` is the raw wire value
+  of the channel's declared symbol column and `raw` the whole row's JSON text (up to 2,000
+  characters); `drift` is the frame's `DriftReport` ([section 19.5](#195-runtime-drift)).
 - `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
   `WAITING_SLOT` (with the next attempt's time; the auth reply was `max_connections`, or the
   server sent a `max_connections` status before closing an authenticated socket), `FAILED`
@@ -3304,19 +3316,20 @@ the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `
 `frozenset` of long-form key columns, built by `_ingest/ws_connection.py` from the `KeySpec`s that the channel's
 dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
 long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
-both across generations and hands them to the decoder, so a row missing one of those keys is a
-`Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
-with no entry has no required keys and no symbol. Wire symbols are never rewritten in
-`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws_connection.py`
-reads a reject's with `canonical_from_wire` (both in `_datasets/wire_symbols.py`) when they route
-them, and topics use the wire's own form, as the subscribe frames do. It
+both across generations and hands them to the decoder, so a row missing one of those keys, or
+holding a value there that does not fit, is a `Reject` carrying the row's raw symbol, while any
+other absent field, or value that does not fit, becomes null. A channel with no entry has no
+required keys and no symbol. Wire symbols are never rewritten in `_massive`: the flush thread
+reads the rows' symbols with `WireSymbols` (`_datasets/wire_symbols.py`) when it routes them,
+and topics use the wire's own form, as the subscribe frames do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
 size is conservative). A call for a generation that is no longer current is discarded: the next
 generation re-sends the whole desired set. Rows from `on_data` go to the per-channel row buffer;
-rejects fail their streams ([section 19.5](#195-runtime-drift)) and never enter a buffer; drift
-goes to the session's `DriftRegistry`.
+rejects never enter a buffer and fail no stream: they are counted in the frame's drift, which
+goes to the flush thread, which reports it to the session's `DriftRegistry` and counts the
+drops toward `DROPPED_RUN_LIMIT` ([section 19.5](#195-runtime-drift)).
 
 **Topics are exact strings.** `A.*` and `AM.AAPL` are unrelated topics; nothing in the library
 matches one topic as a prefix of another. On one channel, while that channel's acknowledged
@@ -3348,8 +3361,8 @@ Responsibilities:
 | `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`, remembers it for the generation, and when that generation's socket closes reports `WAITING_SLOT` instead of `RECONNECTING`. The library only displays the state. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
-| Decode frames against `ws.json`; report rows, rejects, and drift | client |
-| Read raw wire symbols as canonical symbols (`canonical_from_wire`, `WireSymbols` in `_datasets/wire_symbols.py`) when routing rows and rejects; fail or keep an unreadable one (`unreadable_symbols`) | library |
+| Decode frames against `ws.json`; report rows, rejects (the rows whose key cannot be read), and drift | client |
+| Read raw wire symbols as canonical symbols (`WireSymbols` in `_datasets/wire_symbols.py`) when routing rows; fail or keep an unreadable one (`unreadable_symbols`) | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -3478,8 +3491,9 @@ verdict is an `EntitlementError` for that step's streams.
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
 (`MassiveError` with the HTTP status and host), and the data failures of
-[section 19.5](#195-runtime-drift) (a missing required key, an unconvertible value, a
-timestamp out of bounds). `max_connections`, closes, and `NO_ACK` are diagnostic states.
+[section 19.5](#195-runtime-drift) (a run of `DROPPED_RUN_LIMIT` dropped rows, a symbol
+spelling the library cannot read under `RAISE`). `max_connections`, closes, and `NO_ACK` are
+diagnostic states.
 
 ### 13.4 REST
 
@@ -3519,9 +3533,8 @@ sees:
   later page of one series means its data was cut short and raises `MassiveError` naming the
   symbol, the path, and the pages received. Every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
-  a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds, or a null or NaN `poll_keys` value, in every
-  mode), or plans a request with a parameter the
+  a data failure of [section 19.5](#195-runtime-drift) (a page whose every row was dropped,
+  or a null or NaN `poll_keys` value, in every mode), or plans a request with a parameter the
   chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
   an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
@@ -3797,9 +3810,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
   row's `TimestampInsert` the instant its frame arrived (each frame is buffered with that
   instant) and a futures row's `Date` corrected by the connection group's schedule calendar
   ([section 12](#12-timestamp-units-and-day-boundaries)); a schedule miss sets the `Error` of
-  the streams that receive the contract and fails nothing. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
-  streams that would have received them ([section 19.5](#195-runtime-drift)) and are dropped
-  from the batch. Rejected rows never enter a buffer. The batch is converted once with
+  the streams that receive the contract and fails nothing. The timestamp bound is applied as a vectorized mask: a row whose time column fails it is dropped
+  from the batch and counted, and any other value that fails it is null
+  ([section 19.5](#195-runtime-drift)); neither fails a stream. Rows the client dropped never
+  enter a buffer. The batch is converted once with
   `deephaven.arrow.to_table`: one Python-to-Arrow-to-Java conversion per channel per flush.
   Then, for each stream subscribed to that channel: `ALL` streams get `publisher.add(batch)`;
   symbol-list streams get the part of the batch they hold. A symbol stream that holds none of
@@ -4055,15 +4069,17 @@ names as `ReadOptions(column_names=…)`, then sets
 `include_columns` to the documented headers with `include_missing_columns=True`, so a reordered
 file reads identically, an extra header is reported as drift and ignored, a missing header
 becomes a null column of its declared type, and a missing declared key header raises at once
-([section 19.5](#195-runtime-drift)). The CSV reader parses each header straight to its
-column's type (epoch integers for `Instant`s, text for lists), and only an empty field is null:
-`NA` and `NULL` are text, since both are valid tickers. Each block then goes through pure Arrow
-operations in this order: the futures session check on the whole block, the `Symbol` filter
-(`pyarrow.compute.is_in`), the window's half-open `Timestamp` range through the plan's converter
-to nanoseconds (for bars, the starts of the bars whose whole window fits; not applied to
-futures trades, quotes, and session bars named by date, whose files hold exactly the requested
-sessions), and, on the surviving rows only, the rename to long-form names and
-parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
+([section 19.5](#195-runtime-drift)). The CSV reader reads every header as text, and only an
+empty field is null: `NA` and `NULL` are text, since both are valid tickers. Each block then
+goes through pure Arrow operations in this order: the `Symbol` filter
+(`pyarrow.compute.is_in`); the key check, which drops and counts a row whose key header is
+empty or does not parse, or whose time the plan's converter cannot place, and fails the file
+after its last block when it dropped every row of the requested symbols; the window's half-open `Timestamp` range in nanoseconds (for bars, the
+starts of the bars whose whole window fits; not applied to futures trades, quotes, and session
+bars named by date, which `_ingest/flatfiles.py` keeps by each row's own session); and, on the
+surviving rows only, the conversion of each header to its column's type (epoch integers for
+`Instant`s), the parsing of the list columns (`Conditions`, `Indicators`), where a value that
+does not parse is null and reported, and the rename to long-form names. `_ingest/flatfiles.py` then applies
 `rename` in `_datasets/source_columns.py` and the `_datasets/timestamps.py` routine, and moves each
 1-day bar's stamp to 00:00 of its day in the class day zone, warning on a stamp it does not know
 (`row_times.day_starts`). No block is converted
@@ -4308,10 +4324,11 @@ and pool named, no logging call under a leaf lock).
   (request_id 6a1f): 1950 rows in 0.410 s`. Any other status adds the body, up to 2,000
   characters with the key replaced. A retry logs at INFO and giving up at DEBUG; the call
   that fails is what the user sees.
-- A row that cannot be read is logged whole at DEBUG (its JSON, up to 2,000 characters) by the
-  decoder that read it, beside the error: `rest.batch` for a REST page, `ws.protocol` for a
-  WebSocket frame, whose `Reject` also carries the row as `raw`. Every error quotes the
-  offending value's JSON text up to 200 characters.
+- A row the decoder drops, or one holding a value it reads as null, is logged whole at DEBUG
+  (its JSON, up to 2,000 characters) by the decoder that read it: `rest.batch` for a REST page,
+  `ws.protocol` for a WebSocket frame, whose `Reject` also carries the row as `raw`. Every
+  reason and drift sample quotes the offending
+  value's JSON text up to 200 characters.
 - The WebSocket client logs each status object Massive sends (acknowledgements, refusals) and
   each subscription frame it sends at DEBUG, its connections and closes at INFO, and each
   backoff, refused handshake, and reconnect attempt at DEBUG. A frame it cannot decode is
@@ -4342,11 +4359,11 @@ and pool named, no logging call under a leaf lock).
   names its stream id.
 - A REST request's rate governor bucket, and why, logs at DEBUG once per process for each
   dataset, path, and bucket, not once per request.
-- A rejected WebSocket row logs at DEBUG with the streams it fails and its whole raw text; a
-  row with no valid symbol logs at ERROR with the reason (no symbol, or the raw one and why it
-  is not valid) and the library-bug text, once per spelling (at most 100).
+- A WebSocket row the client drops because a key cannot be read (a `Reject`) logs at DEBUG
+  with its reason and its whole raw text, and counts toward its dataset's one WARNING and
+  running count ([section 19.5](#195-runtime-drift)); it fails no stream.
 - Each WebSocket connection logs a DEBUG summary every 60 s from its loop: data batches and rows
-  per channel, rejected rows, the rows each stream got and the streams that got none, the
+  per channel, rows dropped for a key, the rows each stream got and the streams that got none, the
   acknowledged topics (their count, the first 20, and those added and removed since the last
   summary), pending and unacknowledged counts, and how long ago each channel last had data, so
   a stall is visible though nothing failed. Every list is bounded to 20 items. The timer
@@ -4691,8 +4708,8 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      convert_field applies a field's named conversion and raises with the
                      shared bad-value message; field_converter gives a decoder each field's
                      converter once, and unconvertible_message, missing_key_message and
-                     excerpt word a row failure alike in both decoders, which add only their
-                     own context
+                     excerpt word an odd value or a dropped row alike in both decoders, which
+                     add only their own context
   values.py          encode_value(param, value, *, label): one REST parameter value's wire
                      text by ParamKind, for the REST client and the library's filter check
   rest.json  ws.json  flatfiles.json        generated, committed
@@ -5087,14 +5104,16 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     message names, or is empty when it names none), `MAX_CONNECTIONS`, or `OTHER`. `message` is
     the server's text verbatim, and `realtime_verdict` is true when a refusal's message contains
     "real-time" (case-insensitive).
-  - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in the
-    frame. Rows are keyed by **long-form** column (the library renames them) and hold every
-    column of the channel's source, null when absent; values are validated and converted to
-    their Python form (an epoch keeps its integer count; an ISO-8601 instant becomes exact
-    integer nanoseconds since the epoch), and symbols stay as the wire spells them. A row that fails validation becomes a `Reject(channel, symbol or None, WireError, raw)`
-    instead, with the raw value of the declared symbol column (`None` when none is declared or
-    the value is missing); the frame's other rows are delivered. `drift` is the frame's
-    `DriftReport` ([section 19.5](#195-runtime-drift)).
+  - `on_data(generation, channel, rows, rejects, drift)` for each channel's data objects in
+    the frame. Rows are keyed by **long-form** column (the library renames them) and hold
+    every column of the channel's source, null when absent or when the value does not fit;
+    values are validated and converted to their Python form (an epoch keeps its integer
+    count; an ISO-8601 instant becomes exact integer nanoseconds since the epoch), and symbols
+    stay as the wire spells them. A row whose required key is absent, null, or does not fit
+    becomes a `Reject(channel, symbol or None, WireError, raw)` instead, with the raw value of
+    the declared symbol column (`None` when none is declared or the value is missing); the
+    frame's other rows are delivered. `drift` is the frame's `DriftReport`
+    ([section 19.5](#195-runtime-drift)).
 
   No frame text is parsed outside `_massive`.
 - **Sending.** `subscribe` and `unsubscribe` put their frames
@@ -5226,26 +5245,29 @@ urllib3 errors botocore lets through (a TLS failure while reading the body is ur
 stalled part-way through the body). It tells a failed transfer from a broken file: only the
 first is worth reading again.
 `FlatFile.batches(plan)` yields one `(RecordBatch, DriftReport)` per block, in this order:
-(1) the futures session check; (2) the symbol filter (`is_in`); (3) `[start, end)` on
-`plan.to_ns(time column)`; (4) on the survivors, the rename to long-form names and list
-parsing. Instants stay in their wire unit; the library converts them. The reader first peeks the
+(1) the symbol filter (`is_in`); (2) the key check: a row whose `required` header is empty or
+does not parse, or whose time `plan.to_ns` cannot place, is dropped and counted, and a file
+whose every row of the requested symbols is dropped raises after its last block; (3) `[start, end)` on `plan.to_ns(time column)`; (4) on the
+survivors, the conversion of every header from text to its type (a value that does not parse
+is null and reported in `unconvertible`), list parsing, and the rename to long-form names.
+Instants stay in their wire unit; the library converts them. The reader first peeks the
 header line and reads by name ([section 16](#16-historysourceauto)). `close()` is idempotent and
 safe from any thread.
 
 ```python
 ReadPlan(columns: tuple[ReadColumn, ...], symbol_header, symbols, time_header, window_ns,
-         to_ns, session: tuple[str, date] | None, block_size: int, required)
+         to_ns, block_size: int, required)
 ReadColumn(header, column, read_type: pyarrow.DataType, list_type)
 ```
 
-`session` is the futures session check: the header that holds each row's session date and the
-file's date, so `_ingest/flatfiles.py` builds one plan per call and adds the session per futures
-file. `block_size` is the reader's block of decompressed text, a required field with no default;
+`_ingest/flatfiles.py` builds one plan per call. `block_size` is the reader's block of
+decompressed text, a required field with no default;
 `_ingest/flatfiles.py` always passes its `BLOCK_SIZE` (1 MiB).
 
 `_ingest/flatfiles.py` builds the plan from `source(Transport.FLAT_FILES, prefix)`. `to_ns` is the
-`_datasets/timestamps.py` converter, so a wrongly declared unit still raises; the window is never converted
-into wire units.
+`_datasets/timestamps.py` routine, returning the nanoseconds, null where a value fails, and the first
+failure's message, so a wrongly declared unit drops every row and fails the file; the window is
+never converted into wire units.
 
 ### 19.4 Generated schemas
 
@@ -5674,7 +5696,7 @@ for it. The plain converter of each `WireType` is never loosened, and no convers
 no-op. The decoder applies it deliberately: the WebSocket forex `x` is declared an integer
 but sampled as a quoted decimal string (`"44"`), and `quoted-integer` reads either form as
 the `long`; a value it cannot read (`"4.8"`, `"x"`) is
-an unconvertible value and fails loudly like any other ([section 19.5](#195-runtime-drift)).
+an unconvertible value like any other ([section 19.5](#195-runtime-drift)).
 Every entry has a fixture test of both the conversion and the failure; a conversion that no
 entry declares is coercion, which never happens. The conversions:
 
@@ -5884,42 +5906,83 @@ absent, as in an installed wheel; the CI build job checks that the wheel holds n
 
 ### 19.5 Runtime drift
 
-Data on the wire can differ from the committed schema until the next refresh. **Detection** is in
-`_massive`: each decoder compares a payload with its generated source and returns a
-`DriftReport(extra, missing, statuses, samples)` (`missing`: only vendor-`required` fields that
-some row lacked or held as null; `statuses`: REST envelope statuses outside the
-documented ones; `samples`: for each drifted key, the first row's symbol as the wire spells it,
-known to the WebSocket decoder only, and an extra key's value, so a WARNING can quote them;
-outside equality and the `repr`). A decoder never raises for drift; REST and flat files raise
-`WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
-session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
-routing in `_ingest/rest.py`, `_tables/poll.py`, `_ingest/ws_connection.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
+Data on the wire can differ from the committed schema until the next refresh, and Massive's
+data drifts in ways no schema predicts. The rule: a valid request returns its data whenever it
+can, and serves only what is right. One odd value never costs its row, and one odd row never
+costs its call or its stream: a value the library cannot read is null and a row it cannot place
+is dropped, each with a WARNING, the way a missing field already reads as null. Wrong data is
+worse than an error, so nothing is ever coerced or guessed, and only a payload in which no row
+can be placed fails.
+
+**Detection** is in `_massive`: each decoder compares a payload with its generated source and
+returns a `DriftReport(extra, missing, unconvertible, statuses, dropped_rows, dropped_reason,
+samples)` (`missing`: only vendor-`required` fields that some row lacked or held as null;
+`unconvertible`: the fields outside the key columns that held, in some row, a value that does
+not fit, decoded as null; `statuses`: REST envelope statuses outside the documented ones;
+`dropped_rows`: the rows dropped because a key could not be read, with the first one's reason;
+`samples`: for each extra, missing, or unconvertible key, the first row's symbol as the wire
+spells it, known to the WebSocket decoder only, and the value of an extra or unconvertible key,
+so a WARNING can quote them; `dropped_reason` and `samples` are outside equality and the
+`repr`). `DriftReport.merge` combines the reports of two payloads read as one. A decoder never
+raises for drift or for a row. **Policy** is in the library: the session's `DriftRegistry` in
+`_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the routing in
+`_ingest/rest.py`, `_ingest/rest_rows.py`, `_tables/poll.py`, `_ingest/ws_connection.py`,
+`_tables/stream.py`, and `_ingest/flatfiles.py`.
+
+A **key** here is a key the dataset declares for the source, not filled from the request and
+not marked optional (`KeySpec.required`; `source_columns.required_fields`): the row's symbol,
+its time column, and where declared its end, fan-out, and date (the futures session). A dataset
+that declares no key has none.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field), naming where it was seen, the first symbol, and the first value ([section 17.1](#171-the-log)). Shown in `SchemaDrift`. |
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
-| **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
-| **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
-| **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
+| **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); every later drop logs the dataset's running count at DEBUG. Never a failure, unless every row of a payload is dropped (below). |
+| **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
+| **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
+| **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/host_decision.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `unreadable_symbols=LOG`, the default, the row is kept with a null `Symbol` and the text in `RawSymbol`, ERROR once per spelling with the library-bug text (at most 100); under `IGNORE` the same at DEBUG; under `RAISE`, a loud failure whose message names the setting and the bug report. |
 
+**When every row is dropped.** One dropped row is drift; a payload in which no row can be
+placed is the sign of a change in Massive's format (a renamed key, a new timestamp unit), and
+serving it would quietly return an empty table. So a loud failure, a defect of the library
+(`ErrorCause.LIBRARY_DEFECT`), names the count and the first row's reason when:
+
+- **REST**: a page that had rows keeps none of them, its error rows included (`RowDataError`
+  from `rest_rows.RowConverter.convert`). A one-row page whose row is dropped is such a page.
+- **Flat files**: a file holds rows of the requested symbols, and every one of them is
+  dropped (`WireError` from the reader after the file's last block, then `MassiveError` naming
+  the file). Rows the symbol filter removes do not count. The rule is per file, never per
+  block: a block can hold a single row of an illiquid symbol, and its one odd row must not
+  fail the call.
+- **WebSocket**: `DROPPED_RUN_LIMIT` (100) rows of one dataset on one channel of a connection
+  have been dropped in a row, across flushes and symbols, with no row of the dataset published
+  between them (`Flusher._counted`, counting the client's drops and the flush's). A flush is
+  no unit here: a quiet stream's flush often holds one row, so a per-flush rule would let one
+  odd row fail it. A published row starts the count again. Each symbol also has a run of its
+  own (`Flusher._counted_symbols`), which other symbols' published rows do not end: after
+  `DROPPED_RUN_LIMIT` of one symbol's rows in a row are dropped with none of its rows
+  published, the streams that name that symbol fail, so it never freezes them without an
+  error. A `dm.ALL` stream is never failed for one symbol: its `m.streams()` `Error` says,
+  without failing it, `rows for ESH5 are being dropped (<first reason>); its last values may
+  be stale` (the first three such symbols and a count of the rest), and the note goes once a
+  row of the symbol is published again, so a trader never sees a frozen row without a mark.
+
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
-`MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
-WebSocket failure fails, through `publish_failure`, only the streams that would have received
-the row: the channel's `ALL` streams and the streams holding that symbol. A row with no
-symbol is rejected and fails only the channel's `ALL` streams, since it cannot be routed to a
-symbol stream; it is logged at ERROR with the library-bug text, once per spelling (at most
-100). Rejected rows are never published, and the rest of the
-batch is. A drift failure goes through `SessionCore.fail_stream`, like an entitlement
-failure.
+`MassiveError` through `from_wire` or `RowDataError`; `poll()` fails its table through
+`publish_failure`; a WebSocket failure fails, through `publish_failure`, every stream of the
+dataset on the channel. A row dropped for its key is never published, and fails no stream; the
+rest of the batch is published. A drift failure goes through `SessionCore.fail_stream`, like an
+entitlement failure.
 
 **`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)),
-sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` for extra and
-`transport:field-` for missing, with the transport spelled `WebSocket` or `REST`, and
-`m.connections()` uses `channel:field+` and `channel:field-`.
+sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` for extra,
+`transport:field-` for missing, and `transport:field?` for a field that held a value that does
+not fit, with the transport spelled `WebSocket` or `REST`, and `m.connections()` uses
+`channel:field+`, `channel:field-`, and `channel:field?`. Dropped rows add no entry: the log
+counts them.
 
 ### 19.6 Refresh and drift
 
@@ -5993,10 +6056,10 @@ refresh gate and the catalog gates. What each change does:
 | Change at Massive | At run time | In the refresh |
 |---|---|---|
 | Field added | Dropped, one WARNING, `SchemaDrift`. | It gets a name (`short-key` asks for a lexicon or `NAMES` line for a short key) and joins its kind (`type-agreement` checks the type, `transport-agreement` the transports). |
-| Field removed | Null; a required field or CSV header warns; a required key fails loudly. | It leaves its source; the declared-keys gate fails if it was a declared key. |
+| Field removed | Null; a required field or CSV header warns; rows without a required key are dropped, and a payload with none left fails loudly. | It leaves its source; the declared-keys gate fails if it was a declared key. |
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
-| Type changed | A value that no longer converts fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
-| Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
+| Type changed | A value that no longer converts is null with a WARNING; in a key, its row is dropped, and a payload with none left fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
+| Unit changed | The overflow check or the bound drops every row, and the payload, or a run of `DROPPED_RUN_LIMIT` WebSocket rows, fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
 | New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec`, a `DEFERRED` entry, or an `EXCLUSIONS` entry is added. |
 | Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and the generated-sources gate names every dataset that uses it. |
 
@@ -6447,10 +6510,14 @@ document already reflects them.
     `refresh/`, every entry carries a reason, and a stale entry fails the refresh. The
     page-to-prefix map is derived from the vendor's overview tables
     ([section 19.4](#194-generated-schemas)).
-35. **The runtime drift policy** of [section 19.5](#195-runtime-drift): an extra field is
-    dropped and reported; a missing required key, an unconvertible value, or a timestamp
-    out of bounds fails loudly (a `poll()` table through `publish_failure`; on WebSocket only
-    the affected topic's streams). The table never silently lies.
+35. **The runtime drift policy** of [section 19.5](#195-runtime-drift) (2026-10-30): a valid
+    request returns its data whenever it can, and serves only what is right. An extra field is
+    dropped and reported; a value that does not fit, outside the key columns, is null with one
+    WARNING per dataset and field; a row whose key cannot be read is dropped, with one WARNING
+    per dataset and a running count. Only a payload in which no row can be placed fails
+    loudly: a REST page, a flat file's rows of the requested symbols, or a run of
+    `DROPPED_RUN_LIMIT` (100) WebSocket rows of a dataset on a channel. A futures flat-file
+    row keeps its own session. The table never silently lies.
 36. **One timestamp routine** for every transport: epoch 0 to null except in the time column,
     a checked multiply to nanoseconds, and the [1990, 2100] bound on epoch integers only
     ([section 12](#12-timestamp-units-and-day-boundaries)).
@@ -7030,7 +7097,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
 | 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, is moved to 00:00 UTC of the day it falls on and served, with one WARNING per dataset and timespan per session (decision 70). `AUTO` picks the source as for every dataset, so the stamp rule alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all warn, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time are served with one WARNING | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
-| 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
+| 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; on a mismatch the overflow check and the [1990, 2100] bound drop every row and the page raises `RowDataError` | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path is masked | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_host_decision.py`: both replies | `tests/ingest/test_host_decision_integration.py`: subscribe `V.I:SPX` on the resolved host |
@@ -7049,7 +7116,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 18 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
 | 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/massive/ws/test_client_integration.py`: one raw `C` frame; record the form of `x` |
 | 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/massive/ws/test_client_integration.py`: one raw `XT` frame; record the form of `i` |
-| 21 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
+| 21 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); on a mismatch the overflow check and the [1990, 2100] bound drop every row, and the stream fails after `DROPPED_RUN_LIMIT` of them | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 22 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 23 | Where the futures snapshot carries a contract's ticker and product code: the OpenAPI response schema nests both under `details` (`details.ticker`, `details.product_code`), while the OpenAPI response example and the documentation sample both send `ticker` and `product_code` at the top level of each result, with `details` holding only `settlement_date`; the path's `ticker.any_of` filter and its default sort `ticker` also name a top-level field | Two `KEY_FIXES` entries read the fields as `ticker` and `product_code`, columns `Ticker` (the `symbol` key, so `Symbol`) and `ProductCode`; were the wire to nest them as the schema says, every row would fail loudly as a missing required key and `details.ticker` and `details.product_code` would be reported as drift ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: the vendor's own sample, served unchanged, fills `Symbol` and `ProductCode` from the top level | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for current contracts; record where `ticker` and `product_code` appear and that `Symbol` is filled |
 | 24 | Key of the REST ticker events' event type (`/vX/reference/tickers/{id}/events`): the schema declares the required `event_type`, while the response example, the documentation sample, and Massive's Python client all use `type` | A `KEY_FIXES` entry reads the field as `type`, column `Type`; were the wire to send `event_type`, `Type` would be null and `event_type` would be reported as drift | `tests/massive/refresh/test_overrides.py`: the entry reads `event_type` as `type`, column `Type` | `tests/namespaces/test_reference_integration.py`: one `ticker_events` request; record which key the events carry |

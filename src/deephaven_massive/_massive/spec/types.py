@@ -772,9 +772,10 @@ class DriftSample:
 
     Attributes:
         symbol: The row's symbol as the wire spells it, or None when the decoder does not know
-            which key holds it (a REST page, whose symbol the request names).
+            which key holds it (a REST page, whose symbol the request names, or a flat file).
         value: The field's value as `spec.convert.excerpt` quotes it (its JSON text, up to 200
-            characters) for an extra field; None for a missing one.
+            characters; a flat file's text as it was written) for an extra field or a value
+            that does not fit; None for a missing one.
     """
 
     symbol: str | None
@@ -783,27 +784,50 @@ class DriftSample:
 
 @dataclass(frozen=True, kw_only=True)
 class DriftReport:
-    """How one payload differed from its source's fields.
+    """How one payload differed from its source's fields, and the rows it could not place.
 
     A decoder returns one per REST page, WebSocket frame, or flat-file block. It never raises
-    for drift; the library decides what to log and show.
+    for drift; the library decides what to log and show. A value that does not fit its field
+    is drift too: outside the key columns it is decoded as null, so one odd value never costs
+    the rest of its row. A row whose key (its symbol, its time, or another key the dataset
+    declares) is absent, null, or does not fit cannot be placed, so it is dropped and counted.
 
     Attributes:
         extra: Wire keys present in the payload that the source does not declare (dropped).
         missing: Wire keys of the vendor-`required` fields (`Field.required`) that some row
             lacked or held as null (decoded as null). Absent optional fields are not drift.
+        unconvertible: Wire keys (for a flat file, headers) outside the key columns that held,
+            in some row, a value that does not fit the field's type or its named conversion
+            (decoded as null).
         statuses: REST envelope `status` values outside the documented ones (`OK`,
             `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
             Always empty for WebSocket and flat files.
-        samples: For each wire key in `extra` or `missing`, the first row that showed it
-            (`DriftSample`), so a drift WARNING can quote a symbol and a value; a key may have
-            none (a flat-file header). Read-only. Not part of equality, the hash, or the
-            `repr`: two reports of the same drift are equal whichever rows showed it.
+        dropped_rows: How many rows were dropped because a key was absent, null, or did not
+            fit.
+        dropped_reason: Why the first dropped row was dropped, naming the key and quoting its
+            value, or `""` when no row was. Not part of equality, the hash, or the `repr`.
+        samples: For each wire key in `extra`, `missing`, or `unconvertible`, the first row
+            that showed it (`DriftSample`), so a drift WARNING can quote a symbol and a value;
+            a key may have none (a flat-file header the file lacks). Read-only. Not part of
+            equality, the hash, or the `repr`: two reports of the same drift are equal
+            whichever rows showed it.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive import DriftReport
+
+            page = DriftReport(unconvertible=frozenset({"x"}), dropped_rows=1)
+            both = page.merge(DriftReport(dropped_rows=2))
+            assert both.dropped_rows == 3 and both.fields_drifted
     """
 
     extra: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
+    unconvertible: frozenset[str] = frozenset()
     statuses: frozenset[str] = frozenset()
+    dropped_rows: int = 0
+    dropped_reason: str = dataclasses.field(default="", compare=False, hash=False, repr=False)
     samples: Mapping[str, DriftSample] = dataclasses.field(
         default_factory=dict, compare=False, hash=False, repr=False
     )
@@ -811,3 +835,29 @@ class DriftReport:
     def __post_init__(self) -> None:
         """Freeze a copy of the samples, so the report stays immutable."""
         object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))
+
+    @property
+    def fields_drifted(self) -> bool:
+        """True when some field is extra, missing, or held a value that does not fit."""
+        return bool(self.extra or self.missing or self.unconvertible)
+
+    def merge(self, other: DriftReport) -> DriftReport:
+        """Return the drift of two payloads read as one, such as the two parts of a REST page.
+
+        Args:
+            other: The later payload's report.
+
+        Returns:
+            The union of each set and the sum of the dropped rows. A key's sample and the
+            dropped rows' reason are this report's where it has one, else the other's: the
+            first row that showed a drift is the one a fix needs.
+        """
+        return DriftReport(
+            extra=self.extra | other.extra,
+            missing=self.missing | other.missing,
+            unconvertible=self.unconvertible | other.unconvertible,
+            statuses=self.statuses | other.statuses,
+            dropped_rows=self.dropped_rows + other.dropped_rows,
+            dropped_reason=self.dropped_reason or other.dropped_reason,
+            samples={**other.samples, **self.samples},
+        )

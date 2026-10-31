@@ -19,11 +19,10 @@ everything else belongs here:
   then the decision is recorded with the REST
   transport (`RestTransport.record_verdict`), the connection's streams move to the `delayed.`
   host, and they keep running.
-- **Rows, rejects, and drift.** Rows go to the connection's flush thread (`Flusher`), which
-  publishes them. A rejected row fails the streams that would have received it, its raw wire
-  symbol mapped to the canonical one (`_datasets/wire_symbols.py`); a row with no symbol fails only
-  the channel's `dm.ALL` streams and is logged at ERROR as a defect of the library, once per
-  spelling. A connection logs one WARNING per outage, and one when it goes silent during its
+- **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
+  them. A row whose key cannot be read is dropped and counted, and fails no stream; a value
+  that does not fit is null. A connection logs one WARNING per outage, and one when it goes
+  silent during its
   market's trading hours (`NO_FRAMES_WARNING`), each with its recovery at INFO. Drift is
   recorded on the connection's `SchemaDrift` here and handed to the flush thread for the
   streams' rows.

@@ -185,8 +185,9 @@ class WsClient:
     - `on_status(generation, status)`: one decoded status object.
     - `on_data(generation, channel, rows, rejects, drift)`: one channel's objects of one frame.
       `rows` map every column of the channel's source (long-form names) to its value, `None`
-      when absent; symbols are as the wire spells them. `rejects` are the rows that failed
-      validation; `drift` is the `DriftReport` of the channel's objects in the frame.
+      when absent or when the value does not fit; symbols are as the wire spells them.
+      `rejects` are the rows dropped because a required key is absent, null, or does not fit;
+      `drift` is the `DriftReport` of the channel's objects in the frame.
     - `on_state(state, detail)`: the detail is the next attempt's time in seconds since the
       Unix epoch for `RECONNECTING` and `WAITING_SLOT`, the `WireError` for `FAILED`, and
       `None` for `CONNECTING` and `CLOSED`.
@@ -345,8 +346,9 @@ class WsClient:
         """Declare a channel's required key columns and its symbol column. Loop thread only.
 
         Call it before first subscribing the channel. The choice applies to every later frame,
-        across reconnections, until replaced. A row missing a required key, or holding null
-        there, becomes a `Reject`; any other absent field becomes `None`. A channel never
+        across reconnections, until replaced. A row missing a required key, holding null there,
+        or holding a value there that does not fit, becomes a `Reject` and is dropped; any
+        other absent field, or value that does not fit, becomes `None`. A channel never
         declared has no required keys and no symbol. A channel with no source, or a column
         not in it, raises `ValueError`.
 

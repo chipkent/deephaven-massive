@@ -23,6 +23,7 @@ from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.spec.types import (
     DriftReport,
+    DriftSample,
     Field,
     Source,
     Transport,
@@ -685,7 +686,7 @@ def test_a_wildcard_and_an_explicit_topic_stay_independent(
     ]
 
 
-def test_a_bad_row_rejects_only_itself_with_the_raw_symbol(
+def test_an_odd_value_reads_as_null_alone_with_the_raw_symbol(
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
     load_fixture: Callable[[str, str], bytes],
@@ -696,13 +697,16 @@ def test_a_bad_row_rejects_only_itself_with_the_raw_symbol(
     fake_ws_server.send(load_fixture("massive/ws", "trades_with_bad_row.json").decode())
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
     [(generation, channel, rows, rejects, drift)] = h.recorder.of("data")
-    assert (generation, channel) == (1, "T")
-    assert [r["Ticker"] for r in rows] == ["AAPL", "MSFT"]
-    [reject] = rejects
-    assert reject.channel == "T"
-    assert reject.symbol == "BRK.A"
-    assert "Price (wire key 'p')" in reject.error.message
-    assert drift == DriftReport(extra=frozenset({"x"}), missing=frozenset({"s"}))
+    assert (generation, channel, rejects) == (1, "T", [])
+    assert [(r["Ticker"], r["Price"]) for r in rows] == [
+        ("AAPL", 114.125),
+        ("BRK.A", None),
+        ("MSFT", 101.5),
+    ]
+    assert drift == DriftReport(
+        extra=frozenset({"x"}), missing=frozenset({"s"}), unconvertible=frozenset({"p"})
+    )
+    assert drift.samples["p"] == DriftSample("BRK.A", '"623100.5"')
 
 
 def test_a_frame_over_one_mebibyte_is_decoded(

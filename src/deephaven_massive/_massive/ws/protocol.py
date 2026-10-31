@@ -11,16 +11,20 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   authentication frame.
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
   into `Status` events and per-channel `Data`: rows keyed by long-form column, `Reject`s for the
-  rows that fail validation, and the `DriftReport` of the channel's objects in the frame. Each
-  value goes through its field's converter (`spec.convert.field_converter`, looked up once per
-  channel), the converter the REST client uses too (a field with a named `conversion` through
-  that conversion), so a value means the same on both transports. Drift is reported as REST
-  reports it: `extra` holds the keys a channel does not declare, which are dropped, and
-  `missing` only the fields the vendor marks required
-  (`Field.required`) that some object lacked or held as null. Each drifted key carries a
-  sample (`DriftReport.samples`): the symbol of the first object that showed it and, for an
-  extra key, its value. A rejected row carries its whole raw text (`Reject.raw`) and is logged
-  whole at DEBUG on this module's logger, once, where it is decoded.
+  rows dropped because a required key cannot be read, and the `DriftReport` of the channel's
+  objects in the frame. Each value goes through its field's
+  converter (`spec.convert.field_converter`, looked up once per channel), the converter the
+  REST client uses too (a field with a named `conversion` through that conversion), so a value
+  means the same on both transports. Drift is reported as REST reports it: `extra` holds the
+  keys a channel does not declare, which are dropped, `missing` only the fields the vendor
+  marks required (`Field.required`) that some object lacked or held as null, and
+  `unconvertible` the fields that held a value that does not fit, which reads as null. A row
+  whose required key (`FrameDecoder.set_required`) is absent, null, or does not fit cannot be
+  routed, so it is dropped and becomes a `Reject`. Each drifted key carries a sample
+  (`DriftReport.samples`): the symbol of the first object that showed it and, for an extra key
+  or a value that does not fit, its value. A dropped row carries its whole raw text
+  (`Reject.raw`); it, and a row holding a value that does not fit, is logged whole at DEBUG on
+  this module's logger, once, where it is decoded.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
   one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
@@ -147,18 +151,19 @@ class Status:
 
 @dataclass(frozen=True, kw_only=True)
 class Reject:
-    """One received row that failed validation and is not delivered.
+    """One received row dropped because a required key is absent, null, or does not fit.
 
-    The library fails the streams that would have received the row; the frame's other rows
-    are delivered. Immutable, so it may be passed between threads.
+    The row cannot be routed, so it is not delivered; the library counts it as drift and fails
+    no stream for it. The frame's other rows are delivered. Immutable, so it may be passed
+    between threads.
 
     Attributes:
         channel: The channel the row arrived on, such as `"T"`.
         symbol: The row's symbol exactly as the wire spells it (`"EUR/USD"`, not `"C:EURUSD"`),
             read from the column `set_required` declared as the channel's symbol; `None` when
             no symbol column is declared or the row's value is missing or not text.
-        error: Why the row was rejected: a missing required key or an unconvertible value,
-            naming the field, the expected type, and the value.
+        error: Why the row was dropped: a missing required key or a value that does not fit,
+            naming the connection, the field, the expected type, and the value.
         raw: The whole row as it arrived, its compact JSON text cut to 2,000 characters
             (`spec.convert.row_excerpt`), so a log line can show every field it held.
     """
@@ -175,11 +180,13 @@ class Data:
 
     Attributes:
         channel: The channel, such as `"T"`.
-        rows: The valid rows in arrival order, each mapping every column of the channel's
-            source to its value (`None` when the wire omitted it or sent null).
-        rejects: The rows that failed validation, in arrival order.
+        rows: The rows in arrival order, each mapping every column of the channel's source to
+            its value (`None` when the wire omitted it, sent null, or sent a value that does
+            not fit), without the rows dropped for a required key.
+        rejects: The rows dropped for a required key, in arrival order.
         drift: The wire keys of these objects that the source does not declare (`extra`),
-            and the vendor-required fields some object lacked or held as null (`missing`).
+            the vendor-required fields some object lacked or held as null (`missing`), and the
+            fields that held a value that does not fit (`unconvertible`).
     """
 
     channel: str
@@ -317,8 +324,9 @@ class _Step(NamedTuple):
     Attributes:
         wire_key: The key of the field's value in an object.
         column: The long-form column the value is stored under in a row.
-        required: Whether a missing value (or null) rejects the row: the library's choice
-            through `FrameDecoder.set_required`, not the vendor's `Field.required`.
+        required: Whether a missing value (or null), or one that does not fit, drops the row:
+            the library's choice through `FrameDecoder.set_required`, not the vendor's
+            `Field.required`.
         convert: The field's converter (`spec.convert.field_converter`), which checks and
             converts each non-null value.
         field: The generated field, named in the message of a value that does not fit.
@@ -360,7 +368,7 @@ class _Channel:
 
         Args:
             source: The channel's generated source.
-            required: The wire keys whose absence rejects a row.
+            required: The wire keys whose absence, null, or value that does not fit drops a row.
             symbol: The wire key holding the symbol, or `None`.
 
         Returns:
@@ -387,6 +395,7 @@ class _Accumulator:
     rejects: list[Reject] = field(default_factory=list)
     extra: set[str] = field(default_factory=set)
     missing: set[str] = field(default_factory=set)
+    unconvertible: set[str] = field(default_factory=set)
     # The first object's symbol (and value, for an extra key) for each drifted key.
     samples: dict[str, DriftSample] = field(default_factory=dict)
 
@@ -458,10 +467,12 @@ class FrameDecoder:
 
         Args:
             channel: The channel, such as `"T"`.
-            keys: Long-form columns of the channel's source; a row missing one (or holding null)
-                is rejected. Empty means no column is required.
+            keys: Long-form columns of the channel's source; a row missing one, holding it as
+                null, or holding a value that does not fit is dropped. Empty means no column is
+                required.
             symbol: The long-form column holding the row's symbol, read raw into each
-                `Reject.symbol`; `None` when the channel's rows carry no symbol.
+                `Reject.symbol` and drift sample; `None` when the channel's rows carry no
+                symbol.
 
         Raises:
             ValueError: If the channel has no source, or `keys` or `symbol` names a column the
@@ -601,7 +612,43 @@ class FrameDecoder:
         return tuple(topics)
 
     def _row(self, channel: str, item: dict[str, object], into: _Accumulator) -> None:
-        """Decode one data object into a row or a reject, and record its drift.
+        """Decode one data object into a row, or drop it, and record its drift.
+
+        Args:
+            channel: The object's channel, which has a source.
+            item: The object.
+            into: The channel's accumulator for this frame.
+        """
+        spec = self._channels[channel]
+        self._scan(channel, item, into=into)
+        row: dict[str, object] = {}
+        odd: list[tuple[str, object, str]] = []
+        for key, column, required, convert, f in spec.steps:
+            value = item.get(key)
+            problem = None
+            if value is not None:
+                try:
+                    row[column] = convert(value)
+                    continue
+                except UnconvertibleError:
+                    problem = unconvertible_message(f, value)
+            if required:
+                self._drop(channel, item, problem or missing_key_message(f), into=into)
+                return
+            if problem is not None:
+                odd.append((key, value, problem))
+            row[column] = None
+        if odd:
+            self._odd(channel, item, odd, into=into)
+        into.rows.append(row)
+
+    def _scan(self, channel: str, item: dict[str, object], *, into: _Accumulator) -> None:
+        """Record an object's extra keys and its missing vendor-required fields.
+
+        An object of exactly the declared shape, the common case, has no extra key, which one
+        set comparison decides; the vendor-required scan runs only on a channel that has such
+        fields, and covers every object, a dropped one included. Samples are taken only for a
+        key not seen before in this frame, so a drifting frame costs one lookup per key.
 
         Args:
             channel: The object's channel, which has a source.
@@ -610,10 +657,6 @@ class FrameDecoder:
         """
         spec = self._channels[channel]
         keys = item.keys()
-        # An object of exactly the declared shape, the common case, has no extra key, which one
-        # set comparison decides; the vendor-required scan runs only on a channel that has such
-        # fields, and covers every object, a rejected one included. Samples are taken only for
-        # a key not seen before in this frame, so a drifting frame costs one lookup per key.
         if keys != spec.shape:
             for key in keys - spec.shape:
                 if key not in into.extra:
@@ -624,48 +667,70 @@ class FrameDecoder:
                 if item.get(key) is None and key not in into.missing:
                     into.missing.add(key)
                     into.samples[key] = DriftSample(self._symbol(channel, item), None)
-        row: dict[str, object] = {}
-        for key, column, required, convert, f in spec.steps:
-            value = item.get(key)
-            if value is None:
-                if required:
-                    into.rejects.append(self._reject(channel, item, missing_key_message(f)))
-                    return
-                row[column] = None
-                continue
-            try:
-                row[column] = convert(value)
-            except UnconvertibleError:
-                into.rejects.append(self._reject(channel, item, unconvertible_message(f, value)))
-                return
-        into.rows.append(row)
 
-    def _reject(self, channel: str, item: dict[str, object], problem: str) -> Reject:
-        """Build the reject of one row.
+    def _drop(
+        self, channel: str, item: dict[str, object], problem: str, *, into: _Accumulator
+    ) -> None:
+        """Drop a row for a required key: record its `Reject` and log it whole at DEBUG.
 
         Args:
             channel: The row's channel.
             item: The row's object, from which the raw symbol is read.
-            problem: What is wrong with the row: the clause `spec.convert` shares with every
-                decoder, for a missing key or an unconvertible value.
-
-        Returns:
-            The reject, whose error names the connection, the channel, the symbol, and
-            `problem`.
+            problem: Why: the clause `spec.convert` shares with every decoder, for a missing key
+                or a value that does not fit.
+            into: The channel's accumulator for this frame.
         """
-        text = self._symbol(channel, item)
-        about = f" for {text}" if text is not None else ""
         error = WireError(
-            f"rejected a {channel} row{about} from {self._host}{self._path}: {problem}",
-            host=self._host,
-            path=self._path,
+            f"dropped {self._about(channel, item, problem)}", host=self._host, path=self._path
         )
         raw = row_excerpt(item)
         logger.debug("%s; the row: %s", error, raw)
-        return Reject(channel=channel, symbol=text, error=error, raw=raw)
+        symbol = self._symbol(channel, item)
+        into.rejects.append(Reject(channel=channel, symbol=symbol, error=error, raw=raw))
+
+    def _odd(
+        self,
+        channel: str,
+        item: dict[str, object],
+        odd: list[tuple[str, object, str]],
+        *,
+        into: _Accumulator,
+    ) -> None:
+        """Record the values of a kept row that do not fit, and log the row whole at DEBUG.
+
+        Args:
+            channel: The row's channel.
+            item: The row's object.
+            odd: Each value that does not fit: its wire key, the value, and the clause naming
+                the field, the expected type, and the value.
+            into: The channel's accumulator for this frame.
+        """
+        for key, value, _ in odd:
+            if key not in into.unconvertible:
+                into.unconvertible.add(key)
+                into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(value))
+        if logger.isEnabledFor(logging.DEBUG):
+            problems = "; ".join(problem for _, _, problem in odd)
+            reason = self._about(channel, item, problems)
+            logger.debug("read as null in %s; the row: %s", reason, row_excerpt(item))
+
+    def _about(self, channel: str, item: dict[str, object], problem: str) -> str:
+        """Name a row and what is wrong with it, for a dropped row's reason and the DEBUG log.
+
+        Args:
+            channel: The row's channel.
+            item: The row's object, from which the raw symbol is read.
+            problem: What is wrong with the row.
+
+        Returns:
+            `"a <channel> row[ for <symbol>] from <host><path>: <problem>"`.
+        """
+        text = self._symbol(channel, item)
+        about = f" for {text}" if text is not None else ""
+        return f"a {channel} row{about} from {self._host}{self._path}: {problem}"
 
     def _symbol(self, channel: str, item: dict[str, object]) -> str | None:
-        """Return an object's symbol as the wire spells it, for a reject or a drift sample.
+        """Return an object's symbol as the wire spells it, for a drift sample or a reason.
 
         Args:
             channel: The object's channel.
@@ -692,6 +757,9 @@ class FrameDecoder:
         """
         acc = frame[channel]
         drift = DriftReport(
-            extra=frozenset(acc.extra), missing=frozenset(acc.missing), samples=acc.samples
+            extra=frozenset(acc.extra),
+            missing=frozenset(acc.missing),
+            unconvertible=frozenset(acc.unconvertible),
+            samples=acc.samples,
         )
         return Data(channel=channel, rows=acc.rows, rejects=acc.rejects, drift=drift)

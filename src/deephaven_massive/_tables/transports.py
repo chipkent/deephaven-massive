@@ -370,11 +370,16 @@ class FlatFileRead:
         unread: The trading days whose rows the parts leave out, oldest first: every day
             whose file is missing, or, when the read inferred holidays, the first day whose
             file is missing with no later file, the parts then holding no later day either.
+        uncertain: For futures named by dates, the requested sessions whose rows may sit in
+            a file the read did not read, oldest first: a file held rows of a session other
+            than its own day's, so the range's first or last session may be incomplete.
+            Empty when no file did.
     """
 
     parts: tuple[tuple[date, Table], ...]
     empty: Table
     unread: tuple[date, ...]
+    uncertain: tuple[date, ...] = ()
 
 
 class FlatFileTransport(Protocol):

@@ -554,7 +554,9 @@ wrong.
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
   warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
   for room). `Query` shows the call that opened it, `RowsPublished` counts rows delivered, and
-  `SchemaDrift` lists fields Massive added (`WebSocket:zz+`) or stopped sending (`REST:size-`).
+  `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), or
+  sent with a value that does not fit, which reads as null (`REST:exchange?`). A row whose
+  symbol or time cannot be read is dropped, and the log says so in one WARNING.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,

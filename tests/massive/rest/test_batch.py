@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pytest
 
-from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest import batch as batch_module
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.spec.types import (
@@ -57,10 +56,14 @@ _TRADES = RestPath(
 )
 
 
-def _bad(wire_type: WireType, value: object) -> WireError:
-    with pytest.raises(WireError) as caught:
-        to_batch([{"v": value}], _path(_field("v", wire_type)), required=())
-    return caught.value
+def _odd(wire_type: WireType, value: object) -> tuple[pa.RecordBatch, DriftReport]:
+    """Read a page whose second row holds a value that does not fit its field.
+
+    Returns:
+        The page's batch and drift.
+    """
+    path = _path(_field("k", WireType.LONG), _field("v", wire_type))
+    return to_batch([{"k": 1}, {"k": 2, "v": value}], path, required={"K"})
 
 
 # The batch.
@@ -139,35 +142,47 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
     assert drift == DriftReport()
 
 
-def test_a_nested_object_that_is_not_an_object_is_unconvertible() -> None:
-    with pytest.raises(WireError, match=r"^/v3/x: row 0: wire key 'day' expects an object, got 5$"):
-        to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
+def test_a_nested_object_that_is_not_an_object_reads_as_absent_and_is_drift() -> None:
+    batch, drift = to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
+    assert batch.column(0).to_pylist() == [None]
+    assert drift == DriftReport(unconvertible=frozenset({"day"}))
+    assert drift.samples["day"] == DriftSample(None, "5")
 
 
 def test_a_row_whose_nested_object_is_not_one_is_logged_whole_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5, "note": "x"}]
-    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__), pytest.raises(WireError):
-        to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
+        batch, _ = to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
+    assert batch.column(0).to_pylist() == [1.0, None]
     assert caplog.messages == [
         "/v3/x: reading 2 rows one by one: the wire key 'day' holds a value that is not an object",
         ('/v3/x: row 1: wire key \'day\' expects an object, got 5; the row: {"day":5,"note":"x"}'),
     ]
 
 
-def test_a_rejected_row_is_not_serialized_with_debug_off(
+def test_a_required_key_under_an_object_that_is_not_one_drops_the_row() -> None:
+    rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5}]
+    path = _path(_field("day.c", WireType.DOUBLE))
+    batch, drift = to_batch(rows, path, required={"DayC"})
+    assert batch.column(0).to_pylist() == [1.0]
+    assert drift.dropped_rows == 1
+    assert drift.dropped_reason == (
+        "/v3/x: row 1: no DayC (wire key 'day.c'), which the dataset needs"
+    )
+
+
+def test_a_dropped_row_is_not_serialized_with_debug_off(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     def refuse(_row: object) -> str:
         raise AssertionError("the row was serialized with DEBUG off")
 
     monkeypatch.setattr(batch_module, "row_excerpt", refuse)
-    with (
-        caplog.at_level(logging.INFO, logger=batch_module.__name__),
-        pytest.raises(WireError, match="row 0"),
-    ):
-        to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
+    with caplog.at_level(logging.INFO, logger=batch_module.__name__):
+        batch, drift = to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
+    assert (batch.num_rows, drift.dropped_rows) == (0, 1)
 
 
 def test_a_json_text_field_keeps_its_object_whole() -> None:
@@ -214,15 +229,35 @@ def test_a_missing_optional_field_is_null_and_silent() -> None:
 
 
 @pytest.mark.parametrize("row", [{"price": 1.0}, {"price": 1.0, "sip_timestamp": None}])
-def test_a_missing_required_key_is_an_error_naming_it(row: dict[str, object]) -> None:
-    rows: list[dict[str, object]] = [{"price": 1.0, "sip_timestamp": 1}, row]
-    with pytest.raises(WireError) as caught:
-        to_batch(rows, _TRADES, required={"SipTimestamp"})
-    assert str(caught.value) == (
+def test_a_row_missing_a_required_key_is_dropped_and_counted(row: dict[str, object]) -> None:
+    rows: list[dict[str, object]] = [{"price": 1.0, "sip_timestamp": 1}, row, row]
+    batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
+    assert batch.column("SipTimestamp").to_pylist() == [1]
+    assert drift == DriftReport(dropped_rows=2)
+    # The first dropped row's reason, naming the path, the row, and the key.
+    assert drift.dropped_reason == (
         "/v3/trades/{stockTicker}: row 1: no SipTimestamp (wire key 'sip_timestamp'), "
         "which the dataset needs"
     )
-    assert (caught.value.status, caught.value.path) == (None, "/v3/trades/{stockTicker}")
+
+
+def test_a_required_key_that_does_not_fit_drops_its_row() -> None:
+    rows: list[dict[str, object]] = [{"sip_timestamp": 4.0}, {"sip_timestamp": 7}]
+    batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
+    assert batch.column("SipTimestamp").to_pylist() == [7]
+    assert drift.dropped_rows == 1
+    assert drift.unconvertible == frozenset()  # a dropped row's value is no drift of a field
+    assert drift.dropped_reason == (
+        "/v3/trades/{stockTicker}: row 0: SipTimestamp (wire key 'sip_timestamp') expects "
+        "epoch, got 4.0"
+    )
+
+
+def test_a_page_whose_every_row_is_dropped_is_returned_empty() -> None:
+    # Whether that is an error is the library's decision, which knows the whole page.
+    batch, drift = to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
+    assert batch.num_rows == 0
+    assert drift.dropped_rows == 1
 
 
 def test_a_required_column_the_path_lacks_is_a_caller_error() -> None:
@@ -278,17 +313,25 @@ def test_an_iso_instant_lands_as_exact_utc_nanoseconds() -> None:
         (WireType.STRING_ARRAY, "ab"),
     ],
 )
-def test_a_value_that_does_not_fit_is_a_wire_error(wire_type: WireType, value: object) -> None:
-    expected = f"/v3/x: row 0: V (wire key 'v') expects {wire_type}, got "
-    assert str(_bad(wire_type, value)).startswith(expected)
+def test_a_value_that_does_not_fit_reads_as_null_and_is_drift(
+    wire_type: WireType, value: object
+) -> None:
+    batch, drift = _odd(wire_type, value)
+    assert batch.to_pydict() == {"K": [1, 2], "V": [None, None]}
+    assert drift == DriftReport(unconvertible=frozenset({"v"}))
+    assert drift.samples["v"] == DriftSample(None, json.dumps(value))
 
 
-def test_an_unconvertible_value_names_the_field_type_and_200_characters() -> None:
+def test_an_odd_value_is_quoted_to_200_characters_and_its_row_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # The clause after the row is the one `spec.convert` shares with the WebSocket decoder.
-    error = _bad(WireType.LONG, "x" * 300)
-    assert str(error) == f"/v3/x: row 0: V (wire key 'v') expects long, got \"{'x' * 199}"
-    assert (error.status, error.path, error.host) == (None, "/v3/x", None)
-    assert error.__cause__ is None
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
+        _, drift = _odd(WireType.LONG, "x" * 300)
+    assert drift.samples["v"] == DriftSample(None, f'"{"x" * 199}')
+    assert caplog.messages[1].startswith(
+        f"/v3/x: row 1: V (wire key 'v') expects long, got \"{'x' * 199}; the row: "
+    )
 
 
 @pytest.mark.parametrize(
@@ -310,9 +353,9 @@ def test_a_row_that_cannot_be_read_is_logged_whole_at_debug(
     row: dict[str, object], *, reason: str, problem: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The page is first read by column, which gives up and says why; the row-by-row reading
-    # then finds the bad row and logs it whole.
+    # then finds the odd row and logs it whole.
     rows: list[dict[str, object]] = [{"price": 1.0, "sip_timestamp": 1}, row]
-    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__), pytest.raises(WireError):
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
         to_batch(rows, _TRADES, required={"SipTimestamp"})
     whole = json.dumps(row, separators=(",", ":"))
     assert caplog.messages == [
@@ -332,8 +375,8 @@ def test_a_declared_conversion_is_applied_and_named_on_failure() -> None:
     )
     batch, _ = to_batch([{"serverTime": "1970-01-01T00:00:01Z"}], _path(when), required=())
     assert batch.column(0).cast(pa.int64()).to_pylist() == [1_000_000_000]
-    with pytest.raises(WireError, match=r"iso-instant \(by the conversion iso-text-instant\)"):
-        to_batch([{"serverTime": "soon"}], _path(when), required=())
+    _, drift = to_batch([{"serverTime": "soon"}], _path(when), required={"ServerTime"})
+    assert "iso-instant (by the conversion iso-text-instant)" in drift.dropped_reason
 
 
 # Reading by column and row by row: one result.
@@ -387,14 +430,15 @@ def test_reading_by_column_matches_reading_row_by_row(
     with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
         batch, drift = to_batch(rows, _NESTED, required={"Ticker"} if not rows else ())
     assert caplog.messages == []  # read by column: no page fell back
-    arrays, extra, missing = batch_module._by_row(
+    reading = batch_module._by_row(
         rows, _NESTED, objects=batch_module._prefixes(_NESTED.fields), required=()
     )
-    assert batch.columns == arrays
+    assert batch.columns == reading.arrays
+    assert (reading.unconvertible, reading.dropped) == ({}, 0)
     assert drift == DriftReport(
-        extra=frozenset(extra),
-        missing=frozenset(missing),
-        samples={key: DriftSample(None, json.dumps(value)) for key, value in extra.items()},
+        extra=frozenset(reading.extra),
+        missing=frozenset(reading.missing),
+        samples={key: DriftSample(None, json.dumps(v)) for key, v in reading.extra.items()},
     )
 
 

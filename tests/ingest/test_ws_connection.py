@@ -629,7 +629,7 @@ def test_a_connection_skips_a_session_that_is_gone(
     monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     ws_session.on_loop(connection, connection._write_row)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
-    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift))
+    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift, dropped={}))
     assert written == []
     monkeypatch.undo()
     assert ws_session.on_loop(
@@ -1768,7 +1768,20 @@ def test_buffered_rows_are_shown_until_they_are_published(
 _URL = "wss://socket.test/stocks"
 
 
-def test_the_connection_logs_drift_rejects_and_a_summary(
+def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSession) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    error = _massive.WireError("dropped")
+    rejects = [
+        _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
+        for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
+    ]
+    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1}
+    del result
+
+
+def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     ws_session: WsSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
@@ -1778,23 +1791,23 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
     connection = ws_session.connection()
     first = ws_session.on_loop(connection, lambda: connection._summary)
     assert first is not None  # the first generation started the summary's timer
+    timeless = trade("AAPL")
+    del timeless["t"]
     with caplog.at_level(logging.DEBUG):
-        ws_session.send(trade("AAPL", zz=1), trade("AAPL", p="bad"))
+        ws_session.send(trade("AAPL", zz=1), trade("AAPL", p="bad"), timeless)
         ws_session.flush()
-        ws_session.unsubscribed("T.AAPL")  # the reject failed stream 1, which let its topic go
         ws_session.on_loop(connection, connection._summarize)
     # Each summary starts the next window's timer.
     assert ws_session.on_loop(connection, lambda: connection._summary) is not first
     assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
-    [rejected] = [m for m in caplog.messages if "a rejected row fails" in m]
-    assert rejected.startswith(f"{_URL} channel T: a rejected row fails streams [1]: ")
-    assert rejected.endswith('"p":"bad","q":1,"t":1700000000000,"s":100,"z":3,"ds":"100"}')
+    [dropped] = [m for m in caplog.messages if m.startswith("dropped a T row for AAPL")]
+    assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
-    # The failed stream 1 has left the connection; stream 2 has had no rows.
+    # The odd rows failed no stream: stream 1 got both rows it could read.
     assert summary.startswith(
-        f"{_URL}: last 60 s: 1 data batches, rows T=1, 1 rejected; rows per stream 0 [], "
-        "streams with no rows 1 [2]; 1 of 1 topics acknowledged 1 [T.MSFT], added 1 [T.MSFT], "
-        "removed 0 [], 0 pending, 0 with no acknowledgement; last data T "
+        f"{_URL}: last 60 s: 1 data batches, rows T=2, 1 dropped; rows per stream 1 [1=2], "
+        "streams with no rows 1 [2]; 2 of 2 topics acknowledged 2 [T.AAPL, T.MSFT], added 2 "
+        "[T.AAPL, T.MSFT], removed 0 [], 0 pending, 0 with no acknowledgement; last data T "
     )
     assert summary.endswith(" s ago; state CONNECTED, 0 reconnects")
     # The next window starts empty and counts each stream's rows of the window only.
@@ -1804,21 +1817,21 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
         ws_session.flush()
         ws_session.on_loop(connection, connection._summarize)
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
-    assert "1 data batches, rows T=1, 0 rejected; rows per stream 1 [2=1], " in summary
-    assert "streams with no rows 0 []; " in summary
-    assert "acknowledged 1 [T.MSFT], added 0 [], removed 0 [], " in summary
+    assert "1 data batches, rows T=1, 0 dropped; rows per stream 1 [2=1], " in summary
+    assert "streams with no rows 1 [1]; " in summary
+    assert "acknowledged 2 [T.AAPL, T.MSFT], added 0 [], removed 0 [], " in summary
     caplog.clear()
     with caplog.at_level(logging.DEBUG):
         ws_session.on_loop(connection, connection._summarize)
-    assert "0 data batches, rows none, 0 rejected; rows per stream 0 [], " in caplog.text
-    assert "streams with no rows 1 [2]; " in caplog.text
+    assert "0 data batches, rows none, 0 dropped; rows per stream 0 [], " in caplog.text
+    assert "streams with no rows 2 [1, 2]; " in caplog.text
     # A topic that left since the last summary is named.
     caplog.clear()
     ws_session.session.release(other)
     ws_session.unsubscribed("T.MSFT")
     with caplog.at_level(logging.DEBUG):
         ws_session.on_loop(connection, connection._summarize)
-    assert "0 of 0 topics acknowledged 0 [], added 0 [], removed 1 [T.MSFT], " in caplog.text
+    assert "1 of 1 topics acknowledged 1 [T.AAPL], added 0 [], removed 1 [T.MSFT], " in caplog.text
     caplog.clear()
     with caplog.at_level(logging.INFO):
         ws_session.on_loop(connection, connection._summarize)

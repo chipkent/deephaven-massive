@@ -156,8 +156,7 @@ def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
         symbols=None,
         time_header="sip_timestamp",
         window_ns=None,
-        to_ns=lambda values: values,
-        session=None,
+        to_ns=lambda values: (values, ""),
         block_size=block_size,
         required=frozenset({"ticker"}),
     )
