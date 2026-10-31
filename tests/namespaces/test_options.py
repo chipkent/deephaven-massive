@@ -620,15 +620,9 @@ def _factory(name: str) -> Callable[..., object]:
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_docstrings_link_their_column_reference_section(name: str) -> None:
+def test_docstrings_name_their_dataset_page(name: str) -> None:
     doc = inspect.getdoc(_factory(name)) or ""
-    link = (
-        f"https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#{name}"
-    )
-    assert link in doc
-    assert "columns()" in doc
-    assert "dm.ALL" in doc
-    assert "limit" in doc
+    assert f"docs/datasets/options.{name}.md" in doc
 
 
 def test_every_factory_has_a_dataset() -> None:

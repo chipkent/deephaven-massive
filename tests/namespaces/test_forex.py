@@ -59,7 +59,6 @@ R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 MS = 10**6
-DOCS = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#"
 
 RANGE = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
 
@@ -431,7 +430,7 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
         )
 
 
-def test_every_docstring_links_its_section_and_states_limit_and_all() -> None:
+def test_every_docstring_names_its_dataset_page() -> None:
     methods = {
         "quotes": forex._Forex.quotes,
         "last_quote": forex._Forex.last_quote,
@@ -444,11 +443,7 @@ def test_every_docstring_links_its_section_and_states_limit_and_all() -> None:
     }
     assert {f"forex.{name}" for name in methods} == {spec.name for spec in forex.DATASETS}
     for name, method in methods.items():
-        doc = method.__doc__ or ""
-        assert f"{DOCS}{name}" in " ".join(doc.split()), name
-        assert "columns()" in doc
-        assert "limit" in doc
-        assert "dm.ALL" in doc
+        assert f"docs/datasets/forex.{name}.md" in (method.__doc__ or ""), name
 
 
 # --- fixtures -------------------------------------------------------------------------------

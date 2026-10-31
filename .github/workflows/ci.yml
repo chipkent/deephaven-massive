@@ -294,7 +294,7 @@ jobs:
         # WebSocket, and flat-file schemas and the vendor's field descriptions) are package
         # data the library loads at run time.
         # The vendored snapshot under vendor/ is Massive's published content and goes in
-        # neither distribution. The sdist carries the column reference its tests compare.
+        # neither distribution. The sdist carries the dataset reference its tests compare.
         run: |
           unzip -Z1 dist/*.whl > "$RUNNER_TEMP/wheel-files.txt"
           tar -tzf dist/*.tar.gz > "$RUNNER_TEMP/sdist-files.txt"
@@ -307,8 +307,8 @@ jobs:
             grep '^deephaven_massive/_massive/refresh/' "$RUNNER_TEMP/wheel-files.txt" >&2
             exit 1
           fi
-          grep -q '^[^/]*/docs/datasets/stocks\.md$' "$RUNNER_TEMP/sdist-files.txt" \
-            || { echo "the sdist lacks the column reference, docs/datasets/" >&2; exit 1; }
+          grep -q '^[^/]*/docs/datasets/stocks\.trades\.md$' "$RUNNER_TEMP/sdist-files.txt" \
+            || { echo "the sdist lacks the dataset reference, docs/datasets/" >&2; exit 1; }
           if grep -q '^[^/]*/vendor/' "$RUNNER_TEMP/sdist-files.txt"; then
             echo "the sdist contains vendored files:" >&2
             grep '^[^/]*/vendor/' "$RUNNER_TEMP/sdist-files.txt" >&2
@@ -323,7 +323,7 @@ jobs:
         # The library imports deephaven at module level, so using it needs a running Deephaven
         # JVM, exactly as it does for users. The wheel is installed, with its dependencies from
         # PyPI, in a fresh virtual environment next to deephaven-server. The script starts a
-        # server, imports every module the wheel ships, renders the column reference from the
+        # server, imports every module the wheel ships, renders the dataset reference from the
         # installed catalog and compares it with docs/datasets/, and opens a session. -I keeps
         # PYTHONPATH and the script's directory off sys.path, and the script fails if the
         # package is imported from the checkout's src/ rather than the wheel.

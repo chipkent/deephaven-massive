@@ -61,12 +61,11 @@ def test_when_each_days_file_was_published(
 ) -> None:
     """When Massive publishes each day's stock file, against the documented ~11:00 New York.
 
-    The library treats a day's file as unpublished before `flat_file_publish_cutoff` (11:30
-    New York time the next day), or 3 hours later when that day is a Saturday or Sunday, as
-    Friday's is. Records the `LastModified` of `us_stocks_sip/day_aggs_v1` for each of the
-    last ten weekdays, in New York time, or why it has none (a holiday has no file). Reading
-    it: every weekday's file modified before 11:30 the next day, and every Friday's before
-    14:30 on Saturday, confirms the rule; later ones show how far to move it. Skips when the
+    The library assumes no publication time: a missing day's file with no later file is taken
+    for one not out yet, and read from REST under `AUTO`. Records the `LastModified` of
+    `us_stocks_sip/day_aggs_v1` for each of the last ten weekdays, in New York time, or why it
+    has none (a holiday has no file). Reading it: the spread of times, Fridays' included, is
+    what the error message's "about 11:00 ET, but the time varies" describes. Skips when the
     S3 credentials do not reach the stock day files.
     """
     if not flat_files_reached(_DAY_FILE):

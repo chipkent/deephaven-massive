@@ -1,10 +1,10 @@
-"""Tests for the column reference: parity, docstring links, `render`, and `sync`.
+"""Tests for the dataset reference: parity, docstring links, `render`, and `sync`.
 
-The parity test renders the pages from the process's catalog and the committed provenance, in
-the test JVM, and fails on any page under `docs/datasets/` that is stale, missing, or extra,
-naming the command that fixes it. The docstring rule checks that every dataset method's
-docstring links its own section. Both are functions over their inputs, so the tests also run
-them on a copy of the directory and on synthetic namespaces that break them.
+The parity test renders the pages from the process's catalog, the dataset calls, and the
+committed provenance, in the test JVM, and fails on any page under `docs/datasets/` that is
+stale, missing, or extra, naming the command that fixes it. The docstring rule checks that
+every dataset method's docstring names its own page. Both are functions over their inputs, so
+the tests also run them on a copy of the directory and on synthetic namespaces that break them.
 """
 
 from __future__ import annotations
@@ -16,25 +16,40 @@ import re
 import shutil
 import typing
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
+from deephaven_massive._dataset_list import dataset_calls
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_ORDER
 from deephaven_massive._datasets.column_reference import (
     COMMAND,
+    INDEX,
+    PAGES_URL,
+    DatasetCall,
     SyncResult,
-    anchor,
     call_path,
     column_changes,
+    page_name,
+    page_url,
     render,
     sync,
 )
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._massive import Field, Provenance, Source, Transport, WireType, source
+from deephaven_massive._massive import (
+    Field,
+    ParamKind,
+    Provenance,
+    RestPath,
+    Source,
+    Transport,
+    WireType,
+    provenance,
+    source,
+)
 from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._session import CATALOG
 
@@ -45,9 +60,11 @@ if TYPE_CHECKING:
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "datasets"
-SITE = "https://github.com/chipkent/deephaven-massive/blob/main/"
-# The wire interface names `Source.memberships` but exports no constructor for an element.
+# The wire interface names `Source.memberships`, `RestPath.params`, and `Provenance.plans` but
+# exports no constructor for their elements, so the tests copy real ones.
 MEMBERSHIP = type(source(Transport.WS, "stocks/T").memberships[0])
+PARAM = type(source(Transport.REST, "/v3/trades/{stockTicker}").params[0])
+_REAL_PLANS = next(iter(provenance().plans.values()))
 
 
 # --- The parity of docs/datasets ---------------------------------------------------------------
@@ -80,7 +97,7 @@ def parity_message(directory: Path, pages: Mapping[str, str]) -> str | None:
 
 
 def rendered() -> dict[str, str]:
-    return render(CATALOG, _massive.provenance())
+    return render(CATALOG, _massive.provenance(), dataset_calls())
 
 
 def test_the_committed_pages_are_the_rendered_pages() -> None:
@@ -88,30 +105,64 @@ def test_the_committed_pages_are_the_rendered_pages() -> None:
     assert message is None, message
 
 
-def test_every_namespace_with_datasets_has_a_page() -> None:
-    assert list(rendered()) == [
-        "stocks.md",
-        "options.md",
-        "futures.md",
-        "indices.md",
-        "forex.md",
-        "crypto.md",
-        "reference.md",
-        "snapshots.md",
-        "indicators.md",
-        "economy.md",
-        "partners.md",
-    ]
+def test_every_dataset_has_a_page_after_the_index() -> None:
+    assert list(rendered()) == [INDEX, *(f"{name}.md" for name in CATALOG.by_name)]
 
 
 def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     page = rendered()["snapshots.md"]
-    assert page.startswith("# Columns of `m.snapshots`\n")
-    assert page.count("<a id=") == 1
-    assert '<a id="snapshots"></a>\n\n## `m.snapshots`\n\n' in page
-    # One dataset, so the note on unreadable symbols agrees with one.
-    assert "\n`m.snapshots` has a `RawSymbol` String column" in page
-    assert "m.snapshots" not in rendered()["reference.md"]
+    assert page.startswith("# `m.snapshots`\n")
+    assert "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)\n" in page
+    assert "[`m.snapshots`](snapshots.md)" in rendered()[INDEX]
+
+
+def test_the_real_pages_state_each_poll_mode() -> None:
+    pages = rendered()
+    replace = "holds exactly the latest cycle's rows, keyed by `Symbol` (`dm.PollMode.REPLACE`)"
+    assert f"| `poll()` | {replace} |" in pages["options.contracts.md"]
+    assert (
+        "| `poll()` | appends only rows it has not seen, keyed by `Id` (`dm.PollMode.APPEND`)"
+        in pages["reference.news.md"]
+    )
+    assert (
+        "| `poll()` | adds and updates rows, never deletes, keyed by `Symbol` and `IssuerName`"
+        in pages["stocks.ipos.md"]
+    )
+    status = pages["reference.market_status.md"]
+    assert (
+        "| `poll()` | holds exactly the latest cycle's rows; `mode=dm.PollMode.APPEND` also keys by"
+        in (status)
+    )
+    # A dataset without fetch() has no poll() row, and one without sort or filters none of theirs.
+    trades = pages["stocks.trades.md"]
+    assert "| `poll()` |" not in trades
+    assert "| `sort` |" not in trades
+    assert "| `filters` |" not in trades
+
+
+def test_the_real_pages_list_sort_values_and_filters() -> None:
+    pages = rendered()
+    assert "| `sort` | `ticker`, `name`, `market`," in pages["reference.tickers.md"]
+    assert "| `sort` | any REST field of the rows" in pages["stocks.dividends.md"]
+    # The method's own arguments set `type` and `date`, so neither is a filter.
+    tickers = next(
+        line for line in pages["reference.tickers.md"].split("\n") if line.startswith("| `filters`")
+    )
+    assert "`type`" not in tickers
+    assert "`date`" not in tickers
+    assert "`ticker_gte`" in tickers
+    assert (
+        "| Time range | `start` and `end` are sent as `ex_dividend_date.gte` and"
+        in (pages["stocks.dividends.md"])
+    )
+
+
+def test_the_real_pages_show_massives_plan_tables() -> None:
+    bars = rendered()["stocks.bars.md"]
+    assert "| Plan | Day Aggregates (flat files) | Minute Aggregates (flat files) |" in bars
+    assert "| Stocks Basic | Not included | Not included | End-of-day, 2 years |" in bars
+    assert "Custom Bars (OHLC) (REST)" in bars
+    assert "Aggregates (Per Minute) (WebSocket)" in bars
 
 
 def test_the_wire_columns_follow_the_order_of_every_supplied_by() -> None:
@@ -134,11 +185,11 @@ def _plant_directory(directory: Path) -> None:
 
 
 def _delete_page(directory: Path) -> None:
-    (directory / "stocks.md").unlink()
+    (directory / "stocks.trades.md").unlink()
 
 
 def _edit_page(directory: Path) -> None:
-    page = directory / "crypto.md"
+    page = directory / "crypto.trades.md"
     page.write_text(page.read_text() + "An edit.\n")
 
 
@@ -147,8 +198,8 @@ def _edit_page(directory: Path) -> None:
     [
         (_plant_stray, "extra: stray.md"),
         (_plant_directory, "extra: old"),
-        (_delete_page, "missing: stocks.md"),
-        (_edit_page, "stale: crypto.md"),
+        (_delete_page, "missing: stocks.trades.md"),
+        (_edit_page, "stale: crypto.trades.md"),
     ],
 )
 def test_the_parity_test_fails_on_damage_that_the_command_repairs(
@@ -172,16 +223,16 @@ def test_the_parity_test_fails_on_a_linked_page_or_a_missing_directory(tmp_path:
     shutil.copytree(DOCS, copy)
     pages = rendered()
     # A link to the right bytes is still no committed page: sync would replace it.
-    (tmp_path / "stocks.md").write_bytes((copy / "stocks.md").read_bytes())
-    (copy / "stocks.md").unlink()
-    (copy / "stocks.md").symlink_to(tmp_path / "stocks.md")
-    assert "stale: stocks.md" in str(parity_message(copy, pages))
+    (tmp_path / "stocks.trades.md").write_bytes((copy / "stocks.trades.md").read_bytes())
+    (copy / "stocks.trades.md").unlink()
+    (copy / "stocks.trades.md").symlink_to(tmp_path / "stocks.trades.md")
+    assert "stale: stocks.trades.md" in str(parity_message(copy, pages))
     gone = f"docs/datasets/ is not a directory; run `{COMMAND}`"
     assert parity_message(tmp_path / "absent", pages) == gone
-    assert parity_message(tmp_path / "stocks.md", pages) == gone
+    assert parity_message(tmp_path / "stocks.trades.md", pages) == gone
 
 
-# --- The docstring rule: every dataset method links its own section ----------------------------
+# --- The docstring rule: every dataset method names its own page -------------------------------
 
 
 def factory(session: type, path: str) -> Callable[..., object] | None:
@@ -206,7 +257,7 @@ def factory(session: type, path: str) -> Callable[..., object] | None:
 
 
 def link_problems(session: type, specs: Iterable[DatasetSpec]) -> list[str]:
-    """Return every dataset whose method's docstring does not link its own section.
+    """Return every dataset whose method's docstring does not name its own page.
 
     Args:
         session: The session class whose namespaces hold the dataset methods.
@@ -214,21 +265,21 @@ def link_problems(session: type, specs: Iterable[DatasetSpec]) -> list[str]:
 
     Returns:
         One message per dataset whose call path names no method, or whose method's docstring
-        lacks the full GitHub URL of `docs/datasets/<namespace>.md#<anchor>`, ending at the
-        anchor (a longer anchor that merely starts with it does not count).
+        lacks `docs/datasets/<dataset>.md`; another dataset's page, even one whose name starts
+        or ends like it, does not count, since the prefix and `.md` bound the name.
     """
     problems = []
     for spec in specs:
         method = factory(session, call_path(spec))
-        link = f"docs/datasets/{spec.name.split('.')[0]}.md#{anchor(spec)}"
+        link = f"docs/datasets/{page_name(spec)}"
         if method is None:
             problems.append(f"{spec.name}: no method at {call_path(spec)}")
-        elif not re.search(re.escape(SITE + link) + r"(?![\w-])", method.__doc__ or ""):
-            problems.append(f"{spec.name}: the docstring must link {SITE}{link}")
+        elif link not in (method.__doc__ or ""):
+            problems.append(f"{spec.name}: the docstring must name {link}")
     return problems
 
 
-def test_every_dataset_docstring_links_its_section() -> None:
+def test_every_dataset_docstring_names_its_page() -> None:
     assert link_problems(dm.MassiveSession, CATALOG.by_name.values()) == []
 
 
@@ -236,32 +287,25 @@ class _Linked(Namespace):
     __slots__ = ()
 
     def dividends(self) -> Query:
-        """Cash dividends.
-
-        Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends.
-        """
+        """Cash dividends. Columns: docs/datasets/stocks.dividends.md."""
         raise NotImplementedError
 
     def splits(self) -> Query:
-        """Splits; the link names another dataset.
-
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends
-        """
+        """Splits; the page named is another dataset's: docs/datasets/stocks.dividends.md."""
         raise NotImplementedError
 
     def ipos(self) -> Query:
         raise NotImplementedError
 
     def financials(self) -> Query:
-        """Financials; the link names a longer anchor that starts with this one.
+        """Financials; the page named only starts like this one's.
 
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios
+        docs/datasets/stocks.financials.ratios.md
         """
         raise NotImplementedError
 
     def news(self) -> Query:
-        """News; the link lacks the GitHub URL: docs/datasets/stocks.md#news."""
+        """News; the page named only ends like this one's: docs/datasets/more.stocks.news.md."""
         raise NotImplementedError
 
 
@@ -271,7 +315,7 @@ class _LinkedSession:
         raise NotImplementedError
 
     def news(self) -> Query:
-        """Any news: docs/datasets/reference.md#news."""
+        """Any news: docs/datasets/reference.news.md."""
         raise NotImplementedError
 
 
@@ -294,10 +338,10 @@ def test_the_docstring_rule_reports_every_missing_link() -> None:
         )
     ]
     assert link_problems(_LinkedSession, specs) == [
-        f"stocks.splits: the docstring must link {SITE}docs/datasets/stocks.md#splits",
-        f"stocks.ipos: the docstring must link {SITE}docs/datasets/stocks.md#ipos",
-        f"stocks.financials: the docstring must link {SITE}docs/datasets/stocks.md#financials",
-        f"stocks.news: the docstring must link {SITE}docs/datasets/stocks.md#news",
+        "stocks.splits: the docstring must name docs/datasets/stocks.splits.md",
+        "stocks.ipos: the docstring must name docs/datasets/stocks.ipos.md",
+        "stocks.financials: the docstring must name docs/datasets/stocks.financials.md",
+        "stocks.news: the docstring must name docs/datasets/stocks.news.md",
         "stocks.missing: no method at m.stocks.missing",
         "reference.news: no method at m.reference.news",
         "stocks.dividends.more: no method at m.stocks.dividends.more",
@@ -377,10 +421,14 @@ _SOURCES: dict[tuple[Transport, str], Source] = {
         ),
         memberships=(MEMBERSHIP(kind="trades", group="crypto", position=0),),
     ),
-    (R, "/ratios"): Source(
+    # A list path whose `sort` is free text and whose one other parameter is a filter.
+    (R, "/ratios"): RestPath(
         key="/ratios",
-        transport=R,
         fields=(_field("pe", "PriceEarnings", WireType.DOUBLE, text="Price | earnings."),),
+        params=(
+            PARAM(name="sort", kind=ParamKind.STRING),
+            PARAM(name="pe.gte", kind=ParamKind.NUMBER),
+        ),
     ),
 }
 
@@ -417,6 +465,32 @@ _CATALOG = Catalog(
     (_STOCK_TRADES, _RATIOS, _CRYPTO_TRADES),
     source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
 )
+
+
+def _plan_page(title: str, rows: tuple[tuple[str, str, str | None, str | None], ...]) -> object:
+    """Return a page's plan tables, built from a real one, as `Provenance.plans` holds them.
+
+    Args:
+        title: The page's title.
+        rows: Each plan's name, access, recency, and history.
+
+    Returns:
+        The page's plan access, with the summaries `"Access."`, `"Recency."`, and `""`.
+    """
+    terms = _REAL_PLANS.plans[0]
+    return dataclasses.replace(
+        _REAL_PLANS,
+        title=title,
+        access="Access.",
+        recency="Recency.",
+        history="",
+        plans=tuple(
+            dataclasses.replace(terms, plan=plan, access=access, recency=recency, history=history)
+            for plan, access, recency, history in rows
+        ),
+    )
+
+
 _PROVENANCE = Provenance(
     fetched=dt.date(2026, 10, 27),
     urls={
@@ -428,40 +502,78 @@ _PROVENANCE = Provenance(
         # A shared source: `stocks.trades` keeps only the page whose path names `stocks`.
         (W, "stocks/T"): [
             "https://docs.example/ws/crypto/trades.md",
-            "https://docs.example/ws/stocks/trades.md",
+            "https://massive.com/docs/websocket/stocks/trades.md",
         ],
         # No page names the class, so the dataset keeps them all; the duplicate is listed once.
         (R, "/trades/{ticker}"): ["https://docs.example/a.md", "https://docs.example/a.md"],
         (W, "crypto/XT"): ["https://docs.example/ws/crypto.md"],
     },
+    plans=cast(
+        "Mapping[str, Any]",
+        {
+            "https://docs.example/a.md": _plan_page(
+                "Trades",
+                (
+                    ("Stocks Basic", "Included", "End-of-day", "2 years"),
+                    ("Stocks Starter", "Included", None, None),
+                    ("Stocks Business", "Not included", None, None),
+                ),
+            ),
+            "https://massive.com/docs/websocket/stocks/trades.md": _plan_page(
+                "Trades",
+                (
+                    ("Stocks Basic", "Included", "Not included", None),
+                    ("Stocks Advanced", "Included", "Real-time", None),
+                ),
+            ),
+            # A page that lists no plan, only its summaries.
+            "https://docs.example/rest/stocks/ratios.md": _plan_page("Ratios", ()),
+        },
+    ),
 )
 
-_GUIDE = (
-    "Each section lists one dataset's columns in the order every verb returns them. "
-    "**Supplied by** names the transports that fill a column; a column the serving transport "
-    "does not fill is null. The wire-field columns name the Massive fields behind each column "
-    "(`request` for a value the library fills from the request). The same descriptions appear "
-    "in the web UI's column tooltips and in a query's `columns()`."
-)
-_MERGE = (
-    "A dataset has only the columns it can fill, so two asset classes' tables of one kind "
-    "(stock and forex quotes, say) can differ in their columns, while the columns they share "
-    "have one name and type. To merge them, keep the shared columns: "
-    "`common = [c for c in a.column_names if c in b.column_names]`, then "
-    "`merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing "
-    'one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.'
-)
+_CALLS = {
+    "stocks.trades": DatasetCall(
+        signature="m.stocks.trades(symbols)", verbs=("blink", "history"), arguments=("symbols",)
+    ),
+    "stocks.financials.ratios": DatasetCall(
+        signature="m.stocks.financials.ratios(*, sort=None, filters=None)",
+        verbs=("fetch", "poll"),
+        arguments=("sort", "filters"),
+        typed=("sort", "filters"),
+    ),
+    "crypto.trades": DatasetCall(
+        signature="m.crypto.trades(symbols)", verbs=("blink",), arguments=("symbols",)
+    ),
+}
+
 _FOOTER = (
     "Generated by `uv run python scripts/render_reference.py` from Massive's documentation as "
-    "fetched on 2026-10-27. The descriptions are Massive's, corrected where they are clearly "
-    "wrong; the library writes its own for the key columns and the columns it computes."
+    "fetched on 2026-10-27. The descriptions and plan tables are Massive's, descriptions "
+    "corrected where they are clearly wrong; the library writes its own for the key columns "
+    "and the columns it computes."
 )
 
 
-def test_render_gives_one_page_per_namespace_in_catalog_order() -> None:
-    pages = render(_CATALOG, _PROVENANCE)
-    assert list(pages) == ["stocks.md", "crypto.md"]
-    assert render(Catalog(()), _PROVENANCE) == {}
+def _rendered() -> dict[str, str]:
+    return render(_CATALOG, _PROVENANCE, _CALLS)
+
+
+def test_render_gives_the_index_and_one_page_per_dataset_in_catalog_order() -> None:
+    assert list(_rendered()) == [
+        INDEX,
+        "stocks.trades.md",
+        "stocks.financials.ratios.md",
+        "crypto.trades.md",
+    ]
+    assert list(render(Catalog(()), _PROVENANCE, {})) == [INDEX]
+
+
+def test_render_needs_every_datasets_call() -> None:
+    with pytest.raises(
+        KeyError, match=re.escape("no call given for the datasets ['crypto.trades']")
+    ):
+        render(_CATALOG, _PROVENANCE, {k: v for k, v in _CALLS.items() if k != "crypto.trades"})
 
 
 CATALOG_INSERT = next(
@@ -472,8 +584,35 @@ CATALOG_INSERT = next(
 """Every dataset's arrival-time description, the same on every page."""
 
 
-def test_the_rendered_stocks_page() -> None:
-    page = render(_CATALOG, _PROVENANCE)["stocks.md"]
+def test_the_rendered_index() -> None:
+    index = _rendered()[INDEX]
+    classes = (
+        "| Dataset | `m.stocks` | `m.options` | `m.futures` | `m.indices` | `m.forex` "
+        "| `m.crypto` |"
+    )
+    # `trades` is shared by two classes, so it has a grid row; the ratios are listed only.
+    grid = "| `trades` | [✓](stocks.trades.md) |  |  |  |  | [✓](crypto.trades.md) |"
+    assert f"\n{classes}\n| --- | --- | --- | --- | --- | --- | --- |\n{grid}\n\nTables of" in index
+    assert "`financials.ratios` |" not in index
+    stocks = (
+        "## `m.stocks`\n\n| Dataset | Summary | Verbs |\n| --- | --- | --- |\n"
+        "| [`m.stocks.trades`](stocks.trades.md) | Trades of stocks, tick by tick. "
+        "| blink, history |\n"
+        "| [`m.stocks.financials.ratios`](stocks.financials.ratios.md) | Financial ratios. | "
+        "fetch, poll |\n"
+    )
+    assert stocks in index
+    assert index.endswith(f"\n---\n\n{_FOOTER}\n")
+    # A catalog in which no two classes share a dataset has no grid.
+    alone = Catalog(
+        (_RATIOS,),
+        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+    )
+    assert "By asset class" not in render(alone, _PROVENANCE, _CALLS)[INDEX]
+
+
+def test_the_rendered_stocks_trades_page() -> None:
+    page = _rendered()["stocks.trades.md"]
     columns = _CATALOG.dataset_schema(_STOCK_TRADES, raw_symbol=True).columns
     schema = {c.name: c for c in columns}
     symbol = schema["Symbol"].description.replace("|", "\\|")
@@ -484,63 +623,71 @@ def test_the_rendered_stocks_page() -> None:
     insert = schema["TimestampInsert"].description
     raw = schema["RawSymbol"].description
     every = "REST, flat files, WebSocket"
-    head = (
-        "| Column | Deephaven type | Description | Supplied by | REST field | Flat-file field "
-        "| WebSocket field |"
-    )
-    price = (
-        "| `Price` | double | The price, bid \\| ask. | REST, flat files, WebSocket "
-        "| `p`, `price` | `price` | `p` |"
-    )
-    expected = f"""# Columns of the `m.stocks` datasets
+    expected = f"""# `m.stocks.trades`
 
 <!-- Generated by `uv run python scripts/render_reference.py`; do not edit by hand. -->
 
-{_GUIDE}
-
-{_MERGE}
-
-`m.stocks.trades` has a `RawSymbol` String column, which holds Massive's spelling of a symbol \
-the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other \
-row. It is the one column whose presence depends on a setting: a session with \
-`unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on \
-such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
-
-<a id="trades"></a>
-
-## `m.stocks.trades`
-
 Trades of stocks, tick by tick.
 
-{head}
-| --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | {symbol} | {every} | request, `ticker` | `ticker` | `sym` |
-| `Date` | String | {day} | {every} |  |  |  |
-| `Timestamp` | Instant | {stamp} | {every} | `t` | `sip_timestamp` | `t` |
-| `RawSymbol` | String | {raw} | {every} | request, `ticker` | `ticker` | `sym` |
-{price}
-| `TimestampInsert` | Instant | {insert} | {every} |  |  |  |
+```python
+m.stocks.trades(symbols)
+```
+
+[All datasets](README.md)
+
+|  |  |
+| --- | --- |
+| Verbs | `blink()`, `history()` |
+| Served by | REST, flat files, WebSocket |
+
+## Plan access
+
+Which of Massive's plans include this dataset, how recent its data is on each, and how far \
+back its history goes, as Massive's pages state them.
+
+| Plan | Trades (Massive) | Trades (WebSocket) |
+| --- | --- | --- |
+| Stocks Basic | End-of-day, 2 years | Included |
+| Stocks Starter | Included |  |
+| Stocks Business | Not included |  |
+| Stocks Advanced |  | Real-time |
+
+## Columns
+
+| Column | Deephaven type | Description | Supplied by |
+| --- | --- | --- | --- |
+| `Symbol` | String | {symbol} | {every} |
+| `Date` | String | {day} | {every} |
+| `Timestamp` | Instant | {stamp} | {every} |
+| `RawSymbol` | String | {raw} | {every} |
+| `Price` | double | The price, bid \\| ask. | {every} |
+| `TimestampInsert` | Instant | {insert} | {every} |
+
+`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` \
+is null, and `RawSymbol` is null on every other row. A session with \
+`unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails \
+on such a row instead and has no `RawSymbol`; the table shows the default session.
+
+<details><summary>Massive fields</summary>
+
+The Massive field behind each column, per transport (`request` for a value the library fills \
+from the request; empty for a column the library computes).
+
+| Column | REST field | Flat-file field | WebSocket field |
+| --- | --- | --- | --- |
+| `Symbol` | request, `ticker` | `ticker` | `sym` |
+| `Date` |  |  |  |
+| `Timestamp` | `t` | `sip_timestamp` | `t` |
+| `RawSymbol` | request, `ticker` | `ticker` | `sym` |
+| `Price` | `p`, `price` | `price` | `p` |
+| `TimestampInsert` |  |  |  |
+
+</details>
 
 Massive's documentation of this dataset:
 
 - <https://docs.example/a.md>
-- <https://docs.example/ws/stocks/trades.md>
-
-<a id="financials-ratios"></a>
-
-## `m.stocks.financials.ratios`
-
-Financial ratios.
-
-| Column | Deephaven type | Description | Supplied by | REST field |
-| --- | --- | --- | --- | --- |
-| `PriceEarnings` | double | Price \\| earnings. | REST | `pe` |
-| `TimestampInsert` | Instant | {insert} | REST |  |
-
-Massive's documentation of this dataset:
-
-- <https://docs.example/rest/crypto/ratios.md>
-- <https://docs.example/rest/stocks/ratios.md>
+- <https://massive.com/docs/websocket/stocks/trades.md>
 
 ---
 
@@ -549,49 +696,61 @@ Massive's documentation of this dataset:
     assert page == expected
 
 
-def test_the_raw_symbol_note_names_the_datasets_that_read_their_symbol_from_rows() -> None:
-    second = dataclasses.replace(_STOCK_TRADES, name="stocks.more_trades")
+def test_the_rendered_ratios_page() -> None:
+    page = _rendered()["stocks.financials.ratios.md"]
+    facts = (
+        "| Verbs | `fetch()`, `poll()` |\n"
+        "| Served by | REST |\n"
+        "| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` "
+        "(`dm.PollMode.REPLACE`) |\n"
+        "| `sort` | any REST field of the rows (see Massive fields below), or several separated "
+        "by commas, each with an optional `.asc` or `.desc` |\n"
+        "| `filters` | `pe_gte` |\n"
+    )
+    assert facts in page
+    # A page that lists no plan shows its summaries; a page of no plan tables adds nothing.
+    assert "\n| Plan |" not in page
+    assert "\n- Ratios (Massive): Access.; Recency.\n" in page
+    # No RawSymbol column, so no note.
+    assert "RawSymbol" not in page
+    assert "| `PriceEarnings` | double | Price \\| earnings. | REST |\n" in page
+
+
+def test_sort_and_filters_of_a_path_that_takes_neither() -> None:
+    bare = dataclasses.replace(cast("RestPath", _SOURCES[R, "/ratios"]), params=())
     catalog = Catalog(
-        (_STOCK_TRADES, second, _RATIOS),
-        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
-    )
-    page = render(catalog, _PROVENANCE)["stocks.md"]
-    assert "\n`m.stocks.trades` and `m.stocks.more_trades` have a `RawSymbol` String column" in (
-        page
-    )
-    assert page.count("`RawSymbol` String column") == 1
-    # A page whose datasets take their symbols only from requests, or have none, has no note.
-    alone = Catalog(
         (_RATIOS,),
-        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+        source_tables=lambda transport: (
+            {"/ratios": bare}
+            if transport is R
+            else {k: s for (t, k), s in _SOURCES.items() if t is transport}
+        ),
     )
-    assert "RawSymbol" not in render(alone, _PROVENANCE)["stocks.md"]
+    page = render(catalog, _PROVENANCE, _CALLS)["stocks.financials.ratios.md"]
+    assert "| `sort` | not taken |\n| `filters` | none |\n" in page
 
 
-def test_the_rendered_crypto_page() -> None:
-    page = render(_CATALOG, _PROVENANCE)["crypto.md"]
+def test_the_rendered_crypto_trades_page() -> None:
+    page = _rendered()["crypto.trades.md"]
     # One wire-field column for the one transport the dataset reads, and its own URLs only.
-    assert "| Column | Deephaven type | Description | Supplied by | WebSocket field |\n" in page
-    insert = CATALOG_INSERT
-    received = (
-        "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
-        f"| `TimestampInsert` | Instant | {insert} | WebSocket |  |\n"
-    )
+    assert "| Column | WebSocket field |\n" in page
+    received = "| `Received` | Instant | When Massive received it. | WebSocket |\n"
+    assert received in page
     links = "\nMassive's documentation of this dataset:\n\n- <https://docs.example/ws/crypto.md>\n"
-    assert page.endswith(f"{received}{links}\n---\n\n{_FOOTER}\n")
+    assert page.endswith(f"</details>\n{links}\n---\n\n{_FOOTER}\n")
+    # Its page has no plan tables.
+    assert "## Plan access" not in page
 
 
 def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
     bare = Provenance(fetched=dt.date(2026, 10, 27), urls={})
-    page = render(_CATALOG, bare)["crypto.md"]
-    assert page.endswith(
-        f"| `TimestampInsert` | Instant | {CATALOG_INSERT} | WebSocket |  |\n\n---\n\n{_FOOTER}\n"
-    )
+    page = render(_CATALOG, bare, _CALLS)["crypto.trades.md"]
+    assert page.endswith(f"</details>\n\n---\n\n{_FOOTER}\n")
     assert "documentation of this dataset" not in page
 
 
 def test_the_real_pages_link_only_the_datasets_own_class() -> None:
-    options = rendered()["options.md"]
+    options = rendered()["options.snapshots.md"]
     snapshot = "https://massive.com/docs/rest/{}/snapshots/unified-snapshot.md"
     assert f"- <{snapshot.format('options')}>" in options
     for other in ("stocks", "forex", "crypto", "indices"):
@@ -603,20 +762,24 @@ def test_the_real_pages_link_only_the_datasets_own_class() -> None:
 
 
 def test_every_page_line_is_clean() -> None:
-    for page in (*render(_CATALOG, _PROVENANCE).values(), *rendered().values()):
+    for page in (*_rendered().values(), *rendered().values()):
         assert page.endswith("\n")
         assert not page.endswith("\n\n")
         assert all(line == line.rstrip() for line in page.split("\n"))
 
 
-def test_anchors_and_call_paths() -> None:
-    assert anchor(_STOCK_TRADES) == "trades"
-    assert anchor(_RATIOS) == "financials-ratios"
+def test_page_names_urls_and_call_paths() -> None:
+    assert page_name(_STOCK_TRADES) == "stocks.trades.md"
+    assert page_name(_RATIOS) == "stocks.financials.ratios.md"
+    assert page_url(_RATIOS) == f"{PAGES_URL}stocks.financials.ratios.md"
     assert call_path(_RATIOS) == "m.stocks.financials.ratios"
     snapshots = CATALOG.by_name["snapshots"]
-    assert (anchor(snapshots), call_path(snapshots)) == ("snapshots", "m.snapshots")
+    assert (page_name(snapshots), call_path(snapshots)) == ("snapshots.md", "m.snapshots")
     news = CATALOG.by_name["partners.benzinga.news"]
-    assert (anchor(news), call_path(news)) == ("benzinga-news", "m.partners.benzinga.news")
+    assert (page_name(news), call_path(news)) == (
+        "partners.benzinga.news.md",
+        "m.partners.benzinga.news",
+    )
 
 
 # --- sync --------------------------------------------------------------------------------------
@@ -716,16 +879,22 @@ def test_the_column_report_reads_back_every_dataset_of_the_real_pages() -> None:
 
 
 def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
-    def page(heading: str, rows: str) -> str:
-        return f"# T\n\n## `{heading}`\n\nSummary.\n\n| Column | Deephaven type |\n{rows}"
+    def page(call: str, rows: str) -> str:
+        # The facts and the folded wire fields have rows that start like column rows too.
+        return (
+            f"# `{call}`\n\nSummary.\n\n| `sort` | `ticker` |\n\n## Columns\n\n"
+            f"| Column | Deephaven type |\n{rows}\n<details><summary>x</summary>\n\n"
+            "| `Wire` | `w` |\n\n</details>\n\n## Later\n\n| `After` | long |\n"
+        )
 
     before = {
-        "a.md": page("m.a.x", "| `Keep` | long |\n| `Gone` | double |\n| `Codes` | int[] |\n"),
-        "b.md": page("m.b.y", "| `Only` | String |\n"),
+        INDEX: "# Dataset reference\n\n| `trades` | [✓](a.x.md) |\n",
+        "a.x.md": page("m.a.x", "| `Keep` | long |\n| `Gone` | double |\n| `Codes` | int[] |\n"),
+        "b.y.md": page("m.b.y", "| `Only` | String |\n"),
     }
     after = {
-        "a.md": page("m.a.x", "| `Keep` | long |\n| `Codes` | long[] |\n| `New` | String[] |\n"),
-        "c.md": page("m.c.z", "| `One` | String |\n"),
+        "a.x.md": page("m.a.x", "| `Keep` | long |\n| `Codes` | long[] |\n| `New` | String[] |\n"),
+        "c.z.md": page("m.c.z", "| `One` | String |\n"),
     }
     assert column_changes(before, after) == [
         "m.a.x: added New; removed Gone; retyped Codes int[] to long[]",
@@ -735,14 +904,17 @@ def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
 
 
 def test_a_table_row_before_a_page_s_first_heading_belongs_to_no_dataset() -> None:
-    first = "## `m.a.x`\n\n| Column | Deephaven type |\n| `Keep` | long |\n"
-    second = "# B\n\n| `Stray` | String |\n\n## `m.b.y`\n\n| `Only` | String |\n"
+    first = "# `m.a.x`\n\n## Columns\n\n| Column | Deephaven type |\n| `Keep` | long |\n"
+    second = (
+        "# B\n\n## Columns\n\n| `Stray` | String |\n\n# `m.b.y`\n\n## Columns\n\n"
+        "| `Only` | String |\n"
+    )
     report = column_changes({"a.md": first, "b.md": second}, {"a.md": first})
     assert report == ["m.b.y: dataset removed"]  # m.a.x did not gain Stray
 
 
-def test_the_merge_recipe_is_only_on_pages_with_a_shared_kind() -> None:
+def test_the_merge_recipe_and_the_grid_are_on_the_index() -> None:
     pages = rendered()
-    assert "To merge them" in pages["stocks.md"]
-    for alone in ("snapshots.md", "economy.md", "indicators.md", "reference.md"):
-        assert "To merge them" not in pages[alone], alone
+    assert "To merge them" in pages[INDEX]
+    assert "| `bars` | [✓](stocks.bars.md) | [✓](options.bars.md) |" in pages[INDEX]
+    assert "To merge them" not in pages["stocks.trades.md"]
