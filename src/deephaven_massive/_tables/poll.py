@@ -802,24 +802,31 @@ class Poller:
             if now - began <= self._interval:
                 return
             stalled = now - self._progress_at
-            if stalled <= self._max_outage:
-                if not self._marked_late:
-                    self._marked_late = True
-                    note = f"cycle running since {utc_text(began_at)}; {good}"
-                    logger.debug(
-                        "%s poll() stream %d: the cycle started at %s runs past the %g s "
-                        "interval; marking its row",
-                        self._spec.name,
-                        self._stream_id,
-                        utc_text(began_at),
-                        self._interval,
-                    )
-                    # Under the watch lock, so the cycle's own update of the row follows it.
-                    core.update_streams(
-                        {self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})}
-                    )
-                return
-            self._running = False  # fails once
+            failing = stalled > self._max_outage
+            marking = not failing and not self._marked_late
+            if marking:
+                self._marked_late = True
+                note = f"cycle running since {utc_text(began_at)}; {good}"
+                # Under the watch lock, so the cycle's own update of the row follows it.
+                core.update_streams(
+                    {self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})}
+                )
+            if failing:
+                self._running = False  # fails once
+                # Stopped under the watch lock: the cycle's `_watch_end` comes after, so it
+                # sees the stop and publishes nothing; the cycle's waits end too.
+                self._stop.set()
+        if marking:
+            logger.debug(
+                "%s poll() stream %d: the cycle started at %s runs past the %g s interval; "
+                "marked its row",
+                self._spec.name,
+                self._stream_id,
+                utc_text(began_at),
+                self._interval,
+            )
+        if not failing:
+            return
         error = MassiveError(
             f"{self._spec.name} poll(): {good}; the cycle running since {utc_text(began_at)} "
             f"has received nothing for {stalled:.0f} s, longer than MassiveConfig.max_outage "
@@ -834,7 +841,6 @@ class Poller:
             stalled,
             self._max_outage,
         )
-        self._stop.set()  # the cycle's waits end, and it publishes nothing more
         with entered(self._exec_ctx):
             self._fail_fatal(core, error)
 

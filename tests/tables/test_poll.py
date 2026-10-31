@@ -884,6 +884,30 @@ def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
     del table
 
 
+def test_one_watch_thread_serves_every_poller_until_the_session_closes(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    script.rows(("AAPL", 1.0))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        first = start(massive_session, script=script, pollers=pollers, clock=clock)
+        second = start(massive_session, script=script, pollers=pollers, clock=clock)
+        clock.wait_for_sleepers(2)
+        pollers.close()
+        del first, second
+    label = massive_session._core.label
+    watch = [m for m in caplog.messages if "poll watch thread" in m]
+    assert watch == [
+        f"{label}: started the poll watch thread",
+        f"{label}: ending the poll watch thread: the session closed",
+    ]
+
+
 def test_a_failing_check_is_logged_and_the_others_still_run(
     *,
     massive_session: dm.MassiveSession,
