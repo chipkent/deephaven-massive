@@ -148,3 +148,30 @@ def test_which_recency_labels_the_futures_snapshot_carries(
     for row in page.rows:
         evidence(f"futures snapshot {row.get('ticker')}: {_timeframe_fields(row) or 'none'}")
     assert page.rows
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("71")
+def test_which_recency_labels_an_option_chain_carries(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Which recency labels the SPY option chain carries: its envelope status and timeframes.
+
+    The chain is the options host check's snapshot, and `fetch()` and `poll()` of options
+    snapshots refuse a `DELAYED` label unless options are listed in
+    `MassiveConfig.delayed_subscriptions`. Records the envelope status and every `timeframe`
+    field of three contracts. Reading it: on a delayed plan (Options Starter or Developer), a
+    `DELAYED` status or `last_trade.timeframe` confirms the refusal; neither means only
+    Massive's refusal on the real-time feed catches a delayed options plan, and the chain's
+    tables show `Recency` `UNKNOWN`.
+    """
+    page = live_rest.get(
+        source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}"),
+        {"underlyingAsset": "SPY"},
+        {"limit": 3},
+        bucket="options",
+    )
+    evidence(f"option chain envelope status: {page.status!r}")
+    for row in page.rows:
+        evidence(f"option chain row: {_timeframe_fields(row) or 'none'}")
+    assert page.rows

@@ -365,10 +365,11 @@ class StreamRow:
         path: The cluster path; null for a background read.
         recency: Whether the table's data is real-time or delayed: a stream's host's
             (`REALTIME` or `DELAYED`; `UNKNOWN` on a pinned host the library does not know);
-            for a `poll()` table of a subscription's data, `REALTIME` when the subscription is
-            not in `MassiveConfig.delayed_subscriptions` (a `DELAYED` label fails the table)
-            and `UNKNOWN` when it is (REST serves what the plan serves); null for a `poll()`
-            of data of no single subscription and for a background read.
+            for a `poll()` table of current data, what Massive's labels on its latest cycle
+            showed (`REALTIME`, or `DELAYED` for a subscription in
+            `MassiveConfig.delayed_subscriptions`; a delayed label on any other fails the
+            table), and `UNKNOWN` until a label shows either; null for reference, economy,
+            and partner data and for a background read. `UNKNOWN` is never real-time.
         rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
@@ -423,6 +424,7 @@ class StreamUpdate:
             stream reads one channel).
         symbol_count: How many symbols the stream now covers.
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
+        recency: What the latest `poll()` cycle's labels showed (`StreamRow.recency`).
         error: The transport's warning text (`StreamRow.error`).
         clear_error: True to set the transport's warning back to null; takes precedence over
             `error`.
@@ -438,6 +440,7 @@ class StreamUpdate:
     deferred: int | None = None
     symbol_count: int | None = None
     symbols: str | None = None
+    recency: Recency | None = None
     error: str | None = None
     clear_error: bool = False
     skipped: str | None = None
@@ -467,6 +470,7 @@ class StreamUpdate:
             deferred=row.deferred if self.deferred is None else self.deferred,
             symbol_count=row.symbol_count if self.symbol_count is None else self.symbol_count,
             symbols=row.symbols if self.symbols is None else self.symbols,
+            recency=row.recency if self.recency is None else self.recency,
             error=self._error(row),
             skipped=None
             if self.clear_skipped

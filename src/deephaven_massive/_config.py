@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BUSINESS_HOST",
     "DELAYED_HOST",
+    "DELAYED_PREFIX",
     "MIN_RECONNECT_BACKOFF",
     "REALTIME_HOST",
     "HostMap",
@@ -251,8 +252,10 @@ class MassiveConfig:
             data, is not affected. No stream ever moves between the feeds. Forex and crypto
             (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
             them. Fair-market-value (FMV) streams are real-time only, so an FMV stream of a
-            listed subscription raises `ValueError`. Defaults to an empty set: every
-            subscription is real-time. See README.md#real-time-or-delayed.
+            listed subscription raises `ValueError`. A `ws_hosts` pin of a delayed feed (a host
+            whose name starts with `delayed.`) needs its subscription listed, and a listed
+            subscription may pin no other host; either mismatch raises `ValueError`. Defaults to
+            an empty set: every subscription is real-time. See README.md#real-time-or-delayed.
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
             Defaults to 0.05 seconds (50 ms).
         rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
@@ -466,10 +469,18 @@ def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]
     return frozenset(value)
 
 
+DELAYED_PREFIX: Final = "delayed."
+"""The start of a delayed-feed hostname, such as `delayed.massive.com`."""
+
+
 def _check_delayed_subscriptions(
     delayed: frozenset[Subscription], ws_hosts: Mapping[AssetClass, str]
 ) -> None:
     """Refuse a `delayed_subscriptions` Massive cannot serve, or one a `ws_hosts` pin contradicts.
+
+    A host whose name starts with `delayed.` is a delayed feed: pinning one is asking for
+    delayed data, which only a listed subscription may do, and a listed subscription may pin
+    nothing else.
 
     Args:
         delayed: The validated `delayed_subscriptions`.
@@ -477,9 +488,9 @@ def _check_delayed_subscriptions(
 
     Raises:
         ValueError: If `delayed` holds `dm.Subscription.CURRENCIES` (Massive has no delayed
-            forex or crypto feed), `ws_hosts` pins `delayed.massive.com` for a class whose
-            subscription is not listed, or pins any other host for one that is. Each message
-            names both settings and what to change.
+            forex or crypto feed), or `ws_hosts` pins a `delayed.` host for forex or crypto,
+            or for a class whose subscription is not listed, or pins any other host for one
+            that is. Each message names both settings and what to change.
     """
     if Subscription.CURRENCIES in delayed:
         raise ValueError(
@@ -489,13 +500,19 @@ def _check_delayed_subscriptions(
     for asset_class, host in ws_hosts.items():
         subscription = subscription_of(asset_class)
         listed = subscription in delayed
-        if host == DELAYED_HOST and not listed:
+        pins_delayed = host.startswith(DELAYED_PREFIX)
+        if pins_delayed and subscription is Subscription.CURRENCIES:
             raise ValueError(
-                f"ws_hosts pins {asset_class} to Massive's delayed feed {DELAYED_HOST}, but "
-                f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
-                f"to use the delayed feed write {delayed_fix(subscription)} and drop the pin"
+                f"ws_hosts pins {asset_class} to {host}, but Massive has no delayed forex or "
+                "crypto feed; remove the pin"
             )
-        if listed and host != DELAYED_HOST:
+        if pins_delayed and not listed:
+            raise ValueError(
+                f"ws_hosts pins {asset_class} to the delayed feed {host}, but "
+                f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
+                f"to use the delayed feed write {delayed_fix(subscription)}"
+            )
+        if listed and not pins_delayed:
             raise ValueError(
                 f"delayed_subscriptions lists dm.Subscription.{subscription.name}, "
                 f"whose streams use Massive's delayed feed {DELAYED_HOST}, but ws_hosts pins "

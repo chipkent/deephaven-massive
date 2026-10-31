@@ -76,6 +76,7 @@ def test_recency_follows_the_host() -> None:
     assert recency_of(REALTIME_HOST) is Recency.REALTIME
     assert recency_of(BUSINESS_HOST) is Recency.REALTIME
     assert recency_of(DELAYED_HOST) is Recency.DELAYED
+    assert recency_of("delayed.example.com") is Recency.DELAYED
     assert recency_of("fullmarket-business.massive.com") is Recency.UNKNOWN
 
 

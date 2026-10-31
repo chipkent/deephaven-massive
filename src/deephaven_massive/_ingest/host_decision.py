@@ -43,7 +43,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, TypeVar
 
-from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, REALTIME_HOST
+from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -123,12 +123,13 @@ def recency_of(host: str) -> Recency:
         host: The hostname.
 
     Returns:
-        `REALTIME` for the real-time and Business hosts, `DELAYED` for the delayed host, and
-        `UNKNOWN` for any other (a pinned host the library does not know).
+        `REALTIME` for the real-time and Business hosts, `DELAYED` for a delayed feed (a host
+        whose name starts with `delayed.`), and `UNKNOWN` for any other (a pinned host the
+        library does not know).
     """
     if host in (REALTIME_HOST, BUSINESS_HOST):
         return Recency.REALTIME
-    if host == DELAYED_HOST:
+    if host.startswith(DELAYED_PREFIX):
         return Recency.DELAYED
     return Recency.UNKNOWN
 

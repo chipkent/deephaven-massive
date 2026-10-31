@@ -91,7 +91,6 @@ from deephaven_massive._enums import (
     AssetClass,
     HistorySource,
     PollMode,
-    Recency,
     Timespan,
     _require_enum,
 )
@@ -105,7 +104,12 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
-from deephaven_massive._tables.columns import column_table, describe, recency_note
+from deephaven_massive._tables.columns import (
+    column_table,
+    describe,
+    recency_note,
+    rest_recency_note,
+)
 from deephaven_massive._tables.diagnostics import shown_query
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.session_core import SessionCore
@@ -849,7 +853,7 @@ class Query(QueryBase):
             wait=wait,
             transport=Transport.REST,
             # A listed subscription's REST data is unchecked: the description says so.
-            note=recency_note(Recency.UNKNOWN, host=None) if listed else None,
+            note=rest_recency_note(listed=True) if listed else None,
             run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
         )
 

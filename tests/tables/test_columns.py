@@ -35,6 +35,7 @@ from deephaven_massive._tables.columns import (
     describe,
     dh_type,
     recency_note,
+    rest_recency_note,
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
@@ -522,13 +523,22 @@ def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
     assert dataset_table(rows, ("Date",)).j_table.isFlat()
 
 
+def test_the_recency_note_of_an_unknown_host_never_claims_real_time() -> None:
+    note = recency_note(Recency.UNKNOWN, host="x.example.com")
+    assert (
+        note
+        == "Live data from x.example.com, a pinned host whose recency the library does not know."
+    )
+
+
 @pytest.mark.parametrize(
-    ("recency", "host", "note"),
+    ("listed", "note"),
     [
-        (Recency.UNKNOWN, "x.example.com", "a pinned host whose recency the library does not know"),
-        (Recency.REALTIME, None, "Real-time data: a response Massive labels DELAYED fails"),
-        (Recency.UNKNOWN, None, "Data as the plan serves it, real-time or delayed"),
+        (True, "Data as the plan serves it, real-time or delayed"),
+        (False, "Checked for delayed data: a response Massive labels DELAYED fails the table"),
     ],
 )
-def test_the_recency_note_names_the_feed(recency: Recency, host: str | None, note: str) -> None:
-    assert note in recency_note(recency, host=host)
+def test_the_rest_recency_note_never_claims_real_time(listed: bool, note: str) -> None:
+    text = rest_recency_note(listed=listed)
+    assert text.startswith(note)
+    assert "Real-time data" not in text

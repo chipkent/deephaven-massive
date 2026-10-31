@@ -651,7 +651,7 @@ defined in exactly one place: the field defaults of this class.
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads. |
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
-| `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: `delayed.massive.com` for a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
+| `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: a delayed feed (any host whose name starts with `delayed.`) for forex, crypto, or a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. |
@@ -3499,19 +3499,28 @@ sees:
 - **HTTP 401** raises `AuthenticationError`. **HTTP 403**, and a 200 response whose envelope
   `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
   the table from `poll()`.
-- **Delayed data on a real-time subscription.** `fetch()` and `poll()` read current data. When
-  a request is charged to a subscription (its rate-limit bucket names one) that is not listed
-  in `MassiveConfig.delayed_subscriptions`, a page whose envelope `status` is `DELAYED`, or a row whose
-  `timeframe`, `last_trade.timeframe`, `last_quote.timeframe`, or `last_minute.timeframe` is
-  `DELAYED`, raises `EntitlementError` from `fetch()` and fails the table from `poll()`,
-  naming the evidence and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
+- **Delayed data on a real-time subscription.** `fetch()` and `poll()` read current data, and
+  each label Massive puts on it is held against the subscription of the data it labels. A
+  page charged to a subscription (its rate-limit bucket names one) is that subscription's
+  data. A page of the `other` bucket that is not a reference endpoint, such as the unified
+  snapshot of several classes, is each row's own: a row's subscription is its ticker's class's
+  (`symbol_class`, then `subscription_of`). A page whose envelope `status` is `DELAYED` is
+  refused unless every class the request names is listed in
+  `MassiveConfig.delayed_subscriptions` (a request that names none, such as economy data, has
+  nothing to refuse); a row whose `timeframe`, `last_trade.timeframe`, `last_quote.timeframe`,
+  or `last_minute.timeframe` is `DELAYED` is refused unless its subscription is listed. A
+  refusal raises `EntitlementError` from `fetch()` and fails the table from `poll()`, naming
+  the evidence and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
   `underlying_asset.timeframe` is never read: Massive's option-chain sample shows the
-  underlying delayed beside a real-time contract. Requests in the `other` bucket (reference,
-  economy, and partner data) are never checked. For a listed subscription nothing is checked:
-  REST cannot ask for delayed data, so it returns what the plan serves, and the table's
-  description says so. `history()` reads past data and is never checked. Futures snapshots
-  document no `timeframe`, so their envelope status is the evidence (**UNVERIFIED**, item 69
-  of [section 23](#23-open-verification-items)).
+  underlying delayed beside a real-time contract. Reference endpoints are never checked.
+  REST cannot ask for delayed data, so a listed subscription's labels pass and it returns what
+  the plan serves, which the table's description says. Nothing is shown as real-time without
+  proof: a `poll()` table's `Recency` is `UNKNOWN` (null for data of no single subscription)
+  until a cycle's page carries a label, then `REALTIME` or `DELAYED` (section 17), and no
+  description claims real-time data. `history()` reads past data and is never checked.
+  Futures snapshots document no `timeframe`, so their envelope status is the evidence
+  (**UNVERIFIED**, item 69 of [section 23](#23-open-verification-items)), and so is that of an
+  option chain on a delayed plan (item 71).
 - **HTTP 429** pauses the request's subscription and resumes it, as the rate limits below
   specify; only when a pause is longer than the read's patience still covers (10 minutes of
   pauses, or 90 s while the read holds the update graph's lock) does the client raise
@@ -3584,7 +3593,8 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   The futures calendar's contract and schedule lookups go to `futures`, each in a lane of its
   own under a token the calendar's close sets. Reference data and the other datasets Massive
   assigns to no subscription (economy, partner data, the unified snapshot) go to the `other`
-  bucket, whatever their filters: Massive's knowledge base ("What is the request limit for
+  bucket, whatever their filters (the unified snapshot's delayed-data check still holds each
+  row to its own class's subscription, as above): Massive's knowledge base ("What is the request limit for
   Massive's RESTful APIs?", vendored as
   `vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`)
   says reference and cross-asset endpoints are counted in a bucket of their own. So `m.reference.tickers(market=dm.Market.CRYPTO)` goes to `other`, as does
@@ -4159,7 +4169,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
 | `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream, `REST` for a `poll()`, and for a read the source it reads, `REST` or `flat files`; a read's `Host` and `Path` are null |
-| `Recency` | `REALTIME` or `DELAYED`: the feed a stream reads (`UNKNOWN` on a pinned host of no known feed, never shown as real-time); for a `poll()` table of a subscription's current data, `REALTIME` when the subscription is not listed in `MassiveConfig.delayed_subscriptions` (its `DELAYED` labels fail the table) and `UNKNOWN` when it is (REST serves what the plan serves); null for a `poll()` of data of no single subscription (reference, economy, partner data, the cross-class snapshot) and for a background read |
+| `Recency` | `REALTIME` or `DELAYED`: the feed a stream reads (`UNKNOWN` on a pinned host of no known feed); for a `poll()` table of current data, what the labels of its latest labelled cycle showed (`REALTIME`, or `DELAYED` for a subscription listed in `MassiveConfig.delayed_subscriptions`, since a delayed label on any other fails the table), `UNKNOWN` until one does for the data of one subscription, and null until one does for the cross-class snapshot; null for reference, economy, and partner data and for a background read. `UNKNOWN` is never shown as real-time |
 | `RowsPublished` | count; a read's is set once, when its rows land |
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
@@ -7098,13 +7108,16 @@ document already reflects them.
     cannot be listed (Massive has no delayed forex or crypto feed), FMV cannot stream on a
     listed subscription (it is real-time only), and a `ws_hosts` pin that contradicts the list
     is refused at construction. `fetch()` and `poll()` of a subscription's current data fail
-    when Massive labels a response or a row `DELAYED` and the subscription is not listed
-    (`underlying_asset.timeframe` is never read; reference, economy, and partner data are never
-    checked); REST cannot ask for delayed data, so a listed subscription's REST reads return
-    what the plan serves. `history()` is past data, not a way to get current data, and is not
+    when Massive labels a response or a row `DELAYED` and the subscription it labels is not
+    listed (each row of the cross-class snapshot is held to its own class;
+    `underlying_asset.timeframe` is never read; reference endpoints are never checked); REST
+    cannot ask for delayed data, so a listed subscription's REST reads return what the plan
+    serves. `history()` is past data, not a way to get current data, and is not
     affected. `m.streams()` shows each stream's `Recency`, and each live table's description
-    names it ([section 5](#5-massiveconfig), [section 13.2](#132-host-decision),
+    names it; nothing is shown as real-time without a label or a host that proves it
+    ([section 5](#5-massiveconfig), [section 13.2](#132-host-decision),
     [section 13.4](#134-rest)).
+
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
@@ -7187,3 +7200,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 68 | Whether every row of Benzinga's consensus ratings (`/benzinga/v1/consensus-ratings/{ticker}`) carries `ticker`, which the vendor's schema marks optional | Each row's `ticker` is its `Symbol` and its `poll()` key, so a row without one fails the call rather than keeping a null `Symbol` | `tests/namespaces/test_partners.py`: a consensus row without its ticker fails | `tests/namespaces/test_partners_integration.py` (the Benzinga add-on, $99 a month; skipped without it): three stocks' consensus ratings read raw; every row names the requested ticker |
 | 69 | Whether a delayed futures plan's REST snapshot (`/futures/v1/snapshot`) carries the envelope status `DELAYED` | The envelope status is the futures evidence of a delayed plan, for the stream host decision and for `fetch()` and `poll()`; without it a delayed futures plan is caught only by Massive's refusal on the real-time feed | `tests/ingest/test_host_decision.py`, `tests/ingest/test_rest.py`: a `DELAYED` envelope | `docs/live-tests.md` (a delayed futures key): read the snapshot raw and record its envelope status and timeframe fields |
 | 70 | Whether Massive accepts a real-time key on the delayed feed `delayed.massive.com` | A listed subscription always streams from the delayed feed; a refusal there fails the streams with Massive's text and says that removing the subscription from `MassiveConfig.delayed_subscriptions` uses the real-time feed | `tests/ingest/test_ws_connection.py`: a refusal on the delayed feed names the fix | `docs/live-tests.md` (a real-time key, the subscription listed): subscribe on `delayed.` and record the answer |
+| 71 | Whether a delayed options plan's option-chain snapshot (`/v3/snapshot/options/{underlyingAsset}`) carries the envelope status `DELAYED` (the futures snapshot is item 69) | A `DELAYED` envelope or row label refuses the data of a subscription not listed; without one, the table shows `Recency` `UNKNOWN`, never real-time | `tests/ingest/test_rest.py`: a `DELAYED` envelope and row labels | `tests/ingest/test_host_decision_integration.py` (Options Starter): read an SPY chain raw and record its envelope status and timeframe fields |

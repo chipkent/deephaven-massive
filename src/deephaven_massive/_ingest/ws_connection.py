@@ -36,7 +36,7 @@ network call, or wait happens under it. The loop thread makes no Java call. Noth
 a session's core strongly.
 
 The module is one subject although it runs past 1,000 lines: a connection and its group change
-the same leases under the group's one lock, and a move to another host acts on both at once.
+the same leases, sessions, and options-cap bookkeeping under the group's one lock.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
-from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST, delayed_fix
+from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, subscription_of
@@ -155,6 +155,9 @@ one value of each, so only sessions whose values are all equal share connections
 (`ConnectionGroup`). `rest_base_url` is one because the group's futures schedule calendar reads
 through any of its sessions' REST clients, which must all read the same API."""
 
+_FMV_CHANNEL: Final = "FMV"
+"""The fair-market-value channel, every class's one channel of the FMV family."""
+
 _group_numbers: Final = itertools.count(1)
 """Numbers the connection groups of the process, for their threads' names."""
 
@@ -230,8 +233,7 @@ class _Traffic:
         dropped: The rows the client dropped in the window because a key could not be read.
         last_data: When each channel last had rows, in nanoseconds since the epoch.
         acknowledged: The acknowledged topics at the last summary.
-        published: Each stream's `StreamSink.rows_published` at the last summary, or at its
-            adoption from another connection, by stream id.
+        published: Each stream's `StreamSink.rows_published` at the last summary, by stream id.
     """
 
     batches: int = 0
@@ -795,8 +797,7 @@ class Connection:
             ages = ", ".join(
                 f"{c} {(now - at) / 1e9:.0f} s ago" for c, at in sorted(traffic.last_data.items())
             )
-            # A stream opened during the window counts from zero, as its sink is new; one
-            # adopted from another connection counts from its total at the adoption (`adopt`).
+            # A stream opened during the window counts from zero, as its sink is new.
             got = {sid: n - traffic.published.get(sid, 0) for sid, n in sorted(published.items())}
             logger.debug(
                 "%s: last %.0f s: %d data batches, rows %s, %d dropped; rows per stream %s, "
@@ -979,7 +980,9 @@ class Connection:
             On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed,
             that the subscription is listed in `delayed_subscriptions` and that removing it
             uses the real-time feed; on the real-time feed, how to use Massive's delayed feed
-            instead; and for index values, that they may need `business.massive.com`.
+            instead; for fair-market-value topics, that they need a Business plan; on another
+            host, that `ws_hosts` chooses it; and for index values, that they may need
+            `business.massive.com`.
         """
         subscription = subscription_of(self.asset_class)
         if self.decision.evidence == "ws_hosts":
@@ -987,7 +990,7 @@ class Connection:
                 f"MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] pins this host; "
                 "the plan may not include this data here"
             )
-        elif self.decision.host == DELAYED_HOST:
+        elif self.decision.host.startswith(DELAYED_PREFIX):
             hint = (
                 f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}, "
                 f"so its streams use Massive's delayed feed; whether Massive serves it to "
@@ -999,6 +1002,11 @@ class Connection:
                 f"the {subscription} subscription's plan may not include this data in real "
                 f"time; if its data is delayed, use Massive's delayed {subscription} feed: "
                 f"{delayed_fix(subscription)}"
+            )
+        elif any(channel_of(t) == _FMV_CHANNEL for t in refused):
+            hint = (
+                "fair-market-value (FMV) data needs a Business plan of the "
+                f"{subscription} subscription; MassiveConfig.ws_hosts never applies to it"
             )
         else:
             hint = (

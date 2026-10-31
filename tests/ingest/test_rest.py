@@ -306,7 +306,17 @@ MIXED = DatasetSpec(
         (R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker")),
     },
 )
+UNIFIED_PATH = "/v3/snapshot"
+# The unified snapshot: tickers of every class, charged to no one subscription.
+UNIFIED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="snapshots",
+    fetch_path=UNIFIED_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, UNIFIED_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
 SPECS = (
+    UNIFIED,
     DIVIDENDS,
     MIXED,
     CRYPTO_LAST,
@@ -3911,40 +3921,146 @@ def test_a_delayed_label_fails_a_real_time_poll_table(
     assert isinstance(q, Query)
     table = q.poll(60)
     assert table.attributes()["TableDescription"].endswith(
-        "Real-time data: a response Massive labels DELAYED fails the table."
+        "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
+        "MassiveConfig.delayed_subscriptions lists its subscription."
     )
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
-    assert (row["State"], row["Recency"]) == ("FAILED", "REALTIME")
+    assert (row["State"], row["Recency"]) == ("FAILED", "UNKNOWN")  # never real-time unproven
     assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})" in row["Error"]
     session.release(table)
 
 
 @pytest.mark.parametrize(
-    ("spec", "listed", "recency"),
+    ("listed", "row", "shown"),
     [
-        (INDEX_SNAPSHOTS, (Subscription.INDICES,), "UNKNOWN"),
-        (INDEX_SNAPSHOTS, (), "REALTIME"),
-        (CONTRACTS, (), None),
-        (CONSTITUENTS, (), None),
+        ((), {"ticker": "I:SPX"}, "UNKNOWN"),  # no label: nothing proves real-time
+        ((), {"ticker": "I:SPX", "timeframe": "REAL-TIME"}, "REALTIME"),
+        ((Subscription.INDICES,), {"ticker": "I:SPX", "timeframe": "DELAYED"}, "DELAYED"),
+        ((Subscription.INDICES,), {"ticker": "I:SPX"}, "UNKNOWN"),
     ],
 )
-def test_a_poll_tables_recency_follows_its_subscription(
+def test_a_poll_tables_recency_follows_the_labels_it_was_sent(
     *,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
     rows_when: RowsWhen,
-    spec: DatasetSpec,
     listed: tuple[Subscription, ...],
-    recency: str | None,
+    row: dict[str, object],
+    shown: str,
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     m = _delayed_session(fake_rest, *listed)
     try:
-        q = query(m, spec)
+        fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([row])))
+        q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
         assert isinstance(q, Query)
         table = q.poll(60)
-        (row,) = rows_when(m.streams(), bool)
-        assert row["Recency"] == recency
+        (seen,) = rows_when(m.streams(), lambda rows: bool(rows) and rows[0]["RowsPublished"])
+        assert seen["Recency"] == shown
         m.release(table)
     finally:
         m.close()
+
+
+@pytest.mark.parametrize(("spec", "recency"), [(CONTRACTS, None), (CONSTITUENTS, None)])
+def test_a_poll_of_data_no_label_describes_shows_no_recency(
+    *,
+    session: dm.MassiveSession,
+    rows_when: RowsWhen,
+    spec: DatasetSpec,
+    recency: str | None,
+) -> None:
+    q = query(session, spec)
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    assert "Checked for delayed data" not in table.attributes()["TableDescription"]
+    (row,) = rows_when(session.streams(), bool)
+    assert row["Recency"] == recency
+    session.release(table)
+
+
+# --- The unified snapshot: each row is its own class's data -----------------------------------
+
+
+def _unified(m: dm.MassiveSession, *tickers: str) -> list[dict[str, Any]]:
+    return fetch(m, UNIFIED, symbols=list(tickers))
+
+
+def test_a_delayed_stock_row_fails_a_unified_snapshot(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        UNIFIED_PATH,
+        Reply(envelope([{"ticker": "AAPL", "last_trade": {"timeframe": "DELAYED"}}])),
+    )
+    with pytest.raises(dm.EntitlementError) as info:
+        _unified(session, "AAPL")
+    assert str(info.value).startswith(
+        "snapshots data would be delayed (Massive reports last_trade.timeframe=DELAYED), and "
+        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+    )
+
+
+def test_each_unified_row_is_held_to_its_own_subscription(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.STOCKS)
+    contract = "O:SPY251219C00600000"
+    try:
+        stock = {"ticker": "AAPL", "last_trade": {"timeframe": "DELAYED"}}
+        option = {"ticker": contract, "last_trade": {"timeframe": "REAL-TIME"}}
+        fake_rest.reply(UNIFIED_PATH, Reply(envelope([stock, option])))
+        # Stocks are listed: its delayed row passes beside a real-time option.
+        assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL", contract]
+        delayed_option = {"ticker": contract, "last_trade": {"timeframe": "DELAYED"}}
+        fake_rest.reply_first(UNIFIED_PATH, Reply(envelope([stock, delayed_option])))
+        with pytest.raises(dm.EntitlementError, match=r"dm\.Subscription\.OPTIONS is not in"):
+            _unified(m, "AAPL", contract)
+    finally:
+        m.close()
+
+
+@pytest.mark.parametrize(
+    ("listed", "refused"),
+    [
+        ((Subscription.STOCKS,), "OPTIONS"),
+        ((Subscription.STOCKS, Subscription.OPTIONS), None),
+    ],
+)
+def test_a_delayed_envelope_needs_every_class_of_the_request_listed(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    listed: tuple[Subscription, ...],
+    refused: str | None,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, *listed)
+    contract = "O:SPY251219C00600000"
+    try:
+        fake_rest.reply(UNIFIED_PATH, Reply(envelope([{"ticker": "AAPL"}], status="DELAYED")))
+        if refused is None:
+            assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL"]
+        else:
+            with pytest.raises(dm.EntitlementError, match=rf"dm\.Subscription\.{refused} is"):
+                _unified(m, "AAPL", contract)
+    finally:
+        m.close()
+
+
+def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Neither names a subscription a label could be held against.
+    fake_rest.reply(
+        UNIFIED_PATH,
+        Reply(
+            envelope(
+                [{"ticker": "AAPL"}, {"last_trade": {"timeframe": "DELAYED"}}], status="DELAYED"
+            )
+        ),
+    )
+    q = query(session, UNIFIED)
+    assert isinstance(q, Query)
+    assert q.fetch().size == 1  # the row without a ticker is dropped as unreadable

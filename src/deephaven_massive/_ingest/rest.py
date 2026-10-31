@@ -144,6 +144,7 @@ from deephaven_massive._ingest.rate_limits import (
     bucket_of,
     read_patience,
 )
+from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_requests import (
     Call,
@@ -164,7 +165,7 @@ from deephaven_massive._ingest.rest_rows import (
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
 from deephaven_massive._tables import poll
-from deephaven_massive._tables.columns import dataset_table
+from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
@@ -770,6 +771,7 @@ class RestReader:
         limit: int | None,
         window: HistoryWindow | None = None,
         current: bool = False,
+        on_recency: Callable[[Recency], None] | None = None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
@@ -801,6 +803,8 @@ class RestReader:
             current: True for a read of current data (`fetch()` and `poll()`), whose pages
                 are checked for a `DELAYED` label (`_check_recency`); False, the default, for
                 `history()`, which reads past data.
+            on_recency: Given what each page of current data shows about its recency
+                (`_check_recency`), for a `poll()` table's `Recency`; None to ignore it.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -830,6 +834,7 @@ class RestReader:
                 limit=limit,
                 window=window,
                 current=current,
+                on_recency=on_recency,
                 record=record,
                 spec=spec,
                 stop=stop,
@@ -896,6 +901,7 @@ class RestReader:
         limit: int | None,
         window: HistoryWindow | None,
         current: bool,
+        on_recency: Callable[[Recency], None] | None,
         record: Callable[[DriftReport], None] | None,
         stop: Cancel,
         patience: Patience,
@@ -918,6 +924,7 @@ class RestReader:
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
             current: Whether the read is of current data (`read`).
+            on_recency: Given each page's recency evidence (`read`), or None.
             record: Also given each page's drift, or None.
             stop: The read's token, which ends the call's waits.
             patience: The patience of the call's read, which its pause waits are charged to.
@@ -961,7 +968,16 @@ class RestReader:
                 requests += 1
                 self.drift.report_statuses(template, page.drift.statuses)
                 if current:
-                    self._check_recency(spec, page, bucket=bucket)
+                    self._check_recency(
+                        spec,
+                        page,
+                        template=template,
+                        bucket=bucket,
+                        own=own,
+                        call=call,
+                        symbol_key=converter.symbol_key,
+                        on_recency=on_recency,
+                    )
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
                 self.drift.report(
@@ -1022,33 +1038,81 @@ class RestReader:
             raise self._public(error) from error
         return _Outcome(tuple(kept), requests)
 
-    def _check_recency(self, spec: DatasetSpec, page: Page, *, bucket: str) -> None:
-        """Refuse a page of current data that Massive labels delayed, unless delayed is asked for.
+    def _check_recency(
+        self,
+        spec: DatasetSpec,
+        page: Page,
+        *,
+        template: str,
+        bucket: str,
+        own: Sequence[str],
+        call: Call,
+        symbol_key: str | None,
+        on_recency: Callable[[Recency], None] | None,
+    ) -> None:
+        """Refuse a page of current data Massive labels delayed, unless delayed is asked for.
 
-        A page charged to a subscription (its rate-limit bucket names one) that is not in
-        `MassiveConfig.delayed_subscriptions` fails when its envelope `status` is `DELAYED` or
-        a row's `timeframe` field says `DELAYED` (`recency_labels.read_labels`, which never
-        reads `underlying_asset.timeframe`). Pages of the `other` bucket (reference, economy,
-        and partner data) and of a listed subscription are not checked: REST cannot ask for
-        delayed data, so a listed subscription's reads return what the plan serves.
+        Each label is held against the subscription of the data it labels, and refused when
+        that subscription is not in `MassiveConfig.delayed_subscriptions`. A page charged to a
+        subscription (its rate-limit bucket names one) is that subscription's data. A page of
+        the `other` bucket that is not a reference endpoint (`REFERENCE_PATH`), such as the
+        unified snapshot of several classes, is each row's own: a row's subscription is its
+        ticker's class's (`symbol_class`). An envelope `status` of `DELAYED` labels the whole
+        page, so it is refused unless every class the request names is listed. A row's
+        `timeframe` fields (`recency_labels.read_labels`, which never reads
+        `underlying_asset.timeframe`) label that row. Reference endpoints are never checked,
+        and a page of no subscription and no tickers (economy, partner data) has nothing to
+        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass.
 
         Args:
             spec: The dataset, for the message.
             page: The page.
+            template: The page's path template.
             bucket: The page's rate-limit bucket.
+            own: The symbols the request names (`own_symbols`).
+            call: The request, whose one symbol stands for its rows when they carry none.
+            symbol_key: The wire key of the rows' ticker, or None.
+            on_recency: Given what a checked page shows, when it carries a label: `DELAYED`
+                when a label it passed says so (a listed subscription's), else `REALTIME` when
+                a label says real-time; None to ignore it.
 
         Raises:
-            EntitlementError: If the page is labelled delayed (`recency_labels.delayed_refusal`).
+            EntitlementError: If a label says delayed for a subscription not listed
+                (`recency_labels.delayed_refusal`).
         """
-        if bucket == OTHER:
+        if bucket == OTHER and REFERENCE_PATH.match(template):
             return
-        subscription = Subscription(bucket)
-        if subscription in self.delayed_subscriptions:
-            return
-        evidence = read_labels(page.status, page.rows).delayed
-        if evidence is not None:
-            refusal = delayed_refusal(subscription, f"{spec.name} data", evidence, streams=False)
-            raise refusal
+        listed = self.delayed_subscriptions
+        fixed = None if bucket == OTHER else Subscription(bucket)
+        named = {fixed} if fixed is not None else {subscription_of(symbol_class(s)) for s in own}
+        if page.status == DELAYED_LABEL:
+            unlisted = sorted(named - listed)
+            if unlisted:
+                refusal = delayed_refusal(
+                    unlisted[0], f"{spec.name} data", "status=DELAYED", streams=False
+                )
+                raise refusal
+        delayed = page.status == DELAYED_LABEL and bool(named)
+        real_time = False
+        for row in page.rows:
+            labels = read_labels("", [row])
+            real_time = real_time or labels.real_time is not None
+            if labels.delayed is None:
+                continue
+            ticker = row.get(symbol_key) if symbol_key is not None else call.symbol
+            subscription = fixed or (
+                subscription_of(symbol_class(ticker)) if isinstance(ticker, str) else None
+            )
+            if subscription is None:
+                continue
+            if subscription not in listed:
+                refusal = delayed_refusal(
+                    subscription, f"{spec.name} data", labels.delayed, streams=False
+                )
+                raise refusal
+            delayed = True
+        if on_recency is not None and (delayed or real_time):
+            on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
 
     def _check_adjusted(
         self, spec: DatasetSpec, request: Request, *, template: str, echoed: bool | None
@@ -1217,6 +1281,7 @@ class RestReader:
         *,
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: Cancel,
         pace: PaceCheck,
@@ -1234,6 +1299,7 @@ class RestReader:
             request: The normalized arguments.
             symbols: The cycle's static symbols (a reactive table already read).
             record: Records each page's drift in the table's `SchemaDrift`.
+            on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
             cancel: The poller's stop token, which ends the cycle's waits.
             pace: The table's pace check.
@@ -1259,6 +1325,7 @@ class RestReader:
             request,
             planned,
             record=record,
+            on_recency=on_recency,
             executor=executor,
             cancel=cancel,
             patience=patience,
@@ -1424,6 +1491,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None,
         cancel: Cancel | None,
         patience: Patience,
+        on_recency: Callable[[Recency], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
@@ -1442,6 +1510,7 @@ class RestReader:
             executor: A pool for fan-out requests, or None for one of each read's own.
             cancel: Ends the reads' waits when set, or None.
             patience: The patience of the whole read, shared by every path's requests.
+            on_recency: Receives each page's recency evidence (`read`), or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
@@ -1458,6 +1527,7 @@ class RestReader:
                 request=request,
                 limit=request.limit,
                 current=True,
+                on_recency=on_recency,
                 record=record,
                 executor=executor,
                 cancel=cancel,
@@ -1914,30 +1984,43 @@ class RestEndpoints:
             pollers=self._state.pollers,
             host=host,
             path=paths,
-            recency=_rest_recency(spec, self._core.config.delayed_subscriptions),
+            recency=_poll_recency(spec),
+            note=_poll_note(spec, self._core.config.delayed_subscriptions),
             clock=poll.CLOCK,
             stop=Cancel(),
         )
 
 
-def _rest_recency(
-    spec: DatasetSpec, delayed_subscriptions: AbstractSet[Subscription]
-) -> Recency | None:
-    """Return a `poll()` table's recency, for its `m.streams()` row and its description.
+def _poll_recency(spec: DatasetSpec) -> Recency | None:
+    """Return a `poll()` table's first `Recency`, for its `m.streams()` row.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        `UNKNOWN` for the current data of one subscription (`DatasetSpec.current_subscription`):
+        nothing is real-time until a label says so. None otherwise, which a cycle's labels
+        still turn into `REALTIME` or `DELAYED` when Massive sends any (the cross-class
+        snapshot does); reference, economy, and partner data never carry one.
+    """
+    return None if spec.current_subscription is None else Recency.UNKNOWN
+
+
+def _poll_note(spec: DatasetSpec, delayed_subscriptions: AbstractSet[Subscription]) -> str | None:
+    """Return the sentence a `poll()` table's description adds about its recency.
 
     Args:
         spec: The dataset.
         delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
 
     Returns:
-        None for data of no single subscription (`DatasetSpec.current_subscription`);
-        `UNKNOWN` when its subscription is listed (REST serves what the plan serves, unchecked);
-        `REALTIME` otherwise (a page Massive labels `DELAYED` fails the table).
+        `columns.rest_recency_note` for the current data of one subscription, listed or not;
+        None otherwise.
     """
     subscription = spec.current_subscription
     if subscription is None:
         return None
-    return Recency.UNKNOWN if subscription in delayed_subscriptions else Recency.REALTIME
+    return rest_recency_note(listed=subscription in delayed_subscriptions)
 
 
 def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:

@@ -556,7 +556,9 @@ stream never moves from one feed to the other.
   the stream verb raises `dm.EntitlementError` with what Massive reported and the exact line
   to add. A `fetch()` or `poll()` of current data (snapshots, last trades and quotes, movers,
   and every other dataset of the subscription) fails the same way when Massive labels its
-  answer `DELAYED`, so you never get delayed data you did not ask for.
+  answer `DELAYED`, so you never get delayed data you did not ask for. In
+  [`m.snapshots()`](docs/datasets/snapshots.md), which mixes classes, each row is held to its
+  own class's subscription.
 - **Listed: delayed.** The subscription's streams read the delayed feed, even when your plan is
   real-time; one WARNING says so then. REST cannot ask for delayed data, so `fetch()` and
   `poll()` return whatever your plan serves, and the table's description says so.
@@ -564,7 +566,9 @@ stream never moves from one feed to the other.
   listed; fair-market-value streams (Business plans) are real-time only.
 - `history()` reads past data, so this setting does not affect it.
 - `m.streams()` shows each live table's `Recency`, and each live table's description, shown in
-  the web UI, names its feed.
+  the web UI, says what it knows of it. Nothing is shown as real-time without proof: a stream
+  is real-time by its feed, and a `poll()` table only once Massive labels its data real-time;
+  until then it shows `UNKNOWN`.
 
 ```python
 # The default: every subscription real-time. On a delayed plan, a stream stops with an error
@@ -587,7 +591,7 @@ wrong.
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
   warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
   for room). `Query` shows the call that opened it, `Recency` whether its data is real-time
-  (`REALTIME`), delayed (`DELAYED`), or as your plan serves it (`UNKNOWN`, never real-time),
+  (`REALTIME`), delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`),
   `RowsPublished` counts rows delivered, and
   `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), or
   sent with a value that does not fit, which reads as null (`REST:exchange?`). A row whose

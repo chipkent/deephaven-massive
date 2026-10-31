@@ -317,12 +317,24 @@ def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
     with pytest.raises(
         ValueError,
-        match=r"^ws_hosts pins options to Massive's delayed feed delayed\.massive\.com, but "
+        match=r"^ws_hosts pins options to the delayed feed delayed\.massive\.com, but "
         r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
-        r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\) "
-        r"and drop the pin$",
+        r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\)$",
     ):
         _replace(base, ws_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
+    # Any host named as a delayed feed asks for delayed data.
+    with pytest.raises(ValueError, match=r"^ws_hosts pins stocks to the delayed feed delayed\.x"):
+        _replace(base, ws_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
+
+
+@pytest.mark.parametrize("asset_class", [AssetClass.FOREX, AssetClass.CRYPTO])
+def test_forex_and_crypto_cannot_pin_a_delayed_feed(
+    base: MassiveConfig, asset_class: AssetClass
+) -> None:
+    with pytest.raises(
+        ValueError, match=r"Massive has no delayed forex or crypto feed; remove the pin$"
+    ):
+        _replace(base, ws_hosts={asset_class: "delayed.massive.com"})
 
 
 def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:

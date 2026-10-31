@@ -22,7 +22,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
+from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
@@ -1292,3 +1292,24 @@ def test_a_reconnect_keeps_the_one_summary_timer(
     ws_session.wait(lambda s: s.opens == 2)
     assert ws_session.on_loop(connection, lambda: connection._summary) is first
     del result
+
+
+def test_a_refused_fmv_topic_needs_a_business_plan(ws_session: WsSession) -> None:
+    # FMV is never pinned, so the refusal names the plan, not `ws_hosts`.
+    connection = ws_connection.Connection(
+        ws_session.connections.group,
+        exec_ctx=ws_session.session._core.exec_ctx,
+        url="wss://business.massive.com/forex",
+        asset_class=AssetClass.FOREX,
+        family=ChannelFamily.FMV,
+        decision=HostDecision("business.massive.com", Recency.REALTIME, "FMV is Business-only"),
+        sessions=None,
+    )
+    connection._refused(("FMV.C:EURUSD",), "not authorized")
+    assert connection._last_error is not None
+    assert connection._last_error.endswith(
+        "fair-market-value (FMV) data needs a Business plan of the currencies subscription; "
+        "MassiveConfig.ws_hosts never applies to it"
+    )
+    connection.close()
+    assert connection.join(TIMEOUT)

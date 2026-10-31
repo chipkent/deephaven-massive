@@ -58,6 +58,7 @@ __all__ = [
     "describe",
     "dh_type",
     "recency_note",
+    "rest_recency_note",
 ]
 
 logger = logging.getLogger(__name__)
@@ -458,27 +459,17 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | Non
     return Table(j_table=described)
 
 
-def recency_note(recency: Recency, *, host: str | None) -> str:
-    """Return the sentence a live table's description adds about its data's recency.
+def recency_note(recency: Recency, *, host: str) -> str:
+    """Return the sentence a stream's tables add to their description about its feed.
 
     Args:
-        recency: The table's recency: a stream's host's, or for REST `REALTIME` when its
-            subscription is not in `MassiveConfig.delayed_subscriptions` and `UNKNOWN` when it
-            is.
-        host: The stream's WebSocket host, or None for a REST table.
+        recency: The stream's host's recency (`HostDecision.recency`).
+        host: The stream's WebSocket host.
 
     Returns:
         For example `"Live data from Massive's delayed feed (delayed.massive.com), 15 minutes
-        behind (10 for futures)."`.
+        behind (10 for futures)."`; `UNKNOWN` never claims real-time.
     """
-    if host is None:
-        if recency is Recency.REALTIME:
-            return "Real-time data: a response Massive labels DELAYED fails the table."
-        return (
-            "Data as the plan serves it, real-time or delayed: "
-            "MassiveConfig.delayed_subscriptions lists its subscription, so Massive's DELAYED "
-            "labels are not checked."
-        )
     if recency is Recency.REALTIME:
         return f"Live data from Massive's real-time feed ({host})."
     if recency is Recency.DELAYED:
@@ -486,6 +477,28 @@ def recency_note(recency: Recency, *, host: str | None) -> str:
             f"Live data from Massive's delayed feed ({host}), 15 minutes behind (10 for futures)."
         )
     return f"Live data from {host}, a pinned host whose recency the library does not know."
+
+
+def rest_recency_note(*, listed: bool) -> str:
+    """Return the sentence a REST table of current data adds to its description about recency.
+
+    Args:
+        listed: True when `MassiveConfig.delayed_subscriptions` lists the data's subscription,
+            so its labels are not checked.
+
+    Returns:
+        The sentence. Neither claims real-time data: REST says so only through its labels.
+    """
+    if listed:
+        return (
+            "Data as the plan serves it, real-time or delayed: "
+            "MassiveConfig.delayed_subscriptions lists its subscription, so Massive's DELAYED "
+            "labels are not checked."
+        )
+    return (
+        "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
+        "MassiveConfig.delayed_subscriptions lists its subscription."
+    )
 
 
 COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(

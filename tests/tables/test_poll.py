@@ -29,7 +29,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, PollMode
+from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._errors import PermanentError, RowDataError
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
@@ -78,6 +78,8 @@ class Script:
         self.outcomes: queue.SimpleQueue[object] = queue.SimpleQueue()
         self.symbols: list[NormalizedSymbols | None] = []
         self.drift: DriftReport | None = None
+        # What each cycle's pages show about their recency, as the REST transport reports it.
+        self.recency: tuple[Recency, ...] = ()
         self.took = 0.0  # how far each cycle's read moves the clock
         self.clock: FakeClock | None = None
 
@@ -95,6 +97,7 @@ class Script:
         *,
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
     ) -> tuple[pa.Table, int, float]:
@@ -102,6 +105,8 @@ class Script:
         self.cancel = cancel
         if self.drift is not None:
             record(self.drift)
+        for shown in self.recency:
+            on_recency(shown)
         outcome = self.outcomes.get(timeout=TIMEOUT)
         if self.clock is not None:
             self.clock.advance(self.took)
@@ -2139,3 +2144,46 @@ def test_a_poll_failing_while_its_watchlist_changes_fails_once(
     POLL_PATHS[path](case)
     poll_failed_once(case)
     rest_session.release(case.table)
+
+
+@pytest.mark.parametrize(
+    ("pages", "shown"),
+    [
+        ((), "UNKNOWN"),
+        ((Recency.REALTIME,), "REALTIME"),
+        ((Recency.REALTIME, Recency.DELAYED), "DELAYED"),
+    ],
+)
+def test_a_cycles_labels_set_the_rows_recency(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    clock: FakeClock,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+    pages: tuple[Recency, ...],
+    shown: str,
+) -> None:
+    # The row starts UNKNOWN and shows real-time only once a page's label says so; a delayed
+    # page wins over a real-time one in the same cycle.
+    script.recency = pages
+    script.rows(("AAPL", 0.25))
+    table = open_poll(
+        massive_session._core,
+        spec=DIVIDENDS,
+        request=Request(symbols=("AAPL",)),
+        interval=timedelta(seconds=60),
+        mode=PollMode.REPLACE,
+        query="<Query test>",
+        read=script,
+        pollers=Pollers(massive_session._core.label),
+        host="api.test",
+        path=PATH,
+        recency=Recency.UNKNOWN,
+        clock=clock,
+        stop=threading.Event(),
+    )
+    (row,) = rows_when(
+        massive_session.streams(), lambda rows: bool(rows and rows[0]["RowsPublished"])
+    )
+    assert row["Recency"] == shown
+    massive_session.release(table)
