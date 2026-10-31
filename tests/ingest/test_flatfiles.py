@@ -1646,7 +1646,8 @@ def test_a_futures_holiday_whose_next_session_is_not_out_reads_rest_under_auto(
     rest = RestRecorder()
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
     clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=MANY, venues={FuturesVenue.CME})
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
     start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     t = q.history(start, end)
