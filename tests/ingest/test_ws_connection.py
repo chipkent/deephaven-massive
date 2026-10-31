@@ -573,6 +573,7 @@ def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:
         on_status=lambda *_: None,
         on_data=lambda *_: None,
         on_state=lambda *_: None,
+        reconnect_deadline=lambda: None,
     )
     assert isinstance(client, _massive.WsClient)
     assert client._thread.name == "massive #7 ws socket.test/stocks"
@@ -1409,6 +1410,7 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     other = custom_session.query(TRADES, ["MSFT"]).blink()
     custom_session.subscribed("T.AAPL", "T.MSFT")
     custom_session.wait(lambda s: _acks(s) == 2)
+    custom_session.publish(trade("AAPL"), trade("MSFT"))  # rows that could look current
     connection = custom_session.connection()
     fake_ws_server.silent = {"T.AAPL", "T.MSFT"}
     fake_ws_server.close(1011)
@@ -1461,6 +1463,7 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     other = custom_session.query(TRADES, ["MSFT"]).last_by()
     custom_session.subscribed("T.AAPL", "T.MSFT")
     custom_session.wait(lambda s: _acks(s) == 2)
+    custom_session.publish(trade("MSFT"))  # MSFT's last_by now holds a row
     connection = custom_session.connection()
     fake_ws_server.silent = {"T.MSFT"}
     fake_ws_server.close(1011)
@@ -1490,6 +1493,80 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     assert rows[0]["Error"] is None
     assert not result.j_table.isFailed()
     custom_session.session.release(result)
+
+
+def test_a_stream_that_never_received_a_row_runs_on_with_its_topic_unacknowledged(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Before the drop and after the reconnect, Massive never confirms MSFT. Its table has no
+    # row that could look current, so it keeps running with its no-ack note.
+    custom_session = make_ws_session(ack_timeout=0.05)
+    result = custom_session.query(TRADES, ["MSFT"]).last_by()
+    custom_session.subscribed("T.MSFT")
+    connection = custom_session.connection()
+    fake_ws_server.silent = {"T.MSFT"}
+    fake_ws_server.close(1011)
+
+    def no_ack_after_reconnect() -> bool:
+        return bool(
+            custom_session.on_loop(
+                connection,
+                lambda: (
+                    connection._state is ConnectionState.CONNECTED
+                    and connection.subscriptions.counts()[3] == 1
+                ),
+            )
+        )
+
+    custom_session.wait(lambda s: s.opens == 2)
+    wait_for(no_ack_after_reconnect)
+    custom_session.on_loop(connection, connection._check_recovered)
+    assert _down(custom_session, connection) == set()
+    [row] = streams_of(custom_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+    assert re.fullmatch(_NO_ACK, row["Error"])
+    custom_session.session.release(result)
+
+
+def test_a_connection_that_never_connected_gives_its_streams_the_full_limit(
+    ws_session: WsSession,
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+
+    def never_heard_from() -> None:
+        connection._episodes.last_frame_at = 0
+        connection._last_message_at = None
+        connection._on_state(WsState.RECONNECTING, time.time() + 30.0)
+
+    ws_session.on_loop(connection, never_heard_from)
+    assert 290.0 < _left(ws_session, connection, 1) <= 300.0
+    ws_session.session.release(result)
+
+
+def test_a_stream_the_outage_failed_is_not_held_down_again(ws_session: WsSession) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    attempt = functools.partial(connection._on_state, WsState.RECONNECTING, time.time() + 30.0)
+    ws_session.on_loop(connection, attempt)
+    assert _down(ws_session, connection) == {1}
+
+    def expire_then_retry() -> set[int]:
+        # In one loop turn, before the failed table's shutdown releases the stream.
+        cast("Any", connection._episodes.down[1]).cancel()
+        connection._stream_expired(1)
+        attempt()  # the next attempt of the same outage
+        return set(connection._episodes.down)
+
+    assert ws_session.on_loop(connection, expire_then_retry) == set()
+    ws_session.flush()
+    wait_for(lambda: bool(result.j_table.isFailed()))
+    ws_session.session.release(result)
 
 
 def test_a_stream_covered_by_its_channels_wildcard_recovers_with_it(
@@ -1569,6 +1646,24 @@ def test_a_reconnect_that_drops_before_every_topic_is_acknowledged_keeps_the_out
     assert _left(ws_session, connection, 2) < msft  # MSFT keeps its timer
     ws_session.session.release(result)
     ws_session.session.release(other)
+
+
+def test_the_reconnect_deadline_is_the_earliest_held_down_stream_less_the_ack_timeout(
+    *, ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    deadline = connection._reconnect_deadline
+    assert ws_session.on_loop(connection, deadline) is None  # nothing held down: no limit
+    fake_ws_server.silent = {"T.AAPL"}  # the reconnect's subscription stays unanswered
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    left = _left(ws_session, connection, 1)
+    seen = cast("float", ws_session.on_loop(connection, deadline))
+    # The stream's time left, less the 5 s acknowledgement timeout, read a moment later.
+    assert left - 5.0 - 1.0 < seen <= left - 5.0
+    ws_session.session.release(result)
 
 
 def test_a_stream_opened_during_an_outage_gets_its_own_limit(

@@ -68,6 +68,7 @@ class SpyClient(_massive.WsClient):
         sources: Sequence[Source],
         callbacks: dict[str, Callable[..., None]],
         backoff: float,
+        reconnect_deadline: Callable[[], float | None],
         thread_prefix: str,
     ) -> None:
         super().__init__(
@@ -80,6 +81,7 @@ class SpyClient(_massive.WsClient):
             on_state=callbacks["on_state"],
             reconnect_backoff=backoff,
             max_reconnect_backoff=backoff * 2,
+            reconnect_deadline=reconnect_deadline,
             thread_prefix=thread_prefix,
         )
         self._record = record
@@ -269,6 +271,7 @@ class WsSession:
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> SpyClient:
         """Create the client of `url` on the fake server's endpoint of the same path.
 
@@ -291,6 +294,7 @@ class WsSession:
             sources=sources,
             callbacks=callbacks,
             backoff=self.backoff,
+            reconnect_deadline=reconnect_deadline,
             thread_prefix=self.connections.group.label,
         )
 

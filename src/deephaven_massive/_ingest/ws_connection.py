@@ -220,6 +220,7 @@ class ClientFactory(Protocol):
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
         """Return a new, unstarted client of `url` with the given callbacks.
 
@@ -230,6 +231,8 @@ class ClientFactory(Protocol):
             on_status: The connection's `on_status`.
             on_data: The connection's `on_data`.
             on_state: The connection's `on_state`.
+            reconnect_deadline: The connection's `_reconnect_deadline`, which shortens a
+                reconnect wait that would let a held-down stream fail untried.
         """
         ...
 
@@ -336,13 +339,14 @@ class _Episodes:
         quiet_note: The `Error` of every stream that is not down during that episode, or None.
         failure: The error the outage fails its streams with, made at its first failure, so
             the outage logs it once however many streams it fails; None until then.
+        expired: The streams an outage has failed, which no later outage holds down again.
     """
 
     lost_at: float | None = None
     lost_warned: bool = False
     slot_warned: bool = False
     down_since: float | None = None
-    down: dict[int, Timer] = field(default_factory=dict)
+    down: dict[int, asyncio.TimerHandle] = field(default_factory=dict)
     published_at_open: dict[int, int] = field(default_factory=dict)
     data_since_open: bool = False
     down_note: str | None = None
@@ -350,6 +354,7 @@ class _Episodes:
     quiet_at: int | None = None
     quiet_note: str | None = None
     failure: MassiveError | None = None
+    expired: set[int] = field(default_factory=set)
 
 
 class Connection:
@@ -436,6 +441,7 @@ class Connection:
                 channel, rows, rejects=rejects, drift=drift
             ),
             on_state=self._on_state,
+            reconnect_deadline=self._reconnect_deadline,
         )
         self.subscriptions: Final = Subscriptions(
             self._client,
@@ -653,6 +659,7 @@ class Connection:
         self.flusher.routes.remove(stream_id)
         self._notes_shown.pop(stream_id, None)
         self._release_down(stream_id)
+        self._episodes.expired.discard(stream_id)
         self.subscriptions.remove(stream.topics, static=stream.static)
         logger.debug(
             "stream %d shut down: its route is removed and %d topics released on %s",
@@ -1153,9 +1160,11 @@ class Connection:
         that last frame and the drop less `KEEPALIVE_WINDOW`: a socket's keepalive pings are
         no frames, so after a quiet spell (a night, a weekend, an illiquid symbol) the last
         frame can be long past while the connection was healthy until moments before the
-        drop. A limit of zero, or one already passed, fires on the loop's next turn. Every
-        attempt rewrites the note, since a wait for a slot and a plain reconnect read
-        differently.
+        drop. A connection that never received a frame (it never connected) counts from now,
+        so its streams get the full `max_outage`. A limit of zero, or one already passed,
+        fires on the loop's next turn. A stream an outage already failed is never held down
+        again. Every attempt rewrites the note, since a wait for a slot and a plain reconnect
+        read differently.
 
         Args:
             waiting_slot: True for `WAITING_SLOT`: the note says another connection holds the
@@ -1176,8 +1185,9 @@ class Connection:
                 "connection with this API key, perhaps from another process, holds it; the "
                 "plan allows one connection per cluster"
             )
-        left = max(max(last, now - KEEPALIVE_WINDOW) + self._group.max_outage - now, 0.0)
-        newly = [s for s in self._streams if s not in episodes.down]
+        start = max(last, now - KEEPALIVE_WINDOW) if last else now
+        left = max(start + self._group.max_outage - now, 0.0)
+        newly = [s for s in self._streams if s not in episodes.down and s not in episodes.expired]
         for stream_id in newly:
             self._hold_down(stream_id, left)
         logger.debug(
@@ -1192,6 +1202,26 @@ class Connection:
         changed = note != episodes.down_note
         episodes.down_note = note
         self._show_outage_notes(list(episodes.down) if changed else newly)
+
+    def _reconnect_deadline(self) -> float | None:
+        """Return the seconds by which the next attempt must authenticate to save every stream.
+
+        The client asks before each reconnect wait. A stream held down by the outage fails
+        when its timer fires, so the next attempt must authenticate, and its subscriptions be
+        acknowledged within `ack_timeout`, before the earliest timer: the client shortens its
+        wait to fit (never below the reconnect backoff). The waits alone (30, 60, then 100 to
+        120 seconds) would otherwise put the last attempt before a 300-second `max_outage`
+        too late to save it.
+
+        Returns:
+            The earliest held-down stream's time left, less `ack_timeout`, in seconds; None
+            when no stream is held down.
+        """
+        timers = self._episodes.down.values()
+        if not timers:
+            return None
+        earliest = min(timer.when() for timer in timers)
+        return earliest - self._client.loop.time() - self._group.ack_timeout
 
     def _hold_down(self, stream_id: int, left: float) -> None:
         """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
@@ -1231,6 +1261,7 @@ class Connection:
         episodes = self._episodes
         del episodes.down[stream_id]
         episodes.published_at_open.pop(stream_id, None)
+        episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
         if episodes.failure is None:
             since = utc_text(cast("float", episodes.down_since))
@@ -1248,7 +1279,10 @@ class Connection:
 
         It does once rows reached it since the socket opened, or once each of its topics the
         options cap admits is acknowledged (directly or through its channel's wildcard). A
-        topic in `NO_ACK` keeps it down: Massive never confirmed it, so its rows may never come.
+        topic in `NO_ACK` keeps down a stream that has received rows: Massive never confirmed
+        it, so its rows may never come, and its last values could look current. A stream that
+        has never received a row shows no stale data, so it recovers once each such topic is
+        acknowledged or in `NO_ACK`, and runs on with its no-acknowledgement note.
 
         Args:
             stream: A down stream.
@@ -1256,12 +1290,15 @@ class Connection:
         Returns:
             Whether it has recovered.
         """
-        if stream.sink.rows_published > self._episodes.published_at_open[stream.stream_id]:
+        published = stream.sink.rows_published
+        if published > self._episodes.published_at_open[stream.stream_id]:
             return True
-        acked = self.subscriptions.acknowledged
+        subscriptions = self.subscriptions
+        acked = subscriptions.acknowledged
+        resolved = acked if published else acked | subscriptions.no_ack
         return all(
-            t in acked or wildcard(channel_of(t)) in acked
-            for t in stream.topics - self.subscriptions.deferred
+            t in resolved or wildcard(channel_of(t)) in acked
+            for t in stream.topics - subscriptions.deferred
         )
 
     def _check_recovered(self) -> None:
@@ -1269,11 +1306,12 @@ class Connection:
 
         Runs while the connection is `CONNECTED` after a change of its subscriptions, a data
         frame, and each summary. A recovered stream's timer is cancelled and its note
-        cleared, while a stream with a topic in `NO_ACK` stays down and fails at its limit, so
-        one silent topic never holds the others down. The outage ends once no stream is down
-        and the socket has proved itself: a topic is acknowledged, or data arrived; that end is
-        logged at INFO with the outage's length. A socket that the server accepts but never
-        answers is still down, so a stream that opens on it is held down too.
+        cleared, while a stream with rows and a topic in `NO_ACK` stays down and fails at its
+        limit (`_recovered`), so one silent topic never holds the others down. The outage
+        ends once no stream is down and the socket has proved itself: a topic is
+        acknowledged, or data arrived; that end is logged at INFO with the outage's length. A
+        socket that the server accepts but never answers is still down, so a stream that opens
+        on it is held down too.
         """
         episodes = self._episodes
         if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
@@ -1282,7 +1320,12 @@ class Connection:
         for stream_id in recovered:
             self._release_down(stream_id)
         if recovered:
-            logger.debug("%s: streams %s receive data again", self.url, bounded_list(recovered))
+            logger.debug(
+                "%s: streams %s recovered: data again, their topics acknowledged, or, for a "
+                "stream that never received a row, each topic acknowledged or in NO_ACK",
+                self.url,
+                bounded_list(recovered),
+            )
             self._show_outage_notes(recovered)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
@@ -1587,6 +1630,7 @@ class _WsClientFactory:
         on_status: Callable[[int, Status], None],
         on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
+        reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
         """Return a new, unstarted `WsClient` of `url`.
 
@@ -1597,6 +1641,7 @@ class _WsClientFactory:
             on_status: The connection's `on_status`.
             on_data: The connection's `on_data`.
             on_state: The connection's `on_state`.
+            reconnect_deadline: The connection's `_reconnect_deadline`.
 
         Returns:
             The client.
@@ -1610,6 +1655,7 @@ class _WsClientFactory:
             on_data=on_data,
             on_state=on_state,
             reconnect_backoff=self._backoff,
+            reconnect_deadline=reconnect_deadline,
             max_reconnect_backoff=self._max_backoff,
             thread_prefix=self._thread_prefix,
         )

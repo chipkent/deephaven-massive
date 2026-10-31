@@ -43,6 +43,7 @@ __all__ = [
     "DELAYED_HOST",
     "DELAYED_PREFIX",
     "MIN_RECONNECT_BACKOFF",
+    "NO_ACK_RESEND",
     "REALTIME_HOST",
     "HostMap",
     "MassiveConfig",
@@ -58,6 +59,14 @@ MIN_RECONNECT_BACKOFF: Final = 15.0
 
 Massive releases a dropped connection only after roughly 10 to 30 seconds; a client that
 retries sooner can be refused for holding the allowance it just lost.
+"""
+
+NO_ACK_RESEND: Final = 60.0
+"""Seconds between rounds of re-sends of the subscriptions Massive has not acknowledged.
+
+A round sends every such topic in one subscribe frame on the open socket, so it costs the other
+streams nothing; one a minute stays well above the 15 s Massive asks between reconnects. Each
+round awaits its answer for `ack_timeout`, which must therefore be shorter.
 """
 
 REALTIME_HOST: Final = "socket.massive.com"
@@ -206,7 +215,9 @@ class MassiveConfig:
             FMV family is never pinned; it is always `business.massive.com`. Defaults to
             an empty mapping: the library decides every host.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
-            once. Defaults to 5 seconds.
+            once. Must be below `NO_ACK_RESEND` (60 s), the spacing of the periodic re-sends
+            of unacknowledged subscriptions, each of which awaits its answer this long.
+            Defaults to 5 seconds.
         reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
             after any failure that is not fatal: a connection that opened and closed (cleanly
             or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake
@@ -229,9 +240,13 @@ class MassiveConfig:
             rows from then on are missing, so a table that kept running would show stale data
             as if it were current. Call the verb again for a new live table. A `poll()` table
             fails the same way once its cycles have kept failing for this long, counted from
-            the first failure since its last good cycle, which it names. `0` fails at the
+            the start of the first failed cycle since its last good cycle (or that cycle's
+            latest page), or once a cycle running past its interval has received no page for
+            this long; a slow cycle that keeps receiving pages never fails. `0` fails at the
             first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
-            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage.
+            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage. A reconnect
+            wait is shortened when needed so that a held-down stream always gets one more
+            attempt, acknowledged within `ack_timeout`, before it fails.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -257,10 +272,12 @@ class MassiveConfig:
             when the plan cannot serve it: a stream verb raises `EntitlementError` when
             Massive's snapshot shows the plan's data is delayed, Massive's refusal fails the
             refused streams, and `fetch()` or `poll()` of current data (snapshots, last trade
-            and quote, movers, and every dataset charged to the subscription) fails when
-            Massive labels a response or row `DELAYED`; each message names the evidence and
-            the setting to add. REST cannot ask for delayed data, so a listed subscription's
-            `fetch()` and `poll()` return whatever the plan serves, unchecked. Reference,
+            and quote, movers, the option chain) fails when Massive labels a response or row
+            `DELAYED`; each message names the evidence and the setting to add. Past data, such
+            as the previous day's bar, a day's open and close, indicators, and dividends, is
+            served as it is, though Massive labels it `DELAYED` on such plans. REST cannot
+            ask for delayed data, so a listed subscription's `fetch()` and `poll()` return
+            whatever the plan serves, unchecked. Reference,
             economy, and partner data are never checked, and `history()`, which reads past
             data, is not affected. No stream ever moves between the feeds. Forex and crypto
             (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
@@ -334,7 +351,8 @@ class MassiveConfig:
         Raises:
             TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
-            ValueError: If `reconnect_backoff` is below `MIN_RECONNECT_BACKOFF`,
+            ValueError: If `ack_timeout` is not below `NO_ACK_RESEND`, `reconnect_backoff`
+                is below `MIN_RECONNECT_BACKOFF`,
                 `max_reconnect_backoff` is below `reconnect_backoff`, `max_outage` is
                 negative or not finite, a timeout,
                 backoff, interval, or count is not positive, only one of the two S3
@@ -372,6 +390,12 @@ class MassiveConfig:
                 f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} s, not "
                 f"{self.reconnect_backoff:g}: Massive takes roughly 10 to 30 s to release a "
                 "dropped connection, and a sooner retry can be refused for holding it"
+            )
+        if self.ack_timeout >= NO_ACK_RESEND:
+            raise ValueError(
+                f"ack_timeout must be below {NO_ACK_RESEND:g} s, not {self.ack_timeout:g}: "
+                f"unacknowledged subscriptions are re-sent every {NO_ACK_RESEND:g} s, and each "
+                "re-send awaits its answer for ack_timeout"
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")

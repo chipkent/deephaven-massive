@@ -205,6 +205,13 @@ def test_positive_numbers(base: MassiveConfig, name: str, value: float) -> None:
         _replace(base, **{name: value})
 
 
+@pytest.mark.parametrize("value", [60.0, 90.0])
+def test_ack_timeout_is_below_the_no_ack_resend_interval(base: MassiveConfig, value: float) -> None:
+    with pytest.raises(ValueError, match=r"ack_timeout must be below 60 s, not \d+: "):
+        _replace(base, ack_timeout=value)
+    assert _replace(base, ack_timeout=59.0).ack_timeout == 59.0
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

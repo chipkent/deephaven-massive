@@ -385,6 +385,18 @@ class DatasetSpec:
             include options contracts beside other classes' tickers (the unified snapshot): it
             gets the derived `OptionRoot` column every options dataset has, null on a row
             whose `Symbol` is not an options contract. Only such a dataset may set it.
+        serves_current_data: True for a dataset whose `fetch()` and `poll()` read the market's
+            current state, such as a snapshot, the last trade or quote, the day's movers, or
+            an option chain. Only such a dataset's REST answers are checked for Massive's
+            `DELAYED` label against `MassiveConfig.delayed_subscriptions`. A dataset of past
+            data (the previous day's bar, a day's open and close, indicators, dividends) keeps
+            False, the default: Massive labels it `DELAYED` on plans whose current data is
+            delayed, yet its rows are final. Only a dataset with a `fetch_path` that is no
+            reference endpoint (`REFERENCE_PATH`) may set it.
+        refused_alternative: The dataset to suggest when Massive refuses this dataset's REST
+            requests (HTTP 403), such as `"stocks.snapshots"` for `stocks.last_trade`: one
+            that serves the same data and that more plans include. None, the default,
+            suggests nothing.
     """
 
     name: str
@@ -417,6 +429,8 @@ class DatasetSpec:
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
     option_rows: bool = False
+    serves_current_data: bool = False
+    refused_alternative: str | None = None
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.
@@ -440,7 +454,9 @@ class DatasetSpec:
                 reason; a flat-file prefix does not declare its `symbol` and `time` keys from
                 its own columns (and, for futures, its `date` key, the session against which
                 every futures file is checked); a dataset that keeps its symbols as written has
-                channels or flat-file prefixes; a dataset of one class sets `option_rows`; or
+                channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
+                dataset without a fetch path, or whose fetch path is a reference endpoint, sets
+                `serves_current_data`; or
                 the transports match no query class (see the
                 class docstring and `_check_verbs`).
         """
@@ -469,6 +485,14 @@ class DatasetSpec:
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
+        if self.serves_current_data and (
+            self.fetch_path is None or REFERENCE_PATH.match(self.fetch_path)
+        ):
+            # Reference data is no market state, and Massive counts it in no subscription.
+            raise ValueError(
+                f"{self.name}: only a dataset with a fetch path that is no reference endpoint "
+                "serves current data"
+            )
         self._check_keys()
         if self.times is RowTimes.DAY and self.asset_class not in DAY_ZONES:
             raise ValueError(
@@ -609,14 +633,12 @@ class DatasetSpec:
     def current_subscription(self) -> Subscription | None:
         """The subscription whose current data `fetch()` and `poll()` of the dataset read.
 
-        That is the dataset's class's subscription, unless the fetch path is a reference
-        endpoint (`REFERENCE_PATH`), which Massive counts on its own, or the dataset has no
-        single class (economy, partner data, the cross-class snapshot). It names the
-        `MassiveConfig.delayed_subscriptions` member that governs the table's recency.
+        That is the dataset's class's subscription, unless the dataset reads no current data
+        (`serves_current_data` is False) or has no single class (the cross-class snapshot). It
+        names the `MassiveConfig.delayed_subscriptions` member that governs the table's
+        recency.
         """
-        if not isinstance(self.asset_class, AssetClass) or self.fetch_path is None:
-            return None
-        if REFERENCE_PATH.match(self.fetch_path):
+        if not self.serves_current_data or not isinstance(self.asset_class, AssetClass):
             return None
         return subscription_of(self.asset_class)
 

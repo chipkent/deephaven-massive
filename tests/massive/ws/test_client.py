@@ -185,6 +185,7 @@ def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Har
         backoff: tuple[float, float] = (1.0, 1.0),
         start: bool = True,
         recorder: Recorder | None = None,
+        reconnect_deadline: Callable[[], float | None] = lambda: None,
     ) -> Harness:
         recorder = recorder or Recorder()
         sleeper, clock = Sleeper(free_waits), FakeClock()
@@ -198,6 +199,7 @@ def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Har
             on_state=recorder.on_state,
             reconnect_backoff=backoff[0],
             max_reconnect_backoff=backoff[1],
+            reconnect_deadline=reconnect_deadline,
             clock=clock,
             sleep=sleeper,
         )
@@ -475,6 +477,46 @@ def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
     assert h.sleeper.waits == [wait]
     [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.RECONNECTING]
     assert at == h.clock.time() + wait
+
+
+@pytest.mark.parametrize(
+    ("deadline", "longest", "shortest"),
+    [
+        (1000.0, 6.0, 5.0),  # far off: the backoff's wait, 5 s and up to 20% of jitter
+        (15.5, 5.5, 5.0),  # an attempt after 5.5 s that takes the whole 10 s still meets it
+        (12.0, 5.0, 5.0),  # too close to meet: never below the initial backoff
+    ],
+    ids=["far", "clamped", "floor"],
+)
+def test_a_reconnect_wait_is_shortened_so_the_attempt_meets_its_deadline(
+    *,
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+    deadline: float,
+    longest: float,
+    shortest: float,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
+    fake_ws_server.reject_next(503)
+    h = make_client(backoff=(5.0, 120.0), reconnect_deadline=lambda: deadline)
+    h.recorder.wait_open(1)
+    [wait] = h.sleeper.waits
+    assert shortest <= wait <= longest
+    shortened = [r.getMessage() for r in caplog.records if "instead of" in r.getMessage()]
+    assert all(
+        m.endswith(f"so the next attempt can authenticate within {deadline:.1f} s")
+        for m in shortened
+    )
+
+
+def test_a_shortened_wait_still_honours_retry_after(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    fake_ws_server.reject_next(429, {"Retry-After": "8"})
+    h = make_client(backoff=(2.0, 10.0), reconnect_deadline=lambda: 12.0)
+    h.recorder.wait_open(1)
+    assert h.sleeper.waits == [8.0]
 
 
 def test_a_capped_retry_after_is_logged(

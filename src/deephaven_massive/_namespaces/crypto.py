@@ -118,6 +118,8 @@ LAST_TRADE: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     fetch_path=_LAST_TRADE,
+    serves_current_data=True,
+    refused_alternative="crypto.snapshots",
     # The last trade holds the pair outside its `last` object and has no participant time.
     keys={(_R, _LAST_TRADE): _keys(_request("from"), "Timestamp")},
     per_symbol=True,
@@ -191,6 +193,7 @@ SNAPSHOTS: Final = DatasetSpec(
     summary="The current state of crypto pairs: today's, the last minute's, and yesterday's bars.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_SNAPSHOTS,
+    serves_current_data=True,
     keys={(_R, _SNAPSHOTS): ticker_key()},
     symbol_param="tickers",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -203,6 +206,7 @@ MOVERS: Final = DatasetSpec(
     summary="The 20 crypto pairs that gained or lost the most since the previous day's close.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_MOVERS,
+    serves_current_data=True,
     keys={(_R, _MOVERS): ticker_key()},
     revision_keys=("Updated",),
 )

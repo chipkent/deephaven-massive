@@ -645,9 +645,9 @@ defined in exactly one place: the field defaults of this class.
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`, and so does a credential passed as blank text or with surrounding whitespace (None means absent). |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. A bare lower-case hostname, taken exactly as written: a scheme, port, path, upper-case letter, or surrounding whitespace raises `ValueError`. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
-| `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
+| `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic, and how long a round of re-sends awaits its answer. Must be below `NO_ACK_RESEND` (60 s), the spacing of those rounds; a larger value raises `ValueError`. |
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be at least 15 s, else `ValueError` naming Massive's guidance: a shorter wait can be refused for holding the allowance the dropped connection still holds, and on an individual plan that wastes the one slot there is. Tests never need a shorter value: they drive `WsClient` directly, with its backoff as constructor arguments and an injected clock. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
-| `max_outage: float` | `300.0` seconds | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long (from its last frame, or 40 s before the drop when that is later), each stream on it that has not recovered fails, so no live table keeps showing rows as current while the rows since the outage began are missing. A `poll()` table whose cycles have failed this long, from the first failure since its last good cycle, fails the same way ([section 13.4](#134-rest)). `0` fails at the first disconnect or failed cycle. Zero is allowed, unlike the other durations; a negative or non-finite value raises `ValueError`, and a non-number `TypeError`. No environment variable: no duration setting reads one. |
+| `max_outage: float` | `300.0` seconds | The longest outage a live table survives ([section 13.3](#133-connection-and-subscription-protocol), "Outages"). Once a WebSocket connection has been down (`RECONNECTING` or `WAITING_SLOT`) this long (from its last frame, or 40 s before the drop when that is later, or from the drop when no frame ever arrived), each stream on it that has not recovered fails, so no live table keeps showing rows as current while the rows since the outage began are missing. A `poll()` table whose cycles have failed this long, from the last progress of the first failed cycle since its last good cycle, or whose late cycle has received no page this long, fails the same way ([section 13.4](#134-rest)). `0` fails at the first disconnect or failed cycle. Zero is allowed, unlike the other durations; a negative or non-finite value raises `ValueError`, and a non-number `TypeError`. No environment variable: no duration setting reads one. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
 | `flat_file_symbol_threshold: int` | `50` | The `HistorySource.AUTO` switch point when both sources are possible. |
 | `max_concurrency: int` | `8` | REST fan-out and S3 reads: the threads of one fan-out or `history()` call, and the most REST requests, and the most flat files being read, that the session has at once however many calls overlap. Each client's connection pool holds this many connections, and a request waits for a free one (`_massive/net/slots.py`), so overlapping calls never open and discard extra connections. |
@@ -3418,12 +3418,20 @@ Status(ACK, topics)
       covered explicit topics). The knowledge base shows one status object per topic, in one
       array.
 Status(ACK, no topics: the message could not be parsed)
-   -> WARNING once; treated as an acknowledgement of the whole in-flight step
+   -> WARNING once; treated as an acknowledgement of, in turn: the in-flight step's unresolved
+      topics; else the topics of the re-send round awaiting its answer; else the latest
+      step's topics now in NO_ACK (a late answer to a large step whose watchdogs gave up),
+      until a re-send round goes out. A wrong credit only clears a NO_ACK note early.
 Status(REFUSED, topic)
    -> that topic's streams fail with EntitlementError (publish_failure); the topic leaves D
 Status(REFUSED, no topic)
-   -> applies to every topic of the in-flight step (exact attribution, because one step is in
-      flight). See "Refusals name the feed" below.
+   -> fails a stream only when exactly one topic on the connection awaits an answer: one
+      unresolved topic in the in-flight step, no topic in NO_ACK, and no re-send round
+      outstanding; that topic is refused. Every other case (a step of several topics, or any
+      NO_ACK topic or round whose late answer it may be) is logged at INFO and fails nothing,
+      since it could fail a healthy stream. The unanswered topics keep their notes, and a
+      stream with rows still fails at max_outage after a reconnect, so nothing stale goes
+      unmarked. See "Refusals name the feed" below.
 Status(MAX_CONNECTIONS) after authentication
    -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
@@ -3434,10 +3442,11 @@ still none after another ack_timeout, same check
       in its Error without failing, beside its other warnings (each its own part); after a
       drop, though, it keeps its stream down until data comes ("Outages" below). One
       WARNING per step, once the step has resolved, counts its NO_ACK topics. The topic
-      stays desired and subscribed, and its subscribe is re-sent alone every 60 s
-      (NO_ACK_RESEND) until it is acknowledged, leaves the wire, or the generation ends, but
-      never while a step is in flight (that round waits for the next), so a status naming
-      no topic is always the step's. A
+      stays desired and subscribed. Every 60 s (NO_ACK_RESEND) one round re-sends all NO_ACK
+      topics on the wire together, in one subscribe frame, until each is acknowledged, leaves
+      the wire, or the generation ends. A round due while a step is in flight, or while the
+      previous round still awaits its answer, waits ack_timeout and tries again; a sent round awaits its answer for ack_timeout, and no
+      step goes out meanwhile. A
       late acknowledgement or a new generation clears the state and the streams' Error.
       Streams never fail on it, and the connection is never reconnected for it: a reconnect
       would cut every other stream on the shared connection over one late answer
@@ -3484,9 +3493,12 @@ note and the failure name that time. The outage holds every stream on the connec
 and decides recovery per stream: once the connection is `CONNECTED` again, a down stream
 recovers when rows have reached it since the new socket opened, or when each of its topics
 the options cap admits is acknowledged, directly or through its channel's acknowledged
-wildcard. A topic in `NO_ACK` keeps its stream down, since Massive never confirmed it: a
-`last_by` on that stream would otherwise show the rows from before the drop as current. One
-such topic never holds the connection's other streams down. The outage ends once no stream
+wildcard. A topic in `NO_ACK` keeps down a stream that has received rows, since Massive never
+confirmed it: a `last_by` on that stream would otherwise show the rows from before the drop as
+current, so with neither confirmation nor data it fails at `max_outage`. A stream that has
+never received a row shows no stale data: once each of its topics is acknowledged or in
+`NO_ACK`, it recovers and keeps running with its no-acknowledgement note, after a reconnect as
+before one. One such topic never holds the connection's other streams down. The outage ends once no stream
 is down and the socket has proved itself (a topic acknowledged, or data received); a server
 that accepts the key but never answers is still down, so a stream that opens on it is held
 down too. A drop and a reconnect that drops again before the outage ends are one outage, with
@@ -3504,15 +3516,24 @@ connection at a drop, it fires `max_outage` seconds after the later of the last 
 drop less `KEEPALIVE_WINDOW` (40 s: websockets' default `ping_interval` plus `ping_timeout`,
 which the client keeps); keepalive pings are no frames, so after a quiet night, weekend, or
 illiquid symbol the last frame can be hours old while the connection was healthy until moments
-before the drop. A stream that opens during the outage gets a full `max_outage` from its open.
-Recovery, release, or the connection's end cancels the timer. When it fires, the stream fails
+before the drop. A connection that never received a frame (it never connected) counts from
+the drop itself, so its streams get the full `max_outage`. A stream that opens during the
+outage gets a full `max_outage` from its open. Recovery, release, or the connection's end
+cancels the timer, and a stream the outage has failed is never held down again by the
+outage's later attempts or by a later outage. When it fires, the stream fails
 through `publish_failure` (`Flusher.fail`, so through `BlinkPublisher`) with a `MassiveError`
 (`ErrorCause.EXPECTED`), one per outage so it logs once: "the WebSocket connection to
 <host><path> has been down since <time>, longer than MassiveConfig.max_outage (<limit> s); the
 rows from <time> on are missing, so this table stopped; call the verb again for a new live
 table". Tables derived from the stream fail with it, as with every stream failure.
 `max_outage=0` fails them at the drop: the timers fire on the loop's next turn. The
-connection itself keeps reconnecting.
+connection itself keeps reconnecting. So that a held-down stream always gets one full attempt
+before its timer fires, the client asks the connection before each reconnect wait for its
+deadline: the earliest held-down stream's time left, less `ack_timeout`. A wait that would start
+the next attempt later than that deadline less `HANDSHAKE_TIMEOUT` is shortened to fit, but never
+below `reconnect_backoff` or a 429's `Retry-After`. Without it, the default waits (30, 60, then
+100 to 120 seconds) would put the fourth attempt at 290 to 348 seconds, after a 300-second
+`max_outage`.
 
 **Silence.** A `CONNECTED` connection with acknowledged topics that receives no frame for
 `NO_FRAMES_WARNING` (5 minutes) during its asset class's regular trading hours logs its WARNING
@@ -3547,9 +3568,16 @@ sees:
 
 - **HTTP 401** raises `AuthenticationError`. **HTTP 403**, and a 200 response whose envelope
   `status` is `NOT_AUTHORIZED`, raise `EntitlementError` from `fetch()` and `history()` and fail
-  the table from `poll()`.
-- **Delayed data on a real-time subscription.** `fetch()` and `poll()` read current data, and
-  each label Massive puts on it is held against the subscription of the data it labels. A
+  the table from `poll()`. The message names the dataset and the subscription the request is
+  charged to ("your account" for data of none), then Massive's answer, and, where the dataset
+  declares one (`DatasetSpec.refused_alternative`), the dataset to try instead: the class's
+  snapshots for its last trade or last quote.
+- **Delayed data on a real-time subscription.** A `fetch()` or `poll()` of a dataset of current
+  data (`DatasetSpec.serves_current_data`: the snapshots, the last trade and quote, the movers,
+  the option chain, the unified snapshot, the forex conversion) is checked; datasets of past
+  data (`previous_day_bar`, a `daily_open_close`, indicators, dividends, splits) are not, since
+  Massive labels them `DELAYED` on a Basic or Starter key though their rows are final. Each
+  label Massive puts on current data is held against the subscription of the data it labels. A
   page charged to a subscription (its rate-limit bucket names one) is that subscription's
   data. A page of the `other` bucket that is not a reference endpoint, such as the unified
   snapshot of several classes, is each row's own: a row's subscription is its ticker's class's
@@ -3561,7 +3589,8 @@ sees:
   Forex and crypto are never held to a label: Massive has no delayed currencies feed, and
   `delayed_subscriptions` cannot list `CURRENCIES`, so a refusal could name no remedy. A
   refusal raises `EntitlementError` from `fetch()` and fails the table from `poll()`, naming
-  the evidence and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
+  the dataset, the tickers of the refused rows (the first five, then a count), the field that
+  said `DELAYED`, and the fix (`dm.MassiveConfig(delayed_subscriptions={dm.Subscription.<X>})`).
   `underlying_asset.timeframe` is never read: Massive's option-chain sample shows the
   underlying delayed beside a real-time contract. Reference endpoints are never checked.
   REST cannot ask for delayed data, so a listed subscription's labels pass and it returns what
@@ -3609,15 +3638,31 @@ sees:
   least one of which must take every one of them. An emptied symbol table plans no request.
   Any other error sets the stream's `Error` in `m.streams()` to the error followed by "; last
   good cycle at <time>" (or "; no good cycle since the poll started at <time>"), keeps the
-  previous rows, and the next cycle runs as scheduled. A run of failing cycles begins at the
-  first failure after a good cycle; a failure that comes `max_outage` seconds or more after
-  the run's first fails the table instead, in every mode, with a `MassiveError` of the latest
+  previous rows, and the next cycle runs as scheduled. A run of failing cycles begins with
+  the first failed cycle after a good cycle, at that cycle's start, or at its latest page when
+  it received one; a failure that comes `max_outage` seconds or more after the run began
+  fails the table instead, in every mode, with a `MassiveError` of the latest
   error's cause: "<dataset> poll(): last good cycle at <time>; every cycle since <time> has
   failed, for <n> s, longer than MassiveConfig.max_outage (<limit> s); the rows since then may
   be missing, so this table stopped; call the verb again for a new live table. The latest
-  error: <error>". Counting from the run's first failure, not the last good cycle, keeps one
-  failure of an hourly poll, or of a poll slowed by rate-limit pauses, from failing it. A
-  cycle that succeeds with no new row is a good cycle, so a quiet dataset never fails.
+  error: <error>". Counting from the run's start, not the last good cycle, keeps one failure
+  of an hourly poll, or of a slow cycle that kept receiving pages, from failing it. A cycle
+  that succeeds with no new row is a good cycle, so a quiet dataset never fails.
+  A running cycle blocks its poller, so the session's `poll watch` thread checks the running
+  cycles every second (section 18.1). A cycle still running past its interval sets the
+  stream's `Error` to "cycle running since <start>; last good cycle at <time>" (or "; no good
+  cycle since the poll started at <time>") until it ends, whose own update replaces the note.
+  A cycle past its interval that has made no progress (received no page) for more than
+  `max_outage` seconds, counted from its start, or from the start of the run of failing
+  cycles it continues, until its latest page, fails the table with a `MassiveError`
+  (`ErrorCause.EXPECTED`): "<dataset> poll(): last good cycle at <time>; the cycle running
+  since <time> has received nothing for <n> s, longer than MassiveConfig.max_outage (<limit>
+  s); the rows since then may be missing, so this table stopped; call the verb again for a
+  new live table". The stall must also exceed the one-second spacing of the checks, and with
+  `max_outage=0` no running cycle fails this way (a failed cycle still fails at once). A cycle
+  that keeps receiving pages, however slowly its requests are paced or paused, never fails
+  this way, so a Basic fan-out of twenty minutes keeps running, marked
+  late.
   (an expected cause) or ERROR (a defect, with its trace), later ones log at DEBUG, and the
   first cycle that succeeds again logs the recovery at INFO. A cycle that ends later than its
   interval, because its requests are paced or held by a rate-limit pause, logs one WARNING per
@@ -4358,7 +4403,7 @@ is no queue, rotation, JSON, custom field, or context variable: each line costs 
 
 **Correlation.** Every library thread is named after what owns it. A session's own threads are
 `massive #<session> <role>`: `reaper`, `diagnostics`, `poll-<stream id>` and its pool
-`poll-<stream id> rest_<n>`, `crypto pairs`, and the call pools below. The threads of a
+`poll-<stream id> rest_<n>`, `poll watch`, `crypto pairs`, and the call pools below. The threads of a
 connection group, which serve every session sharing its connections, are
 `massive group #<group> <role>`: `ws <host>/<cluster>`, `flush <host>/<cluster>`,
 `start <host>/<cluster>`, `move <host>/<cluster>`, and `futures schedules`. Each static
@@ -4520,6 +4565,7 @@ without the GIL.
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open, charged to the `futures` bucket, each lookup in a lane of its own that the calendar's close ends; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
+| poll watch, one per session while it has a live `poll()` table | library | every second, checks each running cycle: marks one past its interval in its row (`update_streams`), and fails a late one that has received no page for `max_outage` (sets the poller's stop token, then `publish_failure` through the poller's publish lock) | wait on a poller; hold a poller's watch lock across anything but `update_streams` |
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause, then for one of the client's `max_concurrency` connections; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
@@ -7283,3 +7329,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 70 | Whether Massive accepts a real-time key on the delayed feed `delayed.massive.com` | A listed subscription always streams from the delayed feed; a refusal there fails the streams with Massive's text and says that removing the subscription from `MassiveConfig.delayed_subscriptions` uses the real-time feed | `tests/ingest/test_ws_connection.py`: a refusal on the delayed feed names the fix | `docs/live-tests.md` (a real-time key, the subscription listed): subscribe on `delayed.` and record the answer |
 | 71 | Whether a delayed options plan's option-chain snapshot (`/v3/snapshot/options/{underlyingAsset}`) carries the envelope status `DELAYED` (the futures snapshot is item 69) | A `DELAYED` envelope or row label refuses the data of a subscription not listed; without one, the table shows `Recency` `UNKNOWN`, never real-time | `tests/ingest/test_rest.py`: a `DELAYED` envelope and row labels | `tests/ingest/test_host_decision_integration.py` (Options Starter): read an SPY chain raw and record its envelope status and timeframe fields |
 | 72 | How Massive writes a futures contract's year: one digit (`ESZ5`) or two (`ESZ25`), for which contracts, and whether it answers the other spelling of the same contract | A year is never rewritten: `ESZ25` and `ESZ5` are different tickers, and a spelling Massive does not use returns no rows | `tests/datasets/test_symbols.py`: `ESZ5` and `ESZ25` are both canonical and stay as written | `tests/namespaces/test_futures_integration.py`: one page of ES single contracts; record each ticker's year digits beside its last trade date, and the rows Massive answers for the first one-digit and two-digit contract under the other spelling |
+| 73 | Whether past data (`previous_day_bar`, a past `daily_open_close`) reads on a Basic or Starter key with no subscription in `MassiveConfig.delayed_subscriptions`, though Massive labels it `DELAYED` | Only datasets of current data (`DatasetSpec.serves_current_data`) are checked for a `DELAYED` label; past data is served as Massive sends it | `tests/ingest/test_rest.py`: past data is never checked | `tests/namespaces/test_stocks_integration.py` (Stocks Basic): fetch AAPL's previous-day bar and last trading day's open and close on the default configuration |

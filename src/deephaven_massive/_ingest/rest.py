@@ -40,11 +40,13 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   page's `adjusted` echo (`Page.adjusted`) that differs from the request raises
   `MassiveError`, and a page without one logs a WARNING once per path and session, so one
   call never silently mixes adjusted and unadjusted prices.
-- **Recency.** A `fetch()` or `poll()` reads current data, so each of its pages charged to a
-  subscription not in `MassiveConfig.delayed_subscriptions` fails when Massive labels it
-  `DELAYED` (`recency_labels`): the envelope status or a row's `timeframe`. Reference,
-  economy, and partner data (the `other` bucket), a listed subscription's pages, and
-  `history()`, which reads past data, are not checked.
+- **Recency.** A `fetch()` or `poll()` of a dataset of current data
+  (`DatasetSpec.serves_current_data`: snapshots, the last trade and quote, movers, the option
+  chain) fails on each page charged to a subscription not in
+  `MassiveConfig.delayed_subscriptions` that Massive labels `DELAYED` (`recency_labels`): the
+  envelope status or a row's `timeframe`. Datasets of past data (the previous day's bar,
+  indicators, dividends), which Massive labels `DELAYED` on such plans though their rows are
+  final, reference data, a listed subscription's pages, and `history()` are not checked.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
   on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
@@ -125,6 +127,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    EntitlementError,
     ErrorCause,
     MassiveError,
     PermanentError,
@@ -953,9 +956,10 @@ class RestReader:
                 move to 00:00 of their day in the class day zone, and a stamp Massive is not
                 known to use logs one WARNING per dataset and timespan per session
                 (`row_times.stamp_rule`).
-            current: True for a read of current data (`fetch()` and `poll()`), whose pages
-                are checked for a `DELAYED` label (`_check_recency`); False, the default, for
-                `history()`, which reads past data.
+            current: True for a `fetch()` or `poll()` of a dataset of current data
+                (`DatasetSpec.serves_current_data`), whose pages are checked for a `DELAYED`
+                label (`_check_recency`); False, the default, for past data, such as
+                `history()` or a previous day's bar.
             on_recency: Given what each page of current data shows about its recency
                 (`_check_recency`), for a `poll()` table's `Recency`; None to ignore it.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
@@ -1205,7 +1209,7 @@ class RestReader:
                     error.message,
                 )
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
-            raise self._public(error) from error
+            raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
 
     def _check_recency(
@@ -1222,27 +1226,28 @@ class RestReader:
     ) -> None:
         """Refuse a page of current data Massive labels delayed, unless delayed is asked for.
 
-        Each label is held against the subscription of the data it labels, and refused when
-        that subscription is not in `MassiveConfig.delayed_subscriptions`. A page charged to a
-        subscription (its rate-limit bucket names one) is that subscription's data. A page of
-        the `other` bucket that is not a reference endpoint (`REFERENCE_PATH`), such as the
-        unified snapshot of several classes, is each row's own: a row's subscription is its
+        Only a dataset of current data (`DatasetSpec.serves_current_data`) is checked, and
+        none reads a reference endpoint. Each label is held against the subscription of the
+        data it labels, and refused when that subscription is not in
+        `MassiveConfig.delayed_subscriptions`. A page charged to a subscription (its rate-limit
+        bucket names one) is that subscription's data. A page of the `other` bucket, such as
+        the unified snapshot of several classes, is each row's own: a row's subscription is its
         ticker's class's (`symbol_class`). An envelope `status` of `DELAYED` labels the whole
         page, so it is refused unless every class the request names is listed. A row's
         `timeframe` fields (`recency_labels.read_labels`, which never reads
-        `underlying_asset.timeframe`) label that row. Forex and crypto data is never refused:
-        Massive has no delayed currencies feed, and `delayed_subscriptions` cannot list
-        `CURRENCIES`, so a label can name no remedy; the label still shows as `DELAYED`.
-        Reference endpoints are never checked,
-        and a page of no subscription and no tickers (economy, partner data) has nothing to
-        refuse. REST cannot ask for delayed data, so a listed subscription's labels pass. A
-        `timeframe` that is neither label is served and logs a WARNING once per subscription,
-        field, and value in the session (`_warn_unknown_label`).
+        `underlying_asset.timeframe`) label that row; the page is read whole first, so the
+        refusal names every refused row's ticker (the first five, then a count) and the field
+        that said `DELAYED`. Forex and crypto data is never refused: Massive has no delayed
+        currencies feed, and `delayed_subscriptions` cannot list `CURRENCIES`, so a label can
+        name no remedy; the label still shows as `DELAYED`. A page of no subscription and no
+        tickers has nothing to refuse. REST cannot ask for delayed data, so a listed
+        subscription's labels pass. A `timeframe` that is neither label is served and logs a
+        WARNING once per subscription, field, and value in the session (`_warn_unknown_label`).
 
         Args:
             spec: The dataset, for the message.
             page: The page.
-            template: The page's path template.
+            template: The page's path template, for the WARNING of an unknown label.
             bucket: The page's rate-limit bucket.
             own: The symbols the request names (`own_symbols`).
             call: The request, whose one symbol stands for its rows when they carry none.
@@ -1255,8 +1260,6 @@ class RestReader:
             EntitlementError: If a label says delayed for a subscription not listed
                 (`recency_labels.delayed_refusal`).
         """
-        if bucket == OTHER and REFERENCE_PATH.match(template):
-            return
         listed = self.delayed_subscriptions
         fixed = None if bucket == OTHER else Subscription(bucket)
         named = {fixed} if fixed is not None else {subscription_of(symbol_class(s)) for s in own}
@@ -1267,11 +1270,17 @@ class RestReader:
             unlisted = sorted(held - listed)
             if unlisted:
                 refusal = delayed_refusal(
-                    unlisted[0], f"{spec.name} data", "status=DELAYED", streams=False
+                    unlisted[0],
+                    _delayed_what(spec, own),
+                    f"status={DELAYED_LABEL}",
+                    streams=False,
                 )
                 raise refusal
         delayed = page.status == DELAYED_LABEL and bool(named)
         real_time = False
+        # Every refused row of the page, so the message names its tickers, not only the first:
+        # each subscription's tickers in the order seen, each once, and its first evidence.
+        refused: dict[Subscription, tuple[dict[str, None], str]] = {}
         for row in page.rows:
             labels = read_labels("", [row])
             real_time = real_time or labels.real_time is not None
@@ -1288,11 +1297,17 @@ class RestReader:
             if labels.delayed is None or subscription is None:
                 continue
             if subscription is not Subscription.CURRENCIES and subscription not in listed:
-                refusal = delayed_refusal(
-                    subscription, f"{spec.name} data", labels.delayed, streams=False
-                )
-                raise refusal
+                tickers, _ = refused.setdefault(subscription, ({}, labels.delayed))
+                if isinstance(ticker, str):
+                    tickers[ticker] = None
             delayed = True
+        if refused:
+            subscription = min(refused)
+            tickers, evidence = refused[subscription]
+            refusal = delayed_refusal(
+                subscription, _delayed_what(spec, list(tickers)), evidence, streams=False
+            )
+            raise refusal
         if on_recency is not None and (delayed or real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
 
@@ -1438,6 +1453,43 @@ class RestReader:
                 request_id=error.request_id,
             )
         return from_wire(error)
+
+    def _dataset_error(self, spec: DatasetSpec, bucket: str, error: WireError) -> MassiveError:
+        """Return the public error of a dataset's failed request, naming what was refused.
+
+        A refusal (HTTP 403, or a 200 response whose envelope says `NOT_AUTHORIZED`) becomes an
+        `EntitlementError` that names the dataset and the subscription the request is charged
+        to, then Massive's answer, and, where the dataset has one
+        (`DatasetSpec.refused_alternative`), the dataset to try instead. Every other error is
+        `_public`'s.
+
+        Args:
+            spec: The dataset.
+            bucket: The request's rate-limit bucket: its subscription, or `other` for data of
+                no subscription (reference, economy, partner data).
+            error: The wire error.
+
+        Returns:
+            The public error, with the wire error's status and request id, such as
+            `EntitlementError("stocks.last_trade: the Stocks subscription of your plan does not
+            include this data; Massive answered HTTP 403 from GET ...; try
+            m.stocks.snapshots(...), which carries the same values and is in more plans")`.
+        """
+        public = self._public(error)
+        if type(public) is not EntitlementError:
+            return public
+        holder = (
+            "your account" if bucket == OTHER else f"the {bucket.title()} subscription of your plan"
+        )
+        message = f"{spec.name}: {holder} does not include this data; Massive answered {public}"
+        if spec.refused_alternative is not None:
+            message += (
+                f"; try m.{spec.refused_alternative}(...), which carries the same values and is "
+                "in more plans"
+            )
+        return EntitlementError(
+            message, status=public.status, request_id=public.request_id, cause=public.cause
+        )
 
     def rows(
         self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
@@ -1756,7 +1808,7 @@ class RestReader:
                 calls,
                 request=request,
                 limit=request.limit,
-                current=True,
+                current=spec.serves_current_data,
                 on_recency=on_recency,
                 record=record,
                 executor=executor,
@@ -2224,6 +2276,29 @@ class RestEndpoints:
             clock=poll.CLOCK,
             stop=Cancel(),
         )
+
+
+_DELAYED_TICKERS_SHOWN: Final = 5
+"""How many tickers a refusal of delayed data names before it counts the rest."""
+
+
+def _delayed_what(spec: DatasetSpec, tickers: Sequence[str]) -> str:
+    """Return what a refusal of delayed data says would be delayed: the dataset and tickers.
+
+    Args:
+        spec: The dataset.
+        tickers: The tickers of the refused rows or request, in the order seen; empty for a
+            request that names none.
+
+    Returns:
+        Such as `"stocks.snapshots data"`, `"stocks.snapshots data for AAPL"`, or
+        `"stocks.snapshots data for AAPL, MSFT, NVDA, TSLA, AMZN and 3 more"`.
+    """
+    if not tickers:
+        return f"{spec.name} data"
+    shown = ", ".join(tickers[:_DELAYED_TICKERS_SHOWN])
+    rest = len(tickers) - _DELAYED_TICKERS_SHOWN
+    return f"{spec.name} data for {shown}" + (f" and {rest} more" if rest > 0 else "")
 
 
 def _poll_recency(spec: DatasetSpec) -> Recency | None:

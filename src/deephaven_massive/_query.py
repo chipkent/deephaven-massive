@@ -919,9 +919,9 @@ class Query(QueryBase):
             raise ValueError(
                 f"{self!r}.poll() needs a start or a limit: without either, every cycle "
                 f"re-reads the whole archive Massive keeps. Build the query with a start, such as "
-                f"m.{name}(..., start=date.today()), or with a limit and a newest-first order, "
-                "then call poll(). A fixed start keeps widening the window on a poll that runs "
-                "for days"
+                f"m.{name}(..., start=dh_today(to_j_time_zone('America/New_York'))), or with "
+                "a limit and a newest-first order, then call poll(). A fixed start keeps "
+                "widening the window on a poll that runs for days"
             )
         if isinstance(self._request.symbols, SymbolTable):
             _read_symbol_table(

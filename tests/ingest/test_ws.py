@@ -1631,6 +1631,30 @@ def test_a_futures_stream_opened_holding_the_lock_waits_briefly_for_its_schedule
     ws_session.session.release(result)
 
 
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_a_first_futures_stream_failing_in_its_schedule_wait_leaves_a_working_connection(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
+) -> None:
+    # The first stream creates the connection and fails while it waits for its schedules; the
+    # next stream reuses that connection, which must be running to subscribe it.
+    real = ws.WsConnections._load_schedules
+    calls: list[int] = []
+
+    def interrupted(self: ws.WsConnections, contracts: frozenset[str], *, stream_id: int) -> None:
+        calls.append(stream_id)
+        if len(calls) == 1:
+            raise error("interrupted")
+        real(self, contracts, stream_id=stream_id)
+
+    monkeypatch.setattr(ws.WsConnections, "_load_schedules", interrupted)
+    with pytest.raises(error, match="interrupted"):
+        ws_session.query(FUTURES, ["ESZ5"]).blink()
+    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    ws_session.subscribed("T.ESZ5")
+    assert ws_session.connection("wss://socket.test/futures").leases == 1
+    ws_session.session.release(result)
+
+
 def test_a_futures_watchlist_looks_up_the_contracts_it_adds(ws_session: WsSession) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
@@ -1963,7 +1987,7 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     mine = {name.removeprefix(f"{prefix} ") for name in started if name.startswith(f"{prefix} ")}
     shared = {name.removeprefix(f"{group} ") for name in started if name.startswith(f"{group} ")}
     assert len(mine) + len(shared) == len(set(started)), started
-    assert {"diagnostics", "reaper"} <= mine
+    assert {"diagnostics", "reaper", "poll watch"} <= mine
     assert {
         "ws 127.0.0.1/futures",  # the client of each connection, on the fake server
         "flush socket.test/futures",
