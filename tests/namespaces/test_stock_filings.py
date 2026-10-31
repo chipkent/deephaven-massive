@@ -7,10 +7,9 @@ arguments) are in `test_stocks.py`; the fixtures stay with them, under `namespac
 import inspect
 import json
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
 import pytest
@@ -156,23 +155,6 @@ def test_insider_aggregates_leave_no_parameter_to_filters(
         factory(massive_session, name)(filters={"anything": "x"})
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
-def sent(fake_rest: FakeRestServer) -> list[tuple[str, dict[str, str]]]:
-    # Every GET the server received: its path and its query, one value per parameter.
-    out = []
-    for received in fake_rest.requests:
-        parts = urlsplit(received.target)
-        query = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
-        out.append((unquote(parts.path), query))
-    return out
-
-
 def table_rows(table: Table) -> list[dict[str, Any]]:
     # Instants become epoch nanoseconds, so assertions keep every digit.
     data = dh_arrow.to_arrow(table)
@@ -232,7 +214,7 @@ def test_insider_datasets_normalize_every_documented_field(
     path = cast("str", spec_of(name).fetch_path)
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
     table = cast("Query", factory(rest_session, name)()).fetch()
-    assert sent(fake_rest) == [(path, {"limit": "10000"})]
+    assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "10000"})]
     (row,) = table_rows(table)
     # Every row carries the instant its page arrived, last.
     assert list(row)[-1] == "TimestampInsert"

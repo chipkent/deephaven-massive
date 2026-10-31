@@ -980,7 +980,8 @@ class Catalog:
 
         Raises:
             ValueError: If `sort` is not one of an enum `sort`'s fields; or, on a text `sort`,
-                if a part is empty, names no field of the path's rows, or carries its own
+                if a part has surrounding whitespace (`"date, ticker"`; nothing is trimmed),
+                is empty, names no field of the path's rows, or carries its own
                 `.asc` or `.desc` suffix while `order` is set. The message lists the fields
                 the path takes.
 
@@ -999,7 +1000,12 @@ class Catalog:
                     )
                 continue
             fields = sorted({field.wire_key for field in rest_path.fields})
-            for part in (part.strip() for part in sort.split(",")):
+            for part in sort.split(","):
+                if part != part.strip():
+                    raise ValueError(
+                        f"{spec.name}: sort part {part!r} has surrounding whitespace; write "
+                        f"{part.strip()!r}, parts joined by commas alone"
+                    )
                 name, dot, suffix = part.rpartition(".")
                 if not (dot and suffix in _SORT_SUFFIXES):
                     name, suffix = part, ""

@@ -26,16 +26,20 @@ written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANO
 |---------|----------------------------------------------------|--------------------------------|
 | stocks  | upper-case root; `.X`, `pX`, `r`, `w` (`KIMpL`)    | a named convention's spelling  |
 | options | `O:` + OCC (root of 1 to 6 characters, real date)  | no `O:`, padded OSI, any case  |
-| futures | any ticker as Massive writes it (`ESZ5`)           | nothing                        |
+| futures | a contract (`ESZ5`) or a combo (`GCQ6-GCZ6`)       | nothing                        |
 | indices | `I:` + letters and digits (`I:SPX`)                | no `I:` (`SPX`)                |
 | forex   | `C:` + two three-letter codes (`C:EURUSD`)         | `EUR/USD`, `EURUSD`, any case  |
 | crypto  | `X:` + the joined pair (`X:BTCUSD`)                | `BTC-USD`, `BTCUSD`, any case  |
 
-A futures spread is one of the spellings Massive's samples show (`_SPREADS`: `GCQ6-GCZ6`, `BOB 02-01
-U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`); `canonical_symbol_future` takes single contracts and
-`canonical_symbol_future_spread` spreads, strictly, and `canonical_symbol` either, while a dataset
-takes, and a futures row keeps, any futures ticker as Massive writes it, so what comes out can
-always go back in. A dataset whose
+A futures ticker is a single contract or a combo (a spread, strip, pack, or bundle, which
+Massive's contracts list returns with `type: 'combo'`). A contract is strict: a root, a month
+code, and a one- or two-digit year (`ESZ5`, `0NGH39`). A combo is any run of upper-case letters
+and digits joined by Massive's separators, `-`, `:`, or one space (`GCQ6-GCZ6`, `BOB 02-01 U6`,
+`CL:BF Q6-U6-V6`, `1Y:SA 03M F6`): Massive documents no grammar for combos and lists more forms
+than its samples show, and every ticker Massive itself writes must round-trip, so the forms are
+not enumerated, while whitespace, lower case, and a truncated contract (`ESZ`) are refused.
+`canonical_symbol_future` takes contracts, `canonical_symbol_future_spread` combos, and
+`canonical_symbol` and a futures dataset's `symbols` either. A dataset whose
 symbols are a third party's global tickers (`DatasetSpec.symbols_as_written`) takes and keeps them
 as Massive writes them. A stock's case is meaningful (`KIMpL` is Kimco's series L preferred), so
 stock, index, and futures text is never re-cased; the option, forex, and crypto grammars are all
@@ -112,32 +116,19 @@ AS_WRITTEN: Final = re.compile(
     r"^(?![OICX]:)[^\x00-\x20\x7f](?:[^\x00-\x1f\x7f]*[^\x00-\x20\x7f])?$"
 )
 """Text kept exactly as Massive writes it: not empty, no control character, no surrounding
-whitespace, and no class prefix. How a futures row's ticker is read (a combo form not listed in
-`_SPREADS` still keeps its row), and the grammar of a dataset whose symbols are a third party's
-global tickers."""
-_FUTURE: Final = re.compile(r"^(?=[A-Z0-9]*[A-Z])[A-Z0-9]+$")
-"""A single futures contract: upper-case letters and digits, at least one letter (`ESZ5`,
-`6CH5`, `0NGH39`)."""
-_MONTH: Final = r"[FGHJKMNQUVXZ][0-9]{1,2}"
-_SPREADS: Final = (
-    # A calendar spread of two contracts: `GCQ6-GCZ6`, `10YN6-10YQ6`, `6AU7-6AU6`
-    # (vendor/massive/flat-files/futures/minute-aggregates/comex.md and cbot.md,
-    # session-aggregates/cme.md).
-    re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}-[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$"),
-    # A CBOT inter-commodity spread: `BOB 02-01 U6`, `TEX 07-05 U6`
-    # (vendor/massive/flat-files/futures/minute-aggregates/cbot.md, session-aggregates/cbot.md).
-    re.compile(rf"^[A-Z0-9]{{3}} [0-9]{{2}}-[0-9]{{2}} {_MONTH}$"),
-    # A NYMEX strategy of one or two products over months: the butterfly `CL:BF Q6-U6-V6`,
-    # the calendar `CL:BZ U6-V6` (vendor/massive/flat-files/futures/minute-aggregates/nymex.md,
-    # session-aggregates/nymex.md).
-    re.compile(rf"^[A-Z0-9]+:[A-Z0-9]+ {_MONTH}(?:-{_MONTH})+$"),
-    # A CME currency cross: `6A:XF:AUDUSD:Q6` (vendor/massive/flat-files/futures/
-    # session-aggregates/cme.md).
-    re.compile(rf"^[A-Z0-9]+(?::[A-Z0-9]+)+:{_MONTH}$"),
-)
-"""Massive's spellings of a futures spread, each as written in its vendored samples. Massive
-documents no grammar for them (only `type: 'combo'`), so this list is what the samples show,
-and no ticker is ever built from its legs."""
+whitespace, and no class prefix. How a futures row's ticker is read, so a row Massive sends is
+never lost to the grammar, and the grammar of a dataset whose symbols are a third party's global
+tickers."""
+_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$")
+"""A single futures contract: a root of upper-case letters and digits, a month code, and a one-
+or two-digit year (`ESZ5`, `6CH5`, `0NGH39`). `ESZ`, with no year, is no contract."""
+_FUTURES_COMBO: Final = re.compile(r"^(?![OICX]:)[A-Z0-9]+(?:[-: ][A-Z0-9]+)+$")
+"""A futures combo (spread, strip, pack, or bundle): runs of upper-case letters and digits, each
+joined to the next by one `-`, `:`, or space, as Massive writes them (`GCQ6-GCZ6`,
+`BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`, `1Y:SA 03M F6`, `10YF5-10YG5XXX`).
+Massive documents no grammar for combos, so the shape is checked and the forms are not listed:
+a ticker Massive writes always round-trips, while surrounding or doubled whitespace, lower case,
+an empty part, and another class's prefix (`X:BTC-USD`) are refused."""
 _INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 """A canonical index ticker: `I:` and letters and digits, as Massive's WebSocket specification
 writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
@@ -232,31 +223,45 @@ def _occ_ok(symbol: str) -> bool:
 
 
 def is_futures_contract(text: str) -> bool:
-    """Tell whether text is a single futures contract ticker (`ESZ5`), not a spread.
+    """Tell whether text is a single futures contract ticker (`ESZ5`), not a combo.
 
-    The futures schedule calendar looks up only such tickers: every other futures ticker is a
-    spread or combination, which Massive's contracts list does not hold.
+    The futures schedule calendar looks up only such tickers, by their product: a combo
+    (`type: 'combo'` in Massive's contracts list) names several legs, and the calendar keeps no
+    schedule for it.
 
     Args:
         text: The text.
 
     Returns:
-        True for upper-case letters and digits with at least one letter.
+        True for a root of upper-case letters and digits, a month code, and a one- or two-digit
+        year.
     """
     return _FUTURE.fullmatch(text) is not None
 
 
 def _is_spread(text: str) -> bool:
-    """Tell whether text is one of Massive's futures spread spellings (`_SPREADS`).
+    """Tell whether text is a futures combo ticker in Massive's shape (`_FUTURES_COMBO`).
 
     Args:
         text: The text.
 
     Returns:
-        True for a calendar spread, a CBOT inter-commodity spread, a NYMEX strategy, or a CME
-        currency cross, each exactly as Massive writes it.
+        True for runs of upper-case letters and digits joined by single `-`, `:`, or spaces.
     """
-    return any(pattern.fullmatch(text) is not None for pattern in _SPREADS)
+    return _FUTURES_COMBO.fullmatch(text) is not None
+
+
+def _futures_ok(text: str) -> bool:
+    """Tell whether text is a futures ticker a dataset takes: a contract or a combo.
+
+    Args:
+        text: The text.
+
+    Returns:
+        True for a single contract (`ESZ5`) or a combo in Massive's shape (`GCQ6-GCZ6`),
+        exactly as written; False for anything else, `esz5` and `ESZ` included.
+    """
+    return is_futures_contract(text) or _is_spread(text)
 
 
 def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
@@ -274,7 +279,7 @@ def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
 CANONICAL_GRAMMARS: Final[dict[AssetClass, Callable[[str], bool]]] = {
     AssetClass.STOCKS: _matches(_STOCK),
     AssetClass.OPTIONS: _occ_ok,
-    AssetClass.FUTURES: _matches(AS_WRITTEN),
+    AssetClass.FUTURES: _futures_ok,
     AssetClass.INDICES: _matches(_INDEX),
     AssetClass.FOREX: _matches(_FOREX),
     AssetClass.CRYPTO: _matches(_CRYPTO),
@@ -489,9 +494,10 @@ def _convert_future(text: str) -> str:
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
     raise ValueError(
-        f"{text!r} is not a Massive futures ticker: a contract is upper-case letters and digits "
-        "('ESZ5'), and a spread is written as Massive writes it ('GCQ6-GCZ6', 'BOB 02-01 U6', "
-        "'CL:BF Q6-U6-V6', '6A:XF:AUDUSD:Q6')"
+        f"{text!r} is not a Massive futures ticker: a contract is a root of upper-case letters "
+        "and digits, a month code, and a one- or two-digit year ('ESZ5'), and a combo is runs "
+        "of upper-case letters and digits joined by single '-', ':', or spaces ('GCQ6-GCZ6', "
+        "'BOB 02-01 U6', 'CL:BF Q6-U6-V6')"
     )
 
 
@@ -512,7 +518,8 @@ def _convert_single_future(text: str) -> str:
         return text
     if _is_spread(text):
         raise ValueError(
-            f"{text!r} is a futures spread, not a single contract; call "
+            f"{text!r} is a futures combo (a spread, strip, pack, or bundle), not a single "
+            "contract; call "
             "dm.canonical_symbol_future_spread"
         )
     return _convert_future(text)
@@ -529,20 +536,20 @@ def _convert_spread(text: str) -> str:
 
     Raises:
         ValueError: If the text is a single contract (`canonical_symbol_future` takes it), or
-            none of Massive's spread spellings; the message lists them.
+            not in Massive's combo shape; the message describes it.
     """
     if _is_spread(text):
         return text
     if is_futures_contract(text):
         raise ValueError(
-            f"{text!r} is a single futures contract, not a spread; call dm.canonical_symbol_future"
+            f"{text!r} is a single futures contract, not a combo; call dm.canonical_symbol_future"
         )
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
     raise ValueError(
-        f"{text!r} is not one of Massive's futures spread spellings: a calendar spread "
-        "'GCQ6-GCZ6', a CBOT inter-commodity spread 'BOB 02-01 U6', a NYMEX strategy "
-        "'CL:BF Q6-U6-V6' or 'CL:BZ U6-V6', or a CME currency cross '6A:XF:AUDUSD:Q6'"
+        f"{text!r} is not a Massive futures combo ticker: runs of upper-case letters and digits "
+        "joined by single '-', ':', or spaces, such as 'GCQ6-GCZ6', 'BOB 02-01 U6', or "
+        "'CL:BF Q6-U6-V6'"
     )
 
 
@@ -786,8 +793,8 @@ def canonical_symbol(
     only that convention's grammar applies, so text it does not spell raises even when it
     happens to be a Massive ticker. For futures, a single contract (`ESZ5`) or a spread in one
     of Massive's spellings (`GCQ6-GCZ6`) comes back unchanged and anything else raises, with
-    the message of `canonical_symbol_future`, although a dataset takes any futures ticker as
-    Massive writes it. The class is never guessed: `SPX` is an index only because
+    the message of `canonical_symbol_future`; a futures dataset's `symbols` take the same two
+    forms. The class is never guessed: `SPX` is an index only because
     the caller says so. In a Deephaven query string, call the per-class functions instead
     (`canonical_symbol_forex`), which need no enum argument; a function called through the
     module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
@@ -834,10 +841,6 @@ def canonical_symbol(
         return None
     if chosen is not SymbolConvention.MASSIVE:
         return _convert_stock_from(value, chosen)
-    if resolved is AssetClass.FUTURES:
-        # A dataset takes any futures ticker as Massive writes it, but the converter checks
-        # the grammar of a contract or a spread, as the per-class functions do.
-        return value if _is_spread(value) else _convert_single_future(value)
     if CANONICAL_GRAMMARS[resolved](value):
         return value
     return _CONVERTERS[resolved](value)
@@ -993,7 +996,8 @@ def canonical_symbol_option(text: str | None) -> str | None:
 def canonical_symbol_future(text: str | None) -> str | None:
     """Check a single futures contract ticker, which Massive's text is exactly: `ESZ5`.
 
-    A contract ticker is upper-case letters and digits, taken as written: nothing is converted
+    A contract ticker is a root of upper-case letters and digits, a month code, and a one- or
+    two-digit year, taken as written: nothing is converted
     or re-cased. A spread is refused with the function that takes it
     (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit
     (`ESZ5` is December 2025) unless the contract is ten or more years out (`0NGH39`), so
@@ -1011,7 +1015,7 @@ def canonical_symbol_future(text: str | None) -> str | None:
 
     Raises:
         TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is a spread, or not upper-case letters and digits.
+        ValueError: If the text is a combo, or not a root, a month code, and a year.
     """
     value = _require_text(text)
     return None if value is None else _convert_single_future(value)
@@ -1019,14 +1023,14 @@ def canonical_symbol_future(text: str | None) -> str | None:
 
 @raises_through(_require_text, _convert_spread)
 def canonical_symbol_future_spread(text: str | None) -> str | None:
-    """Check a futures spread ticker, exactly as Massive writes it: `GCQ6-GCZ6`, `BOB 02-01 U6`.
+    """Check a futures combo ticker, exactly as Massive writes it: `GCQ6-GCZ6`, `BOB 02-01 U6`.
 
-    Massive documents no grammar for spreads, so the spellings accepted are those its samples
-    show: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`), a CBOT
-    inter-commodity spread (`BOB 02-01 U6`), a NYMEX strategy of one or two products over
-    months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`), and a CME currency
-    cross (`6A:XF:AUDUSD:Q6`). Canonical text comes back unchanged; no ticker is built from its
-    legs. A single contract is refused with `canonical_symbol_future`. Pure and thread-safe.
+    Any combo (spread, strip, pack, or bundle) Massive writes is accepted: runs of upper-case
+    letters and digits joined by single `-`, `:`, or spaces (`GCQ6-GCZ6`, `BOB 02-01 U6`,
+    `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`). Massive documents no grammar for combos, so the shape
+    is checked rather than a list of forms. Canonical text comes back unchanged; no ticker is
+    built from its legs. A single contract is refused with `canonical_symbol_future`. Pure and
+    thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_future_spread`) for a `String` column; called through the module it makes
@@ -1040,8 +1044,8 @@ def canonical_symbol_future_spread(text: str | None) -> str | None:
 
     Raises:
         TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is a single contract, or none of the spread spellings (the message
-            lists them).
+        ValueError: If the text is a single contract, or not in Massive's combo shape (the
+            message describes it).
     """
     value = _require_text(text)
     return None if value is None else _convert_spread(value)

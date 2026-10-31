@@ -153,11 +153,12 @@ def _list_items(
     """Return a list filter's values one text item each, so every spelling gives one key.
 
     The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
-    `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas, and
-    stripping the spaces around each part, makes them one value, so equal filters give equal
-    queries. On a list of dates (`date.any_of`), a `date` item is its ISO-8601 day; on a list
-    of numbers (`strike_price.any_of`), an `int` or `float` item is written as the base
-    parameter writes one number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
+    `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas makes them one
+    value, so equal filters give equal queries; an item is taken exactly as written, so one
+    with surrounding whitespace is refused rather than trimmed. On a list of dates
+    (`date.any_of`), a `date` item is its ISO-8601 day; on a list of numbers
+    (`strike_price.any_of`), an `int` or `float` item is written as the base parameter writes one
+    number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
     `bool` is never a number.
 
     Args:
@@ -174,10 +175,10 @@ def _list_items(
         The tuple of text items.
 
     Raises:
-        ValueError: If an item is empty (`"a,,b"`, `""`, or `" "`), which Massive would read
-            as a value of its own, or an item is of a kind the base parameter does not take:
-            a `date` for a list that is not of dates, a number for a list that is not of
-            numbers, or a `float` for a list of integers.
+        ValueError: If an item is empty (`"a,,b"` or `""`), which Massive would read as a
+            value of its own, holds surrounding whitespace (`"a, b"`, `" "`), or is of a kind
+            the base parameter does not take: a `date` for a list that is not of dates, a
+            number for a list that is not of numbers, or a `float` for a list of integers.
     """
     if isinstance(value, str):
         value = (value,)
@@ -200,7 +201,15 @@ def _list_items(
             except TypeError as error:
                 raise ValueError(str(error)) from None
         elif isinstance(item, str):
-            texts.extend(part.strip() for part in item.split(","))
+            parts = item.split(",")
+            spaced = next((p for p in parts if p != p.strip()), None)
+            if spaced is not None and spaced.strip():
+                raise ValueError(
+                    f"{spec.name} filter {key!r} has the item {spaced!r} with surrounding "
+                    f"whitespace in {value!r}; write {spaced.strip()!r}, items joined by "
+                    "commas alone"
+                )
+            texts.extend(p.strip() for p in parts)  # a blank item becomes empty: refused below
         else:
             return value  # the encoder names the item it cannot send
     if "" in texts:

@@ -13,7 +13,6 @@ from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoo
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, NoReturn, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -381,15 +380,6 @@ def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
     return out
 
 
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its path and decoded query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
-
-
 def epoch_ns(moment: datetime) -> int:
     return int(moment.timestamp()) * NS
 
@@ -410,7 +400,7 @@ def test_fetch_sends_the_typed_parameters_axis_filters_and_page_size(
         params={"sort": "ex_dividend_date", "order": Order.DESC},
         filters={"frequency_gte": 4},
     )
-    requests = sent(fake_rest)
+    requests = fake_rest.get_queries()
     # Two symbols a request (symbols_per_request), sorted canonical order.
     assert sorted(q["ticker.any_of"][0] for _, q in requests) == ["AAPL,IBM", "MSFT"]
     first = requests[0][1]
@@ -434,7 +424,7 @@ def test_iso_text_in_a_date_filter_is_sent_as_its_date(
     assert q._request.filters == (("effective_date", date(2025, 9, 18)),)
     assert isinstance(q, Query)
     q.fetch()
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["effective_date"] == ["2025-09-18"]
     assert sent_query["composite_ticker"] == ["SPY"]
 
@@ -458,7 +448,7 @@ def test_every_filter_kind_reaches_the_wire_as_the_check_parsed_it(
         },
     )
     fetch(session, DIVIDENDS, filters={"frequency": 4, "distribution_type_any_of": "special"})
-    (_, contracts), (_, dividends) = sent(fake_rest)
+    (_, contracts), (_, dividends) = fake_rest.get_queries()
     assert {key: values for key, values in contracts.items() if key != "limit"} == {
         "underlying_ticker": ["NVDA"],
         "contract_type": ["put"],
@@ -483,10 +473,10 @@ def test_a_date_on_an_instant_filter_is_sent_as_its_days_bound(
             "last_updated_gte": "2025-06-02",
             "last_updated_lt": date(2025, 6, 4),
             "date_gte": "2025-06-01",
-            "ticker_any_of": "AAPL, MSFT",
+            "ticker_any_of": "AAPL,MSFT",
         },
     )
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     # `last_updated` is an instant field behind a date-typed filter: its days start in New
     # York. `date` is a calendar date and keeps the day.
     assert sent_query["last_updated.gte"] == ["2025-06-02T04:00:00Z"]
@@ -504,7 +494,7 @@ def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
     fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
-    by_path = dict(sent(fake_rest))
+    by_path = dict(fake_rest.get_queries())
     utc_day = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC)) // 10**6
     new_york_day = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC)) // 10**6
     one_day = 86_400_000
@@ -628,7 +618,7 @@ def test_an_aware_datetime_on_an_inclusive_instant_filter_is_sent_as_given(
     fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
     noon = datetime(2025, 6, 2, 12, 30, tzinfo=ZoneInfo("America/New_York"))
     fetch(session, RATINGS, filters={"last_updated_lte": noon, "last_updated_gt": noon})
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["last_updated.lte"] == ["2025-06-02T16:30:00Z"]
     assert sent_query["last_updated.gt"] == ["2025-06-02T16:30:00Z"]
 
@@ -638,7 +628,7 @@ def test_a_list_of_dates_takes_date_items(
 ) -> None:
     fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
     fetch(session, RATINGS, filters={"date_any_of": [date(2025, 6, 2), "2025-06-03"]})
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["date.any_of"] == ["2025-06-02,2025-06-03"]
     with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no dates"):
         query(session, RATINGS, filters={"ticker_any_of": [date(2025, 6, 2)]})
@@ -654,7 +644,7 @@ def test_each_ticker_takes_its_own_class_days_on_a_dataset_with_a_path_per_class
     )
     bounds = sorted(
         (q["ticker"][0], q["published_utc.gte"][0], q["published_utc.lt"][0])
-        for _, q in sent(fake_rest)
+        for _, q in fake_rest.get_queries()
     )
     assert bounds == [
         ("AAPL", "2025-03-09T05:00:00Z", "2025-03-10T04:00:00Z"),
@@ -667,7 +657,9 @@ def test_any_other_dataset_without_a_class_keeps_new_york_days(
 ) -> None:
     fake_rest.reply(NEWS_PATH, Reply(envelope([])))
     fetch(session, NEWS_TICKERS, symbols=["X:BTCUSD", "AAPL"], start="2025-03-09", end="2025-03-09")
-    assert {q["published_utc.gte"][0] for _, q in sent(fake_rest)} == {"2025-03-09T05:00:00Z"}
+    assert {q["published_utc.gte"][0] for _, q in fake_rest.get_queries()} == {
+        "2025-03-09T05:00:00Z"
+    }
 
 
 def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
@@ -686,7 +678,7 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
     fake_rest.reply("/v1/open-close/crypto/BTC/USD/2025-03-03", Reply(body))
     serve_pairs(fake_rest)
     out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
-    assert [path for path, _ in sent(fake_rest)] == [
+    assert [path for path, _ in fake_rest.get_queries()] == [
         TICKERS_PATH,  # the pair's split comes from Massive's listed crypto tickers,
         TICKERS_PATH,  # and its delisted ones
         "/v1/open-close/crypto/BTC/USD/2025-03-03",
@@ -723,7 +715,7 @@ def serve_pairs(server: FakeRestServer) -> None:
 
 def sent_data(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
     # Every GET but the read of the crypto ticker list.
-    return [(path, query) for path, query in sent(server) if path != TICKERS_PATH]
+    return [(path, query) for path, query in server.get_queries() if path != TICKERS_PATH]
 
 
 def split_pair(symbol: str) -> tuple[str, str]:
@@ -763,7 +755,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", {"cursor": ["two"]}),
         ("/v3/reference/tickers", DELISTED_QUERY),
@@ -788,7 +780,7 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", DELISTED_QUERY),
     ]
@@ -878,7 +870,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
         reader.crypto_pair("X:DOTUSD")
     assert raised.value.status == 403
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
-    assert len(sent(fake_rest)) == 3  # the failed read, then both lists
+    assert len(fake_rest.get_queries()) == 3  # the failed read, then both lists
 
 
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
@@ -1126,7 +1118,7 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
             assert joiner.join() == ("DOT", "USD")
     finally:
         m.close()
-    assert len(sent(fake_rest)) == 4  # the list's three attempts, then the delisted page
+    assert len(fake_rest.get_queries()) == 4  # the list's three attempts, then the delisted page
     assert (listeners.buckets, listeners.live) == (["other"], [])  # heard, then removed
     patience = 90 if console == "joiner" else 600
     assert (
@@ -1170,7 +1162,7 @@ def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
         assert joiner.join() == ("DOT", "USD")  # it read the list itself
     finally:
         m.close()
-    assert len(sent(fake_rest)) == 2
+    assert len(fake_rest.get_queries()) == 2
     assert any(
         "the caller making the crypto ticker list stopped (KeyboardInterrupt())" in message
         for message in caplog.messages
@@ -1205,7 +1197,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
         assert joiner.join() == ("DOT", "USD")
     finally:
         m.close()
-    assert len(sent(fake_rest)) == 3  # the maker's paused page, then the joiner's two lists
+    assert len(fake_rest.get_queries()) == 3  # the maker's paused page, then the joiner's two lists
     assert any(
         "the caller making the crypto ticker list stopped (its read was stopped:" in message
         for message in caplog.messages
@@ -1278,7 +1270,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         assert maker.join() == ("DOT", "USD")
     finally:
         m.close()
-    assert len(sent(fake_rest)) == 3
+    assert len(fake_rest.get_queries()) == 3
     assert listeners.live == []  # the waiter's listeners are gone
 
 
@@ -1353,7 +1345,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
         m.close()
     assert isinstance(decision, HostDecision)
     assert decision.host == "delayed.massive.com"
-    assert len(sent(fake_rest)) == 3
+    assert len(fake_rest.get_queries()) == 3
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
     # The caller that gave up raises; its expected failure logs nothing above DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
@@ -1557,7 +1549,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
             break
         failed.wait(0.01)
     assert failed.is_set()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", DELISTED_QUERY),
     ]
@@ -1570,7 +1562,7 @@ def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
     fetch(session, NEWS, start="2025-06-02", end=date(2025, 6, 2))
     # `published_utc` is an instant field, so its date-typed filter gets the half-open
     # instants of the whole day in New York (the zone of a dataset without a class).
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["published_utc.gte"] == ["2025-06-02T04:00:00Z"]
     assert sent_query["published_utc.lt"] == ["2025-06-03T04:00:00Z"]
 
@@ -1580,7 +1572,7 @@ def test_a_list_symbol_parameter_without_a_limit_takes_every_symbol_at_once(
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
     fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:NDX", "I:DJI"])
-    assert [q["ticker.any_of"] for _, q in sent(fake_rest)] == [["I:DJI,I:NDX,I:SPX"]]
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["I:DJI,I:NDX,I:SPX"]]
 
 
 def test_limit_caps_rows_across_requests(
@@ -1590,7 +1582,7 @@ def test_limit_caps_rows_across_requests(
     out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
     assert len(out) == 3
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
-    assert [q["limit"] for _, q in sent(fake_rest)] == [["3"], ["3"]]
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["3"]]
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -1610,7 +1602,7 @@ def test_a_limit_above_the_page_size_keeps_the_page_size(
 ) -> None:
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     fetch(session, DIVIDENDS, symbols=["AAPL"], limit=5000)
-    assert [q["limit"] for _, q in sent(fake_rest)] == [["1000"]]
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["1000"]]
 
 
 def test_order_is_sent_as_is_where_the_path_has_it(
@@ -1618,7 +1610,7 @@ def test_order_is_sent_as_is_where_the_path_has_it(
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["AAPL"], params={"order": Order.ASC})
-    assert sent(fake_rest)[0][1]["order"] == ["asc"]
+    assert fake_rest.get_queries()[0][1]["order"] == ["asc"]
 
 
 def test_order_alone_goes_as_is_on_a_list_path_with_its_own_order(
@@ -1626,7 +1618,7 @@ def test_order_alone_goes_as_is_on_a_list_path_with_its_own_order(
 ) -> None:
     fake_rest.reply(NEWS_PATH, Reply(envelope([])))
     fetch(session, NEWS, params={"order": Order.DESC})
-    ((_, sent_query),) = sent(fake_rest)
+    ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["order"] == ["desc"]
     assert "sort" not in sent_query
 
@@ -1657,7 +1649,7 @@ def test_path_parameters_come_from_the_typed_parameters(
     gainers = "/v2/snapshot/locale/us/markets/stocks/gainers"
     fake_rest.reply(gainers, Reply(envelope(status="OK", tickers=[{"ticker": "NVDA"}])))
     out = fetch(session, MOVERS, params={"direction": Direction.GAINERS})
-    assert sent(fake_rest) == [(gainers, {})]
+    assert fake_rest.get_queries() == [(gainers, {})]
     assert [r["Symbol"] for r in out] == ["NVDA"]
 
 
@@ -1728,7 +1720,7 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
         params={"window": 50},
         start=datetime(2024, 1, 1, tzinfo=UTC),
     )
-    requests = dict(sent(fake_rest))
+    requests = dict(fake_rest.get_queries())
     assert requests["/v1/indicators/sma/AAPL"] == {
         "limit": ["5000"],
         "timespan": ["day"],
@@ -1749,7 +1741,7 @@ def test_an_explicit_adjusted_fails_on_a_path_without_it(
     assert fake_rest.requests == []
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["AAPL"], adjusted=False)
-    assert sent(fake_rest)[0][1]["adjusted"] == ["false"]
+    assert fake_rest.get_queries()[0][1]["adjusted"] == ["false"]
 
 
 def test_a_per_symbol_detail_path_serves_named_symbols(
@@ -1762,7 +1754,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
     )
     listed = fetch(session, CONTRACTS, filters={"strike_price_gte": 500})
     named = fetch(session, CONTRACTS, symbols=["O:SPY250117C00600000"])
-    assert [path for path, _ in sent(fake_rest)] == [
+    assert [path for path, _ in fake_rest.get_queries()] == [
         CONTRACTS_PATH,
         "/v3/reference/options/contracts/O:SPY250117C00600000",
     ]
@@ -1791,7 +1783,7 @@ def test_row_symbols_are_canonical(
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
     assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
-    assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
+    assert fake_rest.get_queries()[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
     # Under RAISE, a spelling the library cannot read fails the request, naming it.
     config = dm.MassiveConfig(
         api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
@@ -1832,16 +1824,16 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
     watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
-    assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
+    assert fake_rest.get_queries()[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
     # A row that is not Massive's ticker is skipped, so the request names only the others.
     fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX", "I:VIX"])]))
-    assert sent(fake_rest)[1][1]["ticker.any_of"] == ["I:VIX"]
+    assert fake_rest.get_queries()[1][1]["ticker.any_of"] == ["I:VIX"]
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is Massive's ticker, so the "
-        r"result would follow nothing: skipping 1 symbol-table value that is not Massive's "
-        r"ticker: 'SPX'; fix or delete that row$",
+        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
+        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
+        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
@@ -2055,7 +2047,7 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
             with pytest.raises(dm.MassiveError, match=given_up):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
     # The second call failed without a request: the bucket's pause still stands.
-    assert len(sent(fake_rest)) == 1
+    assert len(fake_rest.get_queries()) == 1
     # The first 429 is a notice at INFO, once; the calls raise, and log nothing above it.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     warnings = [
@@ -2113,7 +2105,7 @@ def test_history_bounds_a_timestamp_axis_exactly_and_pages(
     with caplog.at_level(logging.INFO, LOGGER):
         out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert [(r["Symbol"], r["Timestamp"]) for r in out] == [("AAPL", start + 1)]
-    query_sent = sent(fake_rest)[0][1]
+    query_sent = fake_rest.get_queries()[0][1]
     assert query_sent["timestamp.gte"] == [str(start)]
     assert query_sent["timestamp.lt"] == [str(start + 86_400 * NS)]
     assert (
@@ -2139,7 +2131,7 @@ def test_bars_fill_the_range_segments_in_milliseconds(
         timespan=Timespan.DAY,
         adjusted=False,
     )
-    assert sent(fake_rest) == [(path, {"adjusted": ["false"], "sort": ["asc"]})]
+    assert fake_rest.get_queries() == [(path, {"adjusted": ["false"], "sort": ["asc"]})]
     # The bar is March 3 in New York: from its midnight to the next.
     assert [
         (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out
@@ -2166,7 +2158,7 @@ def test_all_daily_bars_read_one_grouped_day_at_a_time(
         timespan=Timespan.DAY,
         adjusted=True,
     )
-    assert sorted(path for path, _ in sent(fake_rest)) == [
+    assert sorted(path for path, _ in fake_rest.get_queries()) == [
         GROUPED_PATH.format(date="2025-03-03"),
         GROUPED_PATH.format(date="2025-03-04"),
     ]
@@ -2192,7 +2184,7 @@ def test_futures_bars_by_date_request_whole_sessions(
         timespan=Timespan.MINUTE,
         multiplier=5,
     )
-    q = sent(fake_rest)[0][1]
+    q = fake_rest.get_queries()[0][1]
     # From the session's regular open, Monday 17:00 Chicago, less the four-day holiday
     # margin, to 18:00 Chicago on the session's date; the rows are kept by session.
     opens = datetime(2025, 2, 27, 17, tzinfo=CHICAGO)
@@ -2237,7 +2229,7 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     out = history(session, FUTURES_TRADES, start="2025-01-21", end="2025-01-21", symbols=["ESH5"])
     path = FUTURES_TRADES_PATH.format(ticker="ESH5")
     # `sort` lists no values: the time axis's field, ascending.
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (path, {"limit": ["50000"], "sort": ["timestamp.asc"], "session_end_date": ["2025-01-21"]})
     ]
     # A row of another session is dropped.
@@ -2283,7 +2275,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
             end="2024-04-01",
             symbols=["NQH5", "ESH5"],
         )
-    asked = sorted(q["session_end_date"][0] for _, q in sent(fake_rest))
+    asked = sorted(q["session_end_date"][0] for _, q in fake_rest.get_queries())
     assert asked == ["2024-03-28"] * 2 + ["2024-03-29"] * 2 + ["2024-04-01"] * 2
     # Sessions in date order, and the symbols of one session in symbol order.
     assert [(r["Symbol"], r["Date"]) for r in out] == [
@@ -2307,7 +2299,7 @@ def test_a_short_session_download_is_not_announced(
         fake_rest.reply(session_target("ESH5", day), Reply(envelope([])))
     with caplog.at_level(logging.INFO):
         history(session, FUTURES_TRADES, start="2025-03-01", end="2025-03-09", symbols=["ESH5"])
-    assert len(sent(fake_rest)) == 5
+    assert len(fake_rest.get_queries()) == 5
     assert "requests a minute" not in caplog.text
 
 
@@ -2318,12 +2310,12 @@ def test_a_session_end_date_filter_needs_datetimes(
     assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.REST)
-    assert sent(fake_rest) == []
+    assert fake_rest.get_queries() == []
     # With datetimes, the filter and the time range travel together.
     fake_rest.reply(FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([])))
     start = datetime(2025, 1, 21, 8, tzinfo=CHICAGO)
     q.history(start, start + timedelta(hours=1), source=HistorySource.REST)
-    sent_query = sent(fake_rest)[0][1]
+    sent_query = fake_rest.get_queries()[0][1]
     assert sent_query["session_end_date"] == ["2025-01-21"]
     assert sent_query["timestamp.gte"] == [str(epoch_ns(start))]
 
@@ -2342,7 +2334,7 @@ def test_futures_trades_by_instants_take_the_exact_timestamp_range(
     start = datetime(2024, 12, 16, 17, tzinfo=CHICAGO)
     end = datetime(2024, 12, 17, 16, tzinfo=CHICAGO)
     out = history(session, FUTURES_TRADES, start=start, end=end, symbols=["ESH5"])
-    q = sent(fake_rest)[0][1]
+    q = fake_rest.get_queries()[0][1]
     assert q["timestamp.gte"] == [str(epoch_ns(start))]
     assert q["timestamp.lt"] == [str(epoch_ns(end))]
     assert "session_end_date" not in q
@@ -2693,7 +2685,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
             patience=_massive.Patience(math.inf),
         )
     # The one worker may take the next call before the read cancels it; the rest never start.
-    assert len(sent(fake_rest)) <= 2
+    assert len(fake_rest.get_queries()) <= 2
 
 
 def test_a_decision_is_shared_even_if_recording_it_fails(
@@ -2831,7 +2823,7 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
         timespan=Timespan.WEEK,
         adjusted=False,
     )
-    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [p for p, _ in fake_rest.get_queries()] == [path]
     # Each week, stamped on its Sunday, runs from its Monday's midnight to the Saturday's
     # after its Friday, and spans several dates, so it has no `Date`.
 
@@ -2858,7 +2850,7 @@ def test_an_open_end_leaves_out_the_unfinished_month(
         timespan=Timespan.MONTH,
         adjusted=False,
     )
-    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [p for p, _ in fake_rest.get_queries()] == [path]
     # Each month ends at midnight after its last weekday: Wednesday 04-30 and Friday 05-30.
     assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (stamps[0] * 10**6, ny_ms(date(2025, 5, 1)) * 10**6),
@@ -2880,7 +2872,7 @@ def test_an_empty_range_returns_every_column_without_a_request(
     bars = query(session, BARS, symbols=["AAPL"], timespan=Timespan.MONTH, adjusted=False)
     assert isinstance(bars, HistoryQuery)
     assert bars.history("2025-03-05", "2025-03-20", source=source).size == 0
-    assert sent(fake_rest) == []
+    assert fake_rest.get_queries() == []
 
 
 def test_a_long_grouped_daily_download_is_announced(
@@ -2899,7 +2891,7 @@ def test_a_long_grouped_daily_download_is_announced(
             adjusted=True,
         )
     # Stocks have no grouped day on a Saturday or Sunday: 11 weekdays, not 15 days.
-    days = sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest))
+    days = sorted(path.rsplit("/", 1)[1] for path, _ in fake_rest.get_queries())
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
@@ -2989,7 +2981,7 @@ def test_a_history_by_instants_is_not_announced_however_many_symbols(
         fake_rest.reply(TRADES_PATH.format(stockTicker=ticker), Reply(envelope([])))
     with caplog.at_level(logging.INFO):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
-    assert len(sent(fake_rest)) == 6
+    assert len(fake_rest.get_queries()) == 6
     assert "requests a minute" not in caplog.text
 
 
@@ -3096,7 +3088,7 @@ def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
         timespan=Timespan.DAY,
         adjusted=True,
     )
-    assert sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest)) == [
+    assert sorted(path.rsplit("/", 1)[1] for path, _ in fake_rest.get_queries()) == [
         "2025-03-07",
         "2025-03-09",
     ]
@@ -3466,7 +3458,7 @@ def test_a_failed_symbol_stops_the_others_paging_after_the_page_on_the_wire(
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
     # The read's token is checked before every page: MSFT finishes the page on the wire and
     # asks for no other.
-    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1
+    assert sum(1 for path, _ in fake_rest.get_queries() if "MSFT" in path) == 1
 
 
 def test_an_interrupted_fan_out_stops_its_running_calls(
@@ -3476,7 +3468,7 @@ def test_an_interrupted_fan_out_stops_its_running_calls(
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope([])))
     with pytest.raises(KeyboardInterrupt):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
-    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1
+    assert sum(1 for path, _ in fake_rest.get_queries() if "MSFT" in path) == 1
 
 
 # --- Time columns, adjustment, and missing data ------------------------------------------------
@@ -3675,7 +3667,7 @@ def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_
         timespan=Timespan.SESSION,
         multiplier=2,
     )
-    assert sent(fake_rest)[0][1]["resolution"] == ["2session"]
+    assert fake_rest.get_queries()[0][1]["resolution"] == ["2session"]
     # The label is not the bar's day: a bar of two sessions has no `Date`. The bar opening
     # Monday evening may end as late as Friday's close, so it is kept; the one opening
     # Wednesday evening may end on Tuesday 04-02 (Good Friday folds), after the range.
@@ -3718,7 +3710,7 @@ def test_fetch_rows_reads_every_page_raw(
     query = {"product_code.any_of": ("ES", "GC")}
     out = transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=Cancel())
     assert out == [{"product_code": "GC"}, {"product_code": "ES", "extra": 2}]
-    assert sent(fake_rest)[0][1]["product_code.any_of"] == ["ES,GC"]
+    assert fake_rest.get_queries()[0][1]["product_code.any_of"] == ["ES,GC"]
     assert requests_by_bucket(session) == {"futures": 2}  # both pages, charged as asked
     # A failed request raises its public error.
     fake_rest.reply("/futures/v1/schedules?product_code=ZZ", Reply(b"{}", status=403))

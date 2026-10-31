@@ -32,6 +32,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
@@ -530,7 +531,8 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     skipped = (
-        "skipping 1 symbol-table value that is not Massive's ticker: 'msft'; fix or delete that row"
+        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
+        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
     )
 
     def error() -> object:
@@ -1281,7 +1283,8 @@ def test_a_stream_waiting_for_a_slot_says_so(
 
 
 SKIPPED_SPY = (
-    "skipping 1 symbol-table value that is not Massive's ticker: 'spy'; fix or delete that row"
+    "skipping 1 symbol-table value this dataset does not take: 'spy'; fix or delete that "
+    f"row, or report it at {ISSUES_URL} if Massive itself writes it"
 )
 """The `Error` text of a stream whose options watchlist holds the bad row `spy`."""
 

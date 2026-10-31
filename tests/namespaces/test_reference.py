@@ -4,12 +4,12 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import urlencode
 
 import pyarrow as pa
 import pytest
@@ -527,23 +527,8 @@ def test_the_vendor_samples_decode(
 # --- End to end through the fake REST server -------------------------------------------------
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
 Fixture = Callable[[str, str], bytes]
 ToRows = Callable[[Table], list[dict[str, Any]]]
-
-
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its decoded path and query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-    ]
 
 
 def sample(load_fixture: Fixture, name: str) -> Reply:
@@ -567,7 +552,7 @@ def test_tickers_fetch(
             "A", market=dm.Market.STOCKS, ticker_type=dm.TickerType.CS, as_of="2021-04-25"
         ).fetch()
     )
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/v3/reference/tickers",
             {
@@ -593,12 +578,14 @@ def test_tickers_without_symbols_list_every_ticker_and_symbols_fan_out(
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
     rest_session.reference.tickers().fetch()
-    assert sent(fake_rest) == [("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]})]
+    assert fake_rest.get_queries() == [
+        ("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]})
+    ]
     rest_session.reference.tickers(["MSFT", "AAPL"]).fetch()
     # The per-symbol requests run concurrently, so they arrive in any order.
-    fanned = sorted(params["ticker"] for _, params in sent(fake_rest)[1:])
+    fanned = sorted(params["ticker"] for _, params in fake_rest.get_queries()[1:])
     assert fanned == [["AAPL"], ["MSFT"]]
-    assert all(params["limit"] == ["1000"] for _, params in sent(fake_rest))
+    assert all(params["limit"] == ["1000"] for _, params in fake_rest.get_queries())
 
 
 def test_ticker_details_fetch_one_request_per_symbol(
@@ -610,7 +597,7 @@ def test_ticker_details_fetch_one_request_per_symbol(
 ) -> None:
     fake_rest.reply("/v3/reference/tickers/AAPL", sample(load_fixture, "ticker_details"))
     out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", as_of="2024-01-02").fetch())
-    assert sent(fake_rest) == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
+    assert fake_rest.get_queries() == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
     assert [(r["Symbol"], r["AddressCity"], r["ListDate"]) for r in out] == [
         ("AAPL", "Cupertino", "1980-12-12")
     ]
@@ -625,7 +612,9 @@ def test_ticker_events_fill_the_symbol_from_the_request(
 ) -> None:
     fake_rest.reply("/vX/reference/tickers/META/events", sample(load_fixture, "ticker_events"))
     out = dh_to_pylist(rest_session.reference.ticker_events("META", types="ticker_change").fetch())
-    assert sent(fake_rest) == [("/vX/reference/tickers/META/events", {"types": ["ticker_change"]})]
+    assert fake_rest.get_queries() == [
+        ("/vX/reference/tickers/META/events", {"types": ["ticker_change"]})
+    ]
     assert [(r["Symbol"], r["Date"], r["Type"], r["TickerChangeTicker"]) for r in out] == [
         ("META", "2022-06-09", "ticker_change", "META"),
         ("META", "2012-05-18", "ticker_change", "FB"),
@@ -641,7 +630,7 @@ def test_related_companies_name_the_peer_and_the_ticker_asked_about(
 ) -> None:
     fake_rest.reply("/v1/related-companies/AAPL", sample(load_fixture, "related_companies"))
     out = dh_to_pylist(rest_session.reference.related_companies("AAPL").fetch())
-    assert sent(fake_rest) == [("/v1/related-companies/AAPL", {})]
+    assert fake_rest.get_queries() == [("/v1/related-companies/AAPL", {})]
     assert len(out) == 10
     assert out[0]["TimestampInsert"] is not None
     assert {k: v for k, v in out[0].items() if k != "TimestampInsert"} == {
@@ -663,7 +652,7 @@ def test_news_fetch(
         symbols="UBS", start=date(2024, 6, 24), end=date(2024, 6, 24), order=dm.Order.DESC
     )
     out = dh_to_pylist(query.fetch())
-    ((path, params),) = sent(fake_rest)
+    ((path, params),) = fake_rest.get_queries()
     assert path == "/v2/reference/news"
     assert params["ticker"] == ["UBS"]
     assert params["order"] == ["desc"]
@@ -803,7 +792,7 @@ def test_lookup_fetches(
     conditions = dh_to_pylist(ref.conditions(condition_id=2, sip=dm.Sip.CTA).fetch())
     status = dh_to_pylist(ref.market_status().fetch())
     holidays = dh_to_pylist(ref.market_holidays().fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/v3/reference/tickers/types", {"asset_class": ["stocks"]}),
         ("/v3/reference/exchanges", {"locale": ["us"]}),
         ("/v3/reference/conditions", {"id": ["2"], "sip": ["CTA"], "limit": ["1000"]}),
