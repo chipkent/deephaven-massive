@@ -20,6 +20,7 @@ Every function is pure and thread-safe.
 
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, time
 from typing import Final
 
@@ -42,10 +43,6 @@ _WEEK_EDGE: Final = time(17)
 """The local time a futures (Chicago) or forex (New York) week opens on Sunday and, for forex,
 closes on Friday."""
 
-_FRIDAY: Final = 4
-_SATURDAY: Final = 5
-_SUNDAY: Final = 6
-
 
 def in_trading_hours(asset_class: AssetClass, moment: datetime) -> bool:
     """Tell whether an asset class's market is in its regular trading hours at an instant.
@@ -65,7 +62,7 @@ def in_trading_hours(asset_class: AssetClass, moment: datetime) -> bool:
     local = moment.astimezone(NEW_YORK)
     if asset_class is AssetClass.FOREX:
         return _forex_trading(local)
-    return local.weekday() < _SATURDAY and _OPEN <= local.time() < _CLOSE
+    return local.weekday() < calendar.SATURDAY and _OPEN <= local.time() < _CLOSE
 
 
 def _futures_trading(local: datetime) -> bool:
@@ -78,8 +75,12 @@ def _futures_trading(local: datetime) -> bool:
         True inside the futures week and outside the daily pause.
     """
     day, clock = local.weekday(), local.time()
-    opening = day == _SUNDAY and clock < _WEEK_EDGE
-    closed = day == _SATURDAY or opening or (day == _FRIDAY and clock >= _FUTURES_PAUSE[0])
+    opening = day == calendar.SUNDAY and clock < _WEEK_EDGE
+    closed = (
+        day == calendar.SATURDAY
+        or opening
+        or (day == calendar.FRIDAY and clock >= _FUTURES_PAUSE[0])
+    )
     return not closed and not _FUTURES_PAUSE[0] <= clock < _FUTURES_PAUSE[1]
 
 
@@ -93,6 +94,6 @@ def _forex_trading(local: datetime) -> bool:
         True inside the forex week.
     """
     day, clock = local.weekday(), local.time()
-    if day == _SUNDAY:
+    if day == calendar.SUNDAY:
         return clock >= _WEEK_EDGE
-    return day < _FRIDAY or (day == _FRIDAY and clock < _WEEK_EDGE)
+    return day < calendar.FRIDAY or (day == calendar.FRIDAY and clock < _WEEK_EDGE)

@@ -5,9 +5,10 @@ an immutable, hashable record, so equal calls give equal queries and share strea
 pass it, with the dataset's `DatasetSpec`, to the transports. The module also names the types a
 request is built from (`ParamValue`) and the identity of a live stream (`StreamKey`).
 
-Everything here is a plain value: no I/O, no threads, and no Deephaven call. The query classes
-that build requests live in `_query.py`; the transport interfaces that receive them live in
-`_tables/transports.py`.
+Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces'
+shared dataset factory builds requests (`build_query` in `_namespaces/query_building.py`), the
+query classes of `_query.py` hand them to the transports, and the transport interfaces that
+receive them live in `_tables/transports.py`.
 """
 
 from __future__ import annotations
