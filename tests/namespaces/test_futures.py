@@ -15,7 +15,6 @@ import re
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
 import pytest
@@ -555,25 +554,9 @@ def rows(table: Table) -> list[dict[str, Any]]:
     return out
 
 
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its path and decoded query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
-
-
 def chicago_open(day: date) -> int:
     # 17:00 America/Chicago on `day`: the open of the session that ends the next trading day.
     return int(datetime.combine(day, time(17), CHICAGO).timestamp()) * NS
-
-
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
 
 
 @pytest.fixture
@@ -607,7 +590,7 @@ def test_tick_history_over_rest_reads_each_session_by_its_date(
     out = rows(factory(symbol).history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))
     # A date names its session, which is requested by that date with no time window, so the
     # hours a holiday adds to a session are covered. Rows are kept by SessionEndDate.
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             path,
             {
@@ -674,7 +657,7 @@ def test_session_bars_over_rest(
     serve("/futures/v1/aggs/GCJ5", "aggs.json")
     q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION)
     out = rows(q.history("2025-02-04", "2025-02-05", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/futures/v1/aggs/GCJ5",
             {
@@ -708,7 +691,7 @@ def test_five_minute_bars_send_their_resolution(
     serve("/futures/v1/aggs/GCJ5", "aggs.json")
     q = rest_session.futures.bars("GCJ5", dm.Timespan.MINUTE, multiplier=5)
     q.history("2025-02-04", "2025-02-05")
-    assert [query["resolution"] for _, query in sent(fake_rest)] == [["5min"]]
+    assert [query["resolution"] for _, query in fake_rest.get_queries()] == [["5min"]]
 
 
 def test_snapshots_over_rest(
@@ -722,7 +705,7 @@ def test_snapshots_over_rest(
         ["ESZ5", "CBN5"], product_code="CB", sort="ticker", order=dm.Order.DESC
     )
     out = rows(q.fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/futures/v1/snapshot",
             {
@@ -752,7 +735,7 @@ def test_every_contract_of_a_product(
 ) -> None:
     serve("/futures/v1/snapshot", "snapshot.json")
     rest_session.futures.snapshots(dm.ALL, product_code="CB").fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/futures/v1/snapshot", {"product_code": ["CB"], "limit": ["50000"]})
     ]
 
@@ -766,7 +749,7 @@ def test_contracts_over_rest(
     serve("/futures/v1/contracts", "contracts.json")
     q = rest_session.futures.contracts(product_code="ES", filters={"active": True}, limit=5)
     out = rows(q.fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/futures/v1/contracts",
             {"product_code": ["ES"], "active": ["true"], "limit": ["5"]},
@@ -788,7 +771,7 @@ def test_contract_symbols_and_day_go_on_the_wire(
 ) -> None:
     serve("/futures/v1/contracts", "contracts.json")
     rest_session.futures.contracts(["NQZ6", "ESZ6"], as_of="2026-10-07").fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/futures/v1/contracts",
             {"ticker.any_of": ["ESZ6,NQZ6"], "date": ["2026-10-07"], "limit": ["1000"]},
@@ -803,7 +786,9 @@ def test_a_long_contract_list_is_split_into_requests(
     # 360 contracts: three products, twelve months, ten years.
     tickers = [f"{p}{m}{y}" for p in ("ES", "NQ", "GC") for y in range(10) for m in "FGHJKMNQUVXZ"]
     rest_session.futures.contracts(tickers).fetch()
-    sizes = sorted(len(query["ticker.any_of"][0].split(",")) for _, query in sent(fake_rest))
+    sizes = sorted(
+        len(query["ticker.any_of"][0].split(",")) for _, query in fake_rest.get_queries()
+    )
     assert sizes == [110, 250]
 
 
@@ -815,7 +800,7 @@ def test_several_product_codes_go_in_one_request(
 ) -> None:
     serve("/futures/v1/contracts", "contracts.json")
     rest_session.futures.contracts(product_code=["NQ", "ES"]).fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/futures/v1/contracts", {"product_code.any_of": ["NQ,ES"], "limit": ["1000"]})
     ]
 
@@ -828,7 +813,7 @@ def test_exchanges_over_rest(
 ) -> None:
     serve("/futures/v1/exchanges", "exchanges.json")
     out = rows(rest_session.futures.exchanges().fetch())
-    assert sent(fake_rest) == [("/futures/v1/exchanges", {"limit": ["1000"]})]
+    assert fake_rest.get_queries() == [("/futures/v1/exchanges", {"limit": ["1000"]})]
     assert out == [
         {
             "Acronym": "CME",
@@ -851,7 +836,7 @@ def test_products_over_rest(
 ) -> None:
     serve("/futures/v1/products", "products.json")
     out = rows(rest_session.futures.products(product_code="EBE").fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/futures/v1/products", {"product_code": ["EBE"], "limit": ["50000"]})
     ]
     assert [(r["ProductCode"], r["TradingVenue"], r["Date"], r["LastUpdated"]) for r in out] == [
@@ -869,7 +854,7 @@ def test_market_status_over_rest(
 ) -> None:
     serve("/futures/v1/market-status", "market_status.json")
     out = rows(rest_session.futures.market_status(product_code="ERL").fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/futures/v1/market-status", {"product_code": ["ERL"], "limit": ["100"]})
     ]
     assert out == [
@@ -895,7 +880,7 @@ def test_schedules_over_rest(
         product_code="ERL", start=date(2024, 6, 10), end=date(2024, 6, 10)
     )
     out = rows(q.fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/futures/v1/schedules",
             {
@@ -1170,10 +1155,11 @@ def test_a_file_of_spreads_reads_every_ticker_as_written(
 
 
 def test_futures_datasets_take_contracts_and_spreads(massive_session: dm.MassiveSession) -> None:
-    # Any ticker as Massive writes it, so a combo form seen on a row can be passed back.
-    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6", "ZZ:NEW COMBO Z6"])
-    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6", "ZZ:NEW COMBO Z6")
-    for bad in (" ESZ5", "X:ESZ5", ""):
+    # A contract or a listed spread; any other text, even a combo form Massive may write, is
+    # refused, as dm.canonical_symbol refuses it.
+    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6"])
+    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6")
+    for bad in (" ESZ5", "X:ESZ5", "", "esz5", "ZZ:NEW COMBO Z6"):
         with pytest.raises(ValueError, match="ticker"):
             massive_session.futures.trades(bad)
 
@@ -1255,7 +1241,7 @@ def test_history_with_dates_refuses_a_session_end_date_filter(
     assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST)
-    assert sent(fake_rest) == []
+    assert fake_rest.get_queries() == []
 
 
 def test_the_current_state_datasets_revise_on_their_update_times() -> None:

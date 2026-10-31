@@ -249,7 +249,7 @@ NEWS = DatasetSpec(
         (DIVIDENDS, "distribution_type_any_of", "special", ("special",)),
         (DIVIDENDS, "distribution_type_any_of", ("a", "b"), ("a", "b")),
         # The wire joins a list with commas, so every spelling of one list is one value.
-        (DIVIDENDS, "distribution_type_any_of", "a, b", ("a", "b")),
+        (DIVIDENDS, "distribution_type_any_of", "a,b", ("a", "b")),
         (DIVIDENDS, "distribution_type_any_of", ("a,b", "c"), ("a", "b", "c")),
     ],
 )
@@ -283,6 +283,14 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
         (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
         (DIVIDENDS, "distribution_type_any_of", " ", "has an empty value in"),
+        # An item is taken exactly as written: a space after a comma is refused, not trimmed.
+        (
+            DIVIDENDS,
+            "distribution_type_any_of",
+            "a, b",
+            "has the item ' b' with surrounding whitespace in",
+        ),
+        (DIVIDENDS, "distribution_type_any_of", ("a", " b"), "has the item ' b'"),
         # ISO-8601 text of no documented precision cannot end a day exactly.
         (
             NEWS,

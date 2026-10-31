@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -550,13 +550,6 @@ DIVIDENDS_PATH = "/stocks/v1/dividends"
 
 DIVIDEND = {"ticker": "AAPL", "cash_amount": 0.25}
 """The one dividend the fake server answers with."""
-
-
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
 
 
 @dataclasses.dataclass

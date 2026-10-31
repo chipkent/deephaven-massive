@@ -635,10 +635,10 @@ defined in exactly one place: the field defaults of this class.
 
 | Field | Default / environment variable | Meaning |
 |---|---|---|
-| `api_key: str` | `MASSIVE_API_KEY` | Required. Absent raises `AuthenticationError` at construction. No other variable is read: `POLYGON_API_KEY`, the vendor's former name, is ignored. |
+| `api_key: str` | `MASSIVE_API_KEY` | Required. Absent or blank raises `AuthenticationError` at construction; a key with surrounding whitespace raises `ValueError` (the message never shows the key). No other variable is read: `POLYGON_API_KEY`, the vendor's former name, is ignored. |
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
-| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`. |
-| `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
+| `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`, and so does a credential passed as blank text or with surrounding whitespace (None means absent). |
+| `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. A bare lower-case hostname, taken exactly as written: a scheme, port, path, upper-case letter, or surrounding whitespace raises `ValueError`. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
 | `ack_timeout: float` | `5.0` seconds | Subscribe-acknowledgement watchdog, per topic. |
 | `reconnect_backoff: float` | `30.0` seconds | The first wait before the WebSocket client tries again after any failure that is not fatal: a connection that opened and closed (cleanly or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake or authentication timeout, or a retryable HTTP status during the upgrade (500, 502, 503, 504). Later waits double up to `max_reconnect_backoff` ([section 19.2](#192-the-websocket-client)). Must be at least 15 s, else `ValueError` naming Massive's guidance: a shorter wait can be refused for holding the allowance the dropped connection still holds, and on an individual plan that wastes the one slot there is. Tests never need a shorter value: they drive `WsClient` directly, with its backoff as constructor arguments and an injected clock. The default waits out the window Massive's knowledge base describes: the server takes "roughly 10 to 30 seconds" to release a dropped connection, and an earlier retry "can be refused for holding the allowance it just lost", which wastes the one slot an individual plan has. |
 | `max_reconnect_backoff: float` | `120.0` seconds | Cap of the doubling backoff, so a connection comes back within this long of a long outage ending. Must not be below `reconnect_backoff`. Jitter only adds up to 20% and is clamped, so every wait lies in `[reconnect_backoff, max_reconnect_backoff]` ([section 19.2](#192-the-websocket-client)). |
@@ -674,7 +674,11 @@ tier carries is its request limit (Basic: 5 per minute; every paid tier: none), 
 tier input is `rest_basic_subscriptions`, which the library also learns from Massive's first
 refusal; the 5 per minute is a wire constant, not configurable.
 
-Environment variables have one name each and no fallbacks. The credentials keep Massive's
+Environment variables have one name each and no fallbacks. An unset or blank variable is
+absent; a value with surrounding whitespace raises `ValueError` naming the variable (never a
+credential's value), as an argument would. The keyword settings (`raise`, `log`, `ignore`,
+and the log levels) accept any case, as their tables say: a keyword names a choice, not an
+identifier Massive matches. The credentials keep Massive's
 names (`MASSIVE_API_KEY`, `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY`), so a key
 set up for Massive's own tools works unchanged.
 
@@ -1769,6 +1773,15 @@ Notation:
   sent" or "no value given", never a mode: a choice among behaviours has an enum member
   (`PollMode.AUTO`) or a real default (`last_by(by="Symbol")`, `expired=False`,
   `venues=frozenset(FuturesVenue)`).
+- **Exact input, never cleaned.** Every text a caller passes is taken exactly as written or
+  refused with `ValueError`; the library never strips, re-cases, or otherwise repairs it, so
+  a typo fails at once instead of reaching Massive as a different request. The message names
+  the form to write (`from_currency=' usd' must be a three-letter upper-case currency code;
+  write 'USD'`). This holds for symbols ([section 10](#10-symbols-and-all)), identifiers such
+  as currency codes, date and time text, `filters` values and `sort`, and `MassiveConfig`'s
+  text fields and environment variables ([section 5](#5-massiveconfig)). The converters
+  (`dm.canonical_symbol*`) exist to turn another spelling into Massive's, and they convert
+  only the spellings they document.
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
   address that axis with the day rules of [section 12](#12-timestamp-units-and-day-boundaries),
@@ -1939,7 +1952,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
-| `conversion(from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2)` | Query | | `/v1/conversion/{from}/{to}` | |
+| `conversion(from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2)`; each currency is exactly a three-letter upper-case code (`"USD"`), and anything else (`" usd"`, `"usd"`) raises `ValueError` naming the code to write | Query | | `/v1/conversion/{from}/{to}` | |
 
 ### 8.6 `m.crypto`
 
@@ -2192,9 +2205,9 @@ the valid keys or values (the valid keys are only those the caller can pass: eve
 is left out); a key reserved by a typed parameter names that parameter. The check
 first puts each value in the form that is sent: ISO-8601 text of a `DATE` or `TIMESTAMP`
 parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a `LIST`
-value is split into its comma-separated items, with the spaces around each removed, so
-`"a,b"`, `"a, b"`, and `("a", "b")` are one value and one query key (the wire joins a list
-with commas, so no item can hold one); an empty item (`"a,,b"`) raises `ValueError`. It then
+value is split into its comma-separated items, so `"a,b"` and `("a", "b")` are one value
+and one query key (the wire joins a list with commas, so no item can hold one); an empty item
+(`"a,,b"`) or one with surrounding whitespace (`"a, b"`) raises `ValueError` naming the item. It then
 runs the wire package's own encoder (`encode_value`) on that value, so everything the encoder
 refuses (a non-finite number, an empty list, an instant finer than a timestamp parameter's
 unit) fails here, at construction, with the encoder's message. `Request.filters` holds the
@@ -2239,7 +2252,8 @@ takes it (`Catalog.check_sort`): where the spec lists the path's sort fields (an
 one of them; where the spec documents `sort` as a comma-separated list of columns, each with an
 optional `.asc` or `.desc` suffix (a `STRING` `sort`, such as `period_end.desc` on the
 financial statements), each part must name a response field of the path (a generated
-`Field.wire_key`), which every default the spec gives such a `sort` does. A part that carries
+`Field.wire_key`), which every default the spec gives such a `sort` does; a part with
+surrounding whitespace (`"date, ticker"`) is refused like any other. A part that carries
 its own suffix cannot be combined with `order`. Anything else raises `ValueError` listing the
 fields the path takes.
 
@@ -2294,9 +2308,12 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   expiry is a real date; a single futures contract is upper-case letters and digits with at
   least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
   `ESZ5`); a futures spread is one of the spellings Massive's samples show, exactly as
-  written (below); a futures dataset takes any ticker as Massive writes it (not empty, no
-  surrounding whitespace, no control character, no class prefix), so a combo form not yet
-  listed can be passed back as `symbols`, while the two converters check their own grammar; an index is `I:` and letters and digits, as Massive's WebSocket pattern
+  written (below); a futures dataset takes a contract or a listed spread, the same grammar
+  `dm.canonical_symbol(text, dm.AssetClass.FUTURES)` checks, and refuses any other text
+  (`'esz5'`, `'hello world'`) with the converter's message. A futures row still keeps any
+  ticker as Massive writes it (not empty, no surrounding whitespace, no control character, no
+  class prefix), so a combo form not yet listed shows in `Symbol` but cannot be passed back as
+  `symbols` until the list learns it; an index is `I:` and letters and digits, as Massive's WebSocket pattern
   `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
   three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
   quote. A stream needs the WebSocket form (`BTC-USD`), and two REST paths take the pair as
@@ -2551,7 +2568,8 @@ integer, which Deephaven reads as epoch nanoseconds and which would silently mis
 written as `20250303`, and text Deephaven reads only as such a count. Internal code may still
 pass an integer it has already decoded, such as epoch nanoseconds, where an internal API takes
 one; the public arguments refuse it. ISO-8601 text is read by `_datasets/dates.py`
-(`parse_date_like`): first as a date in any ISO form (`"2025-03-03"`, `"20250303"`,
+(`parse_date_like`), exactly as written (text with surrounding whitespace raises `ValueError`
+naming the trimmed text): first as a date in any ISO form (`"2025-03-03"`, `"20250303"`,
 `"2025-W10-1"`), then as a date and time. Other text is read by Deephaven's parser at the API
 layer (`_tables/time_text.py`, `deephaven_time_text`): first as a date (`"2025-3-3"`), so
 date-only text stays a calendar date, then as a date and time with a zone or offset, never as an

@@ -78,15 +78,14 @@ def deephaven_time_text(value: DateLike, name: str) -> DateLike:
         unread = error
     else:
         return value
-    text = value.strip()
     reason = ""
     for read in (to_j_local_date, to_j_zdt):
         try:
-            java = read(text)
+            java = read(value)
         except DHError as error:
             reason = _reason(error)
             continue
-        if read is to_j_zdt and "T" not in text.split()[0]:
+        if read is to_j_zdt and "T" not in value.split()[0]:
             raise ValueError(
                 f"{name}={value!r} names a day and a zone but no time; pass '2025-03-03' for "
                 "the whole day, or a time such as '2025-03-03T00:00 ET'"

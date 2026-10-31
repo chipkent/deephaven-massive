@@ -815,6 +815,21 @@ def fake_rest() -> Iterator[FakeRestServer]:
 
 
 @pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[MassiveSession]:
+    """Yield a `MassiveSession` whose REST requests go to the `fake_rest` server.
+
+    Yields:
+        An open session with a test key, closed at teardown; read what it sent with
+        `fake_rest.get_queries()`.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    session: MassiveSession = dm.MassiveSession(config)
+    yield session
+    session.close()
+
+
+@pytest.fixture
 def massive_session() -> Iterator[MassiveSession]:
     """Yield a `MassiveSession` with a test key, closed at teardown.
 

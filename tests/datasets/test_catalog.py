@@ -1449,7 +1449,14 @@ def test_every_sort_default_massive_documents_passes_the_sort_check() -> None:
             r"sort 'strike' is not a sort field of /v3/reference/options/contracts; it takes \[",
         ),
         # A text sort takes fields of the rows, each with an optional direction.
-        (RATINGS, "date.desc, ticker", False, None),
+        (RATINGS, "date.desc,ticker", False, None),
+        # A part is taken exactly as written: a space after a comma is refused, not trimmed.
+        (
+            RATINGS,
+            "date.desc, ticker",
+            False,
+            r"sort part ' ticker' has surrounding whitespace; write 'ticker'",
+        ),
         (RATINGS, "date", True, None),
         (RATINGS, "dat.desc", False, r"sort part 'dat\.desc' names no field of"),
         (RATINGS, "date,,ticker", False, r"sort part '' names no field of"),

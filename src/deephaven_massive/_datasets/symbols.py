@@ -26,16 +26,17 @@ written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANO
 |---------|----------------------------------------------------|--------------------------------|
 | stocks  | upper-case root; `.X`, `pX`, `r`, `w` (`KIMpL`)    | a named convention's spelling  |
 | options | `O:` + OCC (root of 1 to 6 characters, real date)  | no `O:`, padded OSI, any case  |
-| futures | any ticker as Massive writes it (`ESZ5`)           | nothing                        |
+| futures | a contract (`ESZ5`) or a listed spread             | nothing                        |
 | indices | `I:` + letters and digits (`I:SPX`)                | no `I:` (`SPX`)                |
 | forex   | `C:` + two three-letter codes (`C:EURUSD`)         | `EUR/USD`, `EURUSD`, any case  |
 | crypto  | `X:` + the joined pair (`X:BTCUSD`)                | `BTC-USD`, `BTCUSD`, any case  |
 
 A futures spread is one of the spellings Massive's samples show (`_SPREADS`: `GCQ6-GCZ6`, `BOB 02-01
 U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`); `canonical_symbol_future` takes single contracts and
-`canonical_symbol_future_spread` spreads, strictly, and `canonical_symbol` either, while a dataset
-takes, and a futures row keeps, any futures ticker as Massive writes it, so what comes out can
-always go back in. A dataset whose
+`canonical_symbol_future_spread` spreads, strictly, and `canonical_symbol` and a futures dataset's
+`symbols` either. A futures row keeps any ticker as Massive writes it (`AS_WRITTEN`), so a combo
+form not yet listed still shows in `Symbol`, though it cannot be passed back as `symbols` until
+`_SPREADS` holds it. A dataset whose
 symbols are a third party's global tickers (`DatasetSpec.symbols_as_written`) takes and keeps them
 as Massive writes them. A stock's case is meaningful (`KIMpL` is Kimco's series L preferred), so
 stock, index, and futures text is never re-cased; the option, forex, and crypto grammars are all
@@ -259,6 +260,19 @@ def _is_spread(text: str) -> bool:
     return any(pattern.fullmatch(text) is not None for pattern in _SPREADS)
 
 
+def _futures_ok(text: str) -> bool:
+    """Tell whether text is a futures ticker a dataset takes: a contract or a listed spread.
+
+    Args:
+        text: The text.
+
+    Returns:
+        True for a single contract (`ESZ5`) or one of Massive's spread spellings
+        (`GCQ6-GCZ6`), exactly as written; False for anything else, `esz5` included.
+    """
+    return is_futures_contract(text) or _is_spread(text)
+
+
 def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
     """Return the test that text matches a pattern.
 
@@ -274,7 +288,7 @@ def _matches(pattern: re.Pattern[str]) -> Callable[[str], bool]:
 CANONICAL_GRAMMARS: Final[dict[AssetClass, Callable[[str], bool]]] = {
     AssetClass.STOCKS: _matches(_STOCK),
     AssetClass.OPTIONS: _occ_ok,
-    AssetClass.FUTURES: _matches(AS_WRITTEN),
+    AssetClass.FUTURES: _futures_ok,
     AssetClass.INDICES: _matches(_INDEX),
     AssetClass.FOREX: _matches(_FOREX),
     AssetClass.CRYPTO: _matches(_CRYPTO),
@@ -786,8 +800,8 @@ def canonical_symbol(
     only that convention's grammar applies, so text it does not spell raises even when it
     happens to be a Massive ticker. For futures, a single contract (`ESZ5`) or a spread in one
     of Massive's spellings (`GCQ6-GCZ6`) comes back unchanged and anything else raises, with
-    the message of `canonical_symbol_future`, although a dataset takes any futures ticker as
-    Massive writes it. The class is never guessed: `SPX` is an index only because
+    the message of `canonical_symbol_future`; a futures dataset's `symbols` take the same two
+    forms. The class is never guessed: `SPX` is an index only because
     the caller says so. In a Deephaven query string, call the per-class functions instead
     (`canonical_symbol_forex`), which need no enum argument; a function called through the
     module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
@@ -834,10 +848,6 @@ def canonical_symbol(
         return None
     if chosen is not SymbolConvention.MASSIVE:
         return _convert_stock_from(value, chosen)
-    if resolved is AssetClass.FUTURES:
-        # A dataset takes any futures ticker as Massive writes it, but the converter checks
-        # the grammar of a contract or a spread, as the per-class functions do.
-        return value if _is_spread(value) else _convert_single_future(value)
     if CANONICAL_GRAMMARS[resolved](value):
         return value
     return _CONVERTERS[resolved](value)

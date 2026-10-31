@@ -17,7 +17,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import quote
 
 import pyarrow as pa
 import pytest
@@ -509,13 +509,6 @@ NS = 10**9
 MIDNIGHT_MS = 1748836800000  # 2025-06-02 00:00 in New York
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield session
-    session.close()
-
-
 def rows(table: Table) -> list[dict[str, Any]]:
     # Instants become epoch nanoseconds, so assertions keep every digit. Every dataset row
     # carries when it arrived, last, which the rows here leave out once it is checked.
@@ -537,22 +530,13 @@ def bar_rows(table: Table) -> list[dict[str, Any]]:
     return [{name: value for name, value in row.items() if name in filled} for row in out]
 
 
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its path and decoded query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
-
-
 def test_the_snapshot_names_at_most_250_indices_a_request(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
     symbols = [f"I:X{n:03d}" for n in range(251)]
     rest_session.indices.snapshots(symbols).fetch()
-    batches = [query["ticker.any_of"][0].split(",") for _, query in sent(fake_rest)]
+    batches = [query["ticker.any_of"][0].split(",") for _, query in fake_rest.get_queries()]
     # The batches are requested concurrently, so they arrive in either order.
     assert sorted(len(batch) for batch in batches) == [1, 250]
     assert sorted(batches[0] + batches[1]) == symbols
@@ -564,7 +548,7 @@ def test_snapshots_order_alone_is_sent_as_is(
     # The snapshot has its own order parameter, so no sort is needed beside it.
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
     rest_session.indices.snapshots("I:SPX", order=dm.Order.DESC).fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (SNAPSHOT, {"ticker.any_of": ["I:SPX"], "order": ["desc"], "limit": ["250"]})
     ]
 
@@ -580,7 +564,7 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
         ["I:SPX", "I:NDX", "I:NOPE"], sort="ticker", order=dm.Order.DESC
     )
     out = rows(q.fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             SNAPSHOT,
             {
@@ -624,7 +608,7 @@ def test_previous_day_bars_fetch_one_index_a_request(
 ) -> None:
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
     out = bar_rows(rest_session.indices.previous_day_bar("I:SPX").fetch())
-    assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
+    assert fake_rest.get_queries() == [("/v2/aggs/ticker/I:SPX/prev", {})]
     # The New York day, ending an hour late at 01:00 New York time (midnight in Chicago),
     # since whether an index day bar covers the New York or the Chicago day is not verified.
     assert out == [
@@ -652,7 +636,7 @@ def test_a_previous_day_bar_poll_keeps_one_row_per_index(
     table = rest_session.indices.previous_day_bar("I:SPX").poll(60)
     found = rows_when(table, lambda got: len(got) == 1)
     assert [(r["Symbol"], r["Close"]) for r in found] == [("I:SPX", 5935.94)]
-    assert sent(fake_rest)[0] == ("/v2/aggs/ticker/I:SPX/prev", {})
+    assert fake_rest.get_queries()[0] == ("/v2/aggs/ticker/I:SPX/prev", {})
 
 
 def test_bars_history_over_rest_fills_the_range_and_the_symbol(
@@ -665,7 +649,7 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
     fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
     q = rest_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
+    assert fake_rest.get_queries() == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         ("I:SPX", "2025-06-02", 1748871000000 * MS, 1748871060000 * MS),
         ("I:SPX", "2025-06-02", 1748871060000 * MS, 1748871120000 * MS),
@@ -767,7 +751,7 @@ def test_an_index_day_bar_is_kept_once_its_end_has_passed(
     fake_rest.reply(quote(path), bars_reply(MIDNIGHT_MS + HOUR_MS))
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     out = rows(q.history(day, None, source=dm.HistorySource.REST))
-    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [p for p, _ in fake_rest.get_queries()] == [path]
     assert [r["TimestampEnd"] for r in out] == [(MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS] * kept
 
 
@@ -783,7 +767,7 @@ def test_daily_open_close_fetches_each_index_for_the_day(
     fake_rest.reply(quote("/v1/open-close/I:SPX/2025-06-02"), Reply(spx))
     fake_rest.reply(quote("/v1/open-close/I:NDX/2025-06-02"), Reply(ndx))
     out = rows(rest_session.indices.daily_open_close(["I:SPX", "I:NDX"], "2025-06-02").fetch())
-    assert sorted(path for path, _ in sent(fake_rest)) == [
+    assert sorted(path for path, _ in fake_rest.get_queries()) == [
         "/v1/open-close/I:NDX/2025-06-02",
         "/v1/open-close/I:SPX/2025-06-02",
     ]

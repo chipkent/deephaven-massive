@@ -21,7 +21,6 @@ import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
 import pytest
@@ -592,28 +591,12 @@ NS = 10**9
 MS = 10**6
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
 def rows(table: Table) -> list[dict[str, Any]]:
     # Instants become epoch nanoseconds, so assertions keep every digit.
     data = dh_arrow.to_arrow(table)
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
     return out
-
-
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its path and decoded query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
 
 
 def serve(server: FakeRestServer, target: str, fixture: bytes) -> None:
@@ -627,7 +610,7 @@ def test_last_trade_reads_the_last_trade_of_each_pair(
     serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
     serve_pairs(fake_rest)
     out = rows(rest_session.crypto.last_trade("X:BTCUSD").fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         # The pair's split: Massive's listed crypto tickers, then the delisted ones.
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
@@ -658,7 +641,7 @@ def test_trades_history_over_rest_bounds_the_utc_day(
     q = rest_session.crypto.trades("X:BTCUSD")
     out = rows(q.history("2021-07-01", "2021-07-01", source=dm.HistorySource.REST))
     midnight = int(datetime(2021, 7, 1, tzinfo=UTC).timestamp()) * NS
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/v3/trades/X:BTCUSD",
             {
@@ -771,7 +754,7 @@ def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     serve(fake_rest, path, restamp(load_fixture(OWNER, "range.json"), start, start + DAY_MS))
     q = rest_session.crypto.bars(symbol, dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
+    assert fake_rest.get_queries() == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Open"]) for r in out] == [
         (symbol, "2020-06-01", start * MS, 9557.9),
         (symbol, "2020-06-02", (start + DAY_MS) * MS, 10096.87),
@@ -788,7 +771,7 @@ def test_every_pairs_daily_bars_read_the_grouped_day(
     serve(fake_rest, path, restamp(load_fixture(OWNER, "grouped.json"), last, day))
     q = rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     out = rows(q.history("2020-02-02", "2020-02-02", source=dm.HistorySource.REST))
-    assert sent(fake_rest) == [(path, {})]
+    assert fake_rest.get_queries() == [(path, {})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Transactions"]) for r in out] == [
         ("X:ARDRUSD", "2020-02-02", day * MS, 18388),
         ("X:NGCUSD", "2020-02-02", day * MS, 18),
@@ -802,7 +785,7 @@ def test_snapshots_send_the_pairs_or_nothing_for_all(
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
     out = rows(rest_session.crypto.snapshots(["X:FSNUSD", "X:BTCUSD"]).fetch())
     rows(rest_session.crypto.snapshots(dm.ALL).fetch())
-    assert sent(fake_rest) == [(path, {"tickers": ["X:BTCUSD,X:FSNUSD"]}), (path, {})]
+    assert fake_rest.get_queries() == [(path, {"tickers": ["X:BTCUSD,X:FSNUSD"]}), (path, {})]
     [row] = out
     assert (row["Symbol"], row["LastTradeId"], row["Updated"]) == (
         "X:FSNUSD",
@@ -819,7 +802,7 @@ def test_a_long_snapshot_list_is_split_into_requests_of_250(
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
     codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
     rest_session.crypto.snapshots([f"X:{code}USD" for code in codes[:251]]).fetch()
-    sizes = sorted(len(query["tickers"][0].split(",")) for _, query in sent(fake_rest))
+    sizes = sorted(len(query["tickers"][0].split(",")) for _, query in fake_rest.get_queries())
     assert sizes == [1, 250]
 
 
@@ -829,7 +812,7 @@ def test_movers_read_their_direction(
     path = "/v2/snapshot/locale/global/markets/crypto/losers"
     serve(fake_rest, path, load_fixture(OWNER, "movers.json"))
     out = rows(rest_session.crypto.movers(dm.Direction.LOSERS).fetch())
-    assert sent(fake_rest) == [(path, {})]
+    assert fake_rest.get_queries() == [(path, {})]
     assert [(r["Symbol"], r["LastTradeId"], r["TodaysChangePerc"]) for r in out] == [
         ("X:DRNUSD", "517478762", 221.858864)
     ]
@@ -843,7 +826,7 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
     serve_pairs(fake_rest)
     q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
     [row] = rows(q.fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         # The pair's split: Massive's listed crypto tickers, then the delisted ones.
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
@@ -1148,7 +1131,7 @@ def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
         r"Massive's reference data does not list it$",
     ):
         q.blink()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
     ]

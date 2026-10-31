@@ -1,11 +1,9 @@
 """Tests for `m.snapshots()`: the unified snapshot's dataset, which the session serves itself."""
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
-import pytest
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -21,21 +19,6 @@ OWNER = "namespaces/snapshots"
 R = Transport.REST
 Fixture = Callable[[str, str], bytes]
 ToRows = Callable[[Table], list[dict[str, Any]]]
-
-
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
-
-
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its decoded path and query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-    ]
 
 
 def vendor_sample(load_fixture: Fixture) -> dict[str, Any]:
@@ -105,7 +88,7 @@ def test_fetch_fills_the_underlying_and_root_of_options_rows_only(
     fake_rest.reply("/v3/snapshot", Reply(vendor_sample(load_fixture)))
     symbols = ["O:NCLH221014C00005000", "AAPL", "TSLAAPL"]
     out = dh_to_pylist(rest_session.snapshots(symbols).fetch())
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/v3/snapshot",
             {"ticker.any_of": ["AAPL,O:NCLH221014C00005000,TSLAAPL"], "limit": ["250"]},
@@ -128,6 +111,6 @@ def test_fetch_sends_250_tickers_a_request(
     fake_rest.reply("/v3/snapshot", Reply(envelope([])))
     symbols = [f"T{i:03d}" for i in range(251)]
     rest_session.snapshots(symbols).fetch()
-    batches = [q["ticker.any_of"][0].split(",") for _, q in sent(fake_rest)]
+    batches = [q["ticker.any_of"][0].split(",") for _, q in fake_rest.get_queries()]
     assert sorted(len(batch) for batch in batches) == [1, 250]
     assert sorted(s for batch in batches for s in batch) == symbols

@@ -7,10 +7,9 @@ vendor's samples) and each factory's validation and the request it builds.
 
 import inspect
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from deephaven import new_table
@@ -574,22 +573,6 @@ def test_each_factory_links_its_column_reference(name: str) -> None:
 # End to end: each dataset fetched through the fake REST server.
 
 
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield session
-    session.close()
-
-
-def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
-    # Every GET the server received: its path and decoded query.
-    return [
-        (unquote(urlsplit(r.target).path), parse_qs(urlsplit(r.target).query))
-        for r in server.requests
-        if r.method == "GET"
-    ]
-
-
 def expected_value(value: object, column_type: ColumnType) -> object:
     # A wire value as the result table holds it; a date stays its ISO text.
     if column_type is ColumnType.INSTANT:
@@ -620,7 +603,7 @@ def test_fetch_returns_every_fixture_value(
     table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch()
 
     # One request, for the documented maximum page, and nothing the caller did not set.
-    assert sent(fake_rest) == [(target, {"limit": [str(spec.page_size)]})]
+    assert fake_rest.get_queries() == [(target, {"limit": [str(spec.page_size)]})]
     schema = CATALOG.dataset_schema(spec)
     assert table.column_names == list(schema.column_names)
     out = dh_to_pylist(table)
@@ -654,7 +637,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
         limit=10,
         filters={"date_gte": date(2025, 1, 2), "rating_action_any_of": ["upgrades", "downgrades"]},
     ).fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/benzinga/v1/ratings",
             {
@@ -675,7 +658,7 @@ def test_etf_symbols_filter_the_fund(
     rest_session.partners.etf_global.constituents(
         "SPY", filters={"effective_date": "2025-09-18"}
     ).fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (
             "/etf-global/v1/constituents",
             {
@@ -695,7 +678,7 @@ def test_news_sends_an_instant_range_and_tickers(
     rest_session.partners.benzinga.news(
         symbols=["NVDA", "AAPL"], start=datetime(2025, 6, 2, 4, tzinfo=UTC), end=end
     ).fetch()
-    ((path, query),) = sent(fake_rest)
+    ((path, query),) = fake_rest.get_queries()
     assert path == "/benzinga/v2/news"
     assert query.pop("tickers.any_of") == ["AAPL,NVDA"]
     # The axis is an instant: an aware datetime start is the first instant included and an
@@ -706,7 +689,7 @@ def test_news_sends_an_instant_range_and_tickers(
     assert datetime.fromisoformat(bounds["published.lt"][0]) == end
     two_days = rest_session.partners.benzinga.news(start="2025-06-02", end=date(2025, 6, 3))
     two_days.fetch()
-    ((_, query),) = sent(fake_rest)[1:]
+    ((_, query),) = fake_rest.get_queries()[1:]
     assert datetime.fromisoformat(query["published.lt"][0]) == datetime(2025, 6, 4, 4, tzinfo=UTC)
 
 
@@ -723,7 +706,7 @@ def test_a_date_range_is_whole_days(
     path, _ = DATASETS[name]
     fake_rest.reply(path, Reply(envelope([])))
     factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch()
-    ((_, query),) = sent(fake_rest)
+    ((_, query),) = fake_rest.get_queries()
     assert query[f"{axis}.gte"] == ["2025-07-01"]
     assert query[f"{axis}.lte"] == ["2025-07-31"]
 
@@ -745,7 +728,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
         ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch()
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
-    assert sorted(sent(fake_rest)) == [
+    assert sorted(fake_rest.get_queries()) == [
         ("/benzinga/v1/consensus-ratings/BRK.B", window),
         ("/benzinga/v1/consensus-ratings/MSFT", window),
     ]
@@ -774,7 +757,7 @@ def test_every_symbol_list_goes_in_one_request(
     path, _ = DATASETS[name]
     fake_rest.reply(path, Reply(envelope([])))
     factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch()
-    assert sent(fake_rest) == [
+    assert fake_rest.get_queries() == [
         (path, {param: ["AAPL,MSFT"], "limit": [str(spec_of(name).page_size)]})
     ]
 
@@ -826,7 +809,7 @@ def test_tmx_rows_keep_global_tickers_as_written(
     fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows_)))
     table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch()
     assert sorted(row[0] for row in table.iter_tuple(cols="Symbol")) == ["7203", "ERIC B"]
-    ((_, query),) = sent(fake_rest)
+    ((_, query),) = fake_rest.get_queries()
     assert query["ticker.any_of"] == ["7203,ERIC B"]
 
 

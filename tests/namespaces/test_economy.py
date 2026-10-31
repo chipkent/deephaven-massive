@@ -1,7 +1,7 @@
 """Tests for the `m.economy` namespace."""
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
@@ -164,13 +164,6 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
 
 
 # --- End to end through the fake REST server -------------------------------------------------
-
-
-@pytest.fixture
-def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    yield m
-    m.close()
 
 
 @EACH

@@ -130,10 +130,21 @@ def test_the_general_converter_is_as_strict_for_futures_as_the_contract_one(
     assert str(general.value) == str(contract.value)
 
 
-def test_a_dataset_takes_futures_text_the_converters_refuse() -> None:
-    # A dataset takes any futures ticker as Massive writes it; only the converters check forms.
-    for text in ("esz5", "hello world", "BOB 2-1 U6"):
-        assert check_symbol(FUT, text) == text
+@pytest.mark.parametrize("text", ["esz5", "hello world", "BOB 2-1 U6"])
+def test_a_dataset_refuses_futures_text_the_converter_refuses(text: str) -> None:
+    # A dataset takes a contract or a listed spread, the forms dm.canonical_symbol checks, and
+    # refuses everything else with the converter's reason.
+    with pytest.raises(ValueError, match="is not a Massive futures ticker") as converter:
+        dm.canonical_symbol(text, FUT)
+    with pytest.raises(ValueError, match="is not a Massive futures ticker") as dataset:
+        check_symbol(FUT, text)
+    assert str(dataset.value) == f"{converter.value}; symbols must be Massive's exact tickers"
+    assert not is_canonical(FUT, text)
+
+
+def test_a_futures_row_still_keeps_a_ticker_no_dataset_takes() -> None:
+    # A combo form not yet listed keeps its row, as Massive writes it.
+    assert canonical_from_wire(FUT, "BOB 2-1 U6") == "BOB 2-1 U6"
 
 
 @pytest.mark.parametrize(("asset_class", "text"), CANONICAL)
