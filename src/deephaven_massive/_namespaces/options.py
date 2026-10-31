@@ -99,14 +99,9 @@ _QUOTE_FILES: Final = "us_options_opra/quotes_v1"
 _MINUTE_FILES: Final = "us_options_opra/minute_aggs_v1"
 _DAY_FILES: Final = "us_options_opra/day_aggs_v1"
 
-_TICK_PAGE: Final = 50_000
-"""The largest page the trades, quotes, and aggregates endpoints return."""
-
-_SNAPSHOT_PAGE: Final = 250
-"""The largest page the chain and the unified snapshot return."""
-
-_CONTRACTS_PAGE: Final = 1_000
-"""The largest page the contracts endpoint returns."""
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
 
 
 def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) -> SourceKeys:
@@ -164,7 +159,6 @@ TRADES: Final = DatasetSpec(
         (_FLAT, _TRADE_FILES): _keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_TICK_PAGE,
 )
 
 # Each one-row dataset joins the kind of its stream and history dataset, so its rows have the
@@ -194,7 +188,6 @@ QUOTES: Final = DatasetSpec(
         (_FLAT, _QUOTE_FILES): _keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_TICK_PAGE,
 )
 
 BARS: Final = DatasetSpec(
@@ -213,7 +206,7 @@ BARS: Final = DatasetSpec(
         (_FLAT, _MINUTE_FILES): _keys("Ticker", "WindowStart"),
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
-    page_size=_TICK_PAGE,
+    page_size=_AGGREGATES_PAGE,
     column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
@@ -249,7 +242,6 @@ CHAIN: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CHAIN,
     keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
-    page_size=_SNAPSHOT_PAGE,
     revision_keys=_SNAPSHOT_REVISION,
 )
 
@@ -261,7 +253,6 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
-    page_size=_SNAPSHOT_PAGE,
     revision_keys=_SNAPSHOT_REVISION,
 )
 
@@ -277,7 +268,6 @@ CONTRACTS: Final = DatasetSpec(
         (_REST, _CONTRACT): _keys("Ticker", fanout="UnderlyingTicker"),
     },
     symbol_param="ticker",
-    page_size=_CONTRACTS_PAGE,
 )
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(

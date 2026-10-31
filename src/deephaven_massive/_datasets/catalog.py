@@ -346,12 +346,14 @@ class DatasetSpec:
         symbols_per_request: The most symbols one request carries in a list-valued symbol
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
             split over several requests. None sends every symbol in one request.
-        page_size: The REST page size requested: the endpoint's documented maximum `limit`,
-            lowered where the rows are long (article bodies, quoted filing text, financial
+        page_size: The REST page size requested where it is not the path's documented
+            maximum `limit` (`Param.maximum`), which every other request asks for: lower
+            where the rows are long (article bodies, quoted filing text, financial
             statements), so one page decompresses to some tens of megabytes at most, far below
-            the REST client's cap on a response body. `limit` is a separate total-row cap.
-            None for a dataset none of whose REST paths takes `limit`; the `page size` gate
-            requires it on every other one, so no request falls back to Massive's default.
+            the REST client's cap on a response body; or the maximum a path states only in
+            prose (the aggregates' 50,000). `limit` is a separate total-row cap. None, the
+            default, for the documented maximum; the `page size` gate requires it for a path
+            that documents none, so no request falls back to Massive's default page.
         fixed_params: Query parameters the library sets itself on every REST request, by wire
             name, such as the indicators' `{"expand_underlying": False}`; they have no
             argument of their own. Every REST path of the dataset must take each one (the catalog's
@@ -1069,9 +1071,12 @@ class Catalog:
           of the fetch path when there is none), each key filled from the request, which
           names a parameter of its own path, and each `fixed_params` name, a query parameter
           of every REST path of the dataset.
-        - **page size:** a dataset sets `page_size` exactly when one of its REST paths takes a
-          `limit` query parameter, so no request falls back to Massive's default page and no
-          setting goes unread.
+        - **page size:** every request of a path that takes a `limit` query parameter has a
+          page size, so none falls back to Massive's default page: a dataset with such a path
+          that documents no maximum sets `page_size`. A `page_size` never exceeds the
+          documented maximum of a path of its dataset, and is set only where it is read and
+          changes something: some path takes `limit`, and not every one of them documents
+          exactly that maximum.
         - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own
           `poll_keys`, not the default `("Symbol",)`. The gate checks only that the key is
           explicit; the dataset's tests check that it is unique per row.
@@ -1287,7 +1292,7 @@ class Catalog:
         return found
 
     def _page_size_problems(self, spec: DatasetSpec) -> list[str]:
-        """Check that a dataset sets `page_size` exactly when a REST path of it takes `limit`.
+        """Check that every paged request has a page size and that `page_size` is needed.
 
         Args:
             spec: The dataset; every source is generated.
@@ -1295,16 +1300,32 @@ class Catalog:
         Returns:
             The `page size` failures.
         """
-        paged = [
-            path
-            for path in spec.rest_paths
-            if any(p.name == "limit" and not p.in_path for p in self.rest_path(path).params)
-        ]
-        if paged and spec.page_size is None:
-            return [f"page size: {spec.name}: {paged[0]} takes limit, but page_size is unset"]
-        if not paged and spec.page_size is not None:
+        maxima: dict[str, int | None] = {}
+        for path in spec.rest_paths:
+            for param in self.rest_path(path).params:
+                if param.name == "limit" and not param.in_path:
+                    maxima[path] = param.maximum
+        size = spec.page_size
+        if size is None:
+            return [
+                f"page size: {spec.name}: {path} documents no maximum limit, so page_size "
+                "must be set"
+                for path, most in maxima.items()
+                if most is None
+            ]
+        if not maxima:
             return [f"page size: {spec.name}: page_size is set, but no REST path takes limit"]
-        return []
+        found = [
+            f"page size: {spec.name}: page_size {size} exceeds the maximum limit {most} of {path}"
+            for path, most in maxima.items()
+            if most is not None and size > most
+        ]
+        if all(most == size for most in maxima.values()):
+            found.append(
+                f"page size: {spec.name}: page_size {size} is the documented maximum limit of "
+                "every path, so it is read from the specification and must be left unset"
+            )
+        return found
 
     def _parameter_problems(self, spec: DatasetSpec) -> list[str]:
         """Check that every wire name the dataset declares is a parameter of its path.

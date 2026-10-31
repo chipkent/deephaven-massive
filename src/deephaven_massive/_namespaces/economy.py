@@ -32,9 +32,6 @@ __all__ = ["DATASETS", "_Economy"]
 
 logger = logging.getLogger(__name__)
 
-_PAGE_SIZE: Final = 50_000
-"""The largest page the `/fed/v1/` endpoints serve (their documented `limit` maximum)."""
-
 
 def _series(name: str, path: str, summary: str) -> DatasetSpec:
     """Declare one economic series: a REST list endpoint whose rows are calendar dates.
@@ -54,7 +51,6 @@ def _series(name: str, path: str, summary: str) -> DatasetSpec:
         fetch_path=path,
         time_axis=("date.gte", "date.lte"),
         poll_keys=("Date",),
-        page_size=_PAGE_SIZE,
     )
 
 

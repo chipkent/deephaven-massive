@@ -175,7 +175,7 @@ class _Periods:
         Returns:
             The instant, in UTC.
         """
-        return day_start(self.asset_class, day).astimezone(UTC)
+        return day_start(self.asset_class, day)
 
     def anchor(self, day: date) -> date:
         """Return the anchor of the period a day belongs to.

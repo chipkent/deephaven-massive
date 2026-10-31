@@ -60,9 +60,6 @@ __all__ = ["DATASETS", "_Indicators"]
 
 logger = logging.getLogger(__name__)
 
-_PAGE_SIZE: Final = 5000
-"""The largest page the indicator endpoints serve (their documented `limit` maximum)."""
-
 
 def _indicator(name: str, summary: str) -> DatasetSpec:
     """Declare one indicator dataset over its two generated paths.
@@ -99,7 +96,6 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
         row_times=RowTimes.BAR,
         # Its underlying bars are not rows of the table, so the library never asks for them.
         fixed_params={"expand_underlying": False},
-        page_size=_PAGE_SIZE,
     )
 
 

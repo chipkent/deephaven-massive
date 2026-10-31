@@ -148,7 +148,6 @@ TRADES: Final = DatasetSpec(
         (_FLAT_FILES, _TRADES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 
 QUOTES: Final = DatasetSpec(
@@ -165,7 +164,6 @@ QUOTES: Final = DatasetSpec(
         (_FLAT_FILES, _QUOTES_FILES): _tick_keys("Timestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=50_000,
 )
 
 BARS: Final = DatasetSpec(
@@ -185,7 +183,6 @@ BARS: Final = DatasetSpec(
         (_FLAT_FILES, _SESSION_FILES): _tick_keys("WindowStart"),
     },
     time_axis=("window_start.gte", "window_start.lt"),
-    page_size=50_000,
 )
 
 SNAPSHOTS: Final = DatasetSpec(
@@ -195,7 +192,6 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT_PATH,
     keys={(_REST, _SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
-    page_size=50_000,
     # The contract's last quote and trade times: an explicit APPEND poll appends each new
     # state of a contract. The snapshot carries no single update time of its own.
     revision_keys=("LastQuoteLastUpdated", "LastTradeLastUpdated"),
@@ -212,7 +208,6 @@ CONTRACTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     poll_keys=("Symbol", "Date"),
-    page_size=1_000,
 )
 
 PRODUCTS: Final = DatasetSpec(
@@ -221,7 +216,6 @@ PRODUCTS: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     fetch_path=_PRODUCTS_PATH,
     poll_keys=("ProductCode", "TradingVenue", "Date"),
-    page_size=50_000,
 )
 
 EXCHANGES: Final = DatasetSpec(
@@ -230,7 +224,6 @@ EXCHANGES: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     fetch_path=_EXCHANGES_PATH,
     poll_keys=("Id",),
-    page_size=1_000,
 )
 
 MARKET_STATUS: Final = DatasetSpec(
@@ -242,7 +235,6 @@ MARKET_STATUS: Final = DatasetSpec(
     # library's name, so it comes from a declared key.
     keys={(_REST, _MARKET_STATUS_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     poll_keys=("ProductCode", "TradingVenue"),
-    page_size=100,
     # The time of the product's latest market event: an explicit APPEND poll appends each
     # status change.
     revision_keys=("Timestamp",),
@@ -258,7 +250,6 @@ SCHEDULES: Final = DatasetSpec(
     keys={(_REST, _SCHEDULES_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     time_axis=("session_end_date.gte", "session_end_date.lte"),
     poll_keys=("ProductCode", "TradingVenue", "Timestamp", "Event"),
-    page_size=1_000,
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (

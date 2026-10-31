@@ -69,11 +69,9 @@ _VALUE_FILES: Final = "us_indices/values_v1"
 _MINUTE_FILES: Final = "us_indices/minute_aggs_v1"
 _DAY_FILES: Final = "us_indices/day_aggs_v1"
 
-_SNAPSHOT_PAGE: Final = 250
-"""The indices snapshot's largest `limit`."""
-
 _AGGREGATES_PAGE: Final = 50_000
-"""The range endpoint's largest `limit`, which counts the base aggregates behind a page."""
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
 
 VALUES: Final = DatasetSpec(
     name="indices.values",
@@ -143,7 +141,6 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
-    page_size=_SNAPSHOT_PAGE,
     revision_keys=("LastUpdated",),
 )
 """`m.indices.snapshots`: the whole indices snapshot, one row per index."""

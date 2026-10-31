@@ -64,11 +64,9 @@ _TRADE_FILES: Final = "global_crypto/trades_v1"
 _MINUTE_FILES: Final = "global_crypto/minute_aggs_v1"
 _DAY_FILES: Final = "global_crypto/day_aggs_v1"
 
-_MAX_PAGE: Final = 50_000
-"""The largest `limit` `/v3/trades` and the aggregates range endpoint accept.
-
-On `/v3/trades` it is rows per page; on the range endpoint it counts the base aggregates
-a page is built from, not the bars it returns."""
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
 
 
 def _keys(symbol: KeySpec, time: str | None = None) -> SourceKeys:
@@ -111,7 +109,6 @@ TRADES: Final = DatasetSpec(
         (_F, _TRADE_FILES): ticker_key("ParticipantTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
-    page_size=_MAX_PAGE,
 )
 """`m.crypto.trades`: the `XT` stream, `/v3/trades`, and the trade flat files."""
 
@@ -161,7 +158,7 @@ BARS: Final = DatasetSpec(
         (_F, _MINUTE_FILES): ticker_key("WindowStart"),
         (_F, _DAY_FILES): ticker_key("WindowStart"),
     },
-    page_size=_MAX_PAGE,
+    page_size=_AGGREGATES_PAGE,
 )
 """`m.crypto.bars`: the `XAS` and `XA` streams, the range and grouped-daily endpoints, and the
 minute and day aggregate flat files."""

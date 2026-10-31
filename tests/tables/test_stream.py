@@ -582,9 +582,13 @@ def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSe
 def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
+    *,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The listener reports on an update-graph thread, so the failure is only queued there.
+    # The watch logs a failed symbol table only at DEBUG, so the stream's failure is what
+    # reports it, at ERROR: the table is the user's to fix.
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
@@ -600,9 +604,15 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
         weakref.ref(sink), "the symbol table failed, so the result can no longer follow it"
     )
     assert not sink.failed  # nothing failed on the reporting thread
-    gate.set()
-    drain()
+    with caplog.at_level(logging.DEBUG, logger=stream.__name__):
+        gate.set()
+        drain()
     assert failures == ["the symbol table failed, so the result can no longer follow it"]
+    reported = (
+        "test.trades stream 1 failed: the symbol table failed, so the result can no longer "
+        "follow it"
+    )
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.ERROR, reported)]
 
 
 def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -1384,22 +1394,16 @@ def test_benchmark_fan_out(
         )
 
 
-# The default run measures one point, 1 stream of a 2,000-symbol batch, the shape where the
-# filter wins; the others carry the `benchmark` marker. `SPLIT_MIN_STREAMS` comes from these.
-_SPLIT_DEFAULT = (2_000, 2_000, 1)
+# The sweep behind `SPLIT_MIN_STREAMS`: each point times 15 repetitions, so the whole sweep
+# carries the `benchmark` marker and runs only with -m benchmark.
 _SPLIT_POINTS = [
-    pytest.param(
-        rows,
-        distinct,
-        streams,
-        marks=() if (rows, distinct, streams) == _SPLIT_DEFAULT else pytest.mark.benchmark,
-        id=f"{rows}-{distinct}-{streams}",
-    )
+    pytest.param(rows, distinct, streams, id=f"{rows}-{distinct}-{streams}")
     for rows, distinct in ((2_000, 2_000), (5_000, 2_500), (20_000, 1_000), (50_000, 25_000))
     for streams in (1, 4, 8, 16, 32)
 ]
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize(("rows_per_flush", "distinct", "streams"), _SPLIT_POINTS)
 def test_benchmark_symbol_split(
     massive_session: dm.MassiveSession,
