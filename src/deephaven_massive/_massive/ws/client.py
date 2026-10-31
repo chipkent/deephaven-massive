@@ -150,11 +150,11 @@ class _Generation:
 
     Attributes:
         number: The generation, counting from 1 per client.
-        outbox: The frames to send, in order; `None` asks the sender to close the socket.
+        outbox: The frames to send, in order.
     """
 
     number: int
-    outbox: asyncio.Queue[str | None]
+    outbox: asyncio.Queue[str]
 
 
 # The message of a loop-thread method called from another thread.
@@ -397,20 +397,6 @@ class WsClient:
         if self._off_loop_thread():
             raise RuntimeError(_OFF_LOOP.format(method="unsubscribe"))
         self._enqueue(generation, subscription_frames("unsubscribe", topics))
-
-    def reconnect(self) -> None:
-        """Close the current socket, after the frames already queued, so the client reconnects.
-
-        The close counts as a failure, so the backoff rules apply. Without an open generation
-        (connecting, or waiting to reconnect) it does nothing. Loop thread only.
-
-        Raises:
-            RuntimeError: If called from another thread than the client's loop thread.
-        """
-        if self._off_loop_thread():
-            raise RuntimeError(_OFF_LOOP.format(method="reconnect"))
-        if self._current is not None:
-            self._current.outbox.put_nowait(None)
 
     def _off_loop_thread(self) -> bool:
         """Return whether the caller is anything but code running on the client's loop.
@@ -685,16 +671,16 @@ class WsClient:
         return self._redactor.received(frame)
 
     @staticmethod
-    async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
-        """Send a generation's frames in order until the outbox asks to close or the socket closes.
+    async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str]) -> None:
+        """Send a generation's frames in order until the socket closes.
 
         Args:
             websocket: The generation's socket.
-            outbox: The frames; `None` closes the socket with code 1000.
+            outbox: The frames.
         """
         # A closed socket ends the generation; the receiver reports it, so the sender just stops.
         with contextlib.suppress(ConnectionClosed):
-            while (frame := await outbox.get()) is not None:
+            while True:
+                frame = await outbox.get()
                 logger.debug("sending %s", frame)
                 await websocket.send(frame)
-            await websocket.close()

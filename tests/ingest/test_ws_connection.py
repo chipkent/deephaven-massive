@@ -190,6 +190,11 @@ def test_a_rejected_key_fails_every_stream(
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert "rejected the API key" in row["LastError"]
+    # Massive may answer `auth_failed` to a key whose plan has no streams of the class, too.
+    assert row["LastError"].endswith(
+        "; this can also mean the stocks plan includes no WebSocket streams for stocks, not "
+        "only a bad key"
+    )
     assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
     assert len(ws_session.urls) == 2

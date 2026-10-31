@@ -58,6 +58,7 @@ from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    AuthenticationError,
     EntitlementError,
     ErrorCause,
     MassiveError,
@@ -1072,8 +1073,18 @@ class Connection:
         Args:
             error: The client's error.
         """
+        public: MassiveError
         if isinstance(error, WireAuthError):
-            public = from_wire(error)
+            # Massive answers `auth_failed` for a bad key, and may answer it for a key whose
+            # plan has no streams of the class too; its text, which the message keeps, tells.
+            wire = from_wire(error)
+            public = AuthenticationError(
+                f"{wire}; this can also mean the {subscription_of(self.asset_class)} plan "
+                f"includes no WebSocket streams for {self.asset_class.value}, not only a bad key",
+                status=wire.status,
+                request_id=wire.request_id,
+                cause=wire.cause,
+            )
         else:
             public = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "

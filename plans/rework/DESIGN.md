@@ -2954,13 +2954,10 @@ arrive); the flush never waits on it. Only a single contract ticker is looked up
 grammar of the symbols module (`symbols.is_futures_contract`); a spread or combination
 (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6` in the vendor's files) is
 never looked up, since the contracts endpoint lists none and Massive documents no grammar that
-names their legs. Its rows keep the rule's date, which a holiday fold can make wrong, so the
-first rows of each spread log one WARNING. What is still loading keeps the rule's date silently
-for up to a minute (`LOAD_PATIENCE`), so a stream's start shows no error; a contract or product
-still not loaded a minute after it was first asked for (a stalled or rate-limited lookup) is a
-miss, "its schedule was not loaded after 60 s". A row the loaded schedules cannot place (past
-the last loaded session, a contract Massive's contracts do not list, a failed lookup) is a
-**miss** too. A miss gets a null `Date`: without the schedule the rule's date can be wrong on
+names their legs. A row the schedules cannot place is a **miss**: a spread's, one whose
+contract or product is still loading (a stream's first rows, or a stalled or rate-limited
+lookup), one past the loaded sessions, one of a contract Massive's contracts do not list, or
+one whose lookup failed. A miss gets a null `Date`: without the schedule the rule's date can be wrong on
 any weekday, since a holiday folds its trading into the next session and the library has no
 holiday calendar to rule that out, and a wrong date is worse than none. Its `Timestamp` and
 every other column are kept, the miss is logged at WARNING once per product (or contract) and
@@ -3287,8 +3284,7 @@ then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
 size is conservative). A call for a generation that is no longer current is discarded: the next
-generation re-sends the whole desired set. `reconnect()` closes the current socket so the client
-reconnects under its backoff rules. Rows from `on_data` go to the per-channel row buffer;
+generation re-sends the whole desired set. Rows from `on_data` go to the per-channel row buffer;
 rejects fail their streams ([section 19.5](#195-runtime-drift)) and never enter a buffer; drift
 goes to the session's `DriftRegistry`.
 
@@ -3317,7 +3313,7 @@ Responsibilities:
 | Step | Owner |
 |---|---|
 | Open the socket (TLS, proxy, keepalive pings), read `connected`, send auth, read the auth reply, all within the handshake timeout | client |
-| `auth_failed` | The client reports `FAILED` with `WireAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_wire`). |
+| `auth_failed` | The client reports `FAILED` with `WireAuthError` and stops; it never retries a rejected key. The library fails every stream on the path with `AuthenticationError` (`_errors.from_wire`), whose message quotes Massive's text and adds that it can also mean the class's plan includes no WebSocket streams, not only a bad key: Massive may answer `auth_failed` to such a key too. |
 | `max_connections` in the auth reply | The client reports `WAITING_SLOT`, lets the server close the socket, and retries after its backoff; streams stay alive. |
 | `max_connections` as a status after authentication | The client reports `Status(MAX_CONNECTIONS)`, remembers it for the generation, and when that generation's socket closes reports `WAITING_SLOT` instead of `RECONNECTING`. The library only displays the state. |
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |

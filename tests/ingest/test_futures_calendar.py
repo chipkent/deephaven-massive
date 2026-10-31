@@ -19,7 +19,6 @@ import pytest
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
 from deephaven_massive._ingest.futures_calendar import (
-    LOAD_PATIENCE,
     RELOAD_SPACING,
     FuturesCalendar,
 )
@@ -37,7 +36,6 @@ SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
 PATHS = {"contracts_path": CONTRACTS_PATH, "schedules_path": SCHEDULES_PATH}
 """The paths the session passes: those of the futures reference datasets."""
 SPACING = RELOAD_SPACING.total_seconds()
-PATIENCE = LOAD_PATIENCE.total_seconds()
 
 
 def instant(text: str) -> int:
@@ -234,7 +232,7 @@ def test_a_watched_contract_is_asked_for_once(calendar: FuturesCalendar, fetch: 
     "spread",
     ["ZCK4-ZCN4", "BOB 02-01 U6", "BZ:BF F7-G7-H7", "6A:XF:AUDUSD:Q6", "ZZ:NEW COMBO Z6"],
 )
-def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
+def test_a_spread_is_never_looked_up_and_has_no_date(
     *,
     calendar: FuturesCalendar,
     fetch: FakeFetch,
@@ -245,12 +243,16 @@ def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
         watched(calendar, spread)
         assert caplog.records == []
         row = (spread, "2024-03-27T21:50:00", "2024-03-27")
-        assert correct(calendar, [row, row]) == (["2024-03-27", "2024-03-27"], [])
-        assert correct(calendar, [row]) == (["2024-03-27"], [])
+        why = "a spread or combination is never looked up in Massive's schedules"
+        assert correct(calendar, [row, row]) == (
+            [None, None],
+            [(spread.split(maxsplit=1)[0], null_date(spread, why, "2024-03-27"))],
+        )
+        assert correct(calendar, [row]) == ([None], [])
         idle(calendar)
     assert fetch.calls == []
-    # Its rows are dated by the rule, which a holiday can make wrong: one WARNING per spread,
-    # however many batches date it; watching it alone dates nothing and says nothing.
+    # The rule's date can be wrong around a holiday, so its rows get none: one WARNING per
+    # spread and rule date, however many batches it is in; watching it alone says nothing.
     assert [r.levelno for r in caplog.records if spread in r.getMessage()] == [logging.WARNING]
 
 
@@ -318,41 +320,43 @@ def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
     assert (dates, misses) == (["2024-03-28", "2024-03-28", None], [])
 
 
-def test_an_unknown_contract_keeps_the_rule_date_silently_and_is_looked_up(
+def test_an_unknown_contract_has_no_date_until_it_is_looked_up(
     calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
+    dates, misses = correct(calendar, [FOLDED])
+    assert dates == [None]
+    assert [symbol for symbol, _ in misses] == ["ESM4"]
     idle(calendar)
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
 
 
-@pytest.mark.parametrize("path", [CONTRACTS_PATH, SCHEDULES_PATH])
-def test_a_lookup_still_loading_after_a_minute_makes_misses(
+@pytest.mark.parametrize(
+    ("path", "why"),
+    [
+        (CONTRACTS_PATH, "its product is still being looked up"),
+        (SCHEDULES_PATH, "its schedule is still loading"),
+    ],
+)
+def test_a_row_whose_lookup_is_still_loading_is_a_miss(
     *,
     calendar: FuturesCalendar,
     fetch: FakeFetch,
-    clock: Clock,
     caplog: pytest.LogCaptureFixture,
     path: str,
+    why: str,
 ) -> None:
-    # The request is in flight: at first the row keeps the rule's date silently.
+    # The request is in flight: the rule's date may be wrong without the schedule, so the rows
+    # get none, logged once per product (or contract) and rule date.
     fetch.hold(path)
     calendar.watch(["ESM4"])
     fetch.wait(1 if path == CONTRACTS_PATH else 2)
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
-    clock.now += PATIENCE - 1
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
-    # A minute after it was asked for, its rows are misses, logged once: the rule's date may be
-    # wrong without the schedule, so they get none.
-    clock.now += 1
     with caplog.at_level(logging.WARNING):
         dates, misses = correct(calendar, [FOLDED, FOLDED])
+        again = correct(calendar, [FOLDED])
     assert dates == [None, None]
-    assert misses == [
-        ("ESM4", null_date("ESM4", "its schedule was not loaded after 60 s", "2024-03-29"))
-    ]
-    assert caplog.text.count("not loaded after 60 s") == 1
+    assert misses == [("ESM4", null_date("ESM4", why, "2024-03-29"))]
+    assert again == ([None], [])
     # The stream keeps running with every other column: something to know, not a failure.
     assert {r.levelno for r in caplog.records} == {logging.WARNING}
     # Once it loads, the rows place again.
@@ -503,7 +507,7 @@ def test_close_stops_the_worker_once_and_queues_nothing_after(
     calendar.close()
     assert "test futures schedules" not in {t.name for t in threading.enumerate()}
     calendar.watch(["ESM4"])
-    assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
+    assert correct(calendar, [FOLDED])[0] == [None]
     assert calendar.wait_idle(0)
     assert fetch.calls == []
 

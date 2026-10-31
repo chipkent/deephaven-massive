@@ -609,33 +609,6 @@ def test_auth_success_alone_does_not_reset_the_backoff(
     assert 2.0 <= h.sleeper.waits[1] <= 2.4
 
 
-def test_reconnect_closes_after_the_queued_frames(
-    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
-) -> None:
-    h = make_client()
-    h.recorder.wait_open(1)
-
-    def subscribe_then_reconnect() -> None:
-        h.client.subscribe(1, ["T.AAPL"])
-        h.client.reconnect()
-
-    h.on_loop(subscribe_then_reconnect)
-    h.recorder.wait_open(2)
-    assert fake_ws_server.frames(0) == ['{"action":"subscribe","params":"T.AAPL"}']
-    assert fake_ws_server.connections[0].close_code == 1000
-    assert h.sleeper.waits == [1.0]
-
-
-def test_reconnect_without_a_generation_does_nothing(
-    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
-) -> None:
-    fake_ws_server.reject_next(503)
-    h = make_client(free_waits=0)
-    h.sleeper.wait_for_count(1)
-    h.on_loop(h.client.reconnect)
-    assert len(fake_ws_server.connections) == 0
-
-
 # --- frames -----------------------------------------------------------------------------------
 
 
@@ -791,7 +764,6 @@ def test_a_status_after_authentication_is_delivered_in_order_with_data(
         ("set_required", ("T", frozenset())),
         ("subscribe", (1, ["T.AAPL"])),
         ("unsubscribe", (1, ["T.AAPL"])),
-        ("reconnect", ()),
     ],
 )
 def test_loop_thread_methods_refuse_other_threads(
