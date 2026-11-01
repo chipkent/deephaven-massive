@@ -118,7 +118,13 @@ consequences:
 The rate-limit tests need at least one class left on Basic (Indices is preferred). They carry
 `integration_rate_limits`, so `-m integration` leaves them out; the command of "Run order"
 names them, and they run first, each after a minute's pause so earlier requests no longer
-count.
+count. They need no open market, so to keep market hours for the streams, run them apart at
+any other time and leave them out of the market-hours run:
+
+```bash
+uv run pytest -m integration_rate_limits 2>&1 | tee -a live-checks.log
+uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log   # in market hours
+```
 They draw a few HTTP 429 refusals on purpose, so each sends its class more than 5 requests:
 one records the refusal's text and which requests outside every subscription Massive
 counts; one whether a ticker lookup filtered by a class's market (Indices, Currencies, or
@@ -157,7 +163,10 @@ the only time bands change, and the smoke tier streams LULD bands of every ticke
 reason; stock imbalances arrive only around the auctions, so their smoke case always skips
 after the acknowledgement. A skip for the market's hours is a condition of the moment: the
 live-run program runs the check again on a later attempt, and a whole stream day fails a unit
-whose streams delivered no row once its session had opened.
+whose streams delivered no row once its session had opened. A results folder whose stream
+checks passed before streams had to deliver rows (the smoke stream cases, the delayed-feed
+check, and the stream-day units) treats those passes as unproven, so they run again by
+themselves.
 
 The checks of the wire protocol that belong to no asset class (the unsubscribe, the 1,000-topic
 frame, the wildcard) stream crypto, which trades all the time; on a key that streams stocks

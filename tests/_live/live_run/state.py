@@ -45,6 +45,14 @@ MAX_FAILURES: Final = 2
 MAX_CONDITION_SKIPS: Final = 3
 """Attempts a check skipped for a condition gets before the skip is final."""
 
+ROW_RULES: Final = 1
+"""The version of the rule that a stream check passes only when rows reached its table. Before
+it, a stream passed on Massive's acknowledgement alone, which Massive sends with the market
+closed too, so a pass recorded under an older version proves nothing and runs again."""
+
+DELAYED_FEED_TEST: Final = "test_whether_massive_serves_a_real_time_key_on_the_delayed_feed"
+"""The check of a real-time key on the delayed feed, which now also requires rows."""
+
 
 @dataclass
 class Check:
@@ -62,6 +70,8 @@ class Check:
         passed_under: The entitlement id of its last pass, `""` if it never passed.
         last_run: The New York date of its last run, ISO.
         items: The design's open questions it answers (`settles` and `verifies`).
+        passed_rules: The `ROW_RULES` version in force at its last pass; 0 for a pass recorded
+            before the version existed, or none.
     """
 
     group: str
@@ -74,6 +84,7 @@ class Check:
     passed_under: str = ""
     last_run: str = ""
     items: list[str] = field(default_factory=list)
+    passed_rules: int = 0
 
 
 @dataclass
@@ -246,12 +257,31 @@ def is_need(reason: str) -> bool:
     return reason.startswith(NEED_PREFIXES)
 
 
+def needs_rows(check: Check) -> bool:
+    """Tell whether a check must see rows to pass: a stream that once passed on its acknowledgement.
+
+    Args:
+        check: The check.
+
+    Returns:
+        True for a stream-day unit, a smoke tier stream case (its id ends `-stream]`), and the
+        check of a real-time key on the delayed feed.
+    """
+    return (
+        check.group == "stream-day"
+        or check.name.endswith("-stream]")
+        or DELAYED_FEED_TEST in check.name
+    )
+
+
 def is_due(state: RunState, check: Check) -> bool:
     """Decide whether a check runs at its group's next attempt.
 
-    A check is due unless it passed and no tier rose since; it failed `MAX_FAILURES` times; it
-    was refused, or skipped for a subscription the key lacks, and the entitlement has not
-    changed since; or it was skipped for a condition `MAX_CONDITION_SKIPS` times.
+    A check is due unless it passed and no tier rose since; it failed `MAX_FAILURES` times;
+    it was refused, or skipped for a subscription the key lacks, and the entitlement has not
+    changed since; or it was skipped for a condition `MAX_CONDITION_SKIPS` times. A check that
+    needs rows (`needs_rows`) and passed under an older `ROW_RULES` proved nothing, so it is
+    due until it passes again.
 
     Args:
         state: The run's state.
@@ -261,6 +291,8 @@ def is_due(state: RunState, check: Check) -> bool:
         True when it should run.
     """
     if check.status == "passed":
+        if needs_rows(check) and check.passed_rules < ROW_RULES:
+            return True
         return tier_rose(state, check.passed_under, state.current)
     if check.failures >= MAX_FAILURES:
         return False
@@ -311,6 +343,7 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     check.status, check.reason, check.entitlement = status, reason, state.current
     if status == "passed":
         check.passed_under = state.current
+        check.passed_rules = ROW_RULES
     elif status in {"failed", "error"}:
         check.failures += 1
     elif status == "skipped" and not is_need(reason):
