@@ -273,7 +273,8 @@ def decide(
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
     drops the per-ticker rows that carry an `error` (a ticker the plan does not include counts
     as absent), and streams from the real-time feed unless a label says delayed
-    (`_from_labels`). A refused snapshot (HTTP 403 or `NOT_AUTHORIZED`) says nothing certain
+    (`_from_labels`). A refused snapshot (HTTP 403, `NOT_AUTHORIZED`, or rows that all carry
+    an `error`, such as `NOT_ENTITLED`) says nothing certain
     about the WebSocket plan: the class streams from the real-time feed, a WARNING names
     Massive's text, and a refusal from the WebSocket server fails the refused streams.
 
@@ -326,11 +327,40 @@ def decide(
             DELAYED_HOST,
         )
         return HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
-    probe = SNAPSHOT_PROBES[asset_class]
+    return _from_snapshot(asset_class, SNAPSHOT_PROBES[asset_class], fetch)
+
+
+def _from_snapshot(
+    asset_class: AssetClass,
+    probe: SnapshotProbe,
+    fetch: Callable[[SnapshotProbe], SnapshotAnswer],
+) -> HostDecision:
+    """Decide a class's host from its snapshot: the last rule of `decide`.
+
+    Args:
+        asset_class: The class of the stream.
+        probe: The class's snapshot request (`SNAPSHOT_PROBES`).
+        fetch: Sends the request, as `decide` takes it.
+
+    Returns:
+        The real-time host with the refusal as its evidence when Massive refuses the snapshot
+        (an `EntitlementError`, or rows that all carry an `error`); otherwise the decision of
+        the labels of the rows that carry none (`_from_labels`).
+
+    Raises:
+        MassiveError: If `fetch` fails otherwise.
+    """
+    subscription = subscription_of(asset_class)
     try:
         answer = fetch(probe)
     except EntitlementError as error:
         return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, error))
     entitled = [row for row in answer.rows if not is_error_row(row)]
+    if answer.rows and not entitled:
+        # Massive can refuse a whole snapshot with HTTP 200 and an error on every row (a
+        # Basic key's `NOT_ENTITLED`), which is a refusal like a 403.
+        first = answer.rows[0]
+        refusal = f"{first.get('error')}: {first.get('message', '')}".rstrip(": ")
+        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, refusal))
     labels = read_labels(answer.status, entitled)
     return _from_labels(asset_class, subscription=subscription, labels=labels)

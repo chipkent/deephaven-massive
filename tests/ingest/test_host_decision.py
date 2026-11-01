@@ -289,6 +289,22 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
     assert not refused_snapshot("no timeframe in the stocks snapshot")
 
 
+def test_a_snapshot_whose_every_row_is_refused_is_a_refused_snapshot() -> None:
+    # Massive can refuse a Basic key's snapshot with HTTP 200 and an error on every row.
+    rows = [
+        {"ticker": ticker, "error": "NOT_ENTITLED", "message": "Not entitled to this ticker."}
+        for ticker in ("AAPL", "MSFT")
+    ]
+    decision = run(AssetClass.STOCKS, lambda _probe: SnapshotAnswer("OK", rows))
+    assert decision == HostDecision(
+        REALTIME_HOST,
+        Recency.REALTIME,
+        "the host check's snapshot (/v3/snapshot) was refused: NOT_ENTITLED: Not entitled to "
+        "this ticker.",
+    )
+    assert refused_snapshot(decision.evidence)
+
+
 def test_other_errors_propagate_unchanged() -> None:
     error = dm.MassiveError("HTTP 503 from GET /v3/snapshot")
 
