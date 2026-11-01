@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
@@ -908,22 +909,62 @@ def test_day_file_before_a_split_is_as_traded(
     assert abs(float(str(rows[0]["close"])) / rest_close - 1) < _SPLIT_TOLERANCE / 10
 
 
+def _previous_bar_status(client: RestClient) -> str:
+    """Return the envelope status of AAPL's previous day bar, as Massive labels it for a key.
+
+    Returns:
+        The status, such as `"OK"` or `"DELAYED"`.
+    """
+    return client.get(
+        source(Transport.REST, "/v2/aggs/ticker/{stocksTicker}/prev"),
+        {"stocksTicker": _SYMBOL},
+        {},
+        bucket="stocks",
+    ).status
+
+
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("73")
-@pytest.mark.requests(2)
+@pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_past_stock_data_is_served_with_the_default_config(
-    live_config: dm.MassiveConfig, *, previous_trading_day: date, evidence: Evidence
+    live_config: dm.MassiveConfig,
+    *,
+    live_rest: RestClient,
+    rest_for_key: Callable[[str], RestClient],
+    previous_trading_day: date,
+    evidence: Evidence,
 ) -> None:
     """The previous day's bar and a past day's open and close fetch on the default config.
 
     Massive labels past data `DELAYED` on Basic and Starter keys, though its rows are final, so
     only datasets of the market's current state are checked against
-    `MassiveConfig.delayed_subscriptions`. A session with no subscription listed reads AAPL's
-    `previous_day_bar` and its `daily_open_close` of the last trading day before the run. Fails
-    if either raises `EntitlementError` or returns no row.
+    `MassiveConfig.delayed_subscriptions`. The question needs a key whose past data Massive
+    labels `DELAYED`: the test reads AAPL's previous day bar raw and records the envelope
+    status, and uses the main key when it says `DELAYED`, else `MASSIVE_DELAYED_API_KEY` when
+    that key's answer says so; without such a key it skips, "needs a Basic or Starter stocks
+    key". A session on that key with no subscription listed then reads AAPL's
+    `previous_day_bar` and its `daily_open_close` of the last trading day before the run.
+    Fails if either raises `EntitlementError` or returns no row.
     """
-    config = dataclasses.replace(live_config, delayed_subscriptions=frozenset())
+    status = _previous_bar_status(live_rest)
+    evidence(f"the main key's previous day bar envelope status: {status!r}")
+    key = live_config.api_key
+    if status != "DELAYED":
+        key = os.environ.get("MASSIVE_DELAYED_API_KEY", "").strip()
+        if not key:
+            pytest.skip(
+                f"needs a Basic or Starter stocks key: Massive labels the main key's past data "
+                f"{status!r}, not DELAYED, and MASSIVE_DELAYED_API_KEY is not set"
+            )
+        status = _previous_bar_status(rest_for_key(key))
+        evidence(f"MASSIVE_DELAYED_API_KEY's previous day bar envelope status: {status!r}")
+        if status != "DELAYED":
+            pytest.skip(
+                f"needs a Basic or Starter stocks key: Massive labels the past data of both "
+                f"keys {status!r}, not DELAYED"
+            )
+    config = dataclasses.replace(live_config, api_key=key, delayed_subscriptions=frozenset())
     session = dm.MassiveSession(config)
     try:
         previous = session.stocks.previous_day_bar(_SYMBOL).fetch()

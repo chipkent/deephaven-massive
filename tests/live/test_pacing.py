@@ -239,14 +239,10 @@ def test_wait_progress_shows_a_pause_after_a_refusal() -> None:
     governor.put(_state("other", attempts=1, waiting=1, paused_until=1_030.0))
     progress()
     governor.put(_state("other", attempts=1, waiting=2))
-    progress()
+    progress()  # the pause has ended: a wait under 5 s prints nothing
     assert lines == [
         (
             "other: waiting 30 s for a request slot (paused after an HTTP 429); "
-            "2 of this test's 3 requests left"
-        ),
-        (
-            "other: waiting 0 s for a request slot (paused after an HTTP 429); "
             "2 of this test's 3 requests left"
         ),
     ]

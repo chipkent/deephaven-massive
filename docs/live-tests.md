@@ -13,9 +13,10 @@ library. This page says how to run them, safely and within the plans you hold.
 | `integration` | the evidence tests, one question each | `uv run pytest -m integration` |
 | `integration_smoke` | every dataset and verb once, checked automatically | `uv run pytest -m integration_smoke` |
 | `integration_limits` | the four tests that deliberately exceed Massive's subscription and connection limits | `uv run pytest -m integration_limits` |
+| `integration_rate_limits` | the three tests that deliberately exceed a Basic class's 5 requests a minute | `uv run pytest -m integration_rate_limits` |
 
-Every live test carries `integration`; the smoke and limit tests also carry their own marker,
-and `-m integration` leaves them out. The default run deselects all of them, so
+Every live test carries `integration`; the smoke, limit, and rate-limit tests also carry their
+own marker, and `-m integration` leaves them out. The default run deselects all of them, so
 `./scripts/check.sh` and CI never select a live test, and every live test skips without
 `MASSIVE_API_KEY` and whenever `CI` is set. `tests/conftest.py` enforces the markers.
 
@@ -93,20 +94,31 @@ consequences:
   its class is on Basic, with the reason "needs a paid <class> plan: N requests would take
   about M minutes on Basic". Each time a request waits, the run prints one line, such as
   `live pacing: options: waiting 47 s for a request slot (paced at 5 requests a minute); 3 of
-  this test's 5 requests left`, so a paced run never looks hung. A test's timeout also grows
+  this test's 5 requests left`, so a paced run never looks hung; a wait shorter than 5 s
+  prints nothing. A test's timeout also grows
   with its count. A live run lifts the 120 s limit after which faulthandler would end the
   process; each test's own timeout bounds it.
-- **How long a free key takes.** With every class on Basic, `-m integration` runs the tests of
-  the "Every class on Basic" row below. Together they declare about 68 requests to stocks
-  (reference data included), 32 to currencies, 26 to futures, 8 to options, and 7 to indices,
-  so the stock requests alone take at least 13 minutes at 5 a minute; with the rate-limit
-  tests, which wait out about six minutes between them, the run takes roughly 20 minutes.
-  On paid plans nothing waits, and the tests read their full sets.
+- **How long a run takes.** The command of "Run order" below runs the rate-limit tests, the
+  evidence tests, and the smoke tier. With every class on Basic, the evidence tests that run
+  (the "Every class on Basic" row below) declare at most about 74 requests to stocks
+  (reference data included), 32 to currencies, 29 to futures, 8 to options, and 7 to indices,
+  and the smoke tier at most 88 to stocks, 36 to currencies, 24 each to options and futures,
+  and 14 to indices; its stream cases skip before any request, since Basic does not stream.
+  The classes are paced side by side, so stocks sets the pace: at 5 a minute its requests
+  take up to about 15 minutes for the evidence tests and 18 for the smoke tier, and the
+  rate-limit tests wait out about six minutes between them, so a free key's run takes about
+  40 minutes, less when a test sends fewer requests than it declares. On paid plans nothing
+  waits for its pace, but each stream case waits for its rows while its market is open (up
+  to 75 s for a minute bar), so the smoke tier takes about half an hour in market hours and
+  under ten minutes when the markets are closed, and the delayed-feed check of a real-time
+  Stocks key can add up to 17 minutes in the first quarter hour of a stock session.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
 
-The rate-limit tests need at least one class left on Basic (Indices is preferred), and they
-run first in `-m integration`, each after a minute's pause so earlier requests no longer count.
+The rate-limit tests need at least one class left on Basic (Indices is preferred). They carry
+`integration_rate_limits`, so `-m integration` leaves them out; the command of "Run order"
+names them, and they run first, each after a minute's pause so earlier requests no longer
+count.
 They draw a few HTTP 429 refusals on purpose, so each sends its class more than 5 requests:
 one records the refusal's text and which requests outside every subscription Massive
 counts; one whether a ticker lookup filtered by a class's market (Indices, Currencies, or
@@ -128,15 +140,42 @@ deliverable check (from 2014, 2021, and 2024) are the exception: each is read on
 key's Options plan keeps its day, by the documented history windows, and is otherwise
 recorded as outside the plan's history.
 
-A stream test asserts that Massive acknowledged its topics, which Massive does whether or not
-the market is open. It waits for rows only while `/v1/marketstatus/now` says the market is
-open, and skips, after the acknowledgement, only when that status says closed. On a delayed
-plan the first rows of a session arrive only after the plan's delay, so the index stream
-requires rows once the S&P indices have been open 15 minutes past 09:30 New York time on
-Indices Starter, and the futures stream once ES has been open 10 minutes, by the `timestamp`
-of `/futures/v1/market-status`, on Futures Starter and Developer; before that they skip after
-the acknowledgement. The LULD check needs the regular session, the only time bands change. In the smoke tier a stream
-that passed without a row is counted "acknowledged only".
+A stream test passes only when rows reached its table. It first asserts that Massive
+acknowledged its topics, which Massive does whether or not the market is open, then reads the
+market's status (`/v1/marketstatus/now`, or for futures ES's `market_event` in
+`/futures/v1/market-status`). Rows are required while the market is open for the stream's kind
+of rows: stock trades and quotes also in the extended hours (status `extended-hours`, from
+04:00 New York time), every other stock, option, and index stream only in the regular session
+(from 09:30). On a delayed plan the first rows of a session arrive only after the plan's
+delay, so rows are required once the session has been open that long: 15 minutes on Stocks,
+Options, and Indices Starter (and Stocks and Options Developer), 10 minutes on Futures Starter
+and Developer, counted for futures from the `timestamp` of its market status. A minute bar
+stream waits until just past the next minute boundary, up to 75 s. When rows are not required,
+the test skips after the acknowledgement, "not exercised: market closed (acknowledged)" or the
+like; it never passes on the acknowledgement alone. The LULD check needs the regular session,
+the only time bands change, and the smoke tier streams LULD bands of every ticker for the same
+reason; stock imbalances arrive only around the auctions, so their smoke case always skips
+after the acknowledgement. A skip for the market's hours is a condition of the moment: the
+live-run program runs the check again on a later attempt, and a whole stream day fails a unit
+whose streams delivered no row once its session had opened.
+
+The checks of the wire protocol that belong to no asset class (the unsubscribe, the 1,000-topic
+frame, the wildcard) stream crypto, which trades all the time; on a key that streams stocks
+but no currencies they stream stocks instead, on the feed of the key's Stocks plan, while stock
+bars are due. Two more checks prove rows directly: one closes the session's streaming socket
+from under it and requires the crypto stream to reconnect, return to `RUNNING`, and deliver new
+trades, recording any `WAITING_SLOT` on the way; one reads AAPL's minute bars from the previous
+trading day through today on `AUTO` and on REST, before today's flat file exists, and requires
+the same minutes from both, no day missing or doubled, recording `AUTO`'s warning that it
+filled days from REST (it needs Stocks Starter and the S3 credentials).
+
+Two checks are about a delayed plan's labels. The past-data check records the envelope status
+Massive gives AAPL's previous day bar, and counts only when that status is `DELAYED`: on a key
+that gets `OK`, it uses `MASSIVE_DELAYED_API_KEY` when set and otherwise skips, "needs a Basic
+or Starter stocks key". And because the live sessions list every delayed class in
+`delayed_subscriptions`, one check opens a session with the key alone, as a user who lists
+nothing would, and requires the first delayed class's stream (or, for options, the chain) to
+be refused with a message that names the remedy.
 
 ## S3 credentials
 
@@ -194,7 +233,7 @@ documentation page names its plan in its "Plan Access" table ([S15]).
 | Variable | Needed by | Without it |
 |---|---|---|
 | `MASSIVE_API_KEY` | every test | every test skips |
-| `MASSIVE_DELAYED_API_KEY` | what Massive says when a delayed key subscribes on the real-time feed, when Stocks is not on Starter or Developer (then the main key serves) | it skips |
+| `MASSIVE_DELAYED_API_KEY` | what Massive says when a delayed key subscribes on the real-time feed, when Stocks is not on Starter or Developer (then the main key serves); whether past stock data reads on the default configuration, when Massive labels the main key's past data `OK` | it skips |
 
 ## Safety
 
@@ -214,18 +253,21 @@ documentation page names its plan in its "Plan Access" table ([S15]).
 
 ## Run order
 
-Delete `live-evidence.log` first. Every test appends what it observes to that file as it goes,
-flushed line by line, so a run cut short keeps everything recorded before; the same lines close
-each run's terminal output, under "live evidence". Stop every other client of the key, export
-the variables above, and run, at any hour and on any day:
+Each run writes its evidence to a file of its own in the repository root,
+`live-evidence-<UTC time>.log`, and prints its path when the first line is recorded. Every
+test appends what it observes to that file as it goes, flushed line by line, so a run cut
+short keeps everything recorded before; the same lines close each run's terminal output, under
+"live evidence". Stop every other client of the key, export the variables above, and run, at
+any hour and on any day:
 
 ```bash
-uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log
+uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
 ```
 
 The run probes the plans, runs the rate-limit tests first, then every evidence test and the
 smoke tier. Whatever the key lacks, the market's hours, or the plan's history leaves out
-skips with its reason; nothing needs a person to time it. Two checks answer more on some days:
+skips with its reason; nothing needs a person to time it, but a stream proves its rows only
+while its market is open, so a run in market hours checks more than one on a weekend. Two checks answer more on some days:
 the LULD check needs the regular session for rows, and `/prev` shows a short-day stamp only on
 the trading day after a half day (its evidence marks that day `half day: yes`).
 
@@ -260,6 +302,7 @@ uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-resu
 
 | Group | What it runs | When (New York time) |
 |---|---|---|
+| `rate-limits` | `-m integration_rate_limits` | from 11:30 |
 | `evidence` | `-m integration -k "not luld"` | from 11:30, after the previous day's flat files |
 | `luld` | `-m integration -k luld` | 09:28, for the opening bands |
 | `smoke` | `-m integration_smoke` | from 11:30 |
@@ -295,11 +338,17 @@ unit-tested against the fakes; the script is its entry point.
 
 ## Reading the results
 
-A test fails when a request it needs fails or returns nothing, when it is refused although
+A test fails when a request it needs fails or returns nothing, when a stream delivers no row
+while rows are due, when it is refused although
 the key holds its plans, or, for a test marked `verifies`, when Massive's answer is no longer
 the one the library assumes. A skip names what was missing: a plan, a key, S3 credentials,
-history beyond the plan's window, or an open market. Everything else is evidence: read each test's docstring for what it
-means. The smoke tier ends with its coverage: passed, not entitled, otherwise skipped, failed.
+history beyond the plan's window, or a market that is closed or within its feed's delay, so
+no row was due ("not exercised"). Everything else is evidence: read each
+test's docstring for what it means. The smoke tier ends with its coverage: passed (with the
+count that passed with drift: a library WARNING or a `SchemaDrift` the case saw, each listed),
+not entitled, otherwise skipped, failed; the not-entitled and skipped cases are grouped by the
+plan they need or their reason, with a count per group. The open questions follow, each group
+with its count and each question's number beside its one-line title.
 
 One answer comes from `stream-day`'s `debug.log` rather than a test: **does Massive send
 frames on a quiet connection?** A connection with acknowledged subscriptions logs a WARNING
@@ -311,7 +360,7 @@ that connection (`wss://.../stocks status ...`) in those 15 minutes and the long
 without one, and report every `no frame for` WARNING with its time and connection. The
 threshold and its gate change only on that evidence.
 
-`live-evidence.log` and `live-checks.log` are git-ignored. They hold raw licensed rows
+The evidence files and `live-checks.log` are git-ignored. They hold raw licensed rows
 (quotes, partner data such as Benzinga and ETF Global): attach them only where the audience may
 see that data, and redact those rows before sharing them anywhere public.
 

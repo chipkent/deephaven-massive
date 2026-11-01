@@ -8,19 +8,26 @@ holds one connection per cluster and is closed at teardown. How to run these tes
 
 from __future__ import annotations
 
+import os
+import threading
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, source
+from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import date
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration
 
@@ -176,3 +183,75 @@ def test_which_recency_labels_an_option_chain_carries(
     for row in page.rows:
         evidence(f"option chain row: {_timeframe_fields(row) or 'none'}")
     assert page.rows
+
+
+_DELAYED_ORDER = ("stocks", "futures", "indices", "options")
+"""The classes the default-configuration check tries, first held on a delayed plan first."""
+
+
+@pytest.mark.timeout(100)
+def test_a_delayed_plan_is_refused_on_the_default_configuration(
+    live_plans: LivePlans,
+    *,
+    front_contract: Callable[[str, date], str],
+    index_symbol: str,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """Whether a session on the default configuration shows a delayed plan's refusal.
+
+    The live sessions list every class on a delayed plan in
+    `MassiveConfig.delayed_subscriptions`, which hides what a user who lists nothing meets.
+    This check takes the first class the key holds on a delayed plan (Stocks, Futures,
+    Indices, then Options) and, in a session with the key alone and nothing listed, streams
+    one symbol's minute bars (index values for indices) or, for options, fetches the SPY chain.
+    Passes when the library refused it with an `EntitlementError`, or the stream failed with a
+    refusal, and the error says what to do; the evidence quotes it. Skips without a delayed
+    plan.
+    """
+    held = [
+        name for name in _DELAYED_ORDER if RECENCY.get((name, live_plans.tiers[name])) == DELAYED
+    ]
+    if not held:
+        pytest.skip(
+            "needs a delayed plan: Stocks, Options, or Futures Starter or Developer, or "
+            "Indices Starter"
+        )
+    name = held[0]
+    config = dm.MassiveConfig(api_key=os.environ["MASSIVE_API_KEY"].strip())
+    session = dm.MassiveSession(config)
+    errors: list[str] = []
+    try:
+        try:
+            if name == "options":
+                session.options.chain("SPY").fetch()
+            else:
+                today = datetime.now(UTC).date()
+                queries = {
+                    "stocks": lambda: session.stocks.bars("AAPL", dm.Timespan.MINUTE),
+                    "futures": lambda: session.futures.bars(
+                        front_contract("ES", today), dm.Timespan.MINUTE
+                    ),
+                    "indices": lambda: session.indices.values(index_symbol),
+                }
+                table = queries[name]().append_only()
+                pause = threading.Event()  # never set; only paces the polling
+                deadline = time.monotonic() + _STREAM_WAIT
+                while time.monotonic() < deadline and not errors:
+                    errors = [
+                        str(r["Error"])
+                        for r in table_rows(session.streams())
+                        if r["State"] == "FAILED"
+                    ]
+                    pause.wait(0.25)
+                for line in stream_report(session):
+                    evidence(line)
+                session.release(table)
+        except dm.EntitlementError as error:
+            errors = [str(error)]
+    finally:
+        session.close()
+    evidence(f"{name} on the default configuration: {errors or 'served'}")
+    assert errors, f"a delayed {name} plan was served on the default configuration"
+    assert "delayed" in errors[0].lower(), f"the refusal names no remedy: {errors[0]}"

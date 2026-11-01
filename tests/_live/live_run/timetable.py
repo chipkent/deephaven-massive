@@ -77,6 +77,7 @@ SEQUENCE_START: Final = time(11, 30)
 ORDINARY_SEQUENCE: Final = (
     Slot("stream-day-reconcile", SEQUENCE_START, time(18, 0)),
     Slot("half-day", SEQUENCE_START, time(18, 0)),
+    Slot("rate-limits", SEQUENCE_START, time(18, 0)),
     Slot("evidence", SEQUENCE_START, time(18, 0)),
     Slot("smoke", SEQUENCE_START, time(20, 0)),
     Slot("responses", SEQUENCE_START, time(20, 0)),
@@ -85,7 +86,13 @@ ORDINARY_SEQUENCE: Final = (
 )
 """The ordinary sequence, in order; `half-day` runs only on the trading day after a half day."""
 
-ANY_TIME_GROUPS: Final = ("evidence", "smoke", "responses", "stream-day-reconcile")
+ANY_TIME_GROUPS: Final = (
+    "rate-limits",
+    "evidence",
+    "smoke",
+    "responses",
+    "stream-day-reconcile",
+)
 """The groups `--any-time` runs at once: they need no market hours."""
 
 HARD_STOP: Final = time(3, 0)

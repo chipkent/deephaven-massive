@@ -41,6 +41,7 @@ STATUSES: Final = ("passed", "failed", "error", "refused", "skipped", "not run")
 """Every status a check can show, in the order of the summary's columns."""
 
 GROUP_ORDER: Final = (
+    "rate-limits",
     "evidence",
     "luld",
     "smoke",

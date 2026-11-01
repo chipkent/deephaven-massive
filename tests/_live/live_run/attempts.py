@@ -6,10 +6,11 @@ group's own files. This module starts each kind of attempt and records what it f
 
 - **A pytest group** (`run_pytest_group`) first lists its tests with `--collect-only` and the
   outcomes plugin (`collection.json`), then runs only the due ones, writing `outcomes.jsonl`.
-  A `live-evidence.log` left in the repository root moves to `orphans/` before the run, and the
-  run's own moves into the attempt after it. When a test failed with Massive's refusal although
-  the key's tiers allow it, the key is probed again at once: if a tier fell, the test stays due
-  (its next run skips with what it needs); otherwise it is recorded `refused`.
+  Every evidence file (`live-evidence-<time>.log`, one per pytest run) left in the repository
+  root moves to `orphans/` before the run, and the run's own moves into the attempt after it.
+  When a test failed with Massive's refusal although the key's tiers allow it, the key is
+  probed again at once: if a tier fell, the test stays due (its next run skips with what it
+  needs); otherwise it is recorded `refused`.
 - **A built-in group** (`run_built_in_group`) writes `request.json` (the due checks, the
   tiers, its stop) and runs `scripts/live_run.py _group`, whose child writes one line per
   check to `results.jsonl` (`group_child`). The `responses` child gets no S3 pair.
@@ -236,22 +237,28 @@ def collect(
     return collection
 
 
-def move_evidence(source: Path, folder: Path) -> None:
-    """Move a `live-evidence.log` into a folder, never over one already there.
+EVIDENCE_FILES: Final = "live-evidence-*.log"
+"""The names of the evidence files a pytest run writes in the repository root, one per run."""
+
+
+def move_evidence(root: Path, folder: Path) -> None:
+    """Move every evidence file of the repository root into a folder, never over one there.
+
+    A file whose name the folder already holds gets a number before its suffix, such as
+    `live-evidence-20261104T163000Z-2.log`.
 
     Args:
-        source: The file in the repository root, which may be missing.
-        folder: Where it goes.
+        root: The repository root, which may hold none.
+        folder: Where they go; created when there is one to move.
     """
-    if not source.exists():
-        return
-    folder.mkdir(parents=True, exist_ok=True)
-    target = folder / "live-evidence.log"
-    number = 1
-    while target.exists():
-        number += 1
-        target = folder / f"live-evidence-{number}.log"
-    shutil.move(source, target)
+    for source in sorted(root.glob(EVIDENCE_FILES)):
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / source.name
+        number = 1
+        while target.exists():
+            number += 1
+            target = folder / f"{source.stem}-{number}{source.suffix}"
+        shutil.move(source, target)
 
 
 def run_pytest_group(
@@ -289,7 +296,7 @@ def run_pytest_group(
         return
     minutes = sum(int(collection[n]["requests"]) for n in due) // BASIC_REQUESTS_PER_MINUTE
     ctx.say(f"{group}: {len(due)} checks; on Basic, up to {minutes} minutes of requests")
-    move_evidence(ctx.root / "live-evidence.log", ctx.out / "orphans")
+    move_evidence(ctx.root, ctx.out / "orphans")
     outcomes = folder / "outcomes.jsonl"
     argv = _pytest_argv(ctx, attempt, group=group, rest=["--tb=short", *due])
     env = environment(ctx, state, folder=folder, extra={OUTCOMES_VARIABLE: str(outcomes)})
@@ -297,7 +304,7 @@ def run_pytest_group(
     try:
         stopped = run_child(ctx, state, attempt, argv=argv, env=env, until=until)
     finally:
-        move_evidence(ctx.root / "live-evidence.log", folder)
+        move_evidence(ctx.root, folder)
         found = _pytest_results(outcomes, due)
         if not stopped and any(r is not None and r[0] == "refused" for r in found.values()):
             before = state.current

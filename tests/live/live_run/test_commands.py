@@ -266,7 +266,14 @@ def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Ha
     assert commands.command_run(harness.ctx, any_time=True) == commands.INTERRUPTED
     state = harness.state()
     groups = [a.group for a in state.attempts]
-    assert groups == ["evidence", "smoke", "responses", "limits-ws", "limits-second-connection"]
+    assert groups == [
+        "rate-limits",
+        "evidence",
+        "smoke",
+        "responses",
+        "limits-ws",
+        "limits-second-connection",
+    ]
     assert check_of(state, "evidence", NODE).status == "passed"
     assert check_of(state, "responses", "market-status").status == "passed"
     assert harness.awake == ["on", "off"]

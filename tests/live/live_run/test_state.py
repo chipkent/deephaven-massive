@@ -112,6 +112,29 @@ def test_a_condition_skip_is_retried_three_times() -> None:
     assert (check.condition_skips, is_due(state, check)) == (3, False)
 
 
+def test_a_stream_check_skipped_while_the_market_was_closed_is_due_on_a_trading_day() -> None:
+    """A stream that ran while its market was closed proved no row, so it must run again.
+
+    A stream check skips, rather than passes, when its market is closed, and the skip counts
+    as a condition of the moment: the check stays due, so the next attempt, on a trading day,
+    runs it while rows can arrive.
+    """
+    state = _state()
+    check = check_of(state, "smoke", "t.py::test_every[stocks.trades-stream]")
+    saturday, monday = "2026-10-31", "2026-11-02"
+    record(
+        state,
+        check,
+        status="skipped",
+        reason="not exercised: market closed (acknowledged)",
+        day=saturday,
+    )
+    assert (check.status, check.passed_under, check.condition_skips) == ("skipped", "", 1)
+    assert is_due(state, check)
+    record(state, check, status="passed", reason="", day=monday)
+    assert not is_due(state, check)
+
+
 def test_need_reasons_are_told_from_conditions() -> None:
     assert run_state.is_need("not entitled: needs a Stocks plan")
     assert run_state.is_need("outside the plan's history: ...")

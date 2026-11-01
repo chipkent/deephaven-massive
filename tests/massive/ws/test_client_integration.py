@@ -1,10 +1,13 @@
 """Live checks of Massive's WebSocket protocol through the wire client, frame by frame.
 
-Each test opens one wire `WsClient` to one cluster on `socket.massive.com`, records every
-status and, where the form of a value is the question, every raw frame (`evidence`), and
-closes the client before the next test; a probe of a cluster waits a few seconds after the
-previous one closed, so the two never overlap on the server. The tests that subscribe to many
-topics or a wildcard deliberately exceed Massive's limits: they are marked
+Each test opens one wire `WsClient` to one cluster on `socket.massive.com` (or, for a delayed
+stocks plan, `delayed.massive.com`), records every status and, where the form of a value is
+the question, every raw frame (`evidence`), and closes the client before the next test; a probe
+of a cluster waits a few seconds after the previous one closed, so the two never overlap on the
+server. The checks whose question belongs to no asset class (the unsubscribe, the frame size,
+the wildcard) use crypto, which trades all the time, and fall back to stocks on a key that
+streams stocks but no currencies, while the stock market's rows flow. The tests that subscribe
+to many topics or a wildcard deliberately exceed Massive's limits: they are marked
 `integration_limits` and run only with `-m integration_limits`. How to run these tests is in
 `docs/live-tests.md`.
 """
@@ -32,6 +35,8 @@ from deephaven_massive._massive import (
     sources,
 )
 from deephaven_massive._massive.ws import protocol
+from tests._live import plans
+from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -44,7 +49,8 @@ pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 Evidence: TypeAlias = "Callable[[str], None]"
-OpenProbe: TypeAlias = "Callable[[str, str], _Probe]"
+OpenProbe: TypeAlias = "Callable[..., _Probe]"
+RowsDue: TypeAlias = "Callable[[str, str], tuple[str, bool]]"
 
 _HOST = "socket.massive.com"
 _AUTH_WAIT = 20.0
@@ -64,6 +70,8 @@ _CLOSED_AT: dict[str, float] = {}
 
 _STATUSES, _ROWS, _FRAMES = "statuses", "rows", "frames"
 """What a probe keeps: statuses only, statuses and decoded rows, or also every raw frame."""
+
+_DELAYED_HOST = "delayed.massive.com"
 
 _PLAN_REFUSALS = ("not authorized", "not entitled", "plan")
 """Words of a status that refuses a subscription for want of a plan, in lower case."""
@@ -145,13 +153,21 @@ class _Probe:
     """
 
     def __init__(
-        self, cluster: str, api_key: str, *, frames: Callable[[], list[str]], keep_rows: bool
+        self,
+        cluster: str,
+        api_key: str,
+        *,
+        frames: Callable[[], list[str]],
+        keep_rows: bool,
+        host: str = _HOST,
     ) -> None:
-        """Create the client of `wss://socket.massive.com/<cluster>`; nothing connects yet.
+        """Create the client of `wss://<host>/<cluster>`; nothing connects yet.
 
         Args:
             cluster: The cluster, such as `"crypto"`.
             api_key: The Massive API key.
+            host: The feed's host: `socket.massive.com` by default, `delayed.massive.com` for
+                a delayed plan.
             frames: Returns a copy of the raw frames recorded so far (none when not recorded).
             keep_rows: Whether to keep the decoded rows; a probe that only counts
                 acknowledgements drops them, so a busy subscription costs no memory.
@@ -173,7 +189,7 @@ class _Probe:
             s.key.partition("/")[2]: [f.column for f in s.fields] for s in cluster_sources
         }
         self.client = WsClient(
-            f"wss://{_HOST}/{cluster}",
+            f"wss://{host}/{cluster}",
             api_key=api_key,
             sources=cluster_sources,
             on_open=self._on_open,
@@ -277,19 +293,21 @@ def probe(live_config: MassiveConfig, monkeypatch: pytest.MonkeyPatch) -> Iterat
     """Yield a function that opens a probe of one cluster; every probe is closed at teardown.
 
     Yields:
-        A function `(cluster, keep)`: the cluster (`"crypto"`) and what to keep, `"statuses"`,
-        `"rows"`, or `"frames"` (rows and every raw frame). It waits until a few seconds have
-        passed since the last probe of that cluster closed, then returns an authenticated
-        probe.
+        A function `(cluster, keep, host=socket.massive.com)`: the cluster (`"crypto"`), what
+        to keep, `"statuses"`, `"rows"`, or `"frames"` (rows and every raw frame), and the
+        feed's host. It waits until a few seconds have passed since the last probe of that
+        cluster closed, then returns an authenticated probe.
     """
     opened: list[_Probe] = []
 
-    def open_probe(cluster: str, keep: str) -> _Probe:
+    def open_probe(cluster: str, keep: str, host: str = _HOST) -> _Probe:
         frames = _recorder(monkeypatch) if keep == _FRAMES else list
         since = time.monotonic() - _CLOSED_AT.get(cluster, float("-inf"))
         if since < _GAP:
             threading.Event().wait(_GAP - since)
-        made = _Probe(cluster, live_config.api_key, frames=frames, keep_rows=keep != _STATUSES)
+        made = _Probe(
+            cluster, live_config.api_key, frames=frames, keep_rows=keep != _STATUSES, host=host
+        )
         opened.append(made)
         made.open()
         return made
@@ -298,6 +316,65 @@ def probe(live_config: MassiveConfig, monkeypatch: pytest.MonkeyPatch) -> Iterat
     for made in opened:
         made.close()
         _CLOSED_AT[made.cluster] = time.monotonic()
+
+
+@dataclass(frozen=True)
+class _Target:
+    """Where a check whose question belongs to no asset class streams: crypto, or stocks.
+
+    Attributes:
+        cluster: The cluster, `"crypto"` or `"stocks"`.
+        host: The feed's host.
+        symbol: The symbol in a topic, `"BTC-USD"` or `"AAPL"`.
+        busy: A channel that delivers the symbol's rows within seconds: `XT` (crypto trades),
+            `A` (stock second bars), or, on the base Stocks Business plan, which has no second
+            bars, `AM`.
+        light: A light channel of every symbol, for a wildcard: `XT` or `AM` (minute bars).
+        symbol_field: The decoded rows' column that names the symbol.
+    """
+
+    cluster: str
+    host: str
+    symbol: str
+    busy: str
+    light: str
+    symbol_field: str
+
+
+_CRYPTO = _Target("crypto", _HOST, "BTC-USD", "XT", "XT", "Pair")
+
+
+@pytest.fixture
+def target(live_plans: plans.LivePlans, rows_due: RowsDue) -> Callable[..., _Target]:
+    """Return a function that picks the cluster of a check whose question has no class.
+
+    Crypto when the key holds Currencies Starter; otherwise stocks, on the feed of the key's
+    Stocks plan, when it streams stocks at all.
+
+    Returns:
+        A function `(*, rows)`: when `rows` is True the check needs rows, so on stocks it skips
+        unless stock bars are due, in the regular session past the plan's feed delay
+        (`rows_due`); it skips without a plan that streams crypto or stocks.
+    """
+
+    def pick(*, rows: bool) -> _Target:
+        if plans.meets("currencies", live_plans.tiers["currencies"], "starter"):
+            return _CRYPTO
+        tier = live_plans.tiers["stocks"]
+        if tier == "basic":
+            pytest.skip("needs Currencies Starter ($49/month), or a Stocks plan that streams")
+        if rows:
+            status, due = rows_due("stocks", "bars")
+            if not due:
+                pytest.skip(
+                    f"not exercised: the stock market is {status}, or within the feed delay, "
+                    "and the key streams no currencies"
+                )
+        host = _DELAYED_HOST if RECENCY.get(("stocks", tier)) == DELAYED else _HOST
+        busy = "AM" if tier == "business" else "A"
+        return _Target("stocks", host, "AAPL", busy, "AM", "Symbol")
+
+    return pick
 
 
 @pytest.mark.needs("currencies:starter")
@@ -351,22 +428,27 @@ def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) ->
     assert trades
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("9")
-@pytest.mark.timeout(100)
-def test_whether_an_unsubscribe_is_acknowledged(probe: OpenProbe, *, evidence: Evidence) -> None:
+@pytest.mark.timeout(130)
+def test_whether_an_unsubscribe_is_acknowledged(
+    probe: OpenProbe, *, target: Callable[..., _Target], evidence: Evidence
+) -> None:
     """Whether Massive acknowledges an unsubscribe, and how soon frames stop.
 
     The library awaits no acknowledgement and removes a topic at once. Subscribes
-    `XT.BTC-USD`, waits for a trade, unsubscribes, and records every status and every row in
+    `XT.BTC-USD` (or, on a key that streams stocks but no currencies, AAPL's second bars while
+    they are due), waits for a row, unsubscribes, and records every status and every row in
     the next 15 s. Reading it: either way the library is right; the evidence records what a
     removed topic still delivers, and for how long.
     """
-    made = probe("crypto", _ROWS)
-    made.send("subscribe", ["XT.BTC-USD"])
+    chosen = target(rows=True)
+    topic = f"{chosen.busy}.{chosen.symbol}"
+    made = probe(chosen.cluster, _ROWS, chosen.host)
+    made.send("subscribe", [topic])
     before = made.wait(lambda r: bool(r.rows), _WAIT)
+    evidence(f"{topic} on {chosen.host}/{chosen.cluster}")
     sent = time.monotonic()
-    made.send("unsubscribe", ["XT.BTC-USD"])
+    made.send("unsubscribe", [topic])
     after = made.wait(lambda _: False, _LISTEN)
     for line in after.status_lines():
         evidence(line)
@@ -378,37 +460,45 @@ def test_whether_an_unsubscribe_is_acknowledged(probe: OpenProbe, *, evidence: E
     assert before.rows
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("10")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
 def test_a_frame_of_one_thousand_topics_is_acknowledged(
-    probe: OpenProbe, *, live_rest: RestClient, evidence: Evidence
+    probe: OpenProbe,
+    *,
+    target: Callable[..., _Target],
+    live_rest: RestClient,
+    evidence: Evidence,
 ) -> None:
     """Whether Massive accepts one subscribe frame of 1,000 topics.
 
-    The library sends at most 1,000 topics per frame. Subscribes 1,000 crypto minute-bar
-    topics (`XA.<pair>`, a light channel) in one frame and records the acknowledgements and
-    any other status, stopping as soon as every topic is answered. Reading it: all 1,000
-    acknowledged confirms the frame size; a refusal or a closed connection means the per-frame
-    cap must be lower.
+    The library sends at most 1,000 topics per frame. Subscribes 1,000 minute-bar topics (a
+    light channel) of crypto pairs (`XA.<pair>`), or, on a key that streams stocks but no
+    currencies, of stocks (`AM.<ticker>`), in one frame, and records the acknowledgements and
+    any other status, stopping as soon as every topic is answered; an acknowledgement needs no
+    open market. Reading it: all 1,000 acknowledged confirms the frame size; a refusal or a
+    closed connection means the per-frame cap must be lower.
     """
-    pairs = live_rest.get(
+    chosen = target(rows=False)
+    market = "crypto" if chosen.cluster == "crypto" else "stocks"
+    listed = live_rest.get(
         source(Transport.REST, "/v3/reference/tickers"),
         {},
-        {"market": "crypto", "active": True, "limit": 1000},
+        {"market": market, "active": True, "limit": 1000},
         bucket="other",
     ).rows
-    topics = sorted(
-        {
+    if chosen.cluster == "crypto":
+        names = {
             f"XA.{p['base_currency_symbol']}-{p['currency_symbol']}"
-            for p in pairs
+            for p in listed
             if p.get("base_currency_symbol") and p.get("currency_symbol")
         }
-    )[:1000]
+    else:
+        names = {f"AM.{p['ticker']}" for p in listed if p.get("ticker")}
+    topics = sorted(names)[:1000]
     if len(topics) < 1000:
-        pytest.skip(f"only {len(topics)} crypto pairs listed; the frame would hold under 1,000")
-    made = probe("crypto", _STATUSES)
+        pytest.skip(f"only {len(topics)} {market} tickers listed; the frame would hold under 1,000")
+    made = probe(chosen.cluster, _STATUSES, chosen.host)
     made.send("subscribe", topics)
     records = made.wait(lambda r: r.answered(topics), _WAIT)
     others = [
@@ -466,37 +556,37 @@ def test_the_options_cap_counts_contracts_or_topics(
     assert tickers
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("15")
 @pytest.mark.integration_limits
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(130)
 def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(
-    probe: OpenProbe, *, evidence: Evidence
+    probe: OpenProbe, *, target: Callable[..., _Target], evidence: Evidence
 ) -> None:
-    """Whether a trade arrives twice under a wildcard and an explicit topic of one channel.
+    """Whether an event arrives twice under a wildcard and an explicit topic of one channel.
 
     While a channel's wildcard is acknowledged, the library takes its explicit topics off the
-    wire. Subscribes `XT.*` and `XT.BTC-USD` together for 30 s and counts BTC-USD trades
-    delivered more than once (same pair, id, exchange, time, and price). Reading it: duplicates
-    confirm the library's handling is needed; none means it is harmless.
+    wire. Subscribes `XT.*` and `XT.BTC-USD` together for 30 s (or, on a key that streams
+    stocks but no currencies, `AM.*` and `AM.AAPL`, minute bars, for 75 s, so a minute's bars
+    arrive, while they are due) and counts the symbol's events delivered more than once (the
+    same values in every field). Reading it: duplicates confirm the library's handling is
+    needed; none means it is harmless.
     """
-    made = probe("crypto", _ROWS)
-    made.send("subscribe", ["XT.*", "XT.BTC-USD"])
-    records = made.wait(lambda _: False, 30.0)
-    trades = [
-        (
-            row.get("Pair"),
-            row.get("Id"),
-            row.get("Exchange"),
-            row.get("ParticipantTimestamp"),
-            row.get("Price"),
-        )
-        for _, channel, row in records.rows
-        if channel == "XT" and row.get("Pair") == "BTC-USD"
+    chosen = target(rows=True)
+    channel = chosen.light
+    made = probe(chosen.cluster, _ROWS, chosen.host)
+    made.send("subscribe", [f"{channel}.*", f"{channel}.{chosen.symbol}"])
+    records = made.wait(lambda _: False, 30.0 if chosen.cluster == "crypto" else 75.0)
+    events = [
+        tuple(sorted((key, str(value)) for key, value in row.items()))
+        for _, name, row in records.rows
+        if name == channel and row.get(chosen.symbol_field) == chosen.symbol
     ]
-    repeated = {key: n for key, n in Counter(trades).items() if n > 1}
+    repeated = {key: n for key, n in Counter(events).items() if n > 1}
     for line in records.status_lines():
         evidence(line)
-    evidence(f"BTC-USD trades in 30 s: {len(trades)}; delivered more than once: {len(repeated)}")
+    evidence(
+        f"{chosen.symbol} {channel} events: {len(events)}; delivered more than once: "
+        f"{len(repeated)}"
+    )
     evidence(f"examples: {list(repeated.items())[:5]}")
-    assert trades
+    assert events

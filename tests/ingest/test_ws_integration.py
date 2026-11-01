@@ -1,7 +1,10 @@
-"""Live checks of the session's WebSocket handling: the feeds a plan may use, and the slot limit.
+"""Live checks of the session's WebSocket handling: feeds, a dropped socket, the slot limit.
 
 Each test records the session's diagnostics and Massive's messages (`evidence`). Streams
-subscribe to one symbol and are released at once. The slot test opens a second connection to a
+subscribe to one symbol and are released at once. The reconnect check closes the session's
+socket from under it, through the wire client's private `_run_generation`, which receives each
+authenticated socket: the library has no public way to drop a connection, and needs none. The
+slot test opens a second connection to a
 cluster on purpose: it is marked `integration_limits`, runs only with `-m integration_limits`,
 and should run alone and last, with no other client of the key. How to run these tests is in
 `docs/live-tests.md`.
@@ -12,17 +15,21 @@ from __future__ import annotations
 import dataclasses
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._massive import WsClient
+from tests._live import streams
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from websockets.asyncio.client import ClientConnection
 
 pytestmark = pytest.mark.integration
 
@@ -31,12 +38,21 @@ TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Evidence: TypeAlias = "Callable[[str], None]"
+WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+MarketStatus: TypeAlias = "Callable[[str], str]"
 
 _WAIT = 45.0
 """Seconds a test waits for a frame or a state change."""
 
 _FIRST_WAIT = 20.0
 """Seconds the slot test waits for the first session's trades; crypto trades all the time."""
+
+_DELAYED_FEED_LAG = timedelta(minutes=15)
+"""How far Massive's delayed stocks feed lags the market: its first trade of a session comes
+this long after the session opens."""
+
+_RECOVERY_WAIT = 120.0
+"""Seconds the reconnect check waits for the stream to deliver rows again after the drop."""
 
 
 def _wait_for_state(
@@ -120,11 +136,13 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
 
 @pytest.mark.needs("stocks:advanced")
 @pytest.mark.settles("70")
-@pytest.mark.timeout(110)
+@pytest.mark.timeout(1200)
 def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     live_config: dm.MassiveConfig,
     *,
+    wait_acked: WaitAcked,
     wait_rows: WaitRows,
+    market_status: MarketStatus,
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
@@ -133,19 +151,102 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
 
     A subscription listed in `MassiveConfig.delayed_subscriptions` always streams from the
     delayed feed, even on a real-time plan. With a real-time Stocks plan, lists stocks as
-    delayed, subscribes `AM.AAPL`, and records the stream's host, acknowledgement, rows, and any
-    error. Reading it: an acknowledgement means a real-time key may choose delayed data; a
-    refusal means the setting needs a delayed plan, and its message must say so.
+    delayed, subscribes `T.AAPL` (trades, which flow in the extended hours too), and records
+    the stream's host, acknowledgement, rows, and any error. While the stock market is closed
+    the test skips after the acknowledgement. While it is open, it waits until the session
+    has been open longer than the delayed feed's 15 minutes, then up to 45 s for a trade, and
+    requires one, so the test runs up to about 17 minutes in the first quarter hour of a
+    session. Reading it: rows mean a real-time key may choose delayed data; a refusal means
+    the setting needs a delayed plan, and its message must say so.
     """
     config = dataclasses.replace(live_config, delayed_subscriptions={dm.Subscription.STOCKS})
-    errors = _subscribe_minute_bars(
-        config,
-        wait_rows=wait_rows,
-        table_rows=table_rows,
-        stream_report=stream_report,
-        evidence=evidence,
-    )
+    session = dm.MassiveSession(config)
+    try:
+        table = session.stocks.trades("AAPL").append_only()
+        acked = wait_acked(session, 1, time.monotonic() + _WAIT)
+        status = market_status("stocks")
+        now = datetime.now(UTC)
+        opened = streams.opened_at("stocks", status, family="trades", now=now)
+        rows: list[dict[str, Any]] = []
+        if opened is not None:
+            lag = max((opened + _DELAYED_FEED_LAG - now).total_seconds(), 0.0)
+            evidence(f"the session opened {opened}; waiting {lag:.0f} s for the feed's lag")
+            rows = wait_rows(session, table, time.monotonic() + lag + _WAIT)
+        for line in stream_report(session):
+            evidence(line)
+        errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
+        errors += [str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]]
+        session.release(table)
+    finally:
+        session.close()
+    evidence(f"T.AAPL acknowledged {acked}; rows {len(rows)}; errors {errors or 'none'}")
     evidence(f"refused on the delayed feed: {bool(errors)}")
+    assert acked or errors, "Massive neither acknowledged nor refused T.AAPL"
+    if opened is None and not errors:
+        pytest.skip(f"not exercised: the stock market is {status} (acknowledged)")
+    assert rows or errors, f"no AAPL trade arrived on the delayed feed of an open market ({status})"
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.timeout(200)
+def test_a_stream_comes_back_with_rows_after_its_socket_drops(
+    live_session: dm.MassiveSession,
+    *,
+    wait_rows: WaitRows,
+    table_rows: TableRows,
+    stream_report: Report,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: Evidence,
+) -> None:
+    """What the session does when its streaming socket drops: reconnect and deliver rows again.
+
+    Streams `X:BTCUSD` trades (crypto trades all the time) until the first rows arrive, then
+    aborts the socket's transport on the wire client's loop thread, as a network failure
+    would, and samples the connection every quarter second. Passes when the connection counts
+    a reconnect, is `CONNECTED` again, its stream is `RUNNING`, and a trade the library
+    received after the drop reached the table, within 120 s. Every connection state seen is
+    recorded in order, `WAITING_SLOT` included: a reconnect that finds the old connection's
+    slot still held waits for it.
+    """
+    sockets: list[tuple[WsClient, ClientConnection]] = []
+    run_generation = WsClient._run_generation
+
+    async def recording(self: WsClient, websocket: ClientConnection) -> object:
+        sockets.append((self, websocket))
+        return await run_generation(self, websocket)
+
+    monkeypatch.setattr(WsClient, "_run_generation", recording)
+    table = live_session.crypto.trades("X:BTCUSD").append_only()
+    first = wait_rows(live_session, table, time.monotonic() + _FIRST_WAIT)
+    assert first, "no X:BTCUSD trade arrived before the drop"
+    client, websocket = sockets[-1]
+    dropped = time.time_ns()
+    client.loop.call_soon_threadsafe(websocket.transport.abort)
+    states: list[str] = []
+    after: list[dict[str, Any]] = []
+    connection: dict[str, Any] = {}
+    stream: dict[str, Any] = {}
+    pause = threading.Event()  # never set; only paces the polling
+    deadline = time.monotonic() + _RECOVERY_WAIT
+    while time.monotonic() < deadline:
+        connection = table_rows(live_session.connections())[0]
+        stream = table_rows(live_session.streams())[0]
+        if not states or states[-1] != connection["State"]:
+            states.append(str(connection["State"]))
+        after = [r for r in table_rows(table) if int(r["TimestampInsert"]) > dropped]
+        recovered = connection["State"] == "CONNECTED" and stream["State"] == "RUNNING"
+        if connection["Reconnects"] and recovered and after:
+            break
+        pause.wait(0.25)
+    for line in stream_report(live_session):
+        evidence(line)
+    live_session.release(table)
+    evidence(f"connection states after the drop: {' -> '.join(states)}")
+    evidence(f"waited for a slot: {'WAITING_SLOT' in states}")
+    evidence(f"reconnects {connection.get('Reconnects')}; trades after the drop {len(after)}")
+    assert connection.get("Reconnects"), f"the connection never reconnected: {states}"
+    assert stream.get("State") == "RUNNING", f"the stream is {stream.get('State')}"
+    assert after, f"no trade reached the table in {_RECOVERY_WAIT:.0f} s after the drop"
 
 
 @pytest.mark.needs("currencies:starter")

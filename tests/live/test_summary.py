@@ -16,6 +16,8 @@ _SETTLED = {
     "silent": ((), (), ()),
 }
 
+_TITLES = {"1": "Whether one thing holds.", "5": "Whether another holds."}
+
 
 def _lines(*, narrowed: bool = False, held: plans.LivePlans | None = None) -> list[str]:
     outcome = {
@@ -29,17 +31,27 @@ def _lines(*, narrowed: bool = False, held: plans.LivePlans | None = None) -> li
         "silent": "passed",
     }
     return summary.question_lines(
-        _SETTLED, outcome, held or plans.declared_plans(""), narrowed=narrowed
+        _SETTLED,
+        outcome,
+        held or plans.declared_plans(""),
+        titles=_TITLES,
+        narrowed=narrowed,
     )
 
 
-def test_each_question_is_sorted_by_its_tests() -> None:
+def test_each_question_is_sorted_by_its_tests_and_shown_with_its_title() -> None:
     assert _lines()[1:] == [
-        "verified 1 of 6: 2",
-        "ran, evidence to read, 1 of 6: 1",
-        "1 need Stocks Starter ($29/month): 3",
-        "2 not verified (failed or skipped): 4, 6",
-        "1 not verified (partly run): 5 (1 of 2 tests ran)",
+        "verified 1 of 6:",
+        "    2",
+        "ran, evidence to read, 1 of 6:",
+        "    1: Whether one thing holds.",
+        "1 need Stocks Starter ($29/month):",
+        "    3",
+        "2 not verified (failed or skipped):",
+        "    4",
+        "    6",
+        "1 not verified (partly run):",
+        "    5 (1 of 2 tests ran): Whether another holds.",
     ]
 
 
@@ -52,16 +64,18 @@ def test_a_narrowed_run_counts_in_its_selection() -> None:
 
 
 def test_without_plans_a_skip_is_not_verified() -> None:
-    lines = summary.question_lines(_SETTLED, {"needs": "skipped"}, None, narrowed=False)
+    lines = summary.question_lines(_SETTLED, {"needs": "skipped"}, None, titles={}, narrowed=False)
     assert lines == [
-        "verified 0 of 1: ",
-        "ran, evidence to read, 0 of 1: ",
-        "1 not verified (failed or skipped): 3",
+        "verified 0 of 1:",
+        "ran, evidence to read, 0 of 1:",
+        "1 not verified (failed or skipped):",
+        "    3",
     ]
 
 
 def test_no_lines_without_a_question() -> None:
-    assert summary.question_lines(_SETTLED, {"silent": "passed"}, None, narrowed=False) == []
+    lines = summary.question_lines(_SETTLED, {"silent": "passed"}, None, titles={}, narrowed=False)
+    assert lines == []
 
 
 def test_numbered_items_sort_first() -> None:
@@ -71,10 +85,11 @@ def test_numbered_items_sort_first() -> None:
 def test_a_question_with_a_failed_test_is_not_verified() -> None:
     settled = {"passes": ((), ("7",), ()), "fails": ((), ("7",), ())}
     lines = summary.question_lines(
-        settled, {"passes": "passed", "fails": "failed"}, None, narrowed=False
+        settled, {"passes": "passed", "fails": "failed"}, None, titles={}, narrowed=False
     )
     assert lines == [
-        "verified 0 of 1: ",
-        "ran, evidence to read, 0 of 1: ",
-        "1 not verified (failed or skipped): 7",
+        "verified 0 of 1:",
+        "ran, evidence to read, 0 of 1:",
+        "1 not verified (failed or skipped):",
+        "    7",
     ]

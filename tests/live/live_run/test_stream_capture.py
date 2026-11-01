@@ -258,6 +258,50 @@ def test_a_restarted_day_records_its_gap_and_fails_past_thirty_minutes(
 
 
 @pytest.mark.jvm_held
+def test_a_unit_without_a_row_after_its_session_opened_fails(
+    make_ws_session: Callable[..., WsSession], tmp_path: Path
+) -> None:
+    """An acknowledged stream that never delivers fails its unit once its session is open.
+
+    The index session opens at 09:30 New York time, and the delayed feed lags 15 minutes, so
+    from 09:50 a stream day whose index streams recorded no row fails the unit.
+    """
+    harness = make_ws_session()
+    late = START + timedelta(minutes=50)  # 09:50 New York time
+    seen, report = _reports()
+    stream_capture.run_stream_day(
+        harness.session,
+        units=["indices delayed"],
+        tiers={"indices": "starter"},
+        folder=tmp_path,
+        until=late + timedelta(seconds=1),
+        report=report,
+        clock=_Day(now_at=late).clock(),
+        day_start=late,
+    )
+    assert seen == [("indices delayed", "failed", "no rows during its session's hours")]
+
+
+def test_unit_rows_add_up_every_childs_rows_of_the_units_streams(tmp_path: Path) -> None:
+    (tmp_path / "minutes.csv").write_text(
+        "stream,minute,rows\n"
+        "crypto-trades,2026-11-04T14:00,2\n"
+        "crypto-trades,2026-11-04T14:01,3\n"
+        "gone-stream,2026-11-04T14:00,7\n"
+    )
+    assert stream_capture.unit_rows(tmp_path, [_TICKS]) == {"currencies real-time": 5}
+    assert stream_capture.unit_rows(tmp_path / "missing", [_TICKS]) == {}
+
+
+def test_a_units_rows_are_due_after_its_session_opens_and_its_delay() -> None:
+    day = date(2026, 11, 4)
+    due = stream_capture.rows_due_from("stocks delayed", day)
+    assert due.astimezone(UTC) == datetime(2026, 11, 4, 9, 20, tzinfo=UTC)  # 04:20 New York
+    futures = stream_capture.rows_due_from("futures real-time", day)
+    assert futures.astimezone(UTC) == datetime(2026, 11, 4, 8, 50, tzinfo=UTC)  # 03:50
+
+
+@pytest.mark.jvm_held
 def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
     make_ws_session: Callable[..., WsSession], fake_rest: FakeRestServer, tmp_path: Path
 ) -> None:
