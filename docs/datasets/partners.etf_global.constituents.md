@@ -14,7 +14,7 @@ m.partners.etf_global.constituents(symbols=None, *, sort=None, order=None, limit
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol`, `EffectiveDate`, `ProcessedDate` and `ConstituentRank` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`, `EffectiveDate`, `ProcessedDate` and `ConstituentRank` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `composite_ticker_gt`, `composite_ticker_gte`, `composite_ticker_lt`, `composite_ticker_lte`, `constituent_ticker`, `constituent_ticker_any_of`, `constituent_ticker_gt`, `constituent_ticker_gte`, `constituent_ticker_lt`, `constituent_ticker_lte`, `effective_date`, `effective_date_gt`, `effective_date_gte`, `effective_date_lt`, `effective_date_lte`, `figi`, `figi_any_of`, `figi_gt`, `figi_gte`, `figi_lt`, `figi_lte`, `isin`, `isin_any_of`, `isin_gt`, `isin_gte`, `isin_lt`, `isin_lte`, `processed_date`, `processed_date_gt`, `processed_date_gte`, `processed_date_lt`, `processed_date_lte`, `sedol`, `sedol_any_of`, `sedol_gt`, `sedol_gte`, `sedol_lt`, `sedol_lte`, `us_code`, `us_code_any_of`, `us_code_gt`, `us_code_gte`, `us_code_lt`, `us_code_lte` |
 
@@ -51,8 +51,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `UsCode` | String | A unique identifier code for the constituent security in US markets. | REST |
 | `Weight` | double | The constituent's weight in the ETF's portfolio, as a decimal fraction (0.0789 = 7.89%). Short positions are negative. For most funds the weights sum to about 1; leveraged and inverse funds vary. A few constituents have no weight, so a sum can fall short. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as `unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

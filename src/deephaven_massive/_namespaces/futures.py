@@ -303,15 +303,11 @@ class _Futures(Namespace):
         """Trades of futures contracts, tick by tick.
 
         Each row is one trade: price, size, and the exchange's sequence numbers. `Date` is the
-        trading session (README.md#time): Massive's `session_end_date`, or on the WebSocket, which
-        sends none, the session Massive's futures schedules place the row in; the stream waits
-        up to 15 s for its contracts' schedules before it subscribes. A row they cannot place
-        gets a null `Date`, since the 17:00 Chicago rule can be wrong around a holiday, and
-        keeps its other columns: a WARNING says so for a spread, a failed or timed-out lookup,
-        or a row outside the loaded schedule; a contract still being looked up logs at DEBUG
-        only. A date bound of `history()` is a whole session. There is no `fetch()`:
-        `snapshots(symbols)` gives each contract's latest trade. REST `history()` takes explicit
-        contracts; `dm.ALL` streams every contract and reads the flat files.
+        trading session (README.md#time). The stream waits up to 15 s for the contracts'
+        schedules; a row they can't place has a null `Date`, with a WARNING. A date bound of
+        `history()` is a whole session. There is no `fetch()`: `snapshots(symbols)` gives each
+        contract's latest trade. REST `history()` takes explicit contracts; `dm.ALL` streams
+        every contract and reads the flat files.
 
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`. See

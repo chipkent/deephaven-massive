@@ -14,7 +14,7 @@ m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=Non
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `sort` | `ticker`, `name`, `market`, `locale`, `primary_exchange`, `type`, `currency_symbol`, `currency_name`, `base_currency_symbol`, `base_currency_name`, `cik`, `composite_figi`, `share_class_figi`, `last_updated_utc`, `delisted_utc` |
 | `filters` | `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -22,20 +22,20 @@ m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=Non
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | All Tickers (REST) | All Tickers (REST) | All Tickers (REST) | All Tickers (REST) |
-| --- | --- | --- | --- | --- |
-| Currencies Basic | Updated as needed, 2 years | Updated hourly, 2 years |  |  |
-| Currencies Starter | Updated as needed, All history | Updated hourly, All history |  |  |
-| Currencies Business | Updated as needed, All history | Updated hourly, All history |  |  |
-| Indices Basic |  |  | Updated hourly, All history |  |
-| Indices Starter |  |  | Updated hourly, All history |  |
-| Indices Advanced |  |  | Updated hourly, All history |  |
-| Indices Business |  |  | Updated hourly, All history |  |
-| Stocks Basic |  |  |  | Updated daily, 2 years |
-| Stocks Starter |  |  |  | Updated daily, All history |
-| Stocks Developer |  |  |  | Updated daily, All history |
-| Stocks Advanced |  |  |  | Updated daily, All history |
-| Stocks Business |  |  |  | Updated daily, All history |
+| Plan | All Tickers (REST) |
+| --- | --- |
+| Currencies Basic | Updated as needed, 2 years; Updated hourly, 2 years |
+| Currencies Starter | Updated as needed, All history; Updated hourly, All history |
+| Currencies Business | Updated as needed, All history; Updated hourly, All history |
+| Indices Basic | Updated hourly, All history |
+| Indices Starter | Updated hourly, All history |
+| Indices Advanced | Updated hourly, All history |
+| Indices Business | Updated hourly, All history |
+| Stocks Basic | Updated daily, 2 years |
+| Stocks Starter | Updated daily, All history |
+| Stocks Developer | Updated daily, All history |
+| Stocks Advanced | Updated daily, All history |
+| Stocks Business | Updated daily, All history |
 
 ## Columns
 
@@ -59,8 +59,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `ShareClassFigi` | String | The share Class OpenFIGI number for this ticker. Find more information here (https://www.openfigi.com/about/figi) | REST |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as `unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

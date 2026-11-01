@@ -9,6 +9,7 @@ os.makedirs(FOLDER, exist_ok=True)
 LOG = os.path.join(FOLDER, "massive-debug.log")
 dm.enable_debug_logging(LOG)
 
+# The free plan's session. With a paid Stocks plan, use the line the guide gives instead.
 m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 print(dm.__version__)
 print(m)

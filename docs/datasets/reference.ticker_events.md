@@ -14,7 +14,7 @@ m.reference.ticker_events(symbols, *, types=None)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol`, `Date` and `Type` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`, `Date` and `Type` |
 
 ## Plan access
 

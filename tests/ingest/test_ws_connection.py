@@ -341,6 +341,19 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             ),
         ),
         (
+            # A refused snapshot is a Basic key's, which has no live data on either feed, so
+            # the delayed feed is no advice.
+            on_host(
+                REALTIME_HOST,
+                "the host check's snapshot (/futures/v1/snapshot) was refused: not entitled",
+            ),
+            (
+                "Massive also refused the futures snapshot, as it does on the free Basic plan, "
+                "which includes no live (WebSocket) futures data on either feed; read the data "
+                "with fetch(), poll(), or history() instead"
+            ),
+        ),
+        (
             # A key whose snapshot proved real-time data gains nothing from the delayed feed.
             on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
             (

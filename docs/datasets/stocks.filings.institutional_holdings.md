@@ -15,7 +15,7 @@ m.stocks.filings.institutional_holdings(*, filer_cik=None, start=None, end=None,
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | appends only rows it has not seen, keyed by `AccessionNumber`, `Cusip`, `TitleOfClass`, `PutCall`, `InvestmentDiscretion`, `OtherManagers`, `SharesOrPrincipalAmount`, `SharesOrPrincipalType`, `VotingAuthoritySole`, `VotingAuthorityShared` and `VotingAuthorityNone` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `Cusip`, `TitleOfClass`, `PutCall`, `InvestmentDiscretion`, `OtherManagers`, `SharesOrPrincipalAmount`, `SharesOrPrincipalType`, `VotingAuthoritySole`, `VotingAuthorityShared` and `VotingAuthorityNone` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | none |
 

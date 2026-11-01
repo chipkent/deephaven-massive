@@ -3,7 +3,7 @@
 `docs/tester-guide.md` uses these three commands. Run them from the repository root, in the
 terminal that holds `MASSIVE_API_KEY`:
 
-    uv run python scripts/tester.py check         # both setups and the key; changes nothing
+    uv run python scripts/tester.py check         # both setups and the key; saves setup-check.txt
     uv run python scripts/tester.py examples      # writes ~/massive-test/examples-output/
     uv run python scripts/tester.py bug-report    # writes ~/massive-test/bug-report-<time>.zip
 

@@ -14,7 +14,7 @@ m.crypto.last_trade(symbols)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `Timestamp` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `Timestamp` |
 
 ## Plan access
 

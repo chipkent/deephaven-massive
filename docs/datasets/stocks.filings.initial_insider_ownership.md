@@ -15,7 +15,7 @@ m.stocks.filings.initial_insider_ownership(symbols=None, *, issuer_cik=None, own
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `ExercisePrice` and `ExerciseDate` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `ExercisePrice` and `ExerciseDate` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `form_type` |
 

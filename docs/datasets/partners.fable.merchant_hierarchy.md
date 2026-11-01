@@ -14,7 +14,7 @@ m.partners.fable.merchant_hierarchy(*, sort=None, order=None, limit=None, filter
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `LookupName` and `ActiveFrom` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `LookupName` and `ActiveFrom` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `active_from`, `active_from_gt`, `active_from_gte`, `active_from_lt`, `active_from_lte`, `active_to`, `active_to_gt`, `active_to_gte`, `active_to_lt`, `active_to_lte`, `listing_status`, `listing_status_any_of`, `lookup_name`, `lookup_name_any_of`, `lookup_name_gt`, `lookup_name_gte`, `lookup_name_lt`, `lookup_name_lte`, `ticker`, `ticker_any_of`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 

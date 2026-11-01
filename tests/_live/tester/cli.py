@@ -5,14 +5,15 @@
 
 - `check [--folder DIR] [--console-python PATH | --docker-image NAME]` checks both setups and
   the key (`setup_check.check_setup`) and prints one line per item, then `ready: yes` or
-  `ready: no`. The console install is the Python at `PATH`
-  (`~/massive-test/dh-venv/bin/python` by default) or the Docker image `NAME`. Exit 0 when
-  no item failed, else 1.
+  `ready: no`, and saves the same lines in `DIR/setup-check.txt` for the bug report. The
+  console install is the Python at `PATH` (`~/massive-test/dh-venv/bin/python` by default)
+  or the Docker image `NAME`. Exit 0 when no item failed, else 1.
 - `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
   `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
   `DIR/examples-output/`. The examples write their debug log and files to `DIR` too, through
-  the `MASSIVE_TEST_FOLDER` variable this command sets. Exit 0 when no example failed (a
-  refusal by the key's plan is not a failure), else 1.
+  the `MASSIVE_TEST_FOLDER` variable this command sets. It first asks Massive which plan the
+  key holds per subscription, so the first example opens the session those plans need. Exit 0
+  when no example failed (a refusal by the key's plan is not a failure), else 1.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -56,6 +57,9 @@ EXAMPLES_FOLDER: Final = Path("docs") / "tester-examples"
 CONSOLE_PYTHON: Final = Path("~/massive-test/dh-venv/bin/python")
 """The console install's Python, as the guide makes it."""
 
+CHECK_OUTPUT: Final = "setup-check.txt"
+"""The file in the tester's folder where `check` saves what it printed, for the bug report."""
+
 NO_KEY: Final = (
     "MASSIVE_API_KEY is not set in this terminal. Set it, then run the command again: "
     "printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY"
@@ -75,7 +79,7 @@ def parser() -> argparse.ArgumentParser:
     commands = top.add_subparsers(dest="command", required=True)
     folder_help = "the tester's folder (default: ~/massive-test)"
     for name, text in (
-        ("check", "check both setups and the key; changes nothing"),
+        ("check", "check both setups and the key; saves its output for bug reports"),
         ("examples", "run every example of docs/tester-examples/ and save what each did"),
         ("bug-report", "zip the logs and diagnostics for a bug report, cleaned of secrets"),
     ):
@@ -152,6 +156,9 @@ def main(
         describe_machine
     ),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    plans: Callable[[MutableMapping[str, str]], dict[str, str] | None] = (
+        lambda environ: probe_key(credentials(environ), now=datetime.now(UTC)).tiers
+    ),
 ) -> int:
     """Parse the command line and run the command.
 
@@ -164,6 +171,8 @@ def main(
         check: Checks both setups and the key (`check_both`).
         describe: Describes the machine for a bug report (`describe_machine`).
         now: Reads the time, which names a bug report's zip.
+        plans: Asks Massive which plan the key holds per subscription, for the session line
+            of the first example; None when it cannot tell. Only `examples` calls it.
 
     Returns:
         The exit status: 0; 1 when an item of the check failed, an example failed, or a
@@ -183,19 +192,30 @@ def main(
     folder.mkdir(parents=True, exist_ok=True)
     if arguments.command == "check":
         items = check(root, arguments, environ)
-        for item in items:
-            echo(f"{item.verdict:4} {item.name}: {item.detail}")
-        echo(f"ready: {'yes' if ready(items) else 'no'}")
+        lines = [f"{item.verdict:4} {item.name}: {item.detail}" for item in items]
+        lines.append(f"ready: {'yes' if ready(items) else 'no'}")
+        for line in lines:
+            echo(line)
+        text = secrets.clean("\n".join(lines)) + "\n"
+        (folder / CHECK_OUTPUT).write_text(text, encoding="utf-8")
         return 0 if ready(items) else 1
     if arguments.command == "examples":
         environ[FOLDER_VARIABLE] = str(folder)
         start_server()
         examples = importlib.import_module("tests._live.tester.examples")
+        tiers = plans(environ)
+        if tiers is None:
+            session = examples.FREE_PLAN_SESSION
+            echo("could not tell the key's plans; the examples run as on the free plan")
+        else:
+            session = examples.session_line(tiers)
+        echo(f"session: {session.strip()}")
         outcomes = examples.run_examples(
             examples.example_files(root / EXAMPLES_FOLDER),
             folder / "examples-output",
             secrets=secrets,
             echo=echo,
+            session=session,
         )
         failed = [o.name for o in outcomes if o.status == examples.FAILED]
         echo(f"saved to {folder / 'examples-output'}")

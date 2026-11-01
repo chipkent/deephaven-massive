@@ -37,21 +37,22 @@ a few cheap requests per class:
 | a real-time indices snapshot | Advanced |
 | one file of every flat-file prefix | which flat files the S3 credentials reach: only a file that opens counts |
 
-A snapshot counts only with at least one row, since every probe asks for a liquid ticker. An
-empty snapshot proves nothing either way, so the probe stops and the run asks you to declare
-the plans instead. For the same reason the probe does not run from 03:30 to 04:30 New York
-time, while Massive clears and refills its snapshots and a Business plan's `fmv` can be
-missing. A stocks or options Business plan is not an Advanced plan: without the
-expansion it streams no trades, quotes, LULD, or per-second bars, so a test that needs Advanced
-skips on it; declare `business_expansion` to run those tests on a key with the expansion. Indices Business leaves no mark a request can see and reads as Advanced. Futures
-Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a test of a venue
-the plan lacks is refused. The answer is kept in `.live-plans.json` in the repository root (git-ignored; it names the key and
-the S3 access key id only by a digest) until the New York day ends, so later runs that day do
-not probe again. Delete the file to probe again at once, after an upgrade. The plans head the
-evidence (under "live plans") and the summary at the end of the run. The live sessions list
-every class on a delayed plan (Stocks, Options, and Futures Starter and Developer; Indices
-Starter) in `MassiveConfig.delayed_subscriptions`, since the library refuses delayed data for
-any other: their streams use Massive's delayed feed, and their REST reads are not checked.
+A snapshot counts only with at least one row, since every probe asks for a liquid ticker. An empty
+snapshot proves nothing either way, so the probe stops and the run asks you to declare the plans
+instead. For the same reason the probe does not run from 03:30 to 04:30 New York time, while Massive
+clears and refills its snapshots and a Business plan's `fmv` can be missing. A stocks or options
+Business plan is not an Advanced plan: without the expansion it streams no trades, quotes, LULD, or
+per-second bars, so a test that needs Advanced skips on it; declare `business_expansion` to run
+those tests on a key with the expansion. Indices Business leaves no mark a request can see and reads
+as Advanced. Futures Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a
+test of a venue the plan lacks is refused. The answer is kept in `.live-plans.json` in the
+repository root (git-ignored; it names the key and the S3 access key id only by a digest) until the
+New York day ends, so later runs that day do not probe again. Delete the file to probe again at
+once, after an upgrade. The plans head the evidence (under "live plans") and the summary at the end
+of the run. The live sessions list every class on a delayed plan (Stocks, Options, and Futures
+Starter and Developer; Indices Starter) in `MassiveConfig.delayed_subscriptions`, since the library
+refuses delayed data for any other: their streams use Massive's delayed feed, and their REST reads
+are not checked.
 
 To skip the probe, declare the plans in `MASSIVE_LIVE_PLANS`, comma-separated:
 `<class>=<plan>` for each paid class (`starter`, `developer`, `advanced`, `business`, or, for
@@ -221,21 +222,23 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
-The bar-stamp checks read the most recent half day whose week has ended and the full trading
-day before it. A December 24 half day stays the latest until the next Thanksgiving week ends,
-so these reads can be about eleven months old, still inside every plan's two years of history. Their month and quarter reads are the two whole ones before the run's, and the
-index year read runs from January 1 to the run's day; before the year's first trading day
-there is no year bar yet, and the year read is recorded as skipped.
+The bar-stamp checks read the most recent half day whose week has ended and the full trading day
+before it. A December 24 half day stays the latest until the next Thanksgiving week ends, so these
+reads can be about eleven months old, still inside every plan's two years of history. Their month
+and quarter reads are the two whole ones before the run's, and the index year read runs from January
+1 to the run's day; before the year's first trading day there is no year bar yet, and the year read
+is recorded as skipped.
 
 Partner datasets (Benzinga, ETF Global, TMX, consumer spending) are $99 a month each; NOI is
 a $49 expansion ([S9]); economy data and each class's reference data are free on Basic.
 The Benzinga add-on adds one check, that every consensus-ratings row names its ticker; without
 the add-on that check skips.
-Massive's knowledge base already states some answers, which the live tests confirm: a missing
-flat file answers 404 `NoSuchKey`, one subscribe frame of 120,003 entries is accepted, a
-connection carries about 1,000 options contracts, grouped daily stamps the end of its window,
-and the crypto and forex files spell `X:BTC-USD` and `C:EUR-USD` ([S10] to [S13]). Each
-documentation page names its plan in its "Plan Access" table ([S15]).
+
+Massive's knowledge base already states some answers, which the live tests confirm: a missing flat
+file answers 404 `NoSuchKey`, one subscribe frame of 120,003 entries is accepted, a connection
+carries about 1,000 options contracts, grouped daily stamps the end of its window, and the crypto
+and forex files spell `X:BTC-USD` and `C:EUR-USD` ([S10] to [S13]). Each documentation page names
+its plan in its "Plan Access" table ([S15]).
 
 ## Other variables
 
@@ -273,11 +276,11 @@ any hour and on any day:
 uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
 ```
 
-The run probes the plans, runs the rate-limit tests first, then every evidence test and the
-smoke tier. Whatever the key lacks, the market's hours, or the plan's history leaves out
-skips with its reason; nothing needs a person to time it, but a stream proves its rows only
-while its market is open, so a run in market hours checks more than one on a weekend. Two checks answer more on some days:
-the LULD check needs the regular session for rows, and `/prev` shows a short-day stamp only on
+The run probes the plans, runs the rate-limit tests first, then every evidence test and the smoke
+tier. Whatever the key lacks, the market's hours, or the plan's history leaves out skips with its
+reason; nothing needs a person to time it, but a stream proves its rows only while its market is
+open, so a run in market hours checks more than one on a weekend. Two checks answer more on some
+days: the LULD check needs the regular session for rows, and `/prev` shows a short-day stamp only on
 the trading day after a half day (its evidence marks that day `half day: yes`).
 
 Only the limit tests need a person: they exceed Massive's limits on purpose, so run them
@@ -347,17 +350,16 @@ unit-tested against the fakes; the script is its entry point.
 
 ## Reading the results
 
-A test fails when a request it needs fails or returns nothing, when a stream delivers no row
-while rows are due, when it is refused although
-the key holds its plans, or, for a test marked `verifies`, when Massive's answer is no longer
-the one the library assumes. A skip names what was missing: a plan, a key, S3 credentials,
-history beyond the plan's window, or a market that is closed or within its feed's delay, so
-no row was due ("not exercised"). Everything else is evidence: read each
-test's docstring for what it means. The smoke tier ends with its coverage: passed (with the
-count that passed with drift: a library WARNING or a `SchemaDrift` the case saw, each listed),
-not entitled, otherwise skipped, failed; the not-entitled and skipped cases are grouped by the
-plan they need or their reason, with a count per group. The open questions follow, each group
-with its count and each question's number beside its one-line title.
+A test fails when a request it needs fails or returns nothing, when a stream delivers no row while
+rows are due, when it is refused although the key holds its plans, or, for a test marked `verifies`,
+when Massive's answer is no longer the one the library assumes. A skip names what was missing: a
+plan, a key, S3 credentials, history beyond the plan's window, or a market that is closed or within
+its feed's delay, so no row was due ("not exercised"). Everything else is evidence: read each test's
+docstring for what it means. The smoke tier ends with its coverage: passed (with the count that
+passed with drift: a library WARNING or a `SchemaDrift` the case saw, each listed), not entitled,
+otherwise skipped, failed; the not-entitled and skipped cases are grouped by the plan they need or
+their reason, with a count per group. The open questions follow, each group with its count and each
+question's number beside its one-line title.
 
 One answer comes from `stream-day`'s `debug.log` rather than a test: **does Massive send
 frames on a quiet connection?** A connection with acknowledged subscriptions logs a WARNING

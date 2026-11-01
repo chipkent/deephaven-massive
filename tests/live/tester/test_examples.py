@@ -308,6 +308,43 @@ def test_example_files_keep_only_numbered_python_files(tmp_path: Path) -> None:
     assert [p.name for p in examples.example_files(tmp_path)] == ["01_a.py", "02_b.py"]
 
 
+def test_the_first_example_opens_the_free_plans_session() -> None:
+    assert examples.FREE_PLAN_SESSION in (EXAMPLES / "01_start_a_session.py").read_text()
+
+
+def test_session_line_fits_the_keys_plans() -> None:
+    free = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
+    assert examples.session_line(free) == examples.FREE_PLAN_SESSION
+    # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
+    paid = {
+        "stocks": "developer",
+        "options": "advanced",
+        "indices": "basic",
+        "currencies": "starter",
+        "futures": "starter",
+    }
+    assert examples.session_line(paid) == (
+        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
+        "{dm.Subscription.INDICES}, delayed_subscriptions={dm.Subscription.FUTURES, "
+        "dm.Subscription.STOCKS}))\n"
+    )
+    assert examples.session_line({"stocks": "advanced"}) == (
+        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(), "
+        "delayed_subscriptions=set()))\n"
+    )
+
+
+def test_fitted_runs_a_copy_only_when_the_session_line_changes(tmp_path: Path) -> None:
+    first = _write(tmp_path, "01_a.py", f"x = 1\n{examples.FREE_PLAN_SESSION}")
+    other = _write(tmp_path, "02_b.py", "y = 2\n")
+    paid = "m = dm.MassiveSession()\n"
+    assert examples.fitted(first, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == first
+    assert examples.fitted(other, paid, tmp_path / "fitted") == other
+    copy = examples.fitted(first, paid, tmp_path / "fitted")
+    assert copy == tmp_path / "fitted" / "01_a.py"
+    assert copy.read_text(encoding="utf-8") == f"x = 1\n{paid}"
+
+
 def _write(folder: Path, name: str, code: str) -> Path:
     path = folder / name
     path.write_text(code, encoding="utf-8")

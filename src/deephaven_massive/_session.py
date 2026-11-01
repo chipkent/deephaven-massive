@@ -466,11 +466,13 @@ class MassiveSession:
         One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), and background
         read (`read`, from `fetch(wait=False)` or `history(..., wait=False)`). A stream or poll
         is `RUNNING`; a read is `LOADING`, then `DONE`, or `FAILED` with the error. `Error` also
-        shows warnings that do not stop a stream, such as deferred options contracts, a
-        connection that is down (`connection down since <time>; no data`; an outage longer
-        than `MassiveConfig.max_outage` fails the stream), one that has gone quiet during
-        market hours, or a `poll()` cycle's error with the last good cycle's time (cycles
-        failing for `max_outage` fail the table). Each call returns a new live view; after
+        shows warnings that do not stop a stream: deferred options contracts; skipped symbol-table
+        rows that are not Massive's exact tickers; topics Massive has not acknowledged (`no
+        acknowledgement from Massive for ...`, re-sent until it does); a connection that is down
+        (`connection down since <time>; no data`; an outage longer than
+        `MassiveConfig.max_outage` fails the stream), or one gone quiet during market hours; a
+        `poll()` cycle's error with the last good cycle's time; and a `poll()` cycle still running
+        past its interval (`cycle running since <time>`). Each call returns a new live view; after
         `close()` it keeps its final rows. How to read it: README.md#diagnostics.
 
         Returns:
