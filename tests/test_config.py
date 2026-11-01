@@ -451,6 +451,55 @@ def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
     assert "api_key" not in shown
 
 
+@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "~",
+        "api.massive.com",
+        "ftp://api.massive.com",
+        "https://",
+        "https:///path",
+        "https://api.massive.com/a b",
+        " https://api.massive.com",
+        "http://[::1",
+        "https://u@",
+        "HTTPS://api.massive.com",
+    ],
+)
+def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> None:
+    with pytest.raises(ValueError, match=f"^{name} must be an http or https URL with a host"):
+        _replace(MassiveConfig(api_key="k"), **{name: url})
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:8080", "https://api.massive.com/v1?x=1", "http://[::1]:9000"]
+)
+def test_an_http_url_with_a_host_is_accepted(url: str) -> None:
+    config = MassiveConfig(api_key="k", rest_base_url=url, s3_endpoint_url=url)
+    assert (config.rest_base_url, config.s3_endpoint_url) == (url, url)
+
+
+def test_a_refused_url_never_shows_a_password() -> None:
+    with pytest.raises(ValueError, match="must be an http") as info:
+        MassiveConfig(api_key="k", rest_base_url="ftp://u:hunter2@api.massive.com")
+    assert "hunter2" not in str(info.value)
+    assert "'ftp://***@api.massive.com'" in str(info.value)
+
+
+@pytest.mark.parametrize("bucket", ["", "  "])
+def test_the_bucket_must_not_be_blank(bucket: str) -> None:
+    with pytest.raises(ValueError, match=r"^s3_bucket must name a bucket"):
+        MassiveConfig(api_key="k", s3_bucket=bucket)
+
+
+@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url", "s3_bucket"])
+def test_the_text_settings_must_be_strings(base: MassiveConfig, name: str) -> None:
+    with pytest.raises(TypeError, match=f"^{name} must be a str, not NoneType"):
+        _replace(base, **{name: None})
+
+
 def test_a_refused_ws_host_never_shows_a_password() -> None:
     with pytest.raises(ValueError, match=r"got '\*\*\*@delayed\.massive\.com'$") as info:
         dm.MassiveConfig(
@@ -756,6 +805,11 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
     assert (
         message == ", line 1, column 1: unknown setting 'max_outages'; did you mean 'max_outage'?"
     )
+    # A pasted secret as a key shows only its first 40 characters.
+    secret = "a" * 40 + "hunter2-tail"
+    message = _refused(tmp_path, f"{secret}: 1\n")
+    assert message.startswith(f", line 1, column 1: unknown setting '{'a' * 40}…'; the settings")
+    assert "hunter2" not in message
     message = _refused(tmp_path, "zzz: 1\n")
     assert message == (
         ", line 1, column 1: unknown setting 'zzz'; the settings are "
@@ -870,7 +924,31 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             "ws_hosts: {stocks: [a.example.com]}\n",
             ", line 1, column 20: ws_hosts must be a hostname, not a list or mapping",
         ),
+        # The counts: more digits than Python converts, without echoing them.
+        (
+            "max_concurrency: " + "9" * 5000 + "\n",
+            (
+                ", line 1, column 18: max_concurrency is a number of 5000 characters, too "
+                "long to read; write one such as 8"
+            ),
+        ),
         # The text settings.
+        *(
+            (
+                text,
+                (
+                    f", line 1, column {column}: {name} is empty; write the value, or leave "
+                    "the setting out for its default"
+                ),
+            )
+            for text, name, column in [
+                ("rest_base_url:\n", "rest_base_url", 15),
+                ("s3_endpoint_url: ~\n", "s3_endpoint_url", 18),
+                ("s3_bucket: null\n", "s3_bucket", 12),
+                ("s3_bucket: NULL\n", "s3_bucket", 12),
+                ("s3_bucket: ''\n", "s3_bucket", 12),
+            ]
+        ),
         (
             "rest_base_url: [https://api.massive.com]\n",
             ", line 1, column 16: rest_base_url must be text, not a list or mapping",
@@ -888,12 +966,10 @@ def test_tickers_like_on_and_no_stay_text(tmp_path: Path) -> None:
     # YAML 1.1 reads ON, NO, Y, and off as booleans, and 0700 as octal; the file keeps text.
     file = _settings(
         tmp_path,
-        "s3_bucket: NO\nrest_base_url: ON\ns3_endpoint_url: 0700\nws_hosts: {stocks: y}\n",
+        "s3_bucket: NO\nws_hosts: {stocks: y}\n",
     )
     config = MassiveConfig.from_file(file)
     assert config.s3_bucket == "NO"
-    assert config.rest_base_url == "ON"
-    assert config.s3_endpoint_url == "0700"
     assert config.ws_hosts[AssetClass.STOCKS] == "y"
 
 
@@ -910,18 +986,31 @@ def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path
     )
     message = _refused(tmp_path, "ws_hosts: {stocks: Socket.massive.com}\n")
     assert message.startswith(", line 1, column 1: ws_hosts[stocks]='Socket.massive.com' must")
+    message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
+    assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
+    message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")
+    assert message.startswith(", line 2, column 1: s3_endpoint_url must be an http or https URL")
+    message = _refused(tmp_path, "reconnect_backoff: 200\n")
+    assert message == ": max_reconnect_backoff must not be below reconnect_backoff"
 
 
-def test_an_environment_problem_names_the_file_but_no_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "variable",
+    ["MASSIVE_API_KEY", "MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY"],
+)
+def test_an_environment_problem_names_the_variable_and_not_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
 ) -> None:
-    monkeypatch.setenv("MASSIVE_API_KEY", " padded ")
-    message = _refused(tmp_path, "max_outage: 600\n")
-    assert message.startswith(": MASSIVE_API_KEY has leading or trailing whitespace")
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    monkeypatch.setenv(variable, " padded ")
+    file = _settings(tmp_path, "max_outage: 600\n")
+    with pytest.raises(ValueError, match=f"^{variable} has leading or trailing whitespace"):
+        MassiveConfig.from_file(file)
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    monkeypatch.delenv("MASSIVE_S3_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.setenv("MASSIVE_S3_ACCESS_KEY_ID", "AKIA9")
-    message = _refused(tmp_path, "max_outage: 600\n")
-    assert message.startswith(": flat files need both s3_access_key_id and s3_secret_access_key")
+    with pytest.raises(ValueError, match=r"^flat files need both s3_access_key_id"):
+        MassiveConfig.from_file(file)
 
 
 def test_a_missing_key_is_still_an_authentication_error(tmp_path: Path) -> None:

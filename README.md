@@ -777,8 +777,10 @@ Nothing reads the file unless you call `from_file`: `dm.MassiveConfig()` and
 `dm.MassiveSession()` use only the defaults and the environment's keys. The file is read
 strictly, so a typo fails at once instead of being ignored. Every value is text until its
 setting converts it, so a ticker such as `ON` or `NO` stays a ticker. Words are taken exactly
-as shown (`raise`, not `Raise`), an unknown setting names the closest one, and every error names
-the file, the line, and the setting. YAML's tags (`!!python/...`), anchors and aliases
+as shown (`raise`, not `Raise`), an unknown setting names the closest one, and a setting with
+no value after its colon is refused: leave it out to get its default. Every error names the
+file, the line, and the setting, except an error about an environment variable, which names the
+variable. YAML's tags (`!!python/...`), anchors and aliases
 (`&name`, `*name`), repeated keys, and several documents in one file are refused. The log reads
 the file's name and the settings it set at INFO.
 

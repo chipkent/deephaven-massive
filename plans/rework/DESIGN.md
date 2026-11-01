@@ -663,9 +663,9 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
 | `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: a delayed feed (any host whose name starts with `delayed.`) for forex, crypto, or a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
-| `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
-| `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. |
-| `s3_bucket: str` | `flatfiles` | Rarely changed. |
+| `rest_base_url: str` | `https://api.massive.com` | Rarely changed. Must be an `http` or `https` URL with a host and no whitespace (`ValueError`, showing the URL without its user and password). |
+| `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
+| `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 
@@ -711,7 +711,8 @@ naming the file and the keys it set.
 - **Keys** are the field names, and a file sets any subset. The credentials (`api_key`,
   `s3_access_key_id`, `s3_secret_access_key`) come only from code or their `MASSIVE_*`
   variables: a credential key in the file raises `ValueError` naming the variable to use, never
-  the value. An unknown key raises `ValueError` with the closest key ("did you mean").
+  the value. An unknown key raises `ValueError` with the closest key ("did you mean"), showing
+  at most the key's first 40 characters, so a secret pasted as a key is cut short.
 - **Parsing** uses a pure-Python PyYAML `BaseLoader` subclass, never `yaml.load` with a full
   loader or the C loader, so every scalar is text: YAML 1.1's type guessing never turns the
   ticker `ON` or `NO` into a boolean or `0700` into a number. The file is refused when it holds
@@ -721,11 +722,14 @@ naming the file and the keys it set.
   converter: a list of subscription words (`[stocks, options]`), an enum word of `OnError`
   written exactly as its value (`raise`, `log`, `ignore`; `Raise` and `" raise"` are refused
   with the valid spellings), a number (an `int` field takes whole numbers only; a non-finite
-  value is refused), a mapping of asset-class word to host (`ws_hosts`), or text (the URLs and
-  the bucket). The constructor then validates as it does for code, so it stays the only
+  value is refused, and so is a whole number too long for Python to convert), a mapping of
+  asset-class word to host (`ws_hosts`), or text (the URLs and the bucket; an empty value, such
+  as `rest_base_url:` with nothing after it, `~`, `null`, or `''`, is refused: leaving the key
+  out gives the default). The constructor then validates as it does for code, so it stays the only
   validator of values.
 - **Every error** is a `ValueError` that names the file, the key, and the line and column where
-  known; a missing file raises `FileNotFoundError` naming it (and the variable, when the path
+  known, except one about an environment variable (a credential with surrounding whitespace, or
+  one S3 credential without the other), which names the variable and not the file; a missing file raises `FileNotFoundError` naming it (and the variable, when the path
   came from it).
 
 The log is not configured through `MassiveConfig`: it belongs to the process, not to a session.

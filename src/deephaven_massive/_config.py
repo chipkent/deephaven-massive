@@ -322,7 +322,7 @@ class MassiveConfig:
 
         A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
         `ws_hosts` key that is not a
-        `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` or
+        `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a `rest_basic_subscriptions` or
         `delayed_subscriptions` that is not a set of `dm.Subscription`, or a numeric field of a
         non-numeric type also raises
         `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
@@ -337,7 +337,9 @@ class MassiveConfig:
                 negative or not finite, a timeout,
                 backoff, interval, or count is not positive, only one of the two S3
                 credentials is set, `api_key` or an S3 credential has leading or trailing
-                whitespace (or an S3 credential is blank), a `ws_hosts` value is not a bare
+                whitespace (or an S3 credential is blank), `rest_base_url` or
+                `s3_endpoint_url` is not an `http` or `https` URL with a host, `s3_bucket` is
+                blank, a `ws_hosts` value is not a bare
                 lower-case hostname, or an environment variable read for a default has
                 leading or trailing whitespace (`environment_text`); and
                 `_check_delayed_subscriptions` raises it for `dm.Subscription.CURRENCIES` in
@@ -382,6 +384,9 @@ class MassiveConfig:
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
+        _check_url("rest_base_url", self.rest_base_url)
+        _check_url("s3_endpoint_url", self.s3_endpoint_url)
+        _check_bucket(self.s3_bucket)
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
         basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
         object.__setattr__(self, "rest_basic_subscriptions", basic)
@@ -431,9 +436,12 @@ class MassiveConfig:
                 (an empty file included), a duplicate key, a tag (`!!python/...` or any
                 other), an anchor or alias, a credential (the message names the environment
                 variable to use and never shows the value), or an unknown setting (the
-                message suggests the closest name); if a value cannot be converted; or if the
-                constructor refuses a value. Each message names the file, and the setting and
-                its line and column where known.
+                message suggests the closest name, and shows at most the key's first 40
+                characters); if a value is empty or cannot be converted; or if the constructor
+                refuses a value. Each message names the file, and the setting and its line and
+                column where known, except one about an environment variable (a credential
+                with surrounding whitespace, or one S3 credential without the other), which
+                names the variable instead.
             FileNotFoundError: If the file does not exist; the message names it, and the
                 environment variable when the path came from there.
             OSError: If the file exists but cannot be read.
@@ -697,6 +705,54 @@ def _check_s3_credential(name: str, value: str | None) -> None:
             f"{name} is blank or has leading or trailing whitespace; pass the credential "
             "exactly, or None for no flat files (the value is not shown)"
         )
+
+
+_HTTP_URL: Final = re.compile(
+    r"https?://(?:[^/?#\s]*@)?(?:\[[0-9A-Fa-f:.]+\]|[^/?#@:\s\[\]]+)(?::[0-9]*)?(?:[/?#]\S*)?"
+)
+"""An `http` or `https` URL with a host and no whitespace: the scheme, an optional user and
+password, a host name or bracketed IPv6 address, an optional port, and an optional path."""
+
+
+def _check_url(name: str, value: object) -> None:
+    """Refuse a base URL that is not an `http` or `https` URL with a host.
+
+    Every request the library makes is built on the URL, so a value such as `""`, `~`, or
+    `api.massive.com` (no scheme) is refused here rather than failing on the first request.
+
+    Args:
+        name: The field's name (`rest_base_url` or `s3_endpoint_url`), for the message.
+        value: The field's value.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` holds whitespace, or its scheme is not `http` or `https`, or it
+            names no host. The message shows the value with `***@` in place of a user and
+            password (`shown_setting`).
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    if not _HTTP_URL.fullmatch(value):
+        raise ValueError(
+            f"{name} must be an http or https URL with a host, such as "
+            f"'https://api.massive.com', not {shown_setting(name, value)}"
+        )
+
+
+def _check_bucket(value: object) -> None:
+    """Refuse an `s3_bucket` that is not text or is blank.
+
+    Args:
+        value: The field's value.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` is blank.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"s3_bucket must be a str, not {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"s3_bucket must name a bucket, such as 'flatfiles', not {value!r}")
 
 
 def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
@@ -1079,26 +1135,52 @@ def _count(node: yaml.Node) -> int:
         The number; the constructor checks its range.
 
     Raises:
-        _SettingsFileError: If the text is not a whole decimal number.
+        _SettingsFileError: If the text is not a whole decimal number, or has more digits than
+            Python converts (`sys.get_int_max_str_digits`); that message leaves the text out.
     """
     text = _scalar(node, "a whole number")
     if not _WHOLE.fullmatch(text):
         raise _SettingsFileError(
             f"{text!r} is not a whole number; write one such as 8", node.start_mark
         )
-    return int(text)
+    try:
+        return int(text)
+    except ValueError:  # more digits than Python's integer conversion limit
+        raise _SettingsFileError(
+            f"is a number of {len(text)} characters, too long to read; write one such as 8",
+            node.start_mark,
+        ) from None
+
+
+_NULL_WORDS: Final = frozenset({"", "~", "null", "Null", "NULL"})
+"""The plain (unquoted) scalars YAML reads as no value at all."""
 
 
 def _text(node: yaml.Node) -> str:
     """Convert a text setting (a URL or the bucket), taken exactly as written.
+
+    A plain value YAML means as empty (`rest_base_url:` with nothing after it, `~`, or
+    `null`) is refused rather than taken as the text `""` or `"~"`: a user who writes one
+    means the default, which the file gives by leaving the setting out.
 
     Args:
         node: The value's node.
 
     Returns:
         The text.
+
+    Raises:
+        _SettingsFileError: If the node is a list or mapping, is empty quoted text (`''`), or
+            is a plain empty value (`_NULL_WORDS`).
     """
-    return _scalar(node, "text")
+    text = _scalar(node, "text")
+    plain = isinstance(node, yaml.ScalarNode) and node.style is None
+    if not text or (plain and text in _NULL_WORDS):
+        raise _SettingsFileError(
+            "is empty; write the value, or leave the setting out for its default",
+            node.start_mark,
+        )
+    return text
 
 
 _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
@@ -1130,6 +1212,9 @@ _CREDENTIAL_VARIABLES: Final[Mapping[str, str]] = {
 
 _SETTING_NAME: Final = re.compile(r"(?:each )?([a-z0-9_]+)")
 """The setting a constructor message starts with, such as `max_outage` or `each ... member`."""
+
+_SHOWN_KEY_LENGTH: Final = 40
+"""The most characters of an unknown key a message shows, so a pasted secret is cut short."""
 
 
 def _settings_path(path: str | os.PathLike[str] | None) -> tuple[Path, str]:
@@ -1198,7 +1283,8 @@ def _settings_values(
                 if close
                 else f"the settings are {', '.join(_CONVERTERS)}"
             )
-            raise ValueError(f"{place}: unknown setting {name!r}; {hint}")
+            shown = name if len(name) <= _SHOWN_KEY_LENGTH else name[:_SHOWN_KEY_LENGTH] + "…"
+            raise ValueError(f"{place}: unknown setting {shown!r}; {hint}")
         try:
             values[name] = convert(value)
         except _SettingsFileError as problem:
@@ -1241,8 +1327,13 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
     try:
         config = MassiveConfig(**values)
     except ValueError as error:
+        # A message about a setting a file may hold gets the file and the line; one about the
+        # environment (a padded variable, one S3 credential without the other) already names
+        # its variable, and the file has no part in it.
         match = _SETTING_NAME.match(str(error))
-        where = _place(file, positions.get(match.group(1)) if match else None)
+        if match is None or match.group(1) not in _CONVERTERS:
+            raise
+        where = _place(file, positions.get(match.group(1)))
         raise ValueError(f"{where}: {error}") from None
     logger.info("settings file %s%s set %s", file, source, ", ".join(values) or "no settings")
     return config
