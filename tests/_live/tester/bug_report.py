@@ -7,6 +7,8 @@ command calls `build_bundle`, which collects from the tester's folder (`~/massiv
 default):
 
 - `bug-report.md`, the tester's own report;
+- `setup-check.txt`, what `scripts/tester.py check` printed last: the console's versions,
+  whether both setups hold the same commit, and the plan of each subscription;
 - `massive-debug.log`, the library's debug log, and `server.log`, the Deephaven server's
   output;
 - `diagnostics/`, the CSV files of `m.streams()`, `m.connections()`, and `m.rate_limits()`;
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
 
 COLLECTED: Final = (
     "bug-report.md",
+    "setup-check.txt",
     "massive-debug.log",
     "server.log",
     "diagnostics",

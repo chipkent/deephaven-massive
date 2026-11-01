@@ -15,7 +15,7 @@ m.partners.tmx.corporate_events(symbols=None, *, start=None, end=None, sort=None
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `date.gte` and `date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `TmxRecordId` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `TmxRecordId` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `isin`, `isin_any_of`, `isin_gt`, `isin_gte`, `isin_lt`, `isin_lte`, `status`, `status_any_of`, `status_gt`, `status_gte`, `status_lt`, `status_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `tmx_company_id`, `tmx_company_id_gt`, `tmx_company_id_gte`, `tmx_company_id_lt`, `tmx_company_id_lte`, `tmx_record_id`, `tmx_record_id_any_of`, `tmx_record_id_gt`, `tmx_record_id_gte`, `tmx_record_id_lt`, `tmx_record_id_lte`, `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`, `type`, `type_any_of`, `type_gt`, `type_gte`, `type_lt`, `type_lte` |
 
@@ -45,8 +45,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Type` | String | The normalized type of corporate event. Possible values include: analyst_day, business_update, capital_markets_day, conference, dividend, earnings_announcement_date, earnings_conference_call, earnings_results_announcement, forum, interim_statement, other_interim_announcement, production_update, research_and_development_day, seminar, shareholder_meeting, sales_update, stock_split, summit, service_level_update, tradeshow, company_travel, and workshop. | REST |
 | `Url` | String | URL linking to the primary public source of the event announcement, if available. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

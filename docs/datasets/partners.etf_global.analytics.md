@@ -14,7 +14,7 @@ m.partners.etf_global.analytics(symbols=None, *, sort=None, order=None, limit=No
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol`, `EffectiveDate` and `ProcessedDate` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`, `EffectiveDate` and `ProcessedDate` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `composite_ticker_gt`, `composite_ticker_gte`, `composite_ticker_lt`, `composite_ticker_lte`, `effective_date`, `effective_date_gt`, `effective_date_gte`, `effective_date_lt`, `effective_date_lte`, `processed_date`, `processed_date_gt`, `processed_date_gte`, `processed_date_lt`, `processed_date_lte`, `quant_composite_behavioral`, `quant_composite_behavioral_gt`, `quant_composite_behavioral_gte`, `quant_composite_behavioral_lt`, `quant_composite_behavioral_lte`, `quant_composite_fundamental`, `quant_composite_fundamental_gt`, `quant_composite_fundamental_gte`, `quant_composite_fundamental_lt`, `quant_composite_fundamental_lte`, `quant_composite_global`, `quant_composite_global_gt`, `quant_composite_global_gte`, `quant_composite_global_lt`, `quant_composite_global_lte`, `quant_composite_quality`, `quant_composite_quality_gt`, `quant_composite_quality_gte`, `quant_composite_quality_lt`, `quant_composite_quality_lte`, `quant_composite_sentiment`, `quant_composite_sentiment_gt`, `quant_composite_sentiment_gte`, `quant_composite_sentiment_lt`, `quant_composite_sentiment_lte`, `quant_composite_technical`, `quant_composite_technical_gt`, `quant_composite_technical_gte`, `quant_composite_technical_lt`, `quant_composite_technical_lte`, `quant_grade`, `quant_grade_any_of`, `quant_grade_gt`, `quant_grade_gte`, `quant_grade_lt`, `quant_grade_lte`, `quant_total_score`, `quant_total_score_gt`, `quant_total_score_gte`, `quant_total_score_lt`, `quant_total_score_lte`, `reward_score`, `reward_score_gt`, `reward_score_gte`, `reward_score_lt`, `reward_score_lte`, `risk_total_score`, `risk_total_score_gt`, `risk_total_score_gte`, `risk_total_score_lt`, `risk_total_score_lte` |
 
@@ -64,8 +64,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `RiskTotalScore` | double | ETF Global's proprietary Red Diamond overall risk assessment score for the ETF. | REST |
 | `RiskVolatility` | double | A component score measuring the volatility risk of the ETF's price movements. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

@@ -15,7 +15,7 @@ m.stocks.short_interest(symbols=None, *, start=None, end=None, sort=None, order=
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `settlement_date.gte` and `settlement_date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` and `SettlementDate` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `SettlementDate` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `avg_daily_volume`, `avg_daily_volume_any_of`, `avg_daily_volume_gt`, `avg_daily_volume_gte`, `avg_daily_volume_lt`, `avg_daily_volume_lte`, `days_to_cover`, `days_to_cover_any_of`, `days_to_cover_gt`, `days_to_cover_gte`, `days_to_cover_lt`, `days_to_cover_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -42,8 +42,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST |
 | `ShortInterest` | long | The total number of shares that have been sold short but have not yet been covered or closed out. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

@@ -455,21 +455,22 @@ def test_the_first_tables_example_runs(
     assert {"Symbol", "Open", "Close", "TimestampEnd"} <= described.keys()
     fake_ws_server.wait_for(
         lambda server: any(
-            "T.AAPL" in json.loads(frame).get("params", "")
+            "AM.AAPL" in json.loads(frame).get("params", "")
             for connection in server.connections
             for frame in connection.frames
         )
     )
-    trades = [
-        {"ev": "T", "sym": symbol, "x": 4, "i": "1", "p": price, "s": 100, "t": 1_700_000_000_000}
+    minute = {"s": _ms("2025-06-06T19:00:00"), "e": _ms("2025-06-06T19:01:00"), "v": 100}
+    bars = [
+        {"ev": "AM", "sym": symbol, "o": price, "h": price, "l": price, "c": price} | minute
         for symbol, price in (("AAPL", 190.0), ("MSFT", 410.0), ("AAPL", 191.0))
     ]
-    fake_ws_server.send(json.dumps(trades))
-    # Bounded wait for the flush thread and an update-graph cycle to publish the trades.
+    fake_ws_server.send(json.dumps(bars))
+    # Bounded wait for the flush thread and an update-graph cycle to publish the bars.
     pace = threading.Event()  # never set; only paces the loop
     latest: dict[str, float] = {}
     for _ in range(500):
-        latest = {r["Symbol"]: r["Price"] for r in dh_to_pylist(names["latest"])}
+        latest = {r["Symbol"]: r["Close"] for r in dh_to_pylist(names["latest"])}
         if latest == {"AAPL": 191.0, "MSFT": 410.0}:
             break
         pace.wait(0.02)

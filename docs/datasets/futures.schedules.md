@@ -15,7 +15,7 @@ m.futures.schedules(*, product_code=None, start=None, end=None, sort=None, order
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `session_end_date.gte` and `session_end_date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `ProductCode`, `TradingVenue`, `Timestamp` and `Event` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `ProductCode`, `TradingVenue`, `Timestamp` and `Event` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte` |
 

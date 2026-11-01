@@ -35,7 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket |
@@ -46,8 +46,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket |
 | `SequenceNumber` | long | The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST, flat files, WebSocket |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

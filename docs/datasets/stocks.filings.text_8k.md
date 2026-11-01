@@ -15,7 +15,7 @@ m.stocks.filings.text_8k(symbols=None, *, start=None, end=None, sort=None, order
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | appends only rows it has not seen, keyed by `Cik` and `AccessionNumber` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Cik` and `AccessionNumber` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `form_type`, `form_type_any_of`, `form_type_gt`, `form_type_gte`, `form_type_lt`, `form_type_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -44,8 +44,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `FormType` | String | SEC form type (e.g., '8-K', '8-K/A' for amendments). | REST |
 | `ItemsText` | String | Parsed text content from the 8-K filing, including item numbers and descriptions. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

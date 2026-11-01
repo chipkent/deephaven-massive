@@ -14,7 +14,7 @@ m.stocks.share_float(symbols=None, *, sort=None, order=None, limit=None, filters
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `free_float_percent`, `free_float_percent_gt`, `free_float_percent_gte`, `free_float_percent_lt`, `free_float_percent_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -40,8 +40,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. | REST |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

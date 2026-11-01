@@ -14,15 +14,12 @@ m = dm.MassiveSession()
 # Apple's daily bars for one week, read once. Works on every plan, the free one included.
 week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
 
-# The latest trade of each symbol, updated as trades arrive. Needs a Stocks plan that streams
-# trades: the plan table on the dataset's reference page says which.
-latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
+# The latest minute bar of each symbol, updated as each minute closes. Needs a paid Stocks plan.
+latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 ```
 
-Live data is real-time unless you ask for delayed data. Massive's Stocks Starter and Developer
-plans stream 15 minutes late, so on them the live line stops with an error that names the fix:
-open the session with
-`dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))`. See
+Live data is real-time unless you ask for delayed data; on a delayed plan, such as Stocks
+Starter, the live line raises an error that names the setting to add. See
 [real-time or delayed](#real-time-or-delayed).
 
 This README is the whole user guide. The [dataset reference](docs/datasets/README.md) lists
@@ -46,10 +43,9 @@ deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=choose-a-p
 ```
 
 Open <http://localhost:10000/?psk=choose-a-password> and use the **Console** panel; every example
-here runs there. The server asks for a password: the one `-Dauthentication.psk` sets, or,
-without that setting, one it makes up and prints in its startup log as a link that carries it.
-Set the key in the shell that starts the server, before you start it. Avoid typing the key into
-the console itself: every user of a Deephaven server can read the console's variables.
+here runs there. (Without `-Dauthentication.psk`, the server makes up a password and prints a
+link that carries it in its startup log.) Set the key in the shell before you start the server,
+never in the console: every user of the server can read the console's variables.
 
 **Flat files (optional).** Massive's paid plans include flat files: one compressed file per day
 holding every trade, quote, or bar of a whole market, the fast way to read a lot of history.
@@ -61,14 +57,11 @@ export MASSIVE_S3_SECRET_ACCESS_KEY="your-secret-access-key"
 ```
 
 **Settings in code.** Every setting can also be passed to `dm.MassiveConfig`;
-`help(dm.MassiveConfig)` lists them all. Three matter from the start.
-`rest_basic_subscriptions` names the subscriptions you hold on Massive's free Basic plan, which
-allows five REST requests a minute, so the library paces its requests from the first one instead
-of learning the limit from Massive's first refusal. `delayed_subscriptions` names the
-subscriptions whose live data you accept 15 minutes late (10 for futures): list each one your
-Starter or Developer plan holds, since those plans stream delayed data and the library otherwise
-serves only real-time data (see [real-time or delayed](#real-time-or-delayed)).
-`max_concurrency` (default 8) is how many requests or file reads run at once.
+`help(dm.MassiveConfig)` lists them all. Two matter from the start. `rest_basic_subscriptions`
+names the subscriptions you hold on Massive's free Basic plan, which allows five REST requests a
+minute, so the library paces its requests from the first one. `delayed_subscriptions` names
+those whose live data you accept late: each one your Starter or Developer plan holds (see
+[real-time or delayed](#real-time-or-delayed)).
 
 ```python
 import deephaven_massive as dm
@@ -83,8 +76,9 @@ m = dm.MassiveSession(config)
 
 **One session is enough.** Create one session at the top of your script and use it for
 everything. Massive's individual plans allow one WebSocket connection per asset class at a time.
-Sessions of one server that use the same key share their connections, so a second session does
-no harm, but it buys nothing.
+Sessions of one server with the same key and the same connection settings share their
+connections; sessions with different settings, such as another `max_outage`, compete for that
+one connection.
 
 <a id="first-tables"></a>
 
@@ -109,23 +103,16 @@ week = bars.history("2025-06-02", "2025-06-06")
 # What each column of those bars means: Name, Type, Description, SuppliedBy.
 columns = bars.columns()
 
-# Live: the latest trade of each symbol (needs a Stocks plan that streams trades; on Starter
-# or Developer, open the session with delayed_subscriptions, as the next paragraph says).
-latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
+# Live: the latest minute bar of each symbol (needs a paid Stocks plan).
+latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 # Live on any plan: re-read today's Apple headlines every five minutes.
 headlines = m.reference.news("AAPL", start=today).poll(300)
 ```
 
-Click a table's name to open it. `week` has one row per trading day; `latest` changes as AAPL
-and MSFT trade (during market hours); `headlines` grows as articles appear. Hover over a column
+Click a table's name to open it. `week` has one row per trading day; `latest` changes as each
+minute closes (during market hours); `headlines` grows as articles appear. Hover over a column
 header in the web UI to read what the column means.
-
-`latest` is real-time data, the default. Stocks Starter and Developer plans stream data 15
-minutes late, so on them `latest` stops at once with a `dm.EntitlementError` that names the
-fix: create the session with
-`dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))` and run
-the line again. See [real-time or delayed](#real-time-or-delayed).
 
 Crypto trades around the clock, so it is the easiest market to watch at night or at weekends:
 `m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).last_by()` (a paid Currencies plan).
@@ -193,7 +180,7 @@ naming the verbs the query has and, where one exists, the dataset that has the v
 | `m.partners.tmx` | TMX corporate events |
 
 `m.snapshots(...)` is a method of the session itself, not a namespace: the current state of any
-mix of tickers across asset classes, such as `m.snapshots(["AAPL", "O:SPY251219C00600000"])`.
+mix of tickers across asset classes, such as `m.snapshots(["AAPL", "O:SPY271217C00700000"])`.
 
 `dm.datasets()` lists every dataset in one static table, with no session or key needed; filter
 it to find what you want:
@@ -279,8 +266,8 @@ trades = m.stocks.trades(watch).last_by().view(["Symbol", "Price", "Timestamp"])
 board = merge([seed, trades]).last_by("Symbol")
 ```
 
-The snapshot needs a Stocks plan that includes snapshots, and, like the stream, real-time data
-unless the session lists `dm.Subscription.STOCKS` in `delayed_subscriptions`.
+The snapshot needs a Stocks plan that includes snapshots, and real-time data like the stream
+(see [real-time or delayed](#real-time-or-delayed)).
 
 <a id="option-chain"></a>
 
@@ -316,8 +303,8 @@ greeks = calls.fetch().view(
 ```
 
 Massive leaves the greeks out for some contracts, such as those deep in the money; their
-columns are null then. Options Starter and Developer serve the chain 15 minutes late, which the
-session must accept with `delayed_subscriptions={dm.Subscription.OPTIONS}`.
+columns are null then. On Options Starter or Developer the chain is delayed (see
+[real-time or delayed](#real-time-or-delayed)).
 
 ## Concepts
 
@@ -365,6 +352,12 @@ Every table follows the same column conventions. `Symbol` holds Massive's exact 
 instead. `Date` is the trading day as `yyyy-MM-dd` text, and every other calendar date is text
 in the same form, so a date from one table joins to a date from any other. `TimestampInsert` is
 when the library received the row.
+
+When Massive sends something odd, the library serves what it can. A value that does not fit its
+column is null, with one WARNING per dataset and field (and a `?` in a live table's
+`SchemaDrift`). A symbol the library cannot read leaves `Symbol` null and keeps Massive's text
+in `RawSymbol`; `dm.MassiveConfig(unreadable_symbols=dm.OnError.RAISE)` fails the read instead.
+A row missing its symbol or time is dropped and logged.
 
 Tables of one kind from two asset classes, such as stock and forex quotes, share their common
 columns' names and types but can differ in which columns they have. To stack them, keep the
@@ -423,17 +416,13 @@ and the trade count. These rules hold for every `bars()` dataset.
   already ended. Today's daily bar arrives tomorrow; the current week's or month's bar never
   appears; monthly bars from March 5 to March 20 return nothing, because no whole month fits.
   Pass dates, not instants, for daily bars: instants keep only whole calendar days inside them.
-- **Every bar Massive sends is served.** Massive stamps the same bar differently on different
-  sources, such as a daily stock bar at 00:00 on one and at the 16:00 close on another, and the
-  library moves each known stamp to the start of its day, so every source gives the same rows.
-  If Massive stamps a bar at a time the library does not expect, such as a daily bar at 14:30 or
-  a week bar on a Wednesday, the bar is still served, labelled by the day its stamp falls on,
-  and the library logs one WARNING per dataset and timespan in a session naming the stamp. Such
-  a bar's `Date`, `TimestampStart`, and `TimestampEnd` may cover other days than the bar really
-  does: check it before you rely on its dates, and report the WARNING on the
-  [issues page](https://github.com/chipkent/deephaven-massive/issues). A crypto
-  `daily_open_close` row that Massive marks as not UTC is treated the same way: served with the
-  UTC day's window, with a WARNING.
+- **Odd stamps.** Massive stamps the same bar differently on different sources, such as a daily
+  stock bar at 00:00 on one and at the 16:00 close on another; the library moves each known
+  stamp to the start of its day, so every source gives the same rows. A bar stamped at a time it
+  does not expect, such as a daily bar at 14:30, is still served, labelled by the day its stamp
+  falls on, with one WARNING per dataset and timespan: check its dates before you rely on them,
+  and report the WARNING on the [issues page](https://github.com/chipkent/deephaven-massive/issues).
+  A crypto `daily_open_close` row that Massive marks as not UTC is treated the same way.
 
 <a id="history-sources"></a>
 
@@ -459,20 +448,18 @@ files do not); when `AUTO`'s choice leaves columns empty that the other source f
 library logs a WARNING naming them and the `source=` that fills them. Each result's description,
 shown in the web UI, names its source and why.
 
-With `AUTO`, when REST can serve the read, any weekday whose flat file is missing (not out yet,
-or missed) is read from REST, one day at a time, so you get the whole range; those rows may
-leave empty a column only the files fill, and a WARNING and the table's description name the
-days. If your plan lacks the flat files a read needs, or S3 rejects your S3 keys, `AUTO` reads
-REST instead and logs a WARNING. When REST cannot serve the read (for example, trades of
-`dm.ALL`), a missing weekday with a later day's file is taken for a holiday, and one with no
-later file makes the call fail. With
-`source=dm.HistorySource.FLAT_FILES`, a file not out yet or refused is always an error.
+When a weekday's flat file is missing (not out yet, or never published):
+
+- **`AUTO`, and REST can serve the read:** that day is read from REST, so you get the whole
+  range; a WARNING and the table's description name the days. If your plan lacks the files, or
+  S3 rejects your S3 keys, `AUTO` reads REST instead, with a WARNING.
+- **REST cannot serve the read (such as trades of `dm.ALL`), or `source=FLAT_FILES`:** a day
+  with a later day's file is taken for a holiday; otherwise the call fails. With `FLAT_FILES`,
+  files your plan lacks are an error too.
+
 Split-adjusted bars come only from REST, one symbol at a time (every symbol at once only for
 1-day bars), so split-adjusted minute bars of `dm.ALL` have no source: pass `adjusted=False`
 for the as-traded files, or name the symbols.
-
-Flat-file reads skip a missing weekend file silently. A history read pages through everything in its
-range, so it takes no `limit`.
 
 <a id="split-adjustment"></a>
 
@@ -551,9 +538,9 @@ releasing twice does nothing, and a table you derived yourself is refused with `
 
 **Stop everything with `m.close()`.** Every stream, poll, and download of the session stops, and
 every live table of the session, with everything derived from it, **fails** with
-`MassiveSession #1 was closed; this table no longer updates`. Failing them, rather than leaving
-them frozen, means no table ever looks live while it is not, so nobody acts on stale data. After
-`close()`, verbs and the diagnostics tables raise `MassiveError`; building queries still works.
+`MassiveSession #1 was closed; this table no longer updates`, so no table looks live while it
+is not. After `close()`, verbs and the diagnostics tables raise `MassiveError`; building queries
+still works.
 A failed table keeps its rows, but Deephaven builds nothing new on it, so take a static copy:
 
 ```python
@@ -568,31 +555,19 @@ A script that only reads static tables can let a `with` block close the session:
 with an INFO line in the log.
 
 **A long feed outage fails live tables.** When the connection to Massive drops, the library
-reconnects on its own. While it is down, each of its live tables keeps its last rows, and
-`m.streams()` says so in `Error`: `connection down since 2026-10-30T14:03:05Z; no data`, the
-time (UTC) of the last message Massive sent. Each table's note clears once its own data flows
-again: Massive has confirmed its subscriptions, or sent it rows. A table still waiting
-`max_outage` seconds after the drop (300 by default) **fails**, naming when the gap began: the
-trades or quotes sent since then are missing, and a table that kept running would look complete
-when it is not. One symbol Massive never confirms fails only its own table, and only when that
-table already holds rows that could look current; a table that never received a row keeps
-running with its note. Call the same verb again for a new live table; it streams once the
-connection is back. A `poll()` table follows the same limit: while its cycles fail, `Error`
-names the last good cycle, and once they have kept failing for `max_outage` seconds, the table
-fails; one failed cycle of an hourly poll never does. A cycle still running past its interval
-shows `cycle running since <time>; last good cycle at <time>` until it ends. Such a cycle
-fails the table only when it receives nothing for `max_outage` seconds: one whose requests are
-slowed by rate limits keeps running as long as pages arrive. A cycle that finds nothing new is
-a good cycle, so a quiet dataset never fails. To fail at the first disconnect or failed cycle
-instead, set the limit to zero:
+reconnects on its own. Meanwhile each live table keeps its last rows, and `m.streams()` notes
+the outage in `Error`. A table still without data `max_outage` seconds after the drop (300 by
+default) **fails**, since the rows sent meanwhile are missing. A `poll()` table fails the same
+way once its cycles have failed, or a late cycle has received nothing, for that long. Call the
+verb again for a new table; `max_outage=0` fails at the first drop:
 
 ```python
 m = dm.MassiveSession(dm.MassiveConfig(max_outage=0))
 ```
 
 A connected feed can also go quiet: when nothing arrives for 5 minutes during the market's
-regular hours, `Error` says `no data since <time> during stocks trading hours`, but the table
-keeps running, since a quiet symbol or a market holiday looks the same.
+regular hours, `Error` says so, but the table keeps running, since a quiet symbol or a market
+holiday looks the same.
 
 **The console holds the lock live tables need.** Deephaven runs each console command while
 holding the lock every live table needs to update, so a `history()` or `fetch()` that downloads
@@ -634,9 +609,8 @@ crypto together), and Futures, each from the free Basic plan up to paid plans. O
 hold any mix and upgrade mid-month. Reference data, economic data, and news come with every
 account; partner datasets are sold separately. The library does not model plans: it reads what
 you ask for, and when something is out of reach, it says so. Two settings tell it what it cannot
-learn on its own: `rest_basic_subscriptions`, the subscriptions on Basic, so it paces their
-requests from the start, and `delayed_subscriptions`, the subscriptions whose delayed data you
-accept, which Starter and Developer plans need (see [real-time or delayed](#real-time-or-delayed)).
+learn on its own: `rest_basic_subscriptions` and `delayed_subscriptions` (see
+[install](#install)).
 
 What a plan changes, in the library's terms:
 
@@ -645,8 +619,7 @@ What a plan changes, in the library's terms:
 - **Pace.** A Basic subscription allows five REST requests a minute; the library spaces its
   requests to fit, so a large download on Basic is slow but completes.
 - **Freshness.** Massive's stock, option, index, and futures plans range from end-of-day data
-  on Basic, through 15 minutes late (10 for futures), to real time. You choose which feed each
-  subscription streams from: see [real-time or delayed](#real-time-or-delayed).
+  on Basic, through delayed, to real time (see [real-time or delayed](#real-time-or-delayed)).
 - **Kinds of data and history.** Higher plans add more kinds of data, such as streamed trades and
   quotes, and reach further back: Stocks Basic keeps two years of history, while Indices Basic
   keeps all of it. Each dataset's page in the [reference](docs/datasets/README.md) has Massive's
@@ -669,8 +642,9 @@ except dm.EntitlementError as error:
     print(f"not on this plan ({error.status}, request {error.request_id}): {error}")
 ```
 
-A mistake in the call itself, such as a misspelled symbol or text where an enum belongs, raises
-`ValueError` or `TypeError` before anything is sent.
+A mistake in the call itself, such as a symbol not in Massive's form (`aapl`, `EUR/USD`), text
+with stray spaces, or text where an enum belongs, raises `ValueError` or `TypeError` before
+anything is sent.
 
 <a id="real-time-or-delayed"></a>
 
@@ -706,7 +680,7 @@ stream never moves from one feed to the other.
   until then it shows `UNKNOWN`.
 
 ```python
-# The default: every subscription real-time. On a delayed plan, a stream stops with an error
+# The default: every subscription real-time. On a delayed plan, a stream raises an error
 # that names the setting to add.
 real_time = dm.MassiveSession()
 
@@ -724,14 +698,16 @@ wrong.
 - **`m.streams()`**: one row per stream, poll, and background download. `State` is `RUNNING`,
   `RELEASED` (you hold no table from it, but a derived table or an open panel still uses it),
   `FAILED`, `CLOSED`, or for a download `LOADING` and `DONE`. `Error` says why it stopped, or
-  warns without stopping it (a watchlist row in the wrong spelling, options contracts waiting
-  for room, a connection that is down or has gone quiet), all of them at once, joined with
-  `;`. `Query` shows the call that opened it, `Recency` whether its data is real-time
-  (`REALTIME`), delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`),
-  `RowsPublished` counts rows delivered, and
-  `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), or
-  sent with a value that does not fit, which reads as null (`REST:exchange?`). A row whose
-  symbol or time cannot be read is dropped, and the log says so in one WARNING.
+  warns without stopping it, joined with `;`: a watchlist row in the wrong spelling; options
+  contracts waiting for room (`over capacity: <n>/1000; <k> deferred`); a subscription Massive
+  has not confirmed (`no acknowledgement from Massive for ...`; the library re-sends it); a
+  `dm.ALL` stream's symbols whose rows are being dropped; a connection that is down or quiet.
+  `Query` shows the call that opened it, `Recency` whether its data is real-time (`REALTIME`),
+  delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`), `RowsPublished` counts rows
+  delivered, and `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending
+  (`REST:size-`), or sent with a value that does not fit (`REST:exchange?`). A streamed row
+  whose symbol or time cannot be read is dropped and logged; 100 such rows in a row, with none
+  delivered, fail the streams, since Massive has most likely changed its format.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,
@@ -769,7 +745,7 @@ The first argument of most datasets. It takes:
 | `dm.ALL` | `dm.ALL` | every instrument, where the dataset can serve it |
 | `None` | (left out) | on list datasets only: no ticker filter |
 
-Every ticker must be Massive's exact spelling: `AAPL`, `BRK.B`, `O:SPY251219C00650000`,
+Every ticker must be Massive's exact spelling: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
 `I:SPX`, `C:EURUSD`, `X:BTCUSD`, `ESZ6`. A wrong one in a string or list raises `ValueError` at
 once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/USD")` returns
 `"C:EURUSD"`, `dm.canonical_symbol_stock_yahoo("BRK-B")` returns `"BRK.B"`, and
@@ -822,11 +798,12 @@ In a live table, `last_by()` drops the row of a symbol that leaves the watchlist
 `append_only()` and `ring()` keep the rows it already produced. A watchlist row that is not
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
 `m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
-fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`. One session's options
-connection carries at most 1,000 topics, and each stream of a contract is one (its trades and
-its quotes are two). A list or static table of contracts over that cap raises `ValueError`; a
-live watchlist that grows past it defers the extra contracts, counted in `m.streams()`'s
-`Deferred` column, until room frees up.
+fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+
+The options connection carries at most 1,000 topics, counted across every session that shares
+it, and each stream of a contract is one (its trades and its quotes are two). A list or static
+table of contracts over that cap raises `ValueError`; a live watchlist that grows past it defers
+the extra contracts, counted in `m.streams()`'s `Deferred` column, until room frees up.
 
 A schedule is a watchlist too: a symbol table that is empty outside the hours you care about
 stops the stream, and makes a poll send no requests, outside them. This one is live only during
@@ -991,12 +968,13 @@ this section) and look at what the library did.
 | `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
-| `connection down since <time>; no data` in `m.streams()` | The connection to Massive dropped and the library is reconnecting. The table resumes on its own if the outage is short. `m.connections()` shows the state and the next attempt. |
-| `cycle running since <time>; last good cycle at <time>` in a `poll()` table's `Error` | A cycle is taking longer than the interval, usually because its requests are paced or paused by Massive's rate limit (see `m.rate_limits()`). The note clears when the cycle ends. |
-| `poll(): ...; the cycle running since <time> has received nothing for <n> s, longer than MassiveConfig.max_outage` | A late cycle received no data for `max_outage` seconds, so the table stopped rather than show stale data. Call the verb again; raise `max_outage` to wait longer. |
-| `... has been down since <time>, longer than MassiveConfig.max_outage` | The outage outlasted `max_outage`, so the table stopped rather than show stale data. Call the verb again for a new table; raise `max_outage` to ride out longer outages. See [live table lifetime](#live-tables). |
-| `...; last good cycle at <time>` in a `poll()` table's `Error` | Its latest cycle failed with the error before it; the next cycle runs as scheduled and clears it on success. |
-| `poll(): last good cycle at <time>; every cycle since <time> has failed ... longer than MassiveConfig.max_outage` | Its cycles kept failing for `max_outage` seconds, so the table stopped rather than show stale data. Fix the error it names, then call the verb again. |
+| `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows. |
+| `... longer than MassiveConfig.max_outage`, from a stream or from `... poll(): ...` | The outage, or the failing or silent poll cycles, outlasted `max_outage`, so the table stopped rather than show stale data. Fix any error it names, then call the verb again; raise `max_outage` to wait longer. See [live table lifetime](#live-tables). |
+| `no acknowledgement from Massive for ...` in `m.streams()` | Massive has not confirmed the subscription; the library re-sends it until it does. If the note stays, the rows of those symbols may be missing: report it. |
+| `over capacity: <n>/1000; <k> deferred` in `m.streams()` | The options connection is full; the extra contracts subscribe when others leave. Watch fewer contracts. See [`symbols`](#symbols). |
+| `rows for ... are being dropped` in `m.streams()`, or `... the last 100 rows of channel ... were dropped` | Massive sent rows the library cannot read: a `dm.ALL` stream warns and keeps running; any other stream fails after 100 such rows in a row. Massive has most likely changed its format: report it with the log. |
+| `rate limited: ...; this read ran inside a Deephaven console command` | A Basic subscription's pace held a console read for more than 90 seconds. Pass `wait=False`, which waits up to ten minutes, and list your Basic subscriptions in `rest_basic_subscriptions` so the library paces from the start. |
+| `S3 rejected the flat-file credentials` | The S3 keys are wrong. Set `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` from Massive's dashboard and restart the server. |
 | `no data since <time> during ... trading hours` in `m.streams()` | The connection is up but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
 | a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; the table reads Massive's delayed feed (`Recency` `DELAYED` in `m.streams()`), which starts 15 minutes behind; or the stream failed (`m.streams()`). |
 | a download is slow | Basic plans allow five requests a minute (`m.rate_limits()` shows the pace). Use flat files for many symbols, and `wait=False` for long reads. |
@@ -1036,9 +1014,8 @@ servers that answer as Massive's documentation says Massive does, and the live t
 against Massive on a mix of paid and free plans. Some questions remain open because those plans
 cannot settle them, such as how index daily bars and futures sessions are stamped and parts of
 the flat files; on those, the library follows its best reading of Massive's documentation and
-warns when what Massive sends differs. [`docs/live-tests.md`](docs/live-tests.md) lists them.
-The library is not on PyPI yet. Outside testers start with the
-[tester guide](docs/tester-guide.md).
+warns when what Massive sends differs. The library is not on PyPI yet. Outside testers start
+with the [tester guide](docs/tester-guide.md).
 
 <a id="contributing"></a>
 

@@ -15,7 +15,7 @@ m.reference.news(symbols=None, *, start=None, end=None, sort=None, order=None, l
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published_utc.gte` and `published_utc.lt` |
-| `poll()` | appends only rows it has not seen, keyed by `Id` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` |
 | `sort` | `published_utc` |
 | `filters` | `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 

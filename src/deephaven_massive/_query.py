@@ -511,7 +511,11 @@ class QueryBase:
         """List this dataset's columns, their types, and what each one means.
 
         Every verb of the dataset returns these columns in this order, whichever transport
-        serves it; a column the serving transport does not supply is null. The table is built
+        serves it; a column the serving transport does not supply is null. A value Massive sends
+        that does not fit its column is null, logged once, and named in the result's
+        `SchemaDrift` in `m.streams()`; a row missing its symbol or time is dropped. A symbol
+        spelling the library cannot read keeps its row, with a null `Symbol` and the text in
+        `RawSymbol`. The table is built
         from the committed generated schemas: no request is made, no stream is opened, and it
         works on a closed session.
 
@@ -800,8 +804,8 @@ class Query(QueryBase):
             EntitlementError: If the plan does not include the endpoint (HTTP 403), or Massive
                 labels the data `DELAYED` for a subscription not in
                 `MassiveConfig.delayed_subscriptions`; the message names the line to add.
-            MassiveError: If the session is closed, a rate limit outlives the retries, a row
-                breaks the dataset's schema, a symbol's later page answers HTTP 404, or a
+            MassiveError: If the session is closed, a rate limit outlives the retries, every
+                row of a page is unreadable, a symbol's later page answers HTTP 404, or a
                 request fails in any other way.
 
         Example:
@@ -867,9 +871,10 @@ class Query(QueryBase):
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
             mode: How cycles combine. `AUTO` (the default) is the dataset's own mode, which its
-                page names: `REPLACE` keeps the latest cycle by key, `UPSERT` keeps every key
-                ever seen at its latest row, `APPEND` adds only rows whose identity (the poll
-                keys, plus the update time on snapshots and movers) is new. See
+                page in `docs/datasets` names: `REPLACE` keeps the latest cycle by key,
+                `UPSERT` keeps every key ever seen at its latest row, `APPEND` adds only rows
+                whose identity (the poll keys, plus the update time on snapshots and movers) is
+                new. See
                 README.md#verb-arguments.
 
         Returns:
@@ -931,7 +936,8 @@ class StreamQuery(QueryBase):
     The first verb of a stream decides its host (one REST request the first time a class and
     channel family streams in the session), connects if no connection to that host exists, and
     subscribes; the verb returns once the stream's tables exist, without waiting for the
-    server's acknowledgement. A failure the server reports later (a refused topic, a rejected
+    server's acknowledgement. A topic Massive never acknowledges is re-sent, and `m.streams()`
+    names it in `Error` until it is. A failure the server reports later (a refused topic, a rejected
     key) fails the stream's tables and shows in `m.streams()`, while a row that does not decode
     is dropped and logged and the stream goes on; a
     verb whose stream fails while the verb opens it raises `MassiveError` naming the failure,

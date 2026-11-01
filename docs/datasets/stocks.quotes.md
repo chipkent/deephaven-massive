@@ -35,7 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket |
 | `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST, flat files, WebSocket |
@@ -50,8 +50,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket |
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this quote. | REST, flat files |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

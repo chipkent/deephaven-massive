@@ -14,7 +14,7 @@ m.futures.contracts(symbols=None, *, product_code=None, as_of=None, sort=None, o
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` and `Date` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `Date` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `active`, `first_trade_date`, `first_trade_date_gt`, `first_trade_date_gte`, `first_trade_date_lt`, `first_trade_date_lte`, `last_trade_date`, `last_trade_date_gt`, `last_trade_date_gte`, `last_trade_date_lt`, `last_trade_date_lte`, `provider_id`, `provider_product_id`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `type`, `type_any_of` |
 
@@ -58,8 +58,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this contract trades. | REST |
 | `Type` | String | The type of contract, one of 'single' or 'combo'. Leaving this filter blank will query for contracts where type is 'single', 'combo' or empty. This field only exists on contracts as of 2025-03-12 and later. It will be null when date < 2025-03-12. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

@@ -234,9 +234,12 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
     )
     assert dict(columns["Symbol"].wire_keys) == {R: (None,), F: ("ticker",), W: ("sym",)}
     assert columns["Symbol"].supplied_by == (R, F, W)
+    # REST and the flat files describe `sip_timestamp` alike, so they share one item.
+    assert (
+        wire(R, history, "SipTimestamp").description == wire(F, files, "SipTimestamp").description
+    )
     timestamp = [
-        f'REST `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
-        f'flat files `sip_timestamp`: "{wire(F, files, "SipTimestamp").description}"',
+        f'REST and flat files `sip_timestamp`: "{wire(R, history, "SipTimestamp").description}"',
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
     assert columns["Timestamp"].description == (
@@ -326,10 +329,7 @@ def test_a_bars_start_is_described_as_the_window_start(
         f"00:00 {zone} of its window's first day ("
     )
     assert first in described
-    assert "each source's own stamp, quoted next, is moved there. From REST `" in described
-    assert description(stocks.TRADES, "Timestamp").startswith(
-        "The row's primary time, as an Instant. From REST `"
-    )
+    assert "each source's own stamp, quoted next, is moved there. From REST" in described
 
 
 def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:

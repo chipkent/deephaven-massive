@@ -48,6 +48,7 @@ def _run(
     root: Path = ROOT,
     start_server: Callable[[], None] = _no_server,
     check: Callable[[Path, argparse.Namespace, MutableMapping[str, str]], list[Item]] = _check,
+    plans: Callable[[MutableMapping[str, str]], dict[str, str] | None] = lambda _e: None,
 ) -> tuple[int, list[str]]:
     out = io.StringIO()
     status = cli.main(
@@ -59,6 +60,7 @@ def _run(
         check=check,
         describe=_describe,
         now=lambda: datetime(2026, 10, 30, 14, 15, tzinfo=UTC),
+        plans=plans,
     )
     return status, out.getvalue().splitlines()
 
@@ -85,6 +87,9 @@ def test_check_prints_each_item_and_whether_the_setup_is_ready(tmp_path: Path) -
     )
     assert status == 0
     assert lines == ["OK   java: Java 21", "OK   key: accepted ***", "ready: yes"]
+    # The bug report collects the same lines, cleaned of the key.
+    saved = (tmp_path / cli.CHECK_OUTPUT).read_text(encoding="utf-8")
+    assert saved == "\n".join(lines) + "\n"
     assert seen[0].docker_image == "img"
 
 
@@ -190,3 +195,41 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
         "HTTPS_PROXY": False,
         "SSL_CERT_FILE": False,
     }
+
+
+def test_examples_opens_the_session_the_keys_plans_need(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
+    (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
+    tiers = {"stocks": "starter", "options": "basic"}
+    status, lines = _run(
+        ["examples", "--folder", str(tmp_path / "t")],
+        {"MASSIVE_API_KEY": KEY},
+        root=root,
+        start_server=lambda: None,
+        plans=lambda _environ: tiers,
+    )
+    assert status == 0
+    assert lines[0] == (
+        "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
+        "{dm.Subscription.OPTIONS}, delayed_subscriptions={dm.Subscription.STOCKS}))"
+    )
+
+
+def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
+    (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
+    _, lines = _run(
+        ["examples", "--folder", str(tmp_path / "t")],
+        {"MASSIVE_API_KEY": KEY},
+        root=root,
+        start_server=lambda: None,
+    )
+    assert lines[:2] == [
+        "could not tell the key's plans; the examples run as on the free plan",
+        (
+            "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
+            "set(dm.Subscription)))"
+        ),
+    ]

@@ -64,6 +64,7 @@ __all__ = [
     "SnapshotProbe",
     "decide",
     "recency_of",
+    "refused_snapshot",
     "unlabelled",
 ]
 
@@ -130,6 +131,29 @@ def unlabelled(evidence: str) -> bool:
         True for the evidence of a snapshot without a `timeframe`, of any class.
     """
     return any(evidence == _NO_TIMEFRAME.format(asset_class) for asset_class in AssetClass)
+
+
+_REFUSED_SNAPSHOT: Final = "the host check's snapshot ({}) was refused: {}"
+"""The evidence of a decision whose snapshot Massive refused, by its path and Massive's text."""
+
+
+def refused_snapshot(evidence: str) -> bool:
+    """Return whether a host decision's evidence is a snapshot Massive refused.
+
+    Massive refuses the snapshot on its free Basic plan, which has no live (WebSocket) data on
+    either feed, so a stream refusal after it gains nothing from the delayed feed.
+
+    Args:
+        evidence: The decision's evidence, such as
+            `"the host check's snapshot (/v3/snapshot) was refused: ..."`.
+
+    Returns:
+        True for the evidence of a refused snapshot, of any class.
+    """
+    return any(
+        evidence.startswith(_REFUSED_SNAPSHOT.format(probe.path, ""))
+        for probe in SNAPSHOT_PROBES.values()
+    )
 
 
 def recency_of(host: str) -> Recency:
@@ -306,9 +330,7 @@ def decide(
     try:
         answer = fetch(probe)
     except EntitlementError as error:
-        return _unconfirmed_real_time(
-            asset_class, f"the host check's snapshot ({probe.path}) was refused: {error}"
-        )
+        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, error))
     entitled = [row for row in answer.rows if not is_error_row(row)]
     labels = read_labels(answer.status, entitled)
     return _from_labels(asset_class, subscription=subscription, labels=labels)

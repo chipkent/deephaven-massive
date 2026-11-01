@@ -14,7 +14,7 @@ m.partners.benzinga.ratings(symbols=None, *, sort=None, order=None, limit=None, 
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `BenzingaId` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `BenzingaId` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `benzinga_analyst_id`, `benzinga_analyst_id_any_of`, `benzinga_analyst_id_gt`, `benzinga_analyst_id_gte`, `benzinga_analyst_id_lt`, `benzinga_analyst_id_lte`, `benzinga_firm_id`, `benzinga_firm_id_any_of`, `benzinga_firm_id_gt`, `benzinga_firm_id_gte`, `benzinga_firm_id_lt`, `benzinga_firm_id_lte`, `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte`, `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`, `importance`, `importance_gt`, `importance_gte`, `importance_lt`, `importance_lte`, `last_updated`, `last_updated_gt`, `last_updated_gte`, `last_updated_lt`, `last_updated_lte`, `price_target_action`, `price_target_action_any_of`, `price_target_action_gt`, `price_target_action_gte`, `price_target_action_lt`, `price_target_action_lte`, `rating_action`, `rating_action_any_of`, `rating_action_gt`, `rating_action_gte`, `rating_action_lt`, `rating_action_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -57,8 +57,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. | REST |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS UTC) when the rating was issued. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

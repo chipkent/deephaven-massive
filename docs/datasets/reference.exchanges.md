@@ -14,27 +14,27 @@ m.reference.exchanges(*, asset_class=None, locale=None)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `AssetClass` and `Id` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass` and `Id` |
 
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Exchanges (REST) | Exchanges (REST) | Exchanges (REST) | Exchanges (REST) |
-| --- | --- | --- | --- | --- |
-| Currencies Basic | Updated as needed | Updated as needed |  |  |
-| Currencies Starter | Updated as needed | Updated as needed |  |  |
-| Currencies Business | Updated as needed | Updated as needed |  |  |
-| Options Basic |  |  | Updated as needed |  |
-| Options Starter |  |  | Updated as needed |  |
-| Options Developer |  |  | Updated as needed |  |
-| Options Advanced |  |  | Updated as needed |  |
-| Options Business |  |  | Updated as needed |  |
-| Stocks Basic |  |  |  | Updated as needed |
-| Stocks Starter |  |  |  | Updated as needed |
-| Stocks Developer |  |  |  | Updated as needed |
-| Stocks Advanced |  |  |  | Updated as needed |
-| Stocks Business |  |  |  | Updated as needed |
+| Plan | Exchanges (REST) |
+| --- | --- |
+| Currencies Basic | Updated as needed |
+| Currencies Starter | Updated as needed |
+| Currencies Business | Updated as needed |
+| Options Basic | Updated as needed |
+| Options Starter | Updated as needed |
+| Options Developer | Updated as needed |
+| Options Advanced | Updated as needed |
+| Options Business | Updated as needed |
+| Stocks Basic | Updated as needed |
+| Stocks Starter | Updated as needed |
+| Stocks Developer | Updated as needed |
+| Stocks Advanced | Updated as needed |
+| Stocks Business | Updated as needed |
 
 ## Columns
 

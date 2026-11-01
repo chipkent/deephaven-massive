@@ -15,7 +15,7 @@ m.stocks.filings.insider_holdings(symbols=None, *, issuer_cik=None, owner_cik=No
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `last_filing_date.gte` and `last_filing_date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `IssuerCik` and `OwnerCik` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `IssuerCik` and `OwnerCik` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | none |
 

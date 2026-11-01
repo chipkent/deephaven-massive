@@ -14,7 +14,7 @@ m.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastUpdated`, `LastQuoteLastUpdated` and `LastTradeLastUpdated` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastUpdated`, `LastQuoteLastUpdated` and `LastTradeLastUpdated` |
 | `sort` | `ticker` |
 | `filters` | `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `type` |
 
@@ -22,25 +22,25 @@ m.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Unified Snapshot (REST) | Unified Snapshot (REST) | Unified Snapshot (REST) | Unified Snapshot (REST) | Unified Snapshot (REST) |
-| --- | --- | --- | --- | --- | --- |
-| Currencies Basic | Not included | Not included |  |  |  |
-| Currencies Starter | Real-time | Real-time |  |  |  |
-| Currencies Business | Real-time | Real-time |  |  |  |
-| Indices Basic |  |  | Not included |  |  |
-| Indices Starter |  |  | 15-minute delayed |  |  |
-| Indices Advanced |  |  | Real-time |  |  |
-| Indices Business |  |  | Real-time |  |  |
-| Options Basic |  |  |  | Not included |  |
-| Options Starter |  |  |  | 15-minute delayed |  |
-| Options Developer |  |  |  | 15-minute delayed |  |
-| Options Advanced |  |  |  | Real-time |  |
-| Options Business |  |  |  | Real-time |  |
-| Stocks Basic |  |  |  |  | Not included |
-| Stocks Starter |  |  |  |  | 15-minute delayed |
-| Stocks Developer |  |  |  |  | 15-minute delayed |
-| Stocks Advanced |  |  |  |  | Real-time |
-| Stocks Business |  |  |  |  | Real-time |
+| Plan | Unified Snapshot (REST) |
+| --- | --- |
+| Currencies Basic | Not included |
+| Currencies Starter | Real-time |
+| Currencies Business | Real-time |
+| Indices Basic | Not included |
+| Indices Starter | 15-minute delayed |
+| Indices Advanced | Real-time |
+| Indices Business | Real-time |
+| Options Basic | Not included |
+| Options Starter | 15-minute delayed |
+| Options Developer | 15-minute delayed |
+| Options Advanced | Real-time |
+| Options Business | Real-time |
+| Stocks Basic | Not included |
+| Stocks Starter | 15-minute delayed |
+| Stocks Developer | 15-minute delayed |
+| Stocks Advanced | Real-time |
+| Stocks Business | Real-time |
 
 ## Columns
 
@@ -121,8 +121,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST |
 | `Type` | String | The asset class for this ticker. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

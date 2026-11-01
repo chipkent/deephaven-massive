@@ -15,7 +15,7 @@ m.stocks.short_volume(symbols=None, *, start=None, end=None, sort=None, order=No
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `date.gte` and `date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` and `Date` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `Date` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `short_volume_ratio`, `short_volume_ratio_any_of`, `short_volume_ratio_gt`, `short_volume_ratio_gte`, `short_volume_ratio_lt`, `short_volume_ratio_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -52,8 +52,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `ShortVolumeRatio` | double | The percentage of total volume that was sold short. Calculated as (short_volume / total_volume) * 100. | REST |
 | `TotalVolume` | double | Total reported volume across all venues for the ticker on the given date. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

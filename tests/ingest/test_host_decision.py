@@ -16,6 +16,7 @@ from deephaven_massive._ingest.host_decision import (
     SnapshotProbe,
     decide,
     recency_of,
+    refused_snapshot,
     unlabelled,
 )
 from deephaven_massive._massive import Transport, source
@@ -283,6 +284,9 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
     assert "HTTP 403 from GET /v3/snapshot" in record.getMessage()
+    # A stream refusal after it names the plan, not the delayed feed.
+    assert refused_snapshot(decision.evidence)
+    assert not refused_snapshot("no timeframe in the stocks snapshot")
 
 
 def test_other_errors_propagate_unchanged() -> None:

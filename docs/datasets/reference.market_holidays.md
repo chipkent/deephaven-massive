@@ -14,31 +14,31 @@ m.reference.market_holidays()
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Exchange` and `Date` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Exchange` and `Date` |
 
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Market Holidays (REST) | Market Holidays (REST) | Market Holidays (REST) | Market Holidays (REST) | Market Holidays (REST) |
-| --- | --- | --- | --- | --- | --- |
-| Currencies Basic | Updated as needed | Updated as needed |  |  |  |
-| Currencies Starter | Updated as needed | Updated as needed |  |  |  |
-| Currencies Business | Updated as needed | Updated as needed |  |  |  |
-| Indices Basic |  |  | Updated as needed |  |  |
-| Indices Starter |  |  | Updated as needed |  |  |
-| Indices Advanced |  |  | Updated as needed |  |  |
-| Indices Business |  |  | Updated as needed |  |  |
-| Options Basic |  |  |  | Updated as needed |  |
-| Options Starter |  |  |  | Updated as needed |  |
-| Options Developer |  |  |  | Updated as needed |  |
-| Options Advanced |  |  |  | Updated as needed |  |
-| Options Business |  |  |  | Updated as needed |  |
-| Stocks Basic |  |  |  |  | Updated as needed |
-| Stocks Starter |  |  |  |  | Updated as needed |
-| Stocks Developer |  |  |  |  | Updated as needed |
-| Stocks Advanced |  |  |  |  | Updated as needed |
-| Stocks Business |  |  |  |  | Updated as needed |
+| Plan | Market Holidays (REST) |
+| --- | --- |
+| Currencies Basic | Updated as needed |
+| Currencies Starter | Updated as needed |
+| Currencies Business | Updated as needed |
+| Indices Basic | Updated as needed |
+| Indices Starter | Updated as needed |
+| Indices Advanced | Updated as needed |
+| Indices Business | Updated as needed |
+| Options Basic | Updated as needed |
+| Options Starter | Updated as needed |
+| Options Developer | Updated as needed |
+| Options Advanced | Updated as needed |
+| Options Business | Updated as needed |
+| Stocks Basic | Updated as needed |
+| Stocks Starter | Updated as needed |
+| Stocks Developer | Updated as needed |
+| Stocks Advanced | Updated as needed |
+| Stocks Business | Updated as needed |
 
 ## Columns
 

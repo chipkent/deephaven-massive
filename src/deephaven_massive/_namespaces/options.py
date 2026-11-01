@@ -407,8 +407,10 @@ class _Options(Namespace):
         Example:
             ::
 
-                # Name a current contract (see chain()): this one has expired.
-                day = m.options.trades("O:AAPL250117C00150000").history("2025-01-02", "2025-01-02")
+                from datetime import UTC, datetime, timedelta
+
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                hour = m.options.trades(contract).history(datetime.now(UTC) - timedelta(hours=1))
         """
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
@@ -438,7 +440,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                last = m.options.last_trade(["O:AAPL250117C00150000"]).fetch()
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                last = m.options.last_trade(contract).fetch()
         """
         query = build_query(
             self._core,
@@ -472,7 +475,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                book = m.options.quotes(["O:AAPL250117C00150000"]).last_by()
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                book = m.options.quotes(contract).last_by()
         """
         return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
 
@@ -530,7 +534,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                minute = m.options.bars("O:AAPL250117C00150000", dm.Timespan.MINUTE).append_only()
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                minute = m.options.bars(contract, dm.Timespan.MINUTE).append_only()
         """
         return cast(
             "HistoryQuery",
@@ -569,7 +574,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                prev = m.options.previous_day_bar("O:AAPL250117C00150000").fetch()
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                prev = m.options.previous_day_bar(contract).fetch()
         """
         query = build_query(
             self._core,
@@ -607,7 +613,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                fair = m.options.fmv(["O:AAPL250117C00150000"]).last_by()
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                fair = m.options.fmv(contract).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
@@ -713,7 +720,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                greeks = m.options.snapshots(["O:AAPL250117C00150000"]).poll(5)
+                contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
+                greeks = m.options.snapshots(contract).poll(5)
         """
         # Massive refuses `type` beside tickers, so only `dm.ALL` sends it. The key stays when
         # its value is None, which keeps `type` refused as a filter either way.

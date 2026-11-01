@@ -14,7 +14,7 @@ m.reference.related_companies(symbols)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Underlying` and `Symbol` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Underlying` and `Symbol` |
 
 ## Plan access
 
@@ -36,8 +36,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST |
 | `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST: the request's `ticker` parameter. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

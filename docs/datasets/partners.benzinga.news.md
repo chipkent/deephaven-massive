@@ -15,7 +15,7 @@ m.partners.benzinga.news(symbols=None, *, start=None, end=None, sort=None, order
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published.gte` and `published.lt` |
-| `poll()` | appends only rows it has not seen, keyed by `BenzingaId` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `BenzingaId` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `author`, `author_any_of`, `author_gt`, `author_gte`, `author_lt`, `author_lte`, `channels`, `channels_all_of`, `channels_any_of`, `stocks`, `stocks_all_of`, `stocks_any_of`, `tags`, `tags_all_of`, `tags_any_of` |
 

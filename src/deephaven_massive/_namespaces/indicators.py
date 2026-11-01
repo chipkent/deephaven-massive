@@ -156,8 +156,10 @@ class _Indicators(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2025-01-01").fetch()
-            macd = m.indicators.macd("AAPL", timespan=dm.Timespan.HOUR, limit=100).fetch()
+            sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2025-01-01", end="2025-06-30")
+            macd = m.indicators.macd("AAPL", timespan=dm.Timespan.HOUR, end="2025-06-30", limit=100)
+            averages = sma.fetch()
+            hourly = macd.fetch()
     """
 
     __slots__ = ()
@@ -247,7 +249,10 @@ class _Indicators(Namespace):
         Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
         `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
         New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order.
+        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
+        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
+        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
+        See README.md#real-time-or-delayed.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -276,7 +281,8 @@ class _Indicators(Namespace):
         Example:
             ::
 
-                sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2025-01-01").fetch()
+                pairs = ["AAPL", "X:BTCUSD"]
+                sma = m.indicators.sma(pairs, start="2025-01-01", end="2025-06-30").fetch()
         """
         return self._query(
             SMA,
@@ -312,7 +318,10 @@ class _Indicators(Namespace):
         Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
         `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
         New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order.
+        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
+        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
+        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
+        See README.md#real-time-or-delayed.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -341,7 +350,7 @@ class _Indicators(Namespace):
         Example:
             ::
 
-                ema = m.indicators.ema("AAPL", 20, start="2025-01-01").fetch()
+                ema = m.indicators.ema("AAPL", 20, start="2025-01-01", end="2025-06-30").fetch()
         """
         return self._query(
             EMA,
@@ -377,7 +386,10 @@ class _Indicators(Namespace):
         Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
         `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
         New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order.
+        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
+        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
+        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
+        See README.md#real-time-or-delayed.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -406,7 +418,9 @@ class _Indicators(Namespace):
         Example:
             ::
 
-                rsi = m.indicators.rsi("AAPL", timespan=dm.Timespan.HOUR, limit=100).fetch()
+                rsi = m.indicators.rsi(
+                    "AAPL", timespan=dm.Timespan.HOUR, end="2025-06-30", limit=100
+                ).fetch()
         """
         return self._query(
             RSI,
@@ -444,7 +458,10 @@ class _Indicators(Namespace):
         Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
         `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
         New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order.
+        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
+        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
+        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
+        See README.md#real-time-or-delayed.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -475,7 +492,7 @@ class _Indicators(Namespace):
         Example:
             ::
 
-                macd = m.indicators.macd("AAPL", start="2025-01-01").fetch()
+                macd = m.indicators.macd("AAPL", start="2025-01-01", end="2025-06-30").fetch()
         """
         return self._query(
             MACD,

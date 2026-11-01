@@ -44,30 +44,23 @@ Example:
 Status:
     Every dataset is implemented over all three transports and tested against simulated Massive
     servers built from Massive's documentation. The live tests have also run against Massive on
-    the owner's own plans, a mix of paid and free tiers. Questions those plans cannot settle
-    remain open (which host a delayed plan streams from, how index daily bars and futures
-    sessions are stamped, parts of the flat files); there the library follows its best reading
-    of the documentation, and where it can tell, it checks what Massive sends and stops with a
-    clear message instead of returning rows it cannot vouch for. `docs/live-tests.md` lists the
-    open questions. The library is not on PyPI yet.
+    a mix of paid and free plans. Questions those plans cannot settle remain open (which host a
+    delayed plan streams from, how index daily bars and futures sessions are stamped, parts of
+    the flat files); there the library follows its best reading of the documentation. Where
+    Massive sends something unexpected, the library serves what it can: a value that doesn't
+    fit is null, a row missing its symbol or time is dropped, and each is logged once.
+    The library is not on PyPI yet.
 
 Read next:
-    The README, https://github.com/chipkent/deephaven-massive: installing, a first-tables
-    tutorial, how queries and verbs work, a "How do I..." table, the concepts (table shapes,
-    time, bars, history sources, split adjustment, live table lifetime, plans and errors,
-    diagnostics), every shared argument, and troubleshooting by error text. When a docstring
-    says `README.md#symbols`, it means that README's section of that name. The dataset finder,
-    `docs/datasets/README.md`, links one generated page per dataset, such as
-    `docs/datasets/stocks.bars.md`: its call, verbs, time axis, sort and filter keys, plan
-    access, and columns. `help()` on any session, namespace, dataset method, or query shows its own
-    documentation.
+    The README, https://github.com/chipkent/deephaven-massive (a docstring's
+    `README.md#symbols` means its section of that name); the dataset finder,
+    `docs/datasets/README.md`; and `help()` on any object.
 
-Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
-and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, `datasets()`, the
-`canonical_symbol*` converters, and `canonicalize_symbols` need a running Deephaven JVM: use
-them inside a Deephaven worker, or after starting `deephaven_server.Server`. The exceptions,
-the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and `__version__` do
-not.
+`import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
+`datasets()`, the `canonical_symbol*` converters, and `canonicalize_symbols` need a running
+Deephaven JVM: use them inside a Deephaven worker, or after starting `deephaven_server.Server`.
+The exceptions, the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and
+`__version__` do not.
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,

@@ -15,7 +15,7 @@ m.stocks.filings.disclosures_8k(symbols=None, *, start=None, end=None, sort=None
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | appends only rows it has not seen, keyed by `AccessionNumber`, `PrimaryCategory`, `SecondaryCategory`, `TertiaryCategory` and `SupportingText` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `PrimaryCategory`, `SecondaryCategory`, `TertiaryCategory` and `SupportingText` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `cik`, `cik_any_of`, `tertiary_category` |
 

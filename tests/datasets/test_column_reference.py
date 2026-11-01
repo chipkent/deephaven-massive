@@ -118,20 +118,20 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
 
 def test_the_real_pages_state_each_poll_mode() -> None:
     pages = rendered()
-    replace = "holds exactly the latest cycle's rows, keyed by `Symbol` (`dm.PollMode.REPLACE`)"
+    replace = "`dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`"
     assert f"| `poll()` | {replace} |" in pages["options.contracts.md"]
     assert (
-        "| `poll()` | appends only rows it has not seen, keyed by `Id` (`dm.PollMode.APPEND`)"
+        "| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` |"
         in pages["reference.news.md"]
     )
     assert (
-        "| `poll()` | adds and updates rows, never deletes, keyed by `Symbol` and `IssuerName`"
-        in pages["stocks.ipos.md"]
+        "| `poll()` | `dm.PollMode.UPSERT`: adds and updates rows, never deletes, keyed by "
+        "`Symbol` and `IssuerName`" in pages["stocks.ipos.md"]
     )
     status = pages["reference.market_status.md"]
     assert (
-        "| `poll()` | holds exactly the latest cycle's rows; `mode=dm.PollMode.APPEND` also keys by"
-        in (status)
+        "| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows; "
+        "`mode=dm.PollMode.APPEND` also keys by" in (status)
     )
     # A dataset without fetch() has no poll() row, and one without sort or filters none of theirs.
     trades = pages["stocks.trades.md"]
@@ -163,6 +163,10 @@ def test_the_real_pages_show_massives_plan_tables() -> None:
     assert "| Stocks Basic | Not included | Not included | End-of-day, 2 years |" in bars
     assert "Custom Bars (OHLC) (REST)" in bars
     assert "Aggregates (Per Minute) (WebSocket)" in bars
+    # One page per asset class, all of one title, share one column.
+    snapshots = rendered()["snapshots.md"]
+    assert "| Plan | Unified Snapshot (REST) |\n" in snapshots
+    assert "| Stocks Starter | 15-minute delayed |\n" in snapshots
 
 
 def test_the_wire_columns_follow_the_order_of_every_supplied_by() -> None:
@@ -663,11 +667,6 @@ back its history goes, as Massive's pages state them.
 | `Price` | double | The price, bid \\| ask. | {every} |
 | `TimestampInsert` | Instant | {insert} | {every} |
 
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` \
-is null, and `RawSymbol` is null on every other row. A session with \
-`unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails \
-on such a row instead and has no `RawSymbol`; the table shows the default session.
-
 <details><summary>Massive fields</summary>
 
 The Massive field behind each column, per transport (`request` for a value the library fills \
@@ -701,8 +700,8 @@ def test_the_rendered_ratios_page() -> None:
     facts = (
         "| Verbs | `fetch()`, `poll()` |\n"
         "| Served by | REST |\n"
-        "| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` "
-        "(`dm.PollMode.REPLACE`) |\n"
+        "| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by "
+        "`Symbol` |\n"
         "| `sort` | any REST field of the rows (see Massive fields below), or several separated "
         "by commas, each with an optional `.asc` or `.desc` |\n"
         "| `filters` | `pe_gte` |\n"
@@ -711,7 +710,7 @@ def test_the_rendered_ratios_page() -> None:
     # A page that lists no plan shows its summaries; a page of no plan tables adds nothing.
     assert "\n| Plan |" not in page
     assert "\n- Ratios (Massive): Access.; Recency.\n" in page
-    # No RawSymbol column, so no note.
+    # No RawSymbol column.
     assert "RawSymbol" not in page
     assert "| `PriceEarnings` | double | Price \\| earnings. | REST |\n" in page
 

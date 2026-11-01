@@ -1,8 +1,8 @@
 # Needs a paid Stocks plan (Starter or higher). Joins today's minute bars from history with
 # the live ones that follow, into one table that keeps growing. You should see a new table,
-# aapl_today, with a row per minute since the open, and a new row each minute. On Stocks
-# Starter or Developer, use the session example 18 opens with delayed_subscriptions: the live
-# bars then run 15 minutes behind, and history is not affected by the setting.
+# aapl_today, with a row per minute since the open and a new row each minute, while the
+# market is open; before 09:30 New York time or on a weekend, it is empty. On Stocks Starter
+# or Developer, the live bars run 15 minutes behind; history is not affected.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 

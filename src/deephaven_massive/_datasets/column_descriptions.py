@@ -323,7 +323,9 @@ Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
 
 
-def _key_part(transport: Transport, column: SourceColumn, asset_class: str | None) -> str:
+def _key_part(
+    transport: Transport, column: SourceColumn, asset_class: str | None
+) -> tuple[str, str]:
     """Say where one source's value of a renamed key column comes from.
 
     Args:
@@ -333,19 +335,19 @@ def _key_part(transport: Transport, column: SourceColumn, asset_class: str | Non
             the field's description (`Field.description_for`).
 
     Returns:
-        One item of the list `column_description` joins with "; ", with no closing punctuation:
-        ``REST `sip_timestamp`: "<field description>"`` for a wire key with a description,
-        ``REST `sip_timestamp``` for one without, or ``REST: the request's `stocksTicker`
-        parameter`` for a key filled from the request, with the transport spelled as
-        `TRANSPORT_LABELS` spells it (``WebSocket `t`: …``).
+        The transport, spelled as `TRANSPORT_LABELS` spells it, and the rest of one item of the
+        list `column_description` joins with "; ", with no closing punctuation:
+        `` `sip_timestamp`: "<field description>"`` for a wire key with a description,
+        `` `sip_timestamp` `` for one without, or ``: the request's `stocksTicker` parameter``
+        for a key filled from the request. Sources whose rest is the same share one item.
     """
     label = TRANSPORT_LABELS[transport]
     if column.field is None:
-        return f"{label}: the request's `{column.parameter}` parameter"
+        return label, f": the request's `{column.parameter}` parameter"
     described = column.field.description_for(asset_class)
     if described:
-        return f'{label} `{column.field.wire_key}`: "{described}"'
-    return f"{label} `{column.field.wire_key}`"
+        return label, f' `{column.field.wire_key}`: "{described}"'
+    return label, f" `{column.field.wire_key}`"
 
 
 def column_description(
@@ -397,6 +399,18 @@ def with_sentence(text: str, sentence: str) -> str:
     return f"{text}{stop} {sentence}"
 
 
+def _listed(labels: Sequence[str]) -> str:
+    """Join transport labels for a sentence.
+
+    Args:
+        labels: At least one label.
+
+    Returns:
+        The last two joined by "and" and the rest by commas, such as "REST and flat files".
+    """
+    return ", ".join(labels[:-1]) + (" and " if labels[1:] else "") + labels[-1]
+
+
 def _chosen(
     spec: DatasetSpec,
     name: str,
@@ -419,12 +433,15 @@ def _chosen(
     # dataset of every class.
     asset_class = None if spec.asset_class is ClassFromPrefix.ANY else spec.asset_class.value
     if library:
-        parts: list[str] = []
+        # The transports whose source reads the same, in source order, by what they read.
+        sources: dict[str, list[str]] = {}
         if name in _FROM_PARTS:
             for transport, column in own:
-                part = _key_part(transport, column, asset_class)
-                if part not in parts:
-                    parts.append(part)
+                label, rest = _key_part(transport, column, asset_class)
+                labels = sources.setdefault(rest, [])
+                if label not in labels:
+                    labels.append(label)
+        parts = [f"{_listed(labels)}{rest}" for rest, labels in sources.items()]
         sentence = _library_sentence(spec, name)
         if not parts:
             return sentence

@@ -14,7 +14,7 @@ m.partners.benzinga.earnings(symbols=None, *, sort=None, order=None, limit=None,
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `BenzingaId` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `BenzingaId` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`, `date_status`, `date_status_any_of`, `date_status_gt`, `date_status_gte`, `date_status_lt`, `date_status_lte`, `eps_surprise_percent`, `eps_surprise_percent_any_of`, `eps_surprise_percent_gt`, `eps_surprise_percent_gte`, `eps_surprise_percent_lt`, `eps_surprise_percent_lte`, `fiscal_period`, `fiscal_period_any_of`, `fiscal_period_gt`, `fiscal_period_gte`, `fiscal_period_lt`, `fiscal_period_lte`, `fiscal_year`, `fiscal_year_any_of`, `fiscal_year_gt`, `fiscal_year_gte`, `fiscal_year_lt`, `fiscal_year_lte`, `importance`, `importance_any_of`, `importance_gt`, `importance_gte`, `importance_lt`, `importance_lte`, `last_updated`, `last_updated_any_of`, `last_updated_gt`, `last_updated_gte`, `last_updated_lt`, `last_updated_lte`, `revenue_surprise_percent`, `revenue_surprise_percent_any_of`, `revenue_surprise_percent_gt`, `revenue_surprise_percent_gte`, `revenue_surprise_percent_lt`, `revenue_surprise_percent_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -57,8 +57,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `RevenueSurprisePercent` | double | The revenue surprise relative to the estimate, as a decimal fraction (0.126 = 12.6%), calculated as revenue_surprise divided by the absolute value of estimated_revenue. Positive is a beat and negative a miss. | REST |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS EST) when the earnings are scheduled or were reported. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 
