@@ -16,7 +16,7 @@ import dataclasses
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 
@@ -25,11 +25,11 @@ from deephaven_massive._massive import WsClient
 from tests._live import streams
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    import asyncio
+    from collections.abc import Awaitable, Callable
     from typing import TypeAlias
 
     from deephaven.table import Table
-    from websockets.asyncio.client import ClientConnection
 
 pytestmark = pytest.mark.integration
 
@@ -53,6 +53,15 @@ this long after the session opens."""
 
 _RECOVERY_WAIT = 120.0
 """Seconds the reconnect check waits for the stream to deliver rows again after the drop."""
+
+
+class _Socket(Protocol):
+    """The part of an authenticated socket the reconnect check uses: its transport."""
+
+    @property
+    def transport(self) -> asyncio.Transport:
+        """The socket's asyncio transport, whose `abort()` drops the connection at once."""
+        ...
 
 
 def _wait_for_state(
@@ -208,10 +217,12 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     recorded in order, `WAITING_SLOT` included: a reconnect that finds the old connection's
     slot still held waits for it.
     """
-    sockets: list[tuple[WsClient, ClientConnection]] = []
-    run_generation = WsClient._run_generation
+    sockets: list[tuple[WsClient, _Socket]] = []
+    run_generation = cast(
+        "Callable[[WsClient, _Socket], Awaitable[object]]", WsClient._run_generation
+    )
 
-    async def recording(self: WsClient, websocket: ClientConnection) -> object:
+    async def recording(self: WsClient, websocket: _Socket) -> object:
         sockets.append((self, websocket))
         return await run_generation(self, websocket)
 

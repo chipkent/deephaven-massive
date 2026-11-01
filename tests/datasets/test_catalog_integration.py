@@ -84,7 +84,7 @@ _POLL_WAIT = 30.0
 _STREAM_WAIT = 15.0
 """Seconds a stream case waits for Massive's acknowledgement."""
 
-_TICK_WAIT = 45.0
+_TICK_WAIT = 60.0
 """Seconds a stream case of ticks or values waits for its first row once rows must flow."""
 
 _STREAM_GAP = 3.0
@@ -426,6 +426,8 @@ class _Case:
         caplog: The captured log records, for the library's warnings.
         skip_if_not_entitled: Skips the case when a stream of the session was refused.
         evidence: Records a line of evidence.
+        record_property: Records a property of the case's report, for the coverage: its
+            `plan` and its `drift`.
     """
 
     session: dm.MassiveSession
@@ -436,6 +438,7 @@ class _Case:
     caplog: pytest.LogCaptureFixture
     skip_if_not_entitled: SkipIfNotEntitled
     evidence: Evidence
+    record_property: Callable[[str, object], None]
 
     def drift(self) -> list[str]:
         """Return what the case saw drift: the library's warnings and any `SchemaDrift`.
@@ -479,7 +482,7 @@ def _call(case: _Case, query: QueryBase, verb: str, *, day: date) -> tuple[list[
         table = _run(query, verb, bars=case.spec.is_bars, day=day)
     except dm.EntitlementError as error:
         plan = _plan(case.name, case.spec, verb, flat_files="flat files" in str(error))
-        _PLAN_OF[case.name, verb] = plan
+        case.record_property("plan", plan)
         pytest.skip(f"not entitled: needs {plan} ({case.name}: {error})")
     except ValueError as error:
         if "s3" not in str(error).lower():
@@ -558,11 +561,6 @@ def _stream_case(
     return columns, drift
 
 
-_PLAN_OF: dict[tuple[str, str], str] = {}
-"""The plan a refused `fetch()` or `history()` case needs, when it differs from its verb's
-usual one (a refusal of the flat files); the test records it as the case's `plan`."""
-
-
 @pytest.mark.timeout(100)
 @pytest.mark.parametrize(("name", "verb"), _params())
 def test_every_dataset_and_verb_returns_its_columns(
@@ -609,18 +607,26 @@ def test_every_dataset_and_verb_returns_its_columns(
         live_session, name, verb, client=live_rest, symbols=symbols, day=previous_trading_day
     )
     expected = [row["Name"] for row in table_rows(query.columns())]
-    case = _Case(live_session, name, spec, plan, table_rows, caplog, skip_if_not_entitled, evidence)
-    try:
-        if verb in {"fetch", "history"}:
-            columns, drift = _call(case, query, verb, day=previous_trading_day)
-        elif verb == "poll":
-            columns, drift = _poll_case(case, query)
-        else:
-            columns, drift = _stream_case(
-                case, query, wait_acked=wait_acked, wait_rows=wait_rows, rows_due=rows_due
-            )
-    finally:
-        record_property("plan", _PLAN_OF.pop((name, verb), plan))
+    record_property("plan", plan)  # a refusal of the flat files records its own, later
+    case = _Case(
+        live_session,
+        name,
+        spec,
+        plan,
+        table_rows,
+        caplog,
+        skip_if_not_entitled,
+        evidence,
+        record_property,
+    )
+    if verb in {"fetch", "history"}:
+        columns, drift = _call(case, query, verb, day=previous_trading_day)
+    elif verb == "poll":
+        columns, drift = _poll_case(case, query)
+    else:
+        columns, drift = _stream_case(
+            case, query, wait_acked=wait_acked, wait_rows=wait_rows, rows_due=rows_due
+        )
     if drift:
         record_property("drift", "; ".join(drift))
         for line in drift:

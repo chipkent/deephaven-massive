@@ -2493,9 +2493,9 @@ def _case(report: pytest.TestReport) -> str:
 def _smoke_groups(reports: list[pytest.TestReport]) -> dict[str, list[pytest.TestReport]]:
     """Group skipped smoke cases by what they lacked: the plan they need, or the reason.
 
-    A case the plan refused names its plan in its `plan` property, such as "a Stocks plan
-    with REST access"; any other skip is grouped by its reason, less the details in its
-    first parentheses, such as "not exercised: market closed".
+    A case the plan refused ("not entitled") is grouped by the last `plan` property it
+    recorded, such as "a Stocks plan with REST access"; any other skip by its reason, less
+    the details in its first parentheses, such as "not exercised: market closed".
 
     Args:
         reports: The skipped cases' reports.
@@ -2505,8 +2505,10 @@ def _smoke_groups(reports: list[pytest.TestReport]) -> dict[str, list[pytest.Tes
     """
     groups: dict[str, list[pytest.TestReport]] = {}
     for report in reports:
+        reason = _skip_reason(report)
         plan = dict(report.user_properties).get("plan")
-        key = str(plan) if plan else _skip_reason(report).partition(" (")[0]
+        refused = reason.startswith("not entitled") and plan
+        key = str(plan) if refused else reason.partition(" (")[0]
         groups.setdefault(key, []).append(report)
     return groups
 
