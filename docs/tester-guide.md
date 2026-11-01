@@ -1266,5 +1266,27 @@ on Docker Desktop's WSL integration for Ubuntu (**Settings > Resources > WSL int
    `docker exec massive-test sh -c 'echo "${#MASSIVE_API_KEY} characters"'` should print the
    same count as in 1.3.
 
+4. Optional: a settings file. To give the container settings such as `delayed_subscriptions`
+   without typing them into every example, write them in `~/massive-test/settings.yaml` (the
+   README's [settings file](../README.md#settings-file) section shows a full example), then add
+   two options to the `docker run` line of step 2, before the image name:
+
+   ```bash
+     -v "$HOME/massive-test/settings.yaml:/settings/settings.yaml:ro" \
+     -e DEEPHAVEN_MASSIVE_CONFIG_FILE=/settings/settings.yaml \
+   ```
+
+   `:ro` mounts the file read-only; the variable tells the library where it is inside the
+   container. In the console, open the session from it:
+   `m = dm.MassiveSession(dm.MassiveConfig.from_file())`. Never put your key in the file: it
+   is refused there, and `-e MASSIVE_API_KEY` passes it in already.
+
+   | Message | Fix |
+   |---|---|
+   | `no settings file: pass its path ...` | The `-e DEEPHAVEN_MASSIVE_CONFIG_FILE=...` option is missing. Stop the container and start it again with it. |
+   | `settings file /settings/settings.yaml does not exist (from DEEPHAVEN_MASSIVE_CONFIG_FILE)` | The `-v` option is missing, or its left side names a file that does not exist on your computer. Docker creates a folder in its place, so check that `~/massive-test/settings.yaml` is a file. |
+| `Is a directory` | The settings file path is a folder: Docker created it because the file did not exist on your computer when the container started. Stop the container, delete the folder `~/massive-test/settings.yaml`, create the file there, and start the container again. |
+   | `settings file ..., line ..., column ...: ...` | The file holds a mistake on that line: an unknown setting (the message suggests the right name), a word in the wrong case, or a key. Fix the file and run `from_file()` again; no restart is needed. |
+
 Control-C stops the container and removes it; `docker rmi deephaven-massive-test` removes the
 image. On Linux, files the container wrote belong to `root`: delete them with `sudo rm`.

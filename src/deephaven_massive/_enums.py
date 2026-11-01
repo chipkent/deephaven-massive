@@ -458,11 +458,11 @@ class OnError(StrEnum):
 
     - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The
       default there is `RAISE`.
-    - `MassiveConfig.noncanonical_symbols` (`DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS`), for a
-      row of a symbol table passed as `symbols` that is not Massive's exact ticker. A `str` or
-      a list passed in code always raises, whatever the setting. The default is `LOG`.
-    - `MassiveConfig.unreadable_symbols` (`DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS`), for a symbol
-      Massive sends in a spelling the library cannot read. The default is `LOG`.
+    - `MassiveConfig.noncanonical_symbols`, for a row of a symbol table passed as `symbols`
+      that is not Massive's exact ticker. A `str` or a list passed in code always raises,
+      whatever the setting. The default is `LOG`.
+    - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
+      cannot read. The default is `LOG`.
 
     The members:
 

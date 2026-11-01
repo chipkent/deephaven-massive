@@ -42,6 +42,7 @@ README = ROOT / "README.md"
 SOURCE = ROOT / "src" / "deephaven_massive"
 
 _BLOCK = re.compile(r"```python\n(.*?)```", re.DOTALL)
+_YAML_BLOCK = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 _README_CITATION = re.compile(r"README\.md#([A-Za-z0-9_-]+)")
 _PAGE_CITATION = re.compile(r"docs/datasets/([A-Za-z0-9_.]+?)\.md\b")
@@ -202,10 +203,35 @@ def _forget(names: dict[str, Any]) -> None:
 # --- Every example runs ------------------------------------------------------------------------
 
 
+def _settings_file(home: Path) -> Path:
+    """Write the README's example settings file where its examples read it, under `home`.
+
+    The file is the README's own YAML example, so the test checks that the example is a file
+    `MassiveConfig.from_file` accepts.
+
+    Args:
+        home: The folder that stands in for the home folder.
+
+    Returns:
+        The file's path, `<home>/massive/settings.yaml`.
+    """
+    text = README.read_text(encoding="utf-8")
+    start = text.index('<a id="settings-file"></a>')
+    [example] = _YAML_BLOCK.findall(text[start : text.index("<a id=", start + 1)])
+    file = home / "massive" / "settings.yaml"
+    file.parent.mkdir()
+    file.write_text(example, encoding="utf-8")
+    return file
+
+
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
 def test_every_readme_example_runs_in_order(
-    *, readme_server: FakeRestServer, tmp_path: Path
+    *, readme_server: FakeRestServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The settings-file examples read the README's example file from the home folder, by path
+    # and through the environment variable.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_CONFIG_FILE", str(_settings_file(tmp_path)))
     # Every path the examples read answers an empty page, except the futures contracts, which
     # the next example streams, and must name at least one contract.
     readme_server.reply_default(Reply(envelope([])))
@@ -219,6 +245,7 @@ def test_every_readme_example_runs_in_order(
     assert isinstance(names["kept"], Table)
     assert isinstance(names["watched"], Table)
     assert isinstance(names["es"], Table)
+    assert names["config"].max_outage == 600  # read from the example file
     _forget(names)
 
 

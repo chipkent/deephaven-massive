@@ -205,9 +205,9 @@ def unreadable_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
     sent = f"the symbols {listed}, spellings" if texts[1:] else f"the symbol {listed}, a spelling"
     return (
         f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. To keep "
-        "such rows with a null Symbol and the text in RawSymbol meanwhile, set "
-        "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log or pass "
-        f"MassiveConfig(unreadable_symbols=dm.OnError.LOG). {LIBRARY_BUG}"
+        "such rows with a null Symbol and the text in RawSymbol meanwhile, pass "
+        "MassiveConfig(unreadable_symbols=dm.OnError.LOG), or write 'unreadable_symbols: log' "
+        f"in the settings file. {LIBRARY_BUG}"
     )
 
 

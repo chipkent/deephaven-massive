@@ -145,7 +145,7 @@ def test_the_unreadable_symbol_message_names_the_spellings_the_setting_and_the_b
     assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
     one = unreadable_symbol_message("forex.quotes", ["a"])
     assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
-    assert "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log" in message
+    assert "'unreadable_symbols: log' in the settings file" in message
     assert "MassiveConfig(unreadable_symbols=dm.OnError.LOG)" in message
     assert message.endswith(LIBRARY_BUG)
 
