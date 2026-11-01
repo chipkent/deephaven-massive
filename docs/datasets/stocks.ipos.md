@@ -15,7 +15,7 @@ m.stocks.ipos(symbols=None, *, start=None, end=None, sort=None, order=None, limi
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `listing_date.gte` and `listing_date.lte` |
-| `poll()` | adds and updates rows, never deletes, keyed by `Symbol` and `IssuerName` (`dm.PollMode.UPSERT`) |
+| `poll()` | `dm.PollMode.UPSERT`: adds and updates rows, never deletes, keyed by `Symbol` and `IssuerName` |
 | `sort` | `listing_date`, `ticker`, `last_updated`, `security_type`, `issuer_name`, `currency_code`, `isin`, `us_code`, `final_issue_price`, `min_shares_offered`, `max_shares_offered`, `lowest_offer_price`, `highest_offer_price`, `total_offer_size`, `shares_outstanding`, `primary_exchange`, `lot_size`, `security_description`, `ipo_status`, `announced_date` |
 | `filters` | `ipo_status`, `isin`, `us_code` |
 
@@ -57,8 +57,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `TotalOfferSize` | double | The total amount raised by the company for IPO. | REST |
 | `UsCode` | String | This is a unique nine-character alphanumeric code that identifies a North American financial security for the purposes of facilitating clearing and settlement of trades. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
-
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as `unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
 
 <details><summary>Massive fields</summary>
 

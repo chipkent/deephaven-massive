@@ -24,6 +24,7 @@ def _folder(tmp_path: Path) -> Path:
     (folder / "diagnostics").mkdir(parents=True)
     (folder / "examples-output" / "tables" / "03_daily_bars").mkdir(parents=True)
     (folder / "bug-report.md").write_text("What I did\n", encoding="utf-8")
+    (folder / "setup-check.txt").write_text("OK   same commit: both are 1a2b\n", "utf-8")
     (folder / "massive-debug.log").write_text(f"GET /v3?apiKey={KEY}\nline two\n", "utf-8")
     (folder / "diagnostics" / "streams.csv").write_text("Id,State\n1,FAILED\n", "utf-8")
     (folder / "examples-output" / "summary.txt").write_text("01: passed\n", "utf-8")
@@ -54,6 +55,7 @@ def test_the_bundle_holds_the_collected_text_files_cleaned_and_the_environment(
         "examples-output/summary.txt",
         "examples-output/tables/03_daily_bars/daily.csv",
         "massive-debug.log",
+        "setup-check.txt",
     ]
     assert texts["massive-debug.log"] == "GET /v3?apiKey=***\nline two\n"
     assert '"key": "***"' in texts["environment.json"]

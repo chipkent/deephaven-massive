@@ -40,7 +40,6 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.column_descriptions import (
-    RAW_SYMBOL,
     TRANSPORT_LABELS,
     TRANSPORT_ORDER,
 )
@@ -123,15 +122,6 @@ _MERGE: Final = (
     'NULL_LONG")`.'
 )
 """The paragraph of the index on merging tables of different classes."""
-
-_RAW_SYMBOL_NOTE: Final = (
-    "`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's "
-    "`Symbol` is null, and `RawSymbol` is null on every other row. A session with "
-    "`unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as "
-    "`unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the "
-    "table shows the default session."
-)
-"""The note under the columns of a dataset that reads its symbol from rows."""
 
 _WIRE_GUIDE: Final = (
     "The Massive field behind each column, per transport (`request` for a value the library "
@@ -274,8 +264,8 @@ def render(
     plan, one column per page, each cell the plan's recency and history (or "Not included"),
     and the summary of a page that lists no plan. Then the columns, one row per column in
     result order (**Column**, **Deephaven type**, the `ColumnType` value such as `Instant`,
-    **Description**, **Supplied by**, the transports that fill it), a note when the dataset has
-    a `RawSymbol` column, and, folded in `<details>`, the Massive field behind each column per
+    **Description**, **Supplied by**, the transports that fill it), and, folded in
+    `<details>`, the Massive field behind each column per
     transport the dataset reads (`request` for a key filled from the request). Last come the
     sorted, distinct vendor pages and a footer with the generator command and the date
     Massive's documentation was fetched.
@@ -461,15 +451,15 @@ def _poll_text(spec: DatasetSpec) -> str:
         spec: A dataset with `fetch()`.
 
     Returns:
-        The mode's effect, its keys, and the mode, such as "holds exactly the latest cycle's
-        rows, keyed by `Symbol` (`dm.PollMode.REPLACE`)".
+        The mode, then its effect and keys, such as "`dm.PollMode.REPLACE`: holds exactly the
+        latest cycle's rows, keyed by `Symbol`".
     """
-    text = _POLL_MODES[spec.poll_mode]
+    text = f"`dm.PollMode.{spec.poll_mode.name}`: {_POLL_MODES[spec.poll_mode]}"
     if spec.poll_keys:
         text = f"{text}, keyed by {_and(spec.poll_keys)}"
     if spec.revision_keys:
         text = f"{text}; `mode=dm.PollMode.APPEND` also keys by {_and(spec.revision_keys)}"
-    return f"{text} (`dm.PollMode.{spec.poll_mode.name}`)"
+    return text
 
 
 def _and(names: Sequence[str]) -> str:
@@ -539,15 +529,20 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
     ]
     if listed:
         plans = list(dict.fromkeys(terms.plan for _, page in listed for terms in page.plans))
-        header = ["Plan", *(f"{page.title} ({_area(url)})" for url, page in listed)]
+        # Pages of one title and area, such as one per asset class, share one column.
+        titles = [f"{page.title} ({_area(url)})" for url, page in listed]
+        columns = {
+            title: [page for (_, page), own in zip(listed, titles, strict=True) if own == title]
+            for title in titles
+        }
+        header = ["Plan", *columns]
         lines.extend(("", _row(header), _row(["---"] * len(header))))
         for plan in plans:
             cells = []
-            for _, page in listed:
-                terms = next((t for t in page.plans if t.plan == plan), None)
-                cells.append(
-                    "" if terms is None else _plan_cell(terms.access, terms.recency, terms.history)
-                )
+            for column in columns.values():
+                terms = [t for page in column for t in page.plans if t.plan == plan]
+                texts = (_plan_cell(t.access, t.recency, t.history) for t in terms)
+                cells.append("; ".join(dict.fromkeys(texts)))
             lines.append(_row([plan, *cells]))
     unlisted = [(url, page) for url, page in pages if not page.plans]
     if unlisted:
@@ -606,8 +601,6 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
     header = ["Column", "Deephaven type", "Description", "Supplied by"]
     lines = ["", "## Columns", "", _row(header), _row(["---"] * len(header))]
     lines.extend(_row(_cells(column)) for column in schema.columns)
-    if RAW_SYMBOL in schema.column_names:
-        lines.extend(("", _RAW_SYMBOL_NOTE))
     fields = ["Column", *(_WIRE_HEADINGS[t] for t in wire)]
     lines.extend(
         (

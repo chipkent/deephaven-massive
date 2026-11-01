@@ -15,23 +15,23 @@ m.indicators.rsi(symbols, window=14, *, timespan=dm.Timespan.DAY, series_type=dm
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `timestamp.gte` and `timestamp.lt` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Symbol` and `TimestampStart` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `TimestampStart` |
 | `filters` | none |
 
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Relative Strength Index (RSI) (REST) | Relative Strength Index (RSI) (REST) |
-| --- | --- | --- |
-| Currencies Basic | End-of-day, 2 years |  |
-| Currencies Starter | Real-time, All history |  |
-| Currencies Business | Real-time, All history |  |
-| Stocks Basic |  | End-of-day, 2 years |
-| Stocks Starter |  | 15-minute delayed, 5 years |
-| Stocks Developer |  | 15-minute delayed, 10 years |
-| Stocks Advanced |  | Real-time, All history |
-| Stocks Business |  | Real-time, All history |
+| Plan | Relative Strength Index (RSI) (REST) |
+| --- | --- |
+| Currencies Basic | End-of-day, 2 years |
+| Currencies Starter | Real-time, All history |
+| Currencies Business | Real-time, All history |
+| Stocks Basic | End-of-day, 2 years |
+| Stocks Starter | 15-minute delayed, 5 years |
+| Stocks Developer | 15-minute delayed, 10 years |
+| Stocks Advanced | Real-time, All history |
+| Stocks Business | Real-time, All history |
 
 ## Columns
 

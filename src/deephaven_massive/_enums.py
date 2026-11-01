@@ -146,7 +146,7 @@ class PollMode(StrEnum):
     """How a `poll()` table combines successive request cycles.
 
     - `AUTO`, the default of `poll()`: the dataset's own mode, one of the three below, which
-      each dataset's docstring names: `APPEND` for the news and filing feeds, `UPSERT` for
+      its page in `docs/datasets` names: `APPEND` for the news and filing feeds, `UPSERT` for
       IPOs, and `REPLACE` for the rest.
     - `REPLACE`: a keyed table that holds exactly the latest cycle; keys absent from it are
       deleted, including when the cycle returns no rows.
@@ -177,8 +177,10 @@ class PollMode(StrEnum):
 class HistorySource(StrEnum):
     """Where `history()` reads from.
 
-    - `AUTO`: the library picks flat files or REST from credentials, the dataset, the bar
-      shape, publication dates, and the number of symbols.
+    - `AUTO`: the library picks flat files or REST from the S3 credentials, the dataset, the
+      bar shape and `adjusted`, and the number of symbols (`flat_file_symbol_threshold`). A
+      day whose file is missing, or files the plan lacks, are read from REST when REST can
+      serve them. See README.md#history-sources.
     - `REST`: the REST history endpoint, paged internally.
     - `FLAT_FILES`: the gzip CSV files on S3 (`files.massive.com`); needs S3 credentials.
 

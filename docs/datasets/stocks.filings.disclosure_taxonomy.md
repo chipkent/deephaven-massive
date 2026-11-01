@@ -14,7 +14,7 @@ m.stocks.filings.disclosure_taxonomy(*, sort=None, order=None, limit=None, filte
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Taxonomy`, `PrimaryCategory`, `SecondaryCategory` and `TertiaryCategory` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Taxonomy`, `PrimaryCategory`, `SecondaryCategory` and `TertiaryCategory` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `primary_category`, `primary_category_any_of`, `primary_category_gt`, `primary_category_gte`, `primary_category_lt`, `primary_category_lte`, `secondary_category`, `secondary_category_any_of`, `secondary_category_gt`, `secondary_category_gte`, `secondary_category_lt`, `secondary_category_lte`, `taxonomy`, `taxonomy_any_of`, `taxonomy_gt`, `taxonomy_gte`, `taxonomy_lt`, `taxonomy_lte`, `tertiary_category`, `tertiary_category_any_of`, `tertiary_category_gt`, `tertiary_category_gte`, `tertiary_category_lt`, `tertiary_category_lte` |
 

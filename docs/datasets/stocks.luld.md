@@ -43,8 +43,6 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | WebSocket |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |
 
-`RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. A session with `unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as `unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the table shows the default session.
-
 <details><summary>Massive fields</summary>
 
 The Massive field behind each column, per transport (`request` for a value the library fills from the request; empty for a column the library computes).

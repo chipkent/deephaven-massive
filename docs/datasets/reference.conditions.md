@@ -14,7 +14,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` |
 | `sort` | `asset_class`, `id`, `type`, `name`, `data_types`, `legacy` |
 | `filters` | none |
 
@@ -22,21 +22,21 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Condition Codes (REST) | Condition Codes (REST) | Condition Codes (REST) |
-| --- | --- | --- | --- |
-| Currencies Basic | Updated as needed |  |  |
-| Currencies Starter | Updated as needed |  |  |
-| Currencies Business | Updated as needed |  |  |
-| Options Basic |  | Updated as needed |  |
-| Options Starter |  | Updated as needed |  |
-| Options Developer |  | Updated as needed |  |
-| Options Advanced |  | Updated as needed |  |
-| Options Business |  | Updated as needed |  |
-| Stocks Basic |  |  | Updated as needed |
-| Stocks Starter |  |  | Updated as needed |
-| Stocks Developer |  |  | Updated as needed |
-| Stocks Advanced |  |  | Updated as needed |
-| Stocks Business |  |  | Updated as needed |
+| Plan | Condition Codes (REST) |
+| --- | --- |
+| Currencies Basic | Updated as needed |
+| Currencies Starter | Updated as needed |
+| Currencies Business | Updated as needed |
+| Options Basic | Updated as needed |
+| Options Starter | Updated as needed |
+| Options Developer | Updated as needed |
+| Options Advanced | Updated as needed |
+| Options Business | Updated as needed |
+| Stocks Basic | Updated as needed |
+| Stocks Starter | Updated as needed |
+| Stocks Developer | Updated as needed |
+| Stocks Advanced | Updated as needed |
+| Stocks Business | Updated as needed |
 
 ## Columns
 

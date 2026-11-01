@@ -15,7 +15,7 @@ m.stocks.financials.income_statements(symbols=None, *, timeframe=None, start=Non
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `period_end.gte` and `period_end.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `Cik`, `PeriodEnd` and `Timeframe` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Cik`, `PeriodEnd` and `Timeframe` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `filing_date`, `filing_date_gt`, `filing_date_gte`, `filing_date_lt`, `filing_date_lte`, `fiscal_quarter`, `fiscal_quarter_gt`, `fiscal_quarter_gte`, `fiscal_quarter_lt`, `fiscal_quarter_lte`, `fiscal_year`, `fiscal_year_gt`, `fiscal_year_gte`, `fiscal_year_lt`, `fiscal_year_lte` |
 

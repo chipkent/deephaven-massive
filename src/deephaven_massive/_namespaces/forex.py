@@ -464,7 +464,7 @@ class _Forex(Namespace):
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
         One row per pair: today's and the previous UTC day's bars, the latest minute bar, the last
-        quote, and the change since the previous close. Every pair comes in one response.
+        quote, and the change since the previous close. Up to 250 pairs go in one request.
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL` for every

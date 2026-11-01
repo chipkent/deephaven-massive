@@ -15,7 +15,7 @@ m.stocks.filings.insider_transactions(symbols=None, *, issuer_cik=None, owner_ci
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `RecordType`, `TransactionDate`, `TransactionCode`, `TransactionShares`, `TransactionPricePerShare`, `TransactionAcquiredDisposed`, `SharesOwnedFollowingTransaction`, `ExercisePrice`, `ExerciseDate` and `ExpirationDate` (`dm.PollMode.APPEND`) |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `RecordType`, `TransactionDate`, `TransactionCode`, `TransactionShares`, `TransactionPricePerShare`, `TransactionAcquiredDisposed`, `SharesOwnedFollowingTransaction`, `ExercisePrice`, `ExerciseDate` and `ExpirationDate` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `form_type`, `transaction_code` |
 

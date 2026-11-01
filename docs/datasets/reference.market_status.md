@@ -14,31 +14,31 @@ m.reference.market_status()
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows; `mode=dm.PollMode.APPEND` also keys by `ServerTime` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows; `mode=dm.PollMode.APPEND` also keys by `ServerTime` |
 
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Market Status (REST) | Market Status (REST) | Market Status (REST) | Market Status (REST) | Market Status (REST) |
-| --- | --- | --- | --- | --- | --- |
-| Currencies Basic | Updated in real time | Updated in real time |  |  |  |
-| Currencies Starter | Updated in real time | Updated in real time |  |  |  |
-| Currencies Business | Updated in real time | Updated in real time |  |  |  |
-| Indices Basic |  |  | Updated in real time |  |  |
-| Indices Starter |  |  | Updated in real time |  |  |
-| Indices Advanced |  |  | Updated in real time |  |  |
-| Indices Business |  |  | Updated in real time |  |  |
-| Options Basic |  |  |  | Updated in real time |  |
-| Options Starter |  |  |  | Updated in real time |  |
-| Options Developer |  |  |  | Updated in real time |  |
-| Options Advanced |  |  |  | Updated in real time |  |
-| Options Business |  |  |  | Updated in real time |  |
-| Stocks Basic |  |  |  |  | Updated in real time |
-| Stocks Starter |  |  |  |  | Updated in real time |
-| Stocks Developer |  |  |  |  | Updated in real time |
-| Stocks Advanced |  |  |  |  | Updated in real time |
-| Stocks Business |  |  |  |  | Updated in real time |
+| Plan | Market Status (REST) |
+| --- | --- |
+| Currencies Basic | Updated in real time |
+| Currencies Starter | Updated in real time |
+| Currencies Business | Updated in real time |
+| Indices Basic | Updated in real time |
+| Indices Starter | Updated in real time |
+| Indices Advanced | Updated in real time |
+| Indices Business | Updated in real time |
+| Options Basic | Updated in real time |
+| Options Starter | Updated in real time |
+| Options Developer | Updated in real time |
+| Options Advanced | Updated in real time |
+| Options Business | Updated in real time |
+| Stocks Basic | Updated in real time |
+| Stocks Starter | Updated in real time |
+| Stocks Developer | Updated in real time |
+| Stocks Advanced | Updated in real time |
+| Stocks Business | Updated in real time |
 
 ## Columns
 

@@ -138,10 +138,9 @@ class MassiveError(Exception):
 
     Raised directly for failures that are neither authentication nor entitlement problems: a
     transport error, an HTTP error other than 401 or 403, a rate limit that outlived the
-    retries, a closed session, or a timestamp whose declared unit does not fit its magnitude.
-    The message always carries the context needed to act on it (the host, the dataset, the
-    server's text). `status`, `request_id`, and `cause` are read-only and safe to read from any
-    thread.
+    retries, or a closed session. The message always carries the context needed to act on it
+    (the host, the dataset, the server's text). `status`, `request_id`, and `cause` are
+    read-only and safe to read from any thread.
 
     Example:
         Catch every library failure in one place, and branch on the HTTP status::
@@ -224,9 +223,10 @@ class EntitlementError(MassiveError):
     """The key is valid, but the plan does not include what was requested.
 
     Raised when Massive answers HTTP 403 (`NOT_AUTHORIZED`) to a REST request, when a WebSocket
-    subscription is refused with an explicit error for its topic, when a plan has no WebSocket
-    access for an asset class at all, or when S3 refuses a flat file. Only the affected table
-    fails; other tables on the same connection keep running.
+    subscription is refused with an explicit error for its topic, when S3 refuses a flat file,
+    or when Massive labels current data `DELAYED`, or a stream's host check shows delayed data,
+    for a subscription not in `MassiveConfig.delayed_subscriptions` (the message names the line
+    to add). Only the affected table fails; other tables on the same connection keep running.
 
     The library does not model Massive's plans, so the message reports what happened rather than
     guessing at what the plan holds: the subscription (stocks, options, indices, currencies, or

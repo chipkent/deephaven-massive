@@ -26,6 +26,10 @@ other error, which is a finding to report. Every table the examples make belongs
 liveness scope; at the end the runner closes every session the examples left open, forgets
 their variables, and releases that scope, so nothing they started outlives the run.
 
+The first example opens its session with the free plan's line, `FREE_PLAN_SESSION`. On a
+key with paid plans, `run_examples` runs a copy whose line fits them (`session_line`), as the
+guide tells a tester with a paid plan to write it.
+
 This module imports Deephaven, so it is imported only once a Deephaven server runs.
 """
 
@@ -48,7 +52,7 @@ import deephaven_massive as dm
 from deephaven_massive._tables.liveness import new_scope, release_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -74,6 +78,70 @@ minutes of rate-limit pauses, and some time to read."""
 
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""
+
+FREE_PLAN_SESSION: Final = (
+    "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))\n"
+)
+"""The session line of the first example, as the guide writes it for the free plan."""
+
+DELAYED_TIERS: Final = ("starter", "developer")
+"""The plans that stream delayed data, except for currencies, which are real-time on every
+plan."""
+
+
+def session_line(tiers: Mapping[str, str]) -> str:
+    """Write the first example's session line for the key's plans.
+
+    A subscription on the free plan goes in `rest_basic_subscriptions`, so its requests are
+    paced from the start; a Starter or Developer subscription other than currencies goes in
+    `delayed_subscriptions`, so its live examples read the delayed feed its plan streams.
+
+    Args:
+        tiers: Each subscription's plan, as the probe names them (`"stocks": "basic"`).
+
+    Returns:
+        `FREE_PLAN_SESSION` when every subscription is on the free plan; otherwise the line
+        that fits the plans, such as
+        `m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions={...},
+        delayed_subscriptions={dm.Subscription.STOCKS}))`, ending with a newline.
+    """
+    if all(tier == "basic" for tier in tiers.values()):
+        return FREE_PLAN_SESSION
+    basic = sorted(name for name, tier in tiers.items() if tier == "basic")
+    delayed = sorted(
+        name for name, tier in tiers.items() if tier in DELAYED_TIERS and name != "currencies"
+    )
+
+    def members(names: list[str]) -> str:
+        if not names:
+            return "set()"
+        return "{" + ", ".join(f"dm.Subscription.{name.upper()}" for name in names) + "}"
+
+    return (
+        f"m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions={members(basic)}, "
+        f"delayed_subscriptions={members(delayed)}))\n"
+    )
+
+
+def fitted(path: Path, session: str, folder: Path) -> Path:
+    """Return the example to run: the file itself, or a copy whose session line fits the plans.
+
+    Args:
+        path: The example's file.
+        session: The session line to run (`session_line`).
+        folder: Where a changed copy goes, created if missing.
+
+    Returns:
+        `path` when it has no free-plan session line or `session` is that line; otherwise a
+        copy in `folder` with the line replaced.
+    """
+    code = path.read_text(encoding="utf-8")
+    if session == FREE_PLAN_SESSION or FREE_PLAN_SESSION not in code:
+        return path
+    folder.mkdir(parents=True, exist_ok=True)
+    copy = folder / path.name
+    copy.write_text(code.replace(FREE_PLAN_SESSION, session), encoding="utf-8")
+    return copy
 
 
 @dataclass(frozen=True)
@@ -318,6 +386,7 @@ def run_examples(
     echo: Callable[[str], None],
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
+    session: str = FREE_PLAN_SESSION,
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
 
@@ -329,6 +398,8 @@ def run_examples(
         lock: Makes the lock every console command holds.
         wait: Waits for the background downloads before each example; returns False when it
             gave up.
+        session: The session line the first example runs (`session_line`); an example that
+            holds `FREE_PLAN_SESSION` runs from a copy under `out/fitted/` with it replaced.
 
     Returns:
         Each example's outcome.
@@ -342,7 +413,8 @@ def run_examples(
                 echo("a background download is still running; going on without it")
             before = dict(tables_of(namespace))
             echo(f"{path.name}: running")
-            outcome, printed = run_example(path, namespace, lock=lock)
+            runs = fitted(path, session, out / "fitted")
+            outcome, printed = run_example(runs, namespace, lock=lock)
             outcomes.append(outcome)
             made = {n: t for n, t in tables_of(namespace).items() if before.get(n) is not t}
             unsaved = save_tables(made, out / "tables" / path.stem, secrets)

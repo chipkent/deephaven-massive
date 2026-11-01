@@ -14,7 +14,7 @@ m.futures.market_status(*, product_code=None, limit=None)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `ProductCode` and `TradingVenue`; `mode=dm.PollMode.APPEND` also keys by `Timestamp` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `ProductCode` and `TradingVenue`; `mode=dm.PollMode.APPEND` also keys by `Timestamp` |
 
 ## Plan access
 

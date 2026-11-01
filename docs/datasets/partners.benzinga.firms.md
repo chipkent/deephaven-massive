@@ -14,7 +14,7 @@ m.partners.benzinga.firms(*, sort=None, order=None, limit=None, filters=None)
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `BenzingaId` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `BenzingaId` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte` |
 

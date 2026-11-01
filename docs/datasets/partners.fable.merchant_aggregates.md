@@ -15,7 +15,7 @@ m.partners.fable.merchant_aggregates(*, start=None, end=None, sort=None, order=N
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `transaction_date.gte` and `transaction_date.lte` |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `TransactionDate`, `PublishedDate`, `Name`, `Type`, `UserCountry`, `Channel`, `ConsumerType`, `MccGroup` and `TransactionCurrency` (`dm.PollMode.REPLACE`) |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `TransactionDate`, `PublishedDate`, `Name`, `Type`, `UserCountry`, `Channel`, `ConsumerType`, `MccGroup` and `TransactionCurrency` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `channel`, `channel_any_of`, `consumer_type`, `consumer_type_any_of`, `name`, `name_any_of`, `name_gt`, `name_gte`, `name_lt`, `name_lte`, `parent_name`, `parent_name_any_of`, `parent_name_gt`, `parent_name_gte`, `parent_name_lt`, `parent_name_lte`, `user_country`, `user_country_any_of` |
 

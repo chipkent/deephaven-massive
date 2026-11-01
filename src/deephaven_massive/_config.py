@@ -190,29 +190,14 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
-        delayed_subscriptions: The Massive subscriptions whose live data you want from
-            Massive's delayed feed, such as `{dm.Subscription.OPTIONS}`: their streams always
-            use `delayed.massive.com` (15 minutes behind, 10 for futures), even when the plan
-            is real-time. Every subscription not listed always uses the real-time feed and
-            fails loudly when the plan cannot serve it: a stream verb raises
-            `EntitlementError` when Massive's snapshot shows the plan's data is delayed,
-            Massive's refusal fails the refused streams, and `fetch()` or `poll()` of current
-            data (snapshots, last trade and quote, movers, the option chain, and an
-            indicator's latest values) fails when Massive labels a response or row `DELAYED`;
-            each message names the evidence and the setting to add. Past data, such as the
-            previous day's bar, a day's open and close, an indicator over a past range, and
-            dividends, is served as it is, though Massive labels it `DELAYED` on such plans.
-            REST cannot
-            ask for delayed data, so a listed subscription's `fetch()` and `poll()` return
-            whatever the plan serves, unchecked. Reference,
-            economy, and partner data are never checked, and `history()`, which reads past
-            data, is not affected. No stream ever moves between the feeds. Forex and crypto
-            (`dm.Subscription.CURRENCIES`) cannot be listed: Massive has no delayed feed for
-            them. Fair-market-value (FMV) streams are real-time only, so an FMV stream of a
-            listed subscription raises `ValueError`. A `ws_hosts` pin of a delayed feed (a host
-            whose name starts with `delayed.`) needs its subscription listed, and a listed
-            subscription may pin no other host; either mismatch raises `ValueError`. Defaults to
-            an empty set: every subscription is real-time. See README.md#real-time-or-delayed.
+        delayed_subscriptions: The subscriptions whose live data you accept from Massive's
+            delayed feed, 15 minutes behind (10 for futures), such as
+            `{dm.Subscription.OPTIONS}`. A listed subscription's streams read the delayed feed.
+            An unlisted one is real-time: a stream, or a `fetch()` or `poll()` of current data,
+            raises `EntitlementError` naming the line to add when Massive shows the data is
+            delayed. Past data and `history()` are never checked. `dm.Subscription.CURRENCIES`
+            cannot be listed and is never refused; FMV streams are real-time only; a `ws_hosts`
+            pin must match. Defaults to an empty set. See README.md#real-time-or-delayed.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no
@@ -231,8 +216,8 @@ class MassiveConfig:
             FMV family is never pinned; it is always `business.massive.com`. Defaults to
             an empty mapping: the library decides every host.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
-            once. Must be below `NO_ACK_RESEND` (60 s), the spacing of the periodic re-sends
-            of unacknowledged subscriptions, each of which awaits its answer this long.
+            once. Must be below 60 seconds, the spacing of the later re-sends of
+            unacknowledged subscriptions, each of which awaits its answer this long.
             Defaults to 5 seconds.
         reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
             after any failure that is not fatal: a connection that opened and closed (cleanly
@@ -240,7 +225,7 @@ class MassiveConfig:
             or authentication timeout, or a retryable HTTP status during the upgrade (500,
             502, 503, 504). Each further consecutive failure doubles it, up to
             `max_reconnect_backoff`, and the count resets only once a connection has stayed
-            up for 60 seconds. Must be at least `MIN_RECONNECT_BACKOFF` (15 s): Massive's
+            up for 60 seconds. Must be at least 15 seconds: Massive's
             knowledge base says the server takes "roughly 10 to 30 seconds" to release a
             dropped connection, and an earlier retry can be refused for holding the allowance
             it just lost, which on an individual plan wastes the one connection there is. The
@@ -248,21 +233,12 @@ class MassiveConfig:
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
             max_reconnect_backoff]`. Defaults to 120 seconds.
-        max_outage: Seconds of outage a live table survives. While a WebSocket connection is
-            down or reconnecting, each stream on it says so in its `m.streams()` `Error`
-            ("connection down since <time>; no data", the time of its last message) until its
-            own data flows again: Massive confirms its subscriptions, or sends it rows. A
-            stream still down this long after the drop fails, naming when the gap began: its
-            rows from then on are missing, so a table that kept running would show stale data
-            as if it were current. Call the verb again for a new live table. A `poll()` table
-            fails the same way once its cycles have kept failing for this long, counted from
-            the start of the first failed cycle since its last good cycle (or that cycle's
-            latest page), or once a cycle running past its interval has received no page for
-            this long; a slow cycle that keeps receiving pages never fails. `0` fails at the
-            first disconnect or failed cycle. Defaults to 300 seconds (5 minutes), which
-            outlasts a reconnect or two (`reconnect_backoff`) but not a real outage. A reconnect
-            wait is shortened when needed so that a held-down stream always gets one more
-            attempt, acknowledged within `ack_timeout`, before it fails.
+        max_outage: How long, in seconds, a live table may go without data before it fails.
+            A stream fails when its connection has been down this long; a `poll()` table fails when
+            its cycles have kept failing, or a late cycle has received nothing, for this long.
+            Until then, `m.streams()` says so in `Error`. Call the verb again for a new table.
+            `0` fails at the first drop or failed cycle. Defaults to 300 seconds. See
+            README.md#live-tables.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -321,29 +297,24 @@ class MassiveConfig:
         """Validate every field; freeze `ws_hosts` and the two subscription sets into copies.
 
         A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
-        `ws_hosts` key that is not a
-        `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a `rest_basic_subscriptions` or
-        `delayed_subscriptions` that is not a set of `dm.Subscription`, or a numeric field of a
-        non-numeric type also raises
-        `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
-        `require_positive_int`); `max_outage` may also be zero.
+        `ws_hosts` key that is not a `dm.AssetClass`, a host, URL, or bucket that is not a
+        `str`, a `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
+        `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
+        number that is not positive raises `ValueError`, though `max_outage` may be zero.
 
         Raises:
             TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
-            ValueError: If `ack_timeout` is not below `NO_ACK_RESEND`, `reconnect_backoff`
-                is below `MIN_RECONNECT_BACKOFF`,
-                `max_reconnect_backoff` is below `reconnect_backoff`, `max_outage` is
-                negative or not finite, a timeout,
-                backoff, interval, or count is not positive, only one of the two S3
-                credentials is set, `api_key` or an S3 credential has leading or trailing
-                whitespace (or an S3 credential is blank), `rest_base_url` or
-                `s3_endpoint_url` is not an `http` or `https` URL with a host, `s3_bucket` is
-                blank, a `ws_hosts` value is not a bare
-                lower-case hostname, or an environment variable read for a default has
-                leading or trailing whitespace (`environment_text`); and
-                `_check_delayed_subscriptions` raises it for `dm.Subscription.CURRENCIES` in
-                `delayed_subscriptions` or a `ws_hosts` pin that contradicts it.
+            ValueError: If `ack_timeout` is not below 60 seconds, `reconnect_backoff` is
+                below 15 seconds, `max_reconnect_backoff` is below `reconnect_backoff`,
+                `max_outage` is negative or not finite, a timeout, backoff, interval, or count
+                is not positive, only one of the two S3 credentials is set, `api_key` or an S3
+                credential has leading or trailing whitespace (or an S3 credential is blank),
+                `rest_base_url` or `s3_endpoint_url` is not an `http` or `https` URL with a host,
+                `s3_bucket` is blank, a `ws_hosts` value is not a bare lower-case hostname, an
+                environment variable read for a default has leading or trailing whitespace,
+                `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or a `ws_hosts`
+                pin of a delayed host does not match `delayed_subscriptions`.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
