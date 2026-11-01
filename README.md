@@ -68,7 +68,9 @@ of learning the limit from Massive's first refusal. `delayed_subscriptions` name
 subscriptions whose live data you accept 15 minutes late (10 for futures): list each one your
 Starter or Developer plan holds, since those plans stream delayed data and the library otherwise
 serves only real-time data (see [real-time or delayed](#real-time-or-delayed)).
-`max_concurrency` (default 8) is how many requests or file reads run at once.
+`max_concurrency` (default 8) is how many requests or file reads run at once. To keep settings
+in one file that every notebook, console, and container reads, see
+[settings file](#settings-file).
 
 ```python
 import deephaven_massive as dm
@@ -714,6 +716,74 @@ real_time = dm.MassiveSession()
 mixed = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS}))
 ```
 
+<a id="settings-file"></a>
+
+### Settings file
+
+Settings you use everywhere can live in one YAML file instead of in each script. The file sets
+any of `dm.MassiveConfig`'s settings by name; a setting it leaves out keeps its default.
+
+```yaml
+# ~/massive/settings.yaml: settings for deephaven-massive.
+# The API key and the S3 keys never go here: set MASSIVE_API_KEY (and, for flat files,
+# MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY) in the environment.
+
+# Subscriptions whose live data you accept from Massive's delayed feed (Starter, Developer).
+delayed_subscriptions: [options]
+
+# Subscriptions you hold on Massive's free Basic plan: five REST requests a minute.
+rest_basic_subscriptions: [stocks]
+
+# Seconds a live table rides out a dropped connection before it stops.
+max_outage: 600
+
+# How many REST requests or flat-file reads run at once.
+max_concurrency: 4
+
+# A row of a symbol table that is not Massive's exact ticker: raise, log, or ignore.
+noncanonical_symbols: raise
+
+# Pin the WebSocket host of an asset class; the library chooses when you leave this out.
+ws_hosts:
+  options: delayed.massive.com
+```
+
+Read it with `dm.MassiveConfig.from_file`. Code wins over the file, and the file wins over the
+defaults, so override one setting with `dataclasses.replace`. There are three ways to name the
+file:
+
+- **A notebook or script** passes the path:
+  `dm.MassiveConfig.from_file("~/massive/settings.yaml")`.
+- **The Deephaven console** reads the path from `DEEPHAVEN_MASSIVE_CONFIG_FILE`, set in the shell
+  that starts the server, before you start it:
+  `export DEEPHAVEN_MASSIVE_CONFIG_FILE=~/massive/settings.yaml`. Then
+  `dm.MassiveConfig.from_file()` needs no path.
+- **Docker** mounts the file read-only and sets the same variable to the path inside the
+  container: `-v "$HOME/massive/settings.yaml:/massive/settings.yaml:ro"` and
+  `-e DEEPHAVEN_MASSIVE_CONFIG_FILE=/massive/settings.yaml` on the `docker run` line.
+
+```python
+import dataclasses
+
+# A notebook or script names the file.
+config = dm.MassiveConfig.from_file("~/massive/settings.yaml")
+# A console or container started with DEEPHAVEN_MASSIVE_CONFIG_FILE needs no path.
+config = dm.MassiveConfig.from_file()
+# Code overrides the file.
+m = dm.MassiveSession(dataclasses.replace(config, max_concurrency=2))
+```
+
+Nothing reads the file unless you call `from_file`: `dm.MassiveConfig()` and
+`dm.MassiveSession()` use only the defaults and the environment's keys. The file is read
+strictly, so a typo fails at once instead of being ignored. Every value is text until its
+setting converts it, so a ticker such as `ON` or `NO` stays a ticker. Words are taken exactly
+as shown (`raise`, not `Raise`), an unknown setting names the closest one, and a setting with
+no value after its colon is refused: leave it out to get its default. Every error names the
+file, the line, and the setting, except an error about an environment variable, which names the
+variable. YAML's tags (`!!python/...`), anchors and aliases
+(`&name`, `*name`), repeated keys, and several documents in one file are refused. The log reads
+the file's name and the settings it set at INFO.
+
 <a id="diagnostics"></a>
 
 ### Diagnostics
@@ -979,6 +1049,9 @@ this section) and look at what the library did.
 | `... would be delayed (Massive reports ...)` | Your plan's data for that subscription is delayed, and the library serves real-time data unless you ask for delayed. Add the line the message shows, or upgrade the plan. See [real-time or delayed](#real-time-or-delayed). |
 | `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the class, or read the class over REST only. Stream bars instead of trades, or read `history()` or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. When the message suggests `delayed_subscriptions`, your plan may be delayed: see [real-time or delayed](#real-time-or-delayed). |
 | `delayed_subscriptions cannot hold dm.Subscription.CURRENCIES` | Forex and crypto have no delayed feed. Remove it from the set. |
+| `no settings file: pass its path ...` | `dm.MassiveConfig.from_file()` was called without a path, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` is not set where the server runs. Pass the path, or set the variable before you start the server. See [settings file](#settings-file). |
+| `settings file ... does not exist` | The path is wrong, or, in Docker, the file is not mounted at the path the variable names. Check the `-v` and `-e DEEPHAVEN_MASSIVE_CONFIG_FILE` options. |
+| `settings file ..., line ..., column ...: ...` | The file holds something the library refuses: an unknown setting (the message suggests the closest), a word in the wrong case, a credential, or a YAML feature such as a tag or anchor. Fix that line. |
 | `AuthenticationError` on a live table, ending `can also mean the ... plan includes no WebSocket streams` | Massive's live connection gives one answer for a wrong key and, possibly, for a plan without streams of that asset class. If `fetch()` or `history()` works with the same key, the key is right: read the data with `history()` or `poll()`, or check which streams your plan includes on its [reference page](docs/datasets/README.md). |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |
