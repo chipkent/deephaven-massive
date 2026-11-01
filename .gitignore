@@ -244,7 +244,7 @@ vendor/massive-previous/
 # The output and evidence of live integration runs (docs/live-tests.md): they hold raw licensed
 # rows, so they are never committed.
 live-checks.log
-live-evidence.log
+live-evidence-*.log
 # The plans the live tests probed today; it names the key only by a digest.
 .live-plans.json
 

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from deephaven_massive import MassiveSession
 
 GROUPS: Final = (
+    "rate-limits",
     "evidence",
     "luld",
     "smoke",

@@ -3,7 +3,8 @@
 Massive limits each class on its free Basic plan to 5 REST requests per minute and answers
 HTTP 429 beyond that. The tests here deliberately draw refusals from a class the key holds on
 Basic (Indices is preferred, since a run needs it least), so each needs at least one class left
-on Basic, and the run puts them first. They run with no other client of the key.
+on Basic. They are marked `integration_rate_limits`, so `-m integration` leaves them out and
+`-m integration_rate_limits` runs them, with no other client of the key.
 
 Each test first lets a minute pass, so earlier requests no longer count, then sends single raw
 requests (one attempt each, no retry, outside the run's rate governor) and records each
@@ -102,6 +103,7 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
 
 
 @pytest.mark.needs("some:basic")
+@pytest.mark.integration_rate_limits
 @pytest.mark.settles("65", "66", "67")
 @pytest.mark.timeout(330)
 def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
@@ -165,6 +167,7 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
 
 
 @pytest.mark.needs("some:basic")
+@pytest.mark.integration_rate_limits
 @pytest.mark.settles("66")
 @pytest.mark.requests(8)
 @pytest.mark.timeout(150)

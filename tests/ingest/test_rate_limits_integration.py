@@ -5,8 +5,9 @@ that a subscription is on Basic from Massive's refusal, whose text names the per
 and the governor paces it from then on. What it learned lives as long as the governor: once
 the key's last session has closed and the governor holds no slot or pause, it is dropped, and
 a new session starts unpaced. The test here draws one refusal on purpose from a class the key
-holds on Basic, so it needs at least one class left on Basic, and the run puts it first. It
-runs with no other client of the key. How to run these tests is in `docs/live-tests.md`.
+holds on Basic, so it needs at least one class left on Basic. It is marked
+`integration_rate_limits`, so `-m integration` leaves it out and `-m integration_rate_limits`
+runs it, with no other client of the key. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ def _row(
 
 
 @pytest.mark.needs("some:basic")
+@pytest.mark.integration_rate_limits
 @pytest.mark.verifies("65")
 @pytest.mark.requests(7)
 @pytest.mark.timeout(330)

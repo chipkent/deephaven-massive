@@ -9,7 +9,8 @@ the check goes on. How to run these tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
-from datetime import date
+from collections import Counter
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -17,9 +18,9 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._datasets.timestamps import MAGNITUDE_NS_THRESHOLD
 from deephaven_massive._massive import Transport, WireEntitlementError, WireError, sources
+from tests._live import calendar
 
 if TYPE_CHECKING:
-    from collections import Counter
     from collections.abc import Callable
     from typing import TypeAlias
 
@@ -37,6 +38,9 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 
 _VENUES = ("cme", "cbot", "nymex", "comex")
+_COMPARED_LAG = timedelta(minutes=16)
+"""How far before the current minute the AUTO and REST comparison stops: one minute, so no
+bar is still forming, and the 15 minutes a delayed plan's REST bars lag."""
 _DAY_NS = 86_400 * 1_000_000_000
 
 
@@ -175,3 +179,56 @@ def test_ticker_spellings_of_every_flat_file(
         tickers = list(dict.fromkeys(str(row["ticker"]) for row in rows))
         evidence(f"{prefix}: tickers {tickers[:8]}; undocumented headers {sorted(extra)}")
     assert read
+
+
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.timeout(200)
+def test_auto_minute_bars_through_today_match_rest(
+    live_session: dm.MassiveSession,
+    *,
+    previous_trading_day: date,
+    table_rows: TableRows,
+    caplog: pytest.LogCaptureFixture,
+    evidence: Evidence,
+) -> None:
+    """Whether `AUTO` and REST read the same stock minute bars from yesterday through today.
+
+    Today's flat file is published only after the day ends, so `AUTO` reads the published days
+    from the files and fills the rest, today at least, from REST, and warns that it did. Reads
+    AAPL's minute bars as traded (`adjusted=False`, the files' basis) from the previous trading
+    day through today on `AUTO` and on `REST`, and records each source's bars per day and the
+    fill warning. Today's bars keep arriving between the two reads, so only the minutes that
+    start before a cutoff taken before the first read are compared: the minute before the
+    current one, less the delayed feed's 15 minutes, which a delayed plan's REST lags by.
+    Passes when both hold the same minutes (`TimestampStart`) per day, and no minute twice:
+    no day missing or doubled where the sources meet. Skips on a day that is not a trading
+    day, when there is nothing to fill, and when the previous day's file is not published
+    yet, when `AUTO` reads REST for both days and the test would compare REST with REST.
+    """
+    today = calendar.today()
+    if not calendar.is_trading_day(today):
+        pytest.skip(f"not exercised: {today} is not a trading day, so no day is filled from REST")
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    cutoff = int((now - _COMPARED_LAG).timestamp()) * 1_000_000_000
+    query = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE, adjusted=False)
+    read: dict[str, list[tuple[str, int]]] = {}
+    for chosen in (dm.HistorySource.AUTO, dm.HistorySource.REST):
+        table = query.history(previous_trading_day, today, source=chosen)
+        rows = table_rows(table.view(["Date", "TimestampStart"]))
+        read[chosen.value] = sorted(
+            (str(r["Date"]), int(r["TimestampStart"]))
+            for r in rows
+            if int(r["TimestampStart"]) < cutoff
+        )
+        days = Counter(day for day, _ in read[chosen.value])
+        evidence(f"{chosen.value}: {len(rows)} minute bars; per day {dict(sorted(days.items()))}")
+    fills = [r.getMessage() for r in caplog.records if "AUTO read REST" in r.getMessage()]
+    evidence(f"fill warning: {fills or 'none'}; compared minutes before {now - _COMPARED_LAG}")
+    if any(previous_trading_day.isoformat() in fill for fill in fills):
+        pytest.skip(f"not exercised: the {previous_trading_day} file is not published yet")
+    auto, rest = read["auto"], read["rest"]
+    assert len(set(auto)) == len(auto), "AUTO holds a minute twice"
+    assert auto == rest, (
+        f"AUTO and REST differ: {len(set(auto) - set(rest))} minutes only in AUTO, "
+        f"{len(set(rest) - set(auto))} only in REST"
+    )

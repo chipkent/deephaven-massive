@@ -17,7 +17,7 @@ more. This module holds:
 - `live_cases` and `over_the_limit`: every case of a live test module with its plans and
   count, and those over the limit, for the unit test that holds every live test to it;
 - `WaitProgress`: the governor listener that prints one terminal line each time a request of
-  a live test starts to wait, so a paced run never looks hung.
+  a live test starts to wait `SHOWN_WAIT` seconds or more, so a paced run never looks hung.
 
 `tests/conftest.py` turns these into its collection hook and fixtures. Everything here but
 `WaitProgress` is pure.
@@ -48,6 +48,10 @@ test waits more than about a minute for its pace."""
 DEFAULT_REQUESTS: Final = 10
 """The requests a live test is taken to send to one class when it declares none: more than
 `BASIC_LIMIT`, so a test that may read a class on Basic must declare its count."""
+
+SHOWN_WAIT: Final = 5.0
+"""The shortest wait, in seconds, that `WaitProgress` prints: a shorter one only adds noise to
+the terminal, and no run looks hung for it."""
 
 
 def basic_reads(requirements: Iterable[str]) -> tuple[str, ...]:
@@ -207,10 +211,11 @@ class WaitProgress:
     A paced request waits silently inside the library's rate governor, so a live run on Basic
     would look hung. The live run subscribes one of these to the key's governor
     (`RequestGovernor.subscribe`) for each live test, and unsubscribes it when the test ends.
-    Each time a bucket's count of waiting requests grows, it writes the bucket, the seconds
-    until that request may start, and how many of the test's declared requests to the bucket
-    are left, such as `"options: waiting 47 s for a request slot (paced at 5 requests a
-    minute); 3 of this test's 5 requests left"`.
+    Each time a bucket's count of waiting requests grows and the new request waits at least
+    `SHOWN_WAIT` seconds, it writes the bucket, the seconds until that request may start, and
+    how many of the test's declared requests to the bucket are left, such as `"options:
+    waiting 47 s for a request slot (paced at 5 requests a minute); 3 of this test's 5
+    requests left"`.
 
     The governor calls it on whichever thread changed a bucket, without the governor's lock;
     a lock of its own guards the counts it remembers. It reads the governor (`snapshot`,
@@ -252,6 +257,8 @@ class WaitProgress:
                     until = state.paused_until or self._governor.clock.time()
                     seconds = max(until - self._governor.clock.time(), 0.0)
                     why = "paused after an HTTP 429"
+                if seconds < SHOWN_WAIT:
+                    continue
                 made = state.attempts - self._attempts.get(state.bucket, 0)
                 left = max(self._requests - made, 0)
                 lines.append(

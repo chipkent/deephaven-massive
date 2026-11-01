@@ -24,6 +24,9 @@ measures the library as users run it:
   `samples-connections.csv`, and one row of CPU seconds and JVM heap to `samples-process.csv`.
 - **Gaps.** A child that starts again on the same day appends to the same files and records
   the time since the last sample in `gaps.csv`; more than 30 minutes of gaps fails the day.
+- **Rows.** A unit whose streams recorded no row all day fails, once its class's session has
+  been open longer than the unit's delay (`SESSION_OPENS`): an acknowledged subscription that
+  never delivers is a failure, not a quiet pass.
 
 `throughput` holds, from 09:15, the busiest streams of every symbol (`dm.ALL`) as `last_by()`
 tables: second bars of every stock, every crypto trade, and every forex quote. Its samples give
@@ -55,6 +58,7 @@ import numpy as np
 import deephaven_massive as dm
 from tests._live.calendar import NEW_YORK
 from tests._live.contracts import front_contract
+from tests._live.live_run import stream_units
 from tests._live.live_run.stream_units import delay_of
 
 logger = logging.getLogger(__name__)
@@ -92,6 +96,15 @@ DAY_START: Final = time(3, 45)
 
 OPTION_CONTRACTS: Final = 10
 """How many SPY contracts the options unit streams."""
+
+SESSION_OPENS: Final = {"stocks": time(4, 0), "options": time(9, 30), "indices": time(9, 30)}
+"""When each class's session opens on a trading day, New York time: stock trades from the
+extended hours, options and the S&P indices from the regular session. A class not listed,
+currencies and futures, trades through the night, so its session counts as open from the
+stream day's start (`DAY_START`)."""
+
+SESSION_GRACE: Final = timedelta(minutes=5)
+"""How long past its session's open, and its unit's delay, a unit may go without a row."""
 
 _PERCENTILES: Final = (50, 90, 99)
 
@@ -678,20 +691,96 @@ def run_stream_day(
             handle.stop()
         _release(m, tables)
         recorder.close()
-    gaps = total_gaps(folder)
-    minutes = round(gaps.total_seconds() / 60)
+    rows = unit_rows(folder, streams)
     for unit in units:
-        failure = failures.get(unit.split()[0], "")
-        if unit.startswith("options") and not options:
-            report(unit, "failed", "the SPY chain gave no contract to stream")
-        elif failure:
-            report(unit, "failed", f"a stream failed: {failure}")
-        elif gaps > MAX_GAP:
-            report(unit, "failed", f"gaps {minutes}")
-        elif recorder.errors:
-            report(unit, "failed", recorder.errors[0])
-        else:
-            report(unit, "passed", f"gaps {minutes}" if minutes else "")
+        status, reason = _unit_verdict(
+            unit,
+            failure=failures.get(unit.split()[0], ""),
+            contracts=bool(options) or not unit.startswith("options"),
+            gaps=total_gaps(folder),
+            errors=recorder.errors,
+            rows=rows.get(unit, 0),
+            late=clock.now() >= rows_due_from(unit, today),
+        )
+        report(unit, status, reason)
+
+
+def _unit_verdict(
+    unit: str,
+    *,
+    failure: str,
+    contracts: bool,
+    gaps: timedelta,
+    errors: list[str],
+    rows: int,
+    late: bool,
+) -> tuple[str, str]:
+    """Decide one unit's result at the end of a stream day.
+
+    Args:
+        unit: The unit.
+        failure: The error of its class's first failed stream, `""` for none.
+        contracts: Whether it had something to stream (an options unit needs contracts).
+        gaps: The day's gaps.
+        errors: The recorder's errors.
+        rows: The rows its streams recorded all day.
+        late: Whether its session had been open past its delay when the day ended.
+
+    Returns:
+        `("passed", "")` or `("passed", "gaps N")`, or `("failed", why)`.
+    """
+    minutes = round(gaps.total_seconds() / 60)
+    if not contracts:
+        return "failed", "the SPY chain gave no contract to stream"
+    if failure:
+        return "failed", f"a stream failed: {failure}"
+    if gaps > MAX_GAP:
+        return "failed", f"gaps {minutes}"
+    if errors:
+        return "failed", errors[0]
+    if not rows and late:
+        return "failed", "no rows during its session's hours"
+    return "passed", f"gaps {minutes}" if minutes else ""
+
+
+def unit_rows(folder: Path, streams: list[Stream]) -> dict[str, int]:
+    """Add up the rows each unit's streams recorded today, by every child of the day.
+
+    Args:
+        folder: The attempt's folder, whose `minutes.csv` every child of the day appends to.
+        streams: The streams of this child, which name each stream's unit.
+
+    Returns:
+        The rows of each unit with a stream; a unit none of whose streams recorded a row is
+        missing.
+    """
+    path = folder / "minutes.csv"
+    if not path.exists():
+        return {}
+    unit_of = {stream.name: stream.unit for stream in streams}
+    found: dict[str, int] = {}
+    with path.open(encoding="utf-8") as file:
+        for row in csv.DictReader(file):
+            unit = unit_of.get(row["stream"])
+            if unit is not None:
+                found[unit] = found.get(unit, 0) + int(row["rows"])
+    return found
+
+
+def rows_due_from(unit: str, day: date) -> datetime:
+    """Return when a unit must have recorded a row on a stream day.
+
+    Args:
+        unit: The unit, such as `"stocks delayed"`.
+        day: The New York date of the stream day.
+
+    Returns:
+        Its class's session open that day (`SESSION_OPENS`), plus the unit's delay and
+        `SESSION_GRACE`, as an aware instant.
+    """
+    opens = SESSION_OPENS.get(unit.split(maxsplit=1)[0], DAY_START)
+    delay = stream_units.delay_of(unit)
+    return datetime.combine(day, opens, NEW_YORK) + delay + SESSION_GRACE
 
 
 DATASET_CLASSES: Final = {"forex": "currencies", "crypto": "currencies"}

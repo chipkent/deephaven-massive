@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from tests._live.live_run.state import RunState
 
 PYTEST_GROUPS: Final = {
+    "rate-limits": ("-m", "integration_rate_limits"),
     "evidence": ("-m", "integration", "-k", "not luld"),
     "luld": ("-m", "integration", "-k", "luld"),
     "smoke": ("-m", "integration_smoke"),

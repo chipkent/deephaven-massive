@@ -12,7 +12,8 @@ The live integration tests (`tests/**/test_*_integration.py`) get their own fixt
 the marker checks, the key skip, the Basic plan's pacing (the skip of a test that would wait
 more than a minute, and a terminal line for each wait), live sessions and wire clients, raw
 flat-file and REST readers, the run's plans, dates, and corporate actions, and the `evidence`
-recorder, which writes `live-evidence.log` as it goes and closes the terminal summary. The
+recorder, which writes each run's own `live-evidence-<time>.log` as it goes and closes the
+terminal summary. The
 logic behind the plans, pacing, dates, contracts, and corporate actions lives in
 `tests/_live/`, where it is unit-tested against the fakes; the fixtures here only call it.
 
@@ -1600,15 +1601,17 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 # `addopts` deselects by default; `uv run pytest -m integration` runs them. Those that
 # deliberately exceed Massive's limits also carry `integration_limits` and run only when `-m`
 # names it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
-# observes is recorded with the `evidence` fixture: appended at once to `live-evidence.log` in
-# the repository root, flushed line by line, so a run cut short keeps everything recorded
-# before, and printed again in a "live evidence" section at the end of the run.
+# observes is recorded with the `evidence` fixture: appended at once to the run's own evidence
+# file in the repository root, `live-evidence-<UTC time>.log`, flushed line by line, so a run cut
+# short keeps everything recorded before, and printed again in a "live evidence" section at the
+# end of the run.
 # `docs/live-tests.md` explains how to run them.
 
 _INTEGRATION = "integration"
 _LIMITS = "integration_limits"
 _SMOKE = "integration_smoke"
-_SEPARATE = (_LIMITS, _SMOKE)
+_RATE_LIMITS = "integration_rate_limits"
+_SEPARATE = (_LIMITS, _SMOKE, _RATE_LIMITS)
 """The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
 
 _LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
@@ -1617,8 +1620,12 @@ _LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
 _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
 """The config stash key of the evidence lines recorded so far, as (test id, line) pairs."""
 
-_EVIDENCE_FILE = "live-evidence.log"
-"""The file, in the repository root, every evidence line is appended to as it is recorded."""
+_EVIDENCE_PATH: Final = pytest.StashKey[Path]()
+"""The run's evidence file, named when the first line is recorded."""
+
+_EVIDENCE_PREFIX = "live-evidence-"
+"""The start of every evidence file's name; the live-run program moves each such file of the
+repository root into its attempt's folder."""
 
 _EVIDENCE_LOCK = threading.Lock()
 """Guards the evidence list and file, so a line may be recorded from any thread."""
@@ -1632,6 +1639,9 @@ _SETTLED: Final = pytest.StashKey[
 ]()
 """Each live test's `settles` items, `verifies` items, and `needs` requirements, by test id, for
 the summary."""
+
+_TITLES: Final = pytest.StashKey[dict[str, str]]()
+"""Each open question's one-line title, by item, for the summary."""
 
 _PLANS_KEY: Final = pytest.StashKey["plans.LivePlans"]()
 """The run's plans, once the first live test has asked for them, for the summary."""
@@ -1827,12 +1837,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     deselected and escape the check. A live test without the `integration` marker would run in
     CI, and a marked test elsewhere would never run by default. Two tiers of live tests run
     apart: `integration_limits` (tests that deliberately exceed Massive's subscription and
-    connection limits) and `integration_smoke` (the unattended check that every dataset and
-    verb works). A test of either must also be a live test, and it is deselected unless the
-    `-m` expression names its tier: `-m integration` runs every live test but those, and
-    `-m integration_limits` or `-m integration_smoke` runs only that tier. Last, every soak test
-    gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in place of the suite's
-    60 s.
+    connection limits), `integration_smoke` (the unattended check that every dataset and
+    verb works), and `integration_rate_limits` (the checks that draw Massive's per-minute
+    refusals of a class on Basic on purpose). A test of any of them must also be a live test,
+    and it is deselected unless the `-m` expression names its tier: `-m integration` runs
+    every live test but those, and `-m integration_smoke`, for one, runs only that tier.
+    Last, every soak test gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in
+    place of the suite's 60 s.
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -1840,8 +1851,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     Raises:
         pytest.UsageError: If a test of a `*_integration.py` file lacks the `integration`
-            marker, a test of another file has it, or a test has `integration_limits` or
-            `integration_smoke` without `integration`; the message lists them.
+            marker, a test of another file has it, or a test has one of the separate tiers'
+            markers without `integration`; the message lists them.
     """
     wrong = [
         item.nodeid
@@ -1862,7 +1873,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     ]
     if unpaired:
         raise pytest.UsageError(
-            "a test marked integration_limits or integration_smoke must also be marked "
+            "a test marked integration_limits, integration_smoke, or integration_rate_limits "
+            "must also be marked "
             "integration: " + ", ".join(unpaired)
         )
     expression = config.option.markexpr or ""
@@ -1890,7 +1902,8 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
     A test that would send a class on Basic more than 5 requests is skipped once the run knows
     its plans (`_live_tests_need_a_key`), since the plans are probed only when the first live
     test runs. Each test's `settles` and `verifies` items and its `needs` are kept for the
-    summary.
+    summary, and each item's title: the first line of the docstring of the first test that
+    answers it.
 
     Args:
         config: The pytest configuration, whose stash keeps the items.
@@ -1901,10 +1914,14 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
         return
     items.sort(key=lambda item: plans.SOME_BASIC not in _requirements(item))
     settled = config.stash.setdefault(_SETTLED, {})
+    titles = config.stash.setdefault(_TITLES, {})
     for item in live:
         settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
         verifies = tuple(str(a) for m in item.iter_markers("verifies") for a in m.args)
         settled[item.nodeid] = (settles, verifies, _requirements(item))
+        doc = inspect.getdoc(getattr(item, "function", None)) or ""
+        for answered in (*settles, *verifies):
+            titles.setdefault(answered, doc.partition("\n")[0])
         if not pacing.basic_reads(_requirements(item)):
             continue
         count = pacing.declared_requests(item.get_closest_marker("requests"))
@@ -1951,7 +1968,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
     """Print a terminal line each time a request of a live test waits for its pace.
 
     A live test gets a `pacing.WaitProgress` on the key's rate governor for its duration, which
-    prints one line per wait (`_write_progress`), so a paced run never looks hung. It holds a
+    prints one line per long wait (`_write_live_line`), so a paced run never looks hung. It holds a
     lease of the governor meanwhile. It is named to sort after `_live_tests_need_a_key`, so a
     skipped test takes no lease, and it depends on `rest_clock`, which counts the leases a test
     holds when it begins, so that count includes none of this fixture's and the leak check
@@ -1978,7 +1995,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
         listener=_ignore,
     )
     requests = pacing.declared_requests(request.node.get_closest_marker("requests"))
-    write = functools.partial(_write_progress, request.config)
+    write = functools.partial(_write_live_line, request.config, "live pacing: ")
     progress = pacing.WaitProgress(lease.governor, requests=requests, write=write)
     lease.governor.subscribe(progress)
     try:
@@ -1992,20 +2009,22 @@ _PROGRESS_LOCK = threading.Lock()
 """Serializes the progress lines, each of which suspends the output capture while it prints."""
 
 
-def _write_progress(config: pytest.Config, line: str) -> None:
-    """Print one pacing line to the terminal while a live test runs, past the output capture.
+def _write_live_line(config: pytest.Config, prefix: str, line: str) -> None:
+    """Print one line to the terminal while a live test runs, past the output capture.
 
     pytest captures a test's output and shows it only for a failure, so the line is written
-    with the capture suspended for that one write, as `capsys.disabled()` does.
+    with the capture suspended for that one write, as `capsys.disabled()` does. The pacing
+    lines and the evidence file's path are written this way.
 
     Args:
         config: The pytest configuration, for the capture manager and the terminal reporter.
+        prefix: What the line starts with, such as `"live pacing: "`.
         line: The line, without its newline.
     """
     capture = config.pluginmanager.getplugin("capturemanager")
     reporter = config.pluginmanager.getplugin("terminalreporter")
     with _PROGRESS_LOCK, capture.global_and_fixture_disabled():
-        reporter.write_line(f"live pacing: {line}")
+        reporter.write_line(f"{prefix}{line}")
 
 
 def _live_key() -> str:
@@ -2383,11 +2402,11 @@ def delayed_key(live_config: MassiveConfig, live_plans: plans.LivePlans) -> str:
 def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
     """Return a function that records one line of what a live test observed.
 
-    Each line is appended at once to `live-evidence.log` in the repository root, under the
-    test's id, and flushed, so nothing recorded is lost if the run is cut short (a timeout
-    that ends the process). The lines are printed again, grouped by test, in the "live
-    evidence" section of the terminal summary, whatever the test's outcome. Safe to call from
-    any thread.
+    Each line is appended at once to the run's evidence file in the repository root
+    (`_evidence_path`), under the test's id, and flushed, so nothing recorded is lost if the
+    run is cut short (a timeout that ends the process). The lines are printed again, grouped
+    by test, in the "live evidence" section of the terminal summary, whatever the test's
+    outcome. Safe to call from any thread.
 
     Args:
         request: The requesting test, whose id heads its lines.
@@ -2404,8 +2423,30 @@ def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
     return record
 
 
+def _evidence_path(config: pytest.Config) -> Path:
+    """Return the run's evidence file, naming it and printing its path the first time.
+
+    Each run writes a file of its own, `live-evidence-<UTC time>.log` in the repository root,
+    so no run appends to an earlier one's lines and nobody needs to delete a file first. Call
+    it with `_EVIDENCE_LOCK` held.
+
+    Args:
+        config: The pytest configuration, whose stash keeps the path.
+
+    Returns:
+        The path; the file itself is created by the first write.
+    """
+    path = config.stash.get(_EVIDENCE_PATH, None)
+    if path is None:
+        stamp = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+        path = config.rootpath / f"{_EVIDENCE_PREFIX}{stamp}.log"
+        config.stash[_EVIDENCE_PATH] = path
+        _write_live_line(config, "live evidence: ", f"writing {path}")
+    return path
+
+
 def _record(config: pytest.Config, test_id: str, line: str) -> None:
-    """Record one evidence line: in the run's list, and appended to `live-evidence.log`.
+    """Record one evidence line: in the run's list, and appended to the run's evidence file.
 
     Args:
         config: The pytest configuration, whose stash holds the list.
@@ -2416,7 +2457,7 @@ def _record(config: pytest.Config, test_id: str, line: str) -> None:
     with _EVIDENCE_LOCK:
         heading = not records or records[-1][0] != test_id
         records.append((test_id, line))
-        with (config.rootpath / _EVIDENCE_FILE).open("a", encoding="utf-8") as file:
+        with _evidence_path(config).open("a", encoding="utf-8") as file:
             if heading:
                 file.write(f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}\n")
             file.write(f"    {line}\n")
@@ -2437,11 +2478,49 @@ def _skip_reason(report: pytest.TestReport) -> str:
     return reason.removeprefix("Skipped: ")
 
 
+def _case(report: pytest.TestReport) -> str:
+    """Return a smoke case's id, such as `stocks.trades-stream`.
+
+    Args:
+        report: The case's report.
+
+    Returns:
+        The id between the brackets of its node id.
+    """
+    return report.nodeid.split("[")[-1].rstrip("]")
+
+
+def _smoke_groups(reports: list[pytest.TestReport]) -> dict[str, list[pytest.TestReport]]:
+    """Group skipped smoke cases by what they lacked: the plan they need, or the reason.
+
+    A case the plan refused ("not entitled") is grouped by the last `plan` property it
+    recorded, such as "a Stocks plan with REST access"; any other skip by its reason, less
+    the details in its first parentheses, such as "not exercised: market closed".
+
+    Args:
+        reports: The skipped cases' reports.
+
+    Returns:
+        The reports of each group, in the order the groups first appear.
+    """
+    groups: dict[str, list[pytest.TestReport]] = {}
+    for report in reports:
+        reason = _skip_reason(report)
+        plan = dict(report.user_properties).get("plan")
+        refused = reason.startswith("not entitled") and plan
+        key = str(plan) if refused else reason.partition(" (")[0]
+        groups.setdefault(key, []).append(report)
+    return groups
+
+
 def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
     """Print the smoke tier's coverage: passed, not entitled, otherwise skipped, failed.
 
-    A stream case that passed without a row (a closed market) is counted apart among the
-    passes as "acknowledged only": its pass rests on Massive's acknowledgement alone.
+    A pass means rows reached the case's table, or, for a call that may return none (a
+    `fetch()` or `history()`), that the call succeeded with the dataset's columns. A pass that
+    logged a library warning or showed a `SchemaDrift` is counted apart, "passed with drift",
+    and each one is listed with what it saw. The skips are grouped: the refusals by the plan
+    they need, the other skips by their reason, each group with its count and its cases.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the reports.
@@ -2461,18 +2540,21 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
         return
     refused = [r for r in skipped if _skip_reason(r).startswith("not entitled")]
     other = [r for r in skipped if r not in refused]
-    quiet = [r for r in passed if ("stream", "acknowledged only") in r.user_properties]
+    drifted = [r for r in passed if dict(r.user_properties).get("drift")]
     terminalreporter.write_sep("=", "smoke coverage")
     terminalreporter.write_line(
-        f"{len(passed)} passed ({len(quiet)} of them streams acknowledged only, without a row), "
-        f"{len(refused)} not entitled, {len(other)} skipped otherwise, {len(failed)} failed"
+        f"{len(passed)} passed (passed with drift: {len(drifted)}), {len(refused)} not "
+        f"entitled, {len(other)} skipped otherwise, {len(failed)} failed"
     )
-    for title, reports in (("not entitled", refused), ("skipped", other), ("failed", failed)):
-        for report in reports:
-            reason = _skip_reason(report) if report.skipped else report.head_line or ""
-            terminalreporter.write_line(
-                f"{title}: {report.nodeid.split('[')[-1].rstrip(']')}: {reason[:200]}"
-            )
+    for report in drifted:
+        drift = str(dict(report.user_properties)["drift"])
+        terminalreporter.write_line(f"passed with drift: {_case(report)}: {drift[:300]}")
+    for title, reports in (("not entitled, needs", refused), ("skipped", other)):
+        for key, grouped in _smoke_groups(reports).items():
+            cases = ", ".join(_case(r) for r in grouped)
+            terminalreporter.write_line(f"{title} {key}: {len(grouped)}: {cases}")
+    for report in failed:
+        terminalreporter.write_line(f"failed: {_case(report)}: {(report.head_line or '')[:200]}")
 
 
 def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
@@ -2499,8 +2581,13 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
                 report.when == "call" or kind != "passed"
             ):
                 outcome[report.nodeid] = kind
+    titles: dict[str, str] = config.stash.setdefault(_TITLES, {})
     lines = summary.question_lines(
-        settled, outcome, config.stash.get(_PLANS_KEY, None), narrowed=_narrowed(config)
+        settled,
+        outcome,
+        config.stash.get(_PLANS_KEY, None),
+        titles=titles,
+        narrowed=_narrowed(config),
     )
     if not lines:
         return
@@ -2540,7 +2627,8 @@ def pytest_terminal_summary(
         records = list(stored)
     if not records:
         return
-    terminalreporter.write_sep("=", f"live evidence (also in {_EVIDENCE_FILE})")
+    path = config.stash[_EVIDENCE_PATH]
+    terminalreporter.write_sep("=", f"live evidence (also in {path})")
     current = None
     for test_id, line in records:
         if test_id != current:
@@ -2666,6 +2754,43 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
     yield client
     client.close()
     lease.release()
+
+
+@pytest.fixture
+def rest_for_key(live_config: MassiveConfig) -> Iterator[Callable[[str], RestClient]]:
+    """Yield a function that opens a wire REST client on another key; each closed at teardown.
+
+    For a test that reads raw answers with a second key, such as `MASSIVE_DELAYED_API_KEY`.
+    Nothing tells that key's plans, so every class of it is paced as Basic, through the run's
+    governor of that key.
+
+    Args:
+        live_config: The live configuration, for the base URL.
+
+    Yields:
+        A function taking an API key and returning a `RestClient` with one connection.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    opened: list[tuple[RestClient, Any]] = []
+
+    def open_client(api_key: str) -> RestClient:
+        lease = _live_governors().lease(
+            api_key=api_key,
+            base_url=live_config.rest_base_url,
+            basic=frozenset(dm.Subscription),
+            label="live tests, another key",
+            listener=_ignore,
+        )
+        client = RestClient(
+            api_key, base_url=live_config.rest_base_url, max_concurrency=1, governor=lease.governor
+        )
+        opened.append((client, lease))
+        return client
+
+    yield open_client
+    for client, lease in opened:
+        client.close()
+        lease.release()
 
 
 def _ignore() -> None:
@@ -4038,16 +4163,22 @@ def _is_common_stock(
     return check
 
 
+_MARKET_CLASSES: Final = {"fx": "currencies", "crypto": "currencies"}
+"""The class of each market whose name is not its class's, for the feed delay of its plan."""
+
+
 @pytest.fixture
 def rows_due(
     live_rest: RestClient, live_plans: plans.LivePlans, evidence: Callable[[str], None]
-) -> Callable[[str], tuple[str, bool]]:
-    """Return a function that tells whether a delayed stream must have delivered rows by now.
+) -> Callable[..., tuple[str, bool]]:
+    """Return a function that tells whether a stream must have delivered rows by now.
 
-    For indices it reads the S&P indices' status from `/v1/marketstatus/now` and takes the
-    session to open at 09:30 New York time; for futures it reads the E-mini S&P 500's
-    `market_event` and its `timestamp` from `/futures/v1/market-status`. Rows are due once the
-    market has been open longer than the plan's feed delay (`streams.rows_due`).
+    For futures it reads the E-mini S&P 500's `market_event` and its `timestamp` from
+    `/futures/v1/market-status`; for every other market its status from
+    `/v1/marketstatus/now` (`_MARKETS`). The session the stream's rows come from opens as
+    `streams.opened_at` says (stock trades and quotes in the extended hours from 04:00 New York
+    time, the regular session at 09:30), and rows are due once it has been open longer than
+    the plan's feed delay (`streams.rows_due`).
 
     Args:
         live_rest: The live REST client.
@@ -4055,14 +4186,16 @@ def rows_due(
         evidence: Records the status, the open, and the verdict.
 
     Returns:
-        A function taking `"indices"` or `"futures"` and returning Massive's status and
-        whether rows are due.
+        A function `(market, family="values")`: the market `"stocks"`, `"options"`,
+        `"indices"`, `"fx"`, `"crypto"`, or `"futures"`, and the stream's family, the last part
+        of its dataset's name, such as `"trades"`. It returns Massive's status and whether rows
+        are due.
     """
 
-    def due(name: str) -> tuple[str, bool]:
+    def due(market: str, family: str = "values") -> tuple[str, bool]:
         now = datetime.now(UTC)
-        opened: datetime | None = None
-        if name == "futures":
+        since: datetime | None = None
+        if market == "futures":
             rows = live_rest.get(
                 source(Transport.REST, "/futures/v1/market-status"),
                 {},
@@ -4071,18 +4204,19 @@ def rows_due(
             ).rows
             status = str(rows[0].get("market_event")) if rows else "unknown"
             stamp = rows[0].get("timestamp") if rows else None
-            if status == "open" and isinstance(stamp, str):
-                opened = datetime.fromisoformat(stamp)
+            if isinstance(stamp, str):
+                since = datetime.fromisoformat(stamp)
         else:
-            body = live_rest.get(
+            body: object = live_rest.get(
                 source(Transport.REST, "/v1/marketstatus/now"), {}, {}, bucket="other"
             ).body
-            groups = body.get("indicesGroups") if isinstance(body, dict) else None
-            status = str(groups.get("s_and_p")) if isinstance(groups, dict) else "unknown"
-            if status == "open":
-                opened = streams.index_session_open(now)
+            for step in _MARKETS[market]:
+                body = body.get(step) if isinstance(body, dict) else None
+            status = str(body)
+        opened = streams.opened_at(market, status, family=family, now=now, since=since)
+        name = _MARKET_CLASSES.get(market, market)
         verdict = streams.rows_due(live_plans, name, opened=opened, now=now)
-        evidence(f"{name} status {status}, open since {opened}, rows due: {verdict}")
+        evidence(f"{market} {family} status {status}, open since {opened}, rows due: {verdict}")
         return status, verdict
 
     return due

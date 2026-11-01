@@ -11,9 +11,11 @@ sorts every question the run touched:
 - not verified: failed or skipped otherwise, or partly run (a `-k` or path selection left out
   some of its tests).
 
-A run whose paths may leave tests uncollected reports its counts "in this selection". Every
-function is pure; `tests/conftest.py`'s terminal summary gathers the outcomes and writes the
-lines.
+Each group's line gives its count, and each question follows on a line of its own, its number
+beside its one-line title (the first line of the docstring of the first test that answers it),
+so a reader need not look the numbers up. A run whose paths may leave tests uncollected reports
+its counts "in this selection". Every function is pure; `tests/conftest.py`'s terminal summary
+gathers the outcomes and writes the lines.
 """
 
 from __future__ import annotations
@@ -38,14 +40,32 @@ def item_order(item: str) -> tuple[int, str]:
     return (int(item), "") if item.isdigit() else (10_000, item)
 
 
+def _titled(items: list[str], titles: Mapping[str, str]) -> list[str]:
+    """Return one indented line per question: its item, then its title when it has one.
+
+    Args:
+        items: The questions, such as `"70"`, or `"5 (1 of 2 tests ran)"` for a partly run one.
+        titles: Each question's one-line title, by item.
+
+    Returns:
+        Such as `"    70: Whether Massive serves a real-time key on its delayed feed."`.
+    """
+    lines = []
+    for item in items:
+        title = titles.get(item.partition(" ")[0], "")
+        lines.append(f"    {item}: {title}" if title else f"    {item}")
+    return lines
+
+
 def question_lines(
     settled: Mapping[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]],
     outcome: Mapping[str, str],
     plans: LivePlans | None,
     *,
+    titles: Mapping[str, str],
     narrowed: bool,
 ) -> list[str]:
-    """Sort the questions a run touched and describe them, one line per group.
+    """Sort the questions a run touched and describe them, one heading line per group.
 
     Args:
         settled: Each test's `settles` items, `verifies` items, and `needs`, by test id.
@@ -53,13 +73,15 @@ def question_lines(
             `"skipped"`, or `"error"`.
         plans: The run's plans, which name the plan a skipped test needs; None when no live
             test resolved them.
+        titles: Each question's one-line title, by item; a question without one is listed by
+            its item alone.
         narrowed: Whether the run's paths may have left some live tests uncollected; its
             counts are then reported "in this selection".
 
     Returns:
-        The plans line (when there are plans), the verified and ran lines, one line per plan
-        some questions need, and one per kind of question not verified; empty when no test
-        that ran answers a question.
+        The plans line (when there are plans), the verified and ran headings, one heading per
+        plan some questions need, and one per kind of question not verified, each heading
+        followed by its questions (`_titled`); empty when no test that ran answers a question.
     """
     verified: list[str] = []
     evidence: list[str] = []
@@ -85,15 +107,15 @@ def question_lines(
                 unverified["failed or skipped"].append(item)
     total = len(ran)
     selection = " in this selection (run the full live suite to verify)" if narrowed else ""
+    groups = [
+        (f"verified{selection} {len(verified)} of {total}", verified),
+        (f"ran{selection}, evidence to read, {len(evidence)} of {total}", evidence),
+        *((f"{len(items)} need {plan}", items) for plan, items in needing.items()),
+        *((f"{len(items)} not verified ({why})", items) for why, items in unverified.items()),
+    ]
     lines = [f"plans: {plans_text(plans)}"] if plans is not None else []
-    lines.append(f"verified{selection} {len(verified)} of {total}: {', '.join(verified)}")
-    lines.append(
-        f"ran{selection}, evidence to read, {len(evidence)} of {total}: {', '.join(evidence)}"
-    )
-    lines.extend(f"{len(items)} need {plan}: {', '.join(items)}" for plan, items in needing.items())
-    lines.extend(
-        f"{len(items)} not verified ({why}): {', '.join(items)}"
-        for why, items in unverified.items()
-        if items
-    )
+    for index, (heading, items) in enumerate(groups):
+        if items or index < 2:
+            lines.append(f"{heading}:")
+            lines.extend(_titled(items, titles))
     return lines

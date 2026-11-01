@@ -8,8 +8,8 @@ wrapper that runs this file instead, with the same arguments. It does what the t
 the JSON of the `FAKE_LIVE_CHILD` environment variable, in this order:
 
 - `print`: lines to print (a test plants secrets in them to see the program clean its logs);
-- `evidence`: text appended to `live-evidence.log` in the working directory, as the live
-  tests' evidence recorder does (never while collecting);
+- `evidence`: text appended to `live-evidence-20261104T163000Z.log` in the working directory,
+  as the live tests' evidence recorder writes its run's own file (never while collecting);
 - `collection`: with `--collect-only`, the object written to `MASSIVE_LIVE_COLLECTION`;
 - `outcomes`: for each node id on the command line, its phase records, appended to
   `MASSIVE_LIVE_OUTCOMES` as the outcomes plugin would;
@@ -51,7 +51,7 @@ def main() -> int:
         sys.stdout.write(line + "\n")
     sys.stdout.flush()
     if "evidence" in script and "--collect-only" not in argv:
-        with Path("live-evidence.log").open("a", encoding="utf-8") as file:
+        with Path("live-evidence-20261104T163000Z.log").open("a", encoding="utf-8") as file:
             file.write(script["evidence"])
     collection = os.environ.get("MASSIVE_LIVE_COLLECTION", "")
     outcomes = os.environ.get("MASSIVE_LIVE_OUTCOMES", "")

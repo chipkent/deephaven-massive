@@ -119,7 +119,7 @@ def test_an_ordinary_day_waits_for_the_luld_check_then_runs_the_sequence() -> No
     assert next_step(state, _probed(early), early) == Step("sleep", "luld", _at(WEDNESDAY, 9, 28))
     late = _at(WEDNESDAY, 11, 31)
     assert next_step(state, _probed(late), late) == Step(
-        "run", "evidence", _at(WEDNESDAY + timedelta(days=1), 3)
+        "run", "rate-limits", _at(WEDNESDAY + timedelta(days=1), 3)
     )
 
 
@@ -127,6 +127,7 @@ def test_a_group_that_ran_today_or_has_nothing_due_is_passed_over() -> None:
     state = _state()
     _collected(state)
     now = _at(WEDNESDAY, 12)
+    _finish(state, "rate-limits", WEDNESDAY)
     _finish(state, "evidence", WEDNESDAY)
     record(
         state,
@@ -145,6 +146,7 @@ def test_limits_wait_until_after_the_close() -> None:
     state.known["limits-ws"] = ["tests/x.py::test_wide"]
     state.known["limits-second-connection"] = ["tests/x.py::test_second"]
     state.known["evidence"] = state.known["smoke"] = state.known["luld"] = []
+    state.known["rate-limits"] = []
     for example in schedule.known_names(state, "responses", WEDNESDAY) or []:
         record(state, check_of(state, "responses", example), status="passed", reason="", day="")
     now = _at(WEDNESDAY, 13)

@@ -112,6 +112,56 @@ def test_a_condition_skip_is_retried_three_times() -> None:
     assert (check.condition_skips, is_due(state, check)) == (3, False)
 
 
+def test_a_stream_check_skipped_while_the_market_was_closed_is_due_on_a_trading_day() -> None:
+    """A stream that ran while its market was closed proved no row, so it must run again.
+
+    A stream check skips, rather than passes, when its market is closed, and the skip counts
+    as a condition of the moment: the check stays due, so the next attempt, on a trading day,
+    runs it while rows can arrive.
+    """
+    state = _state()
+    check = check_of(state, "smoke", "t.py::test_every[stocks.trades-stream]")
+    saturday, monday = "2026-10-31", "2026-11-02"
+    record(
+        state,
+        check,
+        status="skipped",
+        reason="not exercised: market closed (acknowledged)",
+        day=saturday,
+    )
+    assert (check.status, check.passed_under, check.condition_skips) == ("skipped", "", 1)
+    assert is_due(state, check)
+    record(state, check, status="passed", reason="", day=monday)
+    assert not is_due(state, check)
+
+
+@pytest.mark.parametrize(
+    ("group", "name"),
+    [
+        ("smoke", "t.py::test_every[stocks.trades-stream]"),
+        ("evidence", "t.py::test_whether_massive_serves_a_real_time_key_on_the_delayed_feed"),
+        ("stream-day", "stocks delayed"),
+    ],
+)
+def test_a_stream_pass_from_before_rows_were_required_runs_again(group: str, name: str) -> None:
+    """A stream that passed on its acknowledgement alone, under the older rule, proved nothing.
+
+    Its pass, stored without a rule version, leaves it due until it passes under the rule that
+    requires rows; a skip on the way does not retire it.
+    """
+    state = _state()
+    check = check_of(state, group, name)
+    check.status, check.passed_under = "passed", state.current  # as an older state stored it
+    assert is_due(state, check)
+    record(state, check, status="skipped", reason="not exercised: market closed", day=DAY)
+    assert is_due(state, check)
+    record(state, check, status="passed", reason="", day=DAY)
+    assert (check.passed_rules, is_due(state, check)) == (run_state.ROW_RULES, False)
+    other = check_of(state, "smoke", "t.py::test_every[stocks.trades-fetch]")
+    other.status, other.passed_under = "passed", state.current
+    assert not is_due(state, other)
+
+
 def test_need_reasons_are_told_from_conditions() -> None:
     assert run_state.is_need("not entitled: needs a Stocks plan")
     assert run_state.is_need("outside the plan's history: ...")

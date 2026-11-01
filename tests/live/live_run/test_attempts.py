@@ -150,7 +150,7 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
             B: [_phase("setup", "skipped", reason="needs Stocks Starter ($29/month)")],
         },
     )
-    (harness.root / "live-evidence.log").write_text("left by a run before\n")
+    (harness.root / "live-evidence-20261103T120000Z.log").write_text("left by a run before\n")
     assert _run(harness) == []
     folder = harness.ctx.out / "evidence" / "2026-11-04-1"
     argv = json.loads((folder / "argv.json").read_text())
@@ -164,10 +164,9 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
         "needs Stocks Starter ($29/month)",
     )
     assert harness.state.known["evidence"] == [A, B, C]
-    assert (
-        harness.ctx.out / "orphans" / "live-evidence.log"
-    ).read_text() == "left by a run before\n"
-    assert (folder / "live-evidence.log").read_text() == "evidence line\n"
+    orphan = harness.ctx.out / "orphans" / "live-evidence-20261103T120000Z.log"
+    assert orphan.read_text() == "left by a run before\n"
+    assert (folder / "live-evidence-20261104T163000Z.log").read_text() == "evidence line\n"
     log = (folder / "group.log").read_text()
     assert "collecting with ***" in log
     assert PLANTED_KEY not in log
@@ -454,8 +453,19 @@ def test_the_servers_start_up_lines_are_noise() -> None:
 def test_evidence_never_overwrites_evidence(tmp_path: Path) -> None:
     folder = tmp_path / "attempt"
     for text in ("first", "second", "third"):
-        (tmp_path / "live-evidence.log").write_text(text)
-        attempts.move_evidence(tmp_path / "live-evidence.log", folder)
+        (tmp_path / "live-evidence-1.log").write_text(text)
+        attempts.move_evidence(tmp_path, folder)
+    (tmp_path / "live-evidence-9.log").write_text("another run")
+    (tmp_path / "live-checks.log").write_text("not evidence")
+    attempts.move_evidence(tmp_path, folder)
     names = sorted(p.name for p in folder.iterdir())
-    assert names == ["live-evidence-2.log", "live-evidence-3.log", "live-evidence.log"]
-    attempts.move_evidence(tmp_path / "missing.log", folder)
+    assert names == [
+        "live-evidence-1-2.log",
+        "live-evidence-1-3.log",
+        "live-evidence-1.log",
+        "live-evidence-9.log",
+    ]
+    assert (folder / "live-evidence-1.log").read_text() == "first"
+    assert (tmp_path / "live-checks.log").exists()
+    attempts.move_evidence(tmp_path / "empty", tmp_path / "never made")
+    assert not (tmp_path / "never made").exists()

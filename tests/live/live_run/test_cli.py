@@ -138,7 +138,7 @@ def test_an_unknown_redo_group_is_refused(tmp_path: Path) -> None:
         _main(["run", "--out", str(tmp_path), "--redo", "evidence,nope"], recorder) == cli.REFUSED
     )
     assert recorder.lines[0].startswith(
-        "refused: --redo names no group: nope; the groups: evidence"
+        "refused: --redo names no group: nope; the groups: rate-limits, evidence"
     )
 
 
