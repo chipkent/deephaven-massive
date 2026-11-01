@@ -221,7 +221,7 @@ def test_conversion_fails_the_rows_of_unreadable_symbols_under_raise(
     assert converted.batch.column("Symbol").to_pylist() == ["C:EURUSD"]
     message = converted.unreadable
     assert "test.forex: Massive sent the symbol 'nonsense pair'" in message
-    assert "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log" in message
+    assert "MassiveConfig(unreadable_symbols=dm.OnError.LOG)" in message
     assert message.endswith(LIBRARY_BUG)
     assert converted.null_symbols is False
 

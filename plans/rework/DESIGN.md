@@ -294,7 +294,8 @@ module each new or renamed one comes from.
 ```
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
-_config.py               MassiveConfig (section 5), HostMap, the environment readers;
+_config.py               MassiveConfig (section 5), HostMap, the environment readers, the
+                         settings-file reader (MassiveConfig.from_file);
                          require_positive_int and require_positive_number, the two argument
                          checks used across layers
 _enums.py                the sixteen public enums, Recency, ChannelFamily, ClassFromPrefix, NotBars,
@@ -580,7 +581,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | Rank | Layer | Home | What justifies the boundary |
 |---|---|---|---|
 | 0 | wire | `_massive/` | The only network I/O, and no Deephaven ([section 19](#19-wire-clients-and-the-spec-snapshot)). |
-| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types`, `_log_limits` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
+| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types`, `_log_limits` | The public value types every layer names. No network I/O and no threads (`_config` reads the settings file, a local read at the caller's request); Deephaven appears only as the `Table` in `Symbols`. |
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
@@ -642,8 +643,10 @@ root package (`deephaven_massive._ingest`); review keeps those out.
 
 ## 5. `MassiveConfig`
 
-`MassiveConfig` is a frozen dataclass. `MassiveConfig()` reads the environment. Defaults are
-defined in exactly one place: the field defaults of this class.
+`MassiveConfig` is a frozen dataclass. `MassiveConfig()` reads the credentials from the
+environment and nothing else: it never reads a file. Defaults are defined in exactly one place:
+the field defaults of this class. `MassiveConfig.from_file` builds one from a settings file
+(below).
 
 | Field | Default / environment variable | Meaning |
 |---|---|---|
@@ -660,11 +663,11 @@ defined in exactly one place: the field defaults of this class.
 | `rest_basic_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions the key's account holds on Massive's free Basic tier, whose REST requests are paced at 5 per minute from the first one ([section 13.4](#134-rest)). Stored as a `frozenset`. Anything but a set of `Subscription` raises `TypeError`; forex or crypto, as text or as an `AssetClass`, raises `TypeError` naming `Subscription.CURRENCIES`, the one subscription of both. |
 | `delayed_subscriptions: AbstractSet[Subscription]` | `frozenset()` | The subscriptions whose streams use Massive's delayed feed (`delayed.massive.com`: 15 minutes behind, 10 for futures), even when the plan is real-time. Every subscription not listed uses the real-time feed, and a stream verb of one raises `EntitlementError` when Massive shows that the plan's data is delayed, naming the evidence and this setting ([section 13.2](#132-host-decision)); `fetch()` and `poll()` of its current data fail the same way when Massive labels a response or row `DELAYED` ([section 13.4](#134-rest)). REST cannot ask for delayed data, so a listed subscription's REST reads return whatever the plan serves, unchecked. The choice is deterministic: no stream ever moves between feeds. `history()` is past data and is not affected. Stored as a `frozenset` and validated like `rest_basic_subscriptions` (`TypeError`); `Subscription.CURRENCIES` raises `ValueError`, since Massive has no delayed forex or crypto feed. A `ws_hosts` pin that contradicts it raises `ValueError`: a delayed feed (any host whose name starts with `delayed.`) for forex, crypto, or a class whose subscription is not listed, or any other host for one that is. A stream of the FMV family on a listed subscription raises `ValueError`: FMV is real-time only. |
 | `flush_interval: float` | `0.05` seconds | WebSocket micro-batch flush into `TablePublisher.add`. |
-| `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
-| `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. |
-| `s3_bucket: str` | `flatfiles` | Rarely changed. |
-| `noncanonical_symbols: OnError` | `DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS` (`raise`, `log`, or `ignore`, any case; other text raises `ValueError`), then `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
-| `unreadable_symbols: OnError` | `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS` (`raise`, `log`, or `ignore`, any case; other text raises `ValueError`), then `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
+| `rest_base_url: str` | `https://api.massive.com` | Rarely changed. Must be an `http` or `https` URL with a host and no whitespace (`ValueError`, showing the URL without its user and password). |
+| `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
+| `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
+| `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
+| `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 
 Not configurable:
 
@@ -689,11 +692,45 @@ refusal; the 5 per minute is a wire constant, not configurable.
 
 Environment variables have one name each and no fallbacks. An unset or blank variable is
 absent; a value with surrounding whitespace raises `ValueError` naming the variable (never a
-credential's value), as an argument would. The keyword settings (`raise`, `log`, `ignore`,
-and the log levels) accept any case, as their tables say: a keyword names a choice, not an
-identifier Massive matches. The credentials keep Massive's
+credential's value), as an argument would. The log levels accept any case, as their table
+says: a keyword names a choice, not an identifier Massive matches. The only settings read from
+the environment are the credentials, the log's two variables, and the settings file's path,
+`DEEPHAVEN_MASSIVE_CONFIG_FILE`. The credentials keep Massive's
 names (`MASSIVE_API_KEY`, `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY`), so a key
 set up for Massive's own tools works unchanged.
+
+**The settings file.** `MassiveConfig.from_file(path=None)` returns a configuration built from a
+YAML file, so a notebook, a console, and a container can share one set of settings. With no
+path it reads the path from `DEEPHAVEN_MASSIVE_CONFIG_FILE`, and raises `ValueError` naming that
+variable when it is unset; `~` in either is expanded. Nothing else reads a file: there is no
+default location and no discovery, so `MassiveConfig()` and `MassiveSession()` behave the same
+wherever they run. Precedence is code, then the file, then the defaults: code overrides a file's
+setting with `dataclasses.replace(MassiveConfig.from_file(), ...)`. The call logs one INFO line
+naming the file and the keys it set.
+
+- **Keys** are the field names, and a file sets any subset. The credentials (`api_key`,
+  `s3_access_key_id`, `s3_secret_access_key`) come only from code or their `MASSIVE_*`
+  variables: a credential key in the file raises `ValueError` naming the variable to use, never
+  the value. An unknown key raises `ValueError` with the closest key ("did you mean"), showing
+  at most the key's first 40 characters, so a secret pasted as a key is cut short.
+- **Parsing** uses a pure-Python PyYAML `BaseLoader` subclass, never `yaml.load` with a full
+  loader or the C loader, so every scalar is text: YAML 1.1's type guessing never turns the
+  ticker `ON` or `NO` into a boolean or `0700` into a number. The file is refused when it holds
+  a duplicate key, any explicit tag (`!!python/...` included), an anchor or alias, more than one
+  document, or a top level that is not a mapping (an empty file included).
+- **Conversion** goes through one table that maps every field but the credentials to a
+  converter: a list of subscription words (`[stocks, options]`), an enum word of `OnError`
+  written exactly as its value (`raise`, `log`, `ignore`; `Raise` and `" raise"` are refused
+  with the valid spellings), a number (an `int` field takes whole numbers only; a non-finite
+  value is refused, and so is a whole number too long for Python to convert), a mapping of
+  asset-class word to host (`ws_hosts`), or text (the URLs and the bucket; an empty value, such
+  as `rest_base_url:` with nothing after it, `~`, `null`, or `''`, is refused: leaving the key
+  out gives the default). The constructor then validates as it does for code, so it stays the only
+  validator of values.
+- **Every error** is a `ValueError` that names the file, the key, and the line and column where
+  known, except one about an environment variable (a credential with surrounding whitespace, or
+  one S3 credential without the other), which names the variable and not the file; a missing file raises `FileNotFoundError` naming it (and the variable, when the path
+  came from it).
 
 The log is not configured through `MassiveConfig`: it belongs to the process, not to a session.
 Two environment variables turn it on, read once per process when the first session is created
@@ -1819,8 +1856,8 @@ Notation:
   the form to write (`from_currency=' usd' must be a three-letter upper-case currency code;
   write 'USD'`). This holds for symbols ([section 10](#10-symbols-and-all)), identifiers such
   as currency codes, date and time text, `filters` values and `sort`, and `MassiveConfig`'s
-  text fields and environment variables ([section 5](#5-massiveconfig)). The converters
-  (`dm.canonical_symbol*`) exist to turn another spelling into Massive's, and they convert
+  text fields, environment variables, and settings file ([section 5](#5-massiveconfig)). The
+  converters (`dm.canonical_symbol*`) exist to turn another spelling into Massive's, and they convert
   only the spellings they document.
 - `…T` is `start: DateLike | None = None, end: DateLike | None = None` followed by `…F`. It
   exists only on datasets whose row has a named time axis (shown as "axis"). `start` and `end`
@@ -7062,9 +7099,8 @@ document already reflects them.
     both `LOG` by default (the owner's decision, which replaces the earlier "fails by
     default"): `noncanonical_symbols`, for a row of a symbol table that is not Massive's exact
     ticker, and `unreadable_symbols` (renamed from `unknown_symbols`), for a symbol Massive
-    sends in a spelling the library cannot read. Their environment variables are
-    `DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS` and `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS`, taking
-    `raise`, `log`, or `ignore`, under the library's own prefix. A `str` or a list in code
+    sends in a spelling the library cannot read. They have no environment variables: code or
+    the settings file sets them (decision 80). A `str` or a list in code
     always raises, whatever the setting, and `canonicalize_symbols(on_error=OnError.RAISE)`
     keeps its own argument, since it is a standalone function. No per-dataset parameter: it
     would act only when a symbol table is passed, and nobody wants a different strictness per
@@ -7253,6 +7289,16 @@ document already reflects them.
     names it; nothing is shown as real-time without a label or a host that proves it
     ([section 5](#5-massiveconfig), [section 13.2](#132-host-decision),
     [section 13.4](#134-rest)).
+80. **Settings can come from a YAML file** (2026-10-31, owner). `MassiveConfig.from_file`
+    reads one, from a path or from `DEEPHAVEN_MASSIVE_CONFIG_FILE`; nothing reads a file
+    unasked. Code overrides the file, which overrides the defaults. Credentials stay in code or
+    the environment and are refused in the file. Every scalar is text and every value goes
+    through one explicit converter per field, so YAML's type guessing never reaches a setting,
+    and enum words are taken exactly as spelled. The two symbol-policy environment variables
+    are removed: a setting has one source outside code, the file. The log's two variables stay,
+    since the log belongs to the process, not to a session. The vocabulary layer's rule becomes
+    "no network I/O and no threads", since `_config` reads the file
+    ([section 5](#5-massiveconfig)).
 
 ## 23. Open verification items
 

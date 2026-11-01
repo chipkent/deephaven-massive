@@ -665,8 +665,9 @@ back its history goes, as Massive's pages state them.
 
 `RawSymbol` holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` \
 is null, and `RawSymbol` is null on every other row. A session with \
-`unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails \
-on such a row instead and has no `RawSymbol`; the table shows the default session.
+`unreadable_symbols=dm.OnError.RAISE` (in code or in the settings file, as \
+`unreadable_symbols: raise`) fails on such a row instead and has no `RawSymbol`; the table shows \
+the default session.
 
 <details><summary>Massive fields</summary>
 
