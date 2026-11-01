@@ -215,6 +215,19 @@ def _symbol(name: str, spec: DatasetSpec, client: RestClient, *, symbols: Mappin
     return symbols.get(spec.asset_class, "AAPL")
 
 
+def _daily_unit(spec: DatasetSpec) -> dm.Timespan:
+    """Return the timespan of one bar per trading day for a bars dataset.
+
+    Futures bars have no `Timespan.DAY`: Massive's futures aggregates endpoint has a
+    trading-session unit instead, and `bars()` refuses `DAY` for futures and `SESSION` for every
+    other class. The catalog records no timespans, so the choice follows that asset-class rule.
+
+    Returns:
+        `Timespan.SESSION` for futures bars, `Timespan.DAY` for every other class.
+    """
+    return dm.Timespan.SESSION if spec.asset_class is dm.AssetClass.FUTURES else dm.Timespan.DAY
+
+
 def _query(
     session: dm.MassiveSession,
     name: str,
@@ -229,8 +242,9 @@ def _query(
     Every required argument gets a value (`_FIXED_ARGUMENTS`, `day` for a `date`); `symbols`
     gets the class's symbol even where it is optional, and `limit` 5 where the dataset takes
     one. A bars dataset, whose `timespan` is required, uses `Timespan.MINUTE` for a stream (the
-    one-minute channel every bars dataset offers) and `Timespan.DAY` for every other verb (the
-    previous day's bar for `fetch()` and `poll()`, one daily bar for `history()`).
+    one-minute channel every bars dataset offers) and its daily unit for every other verb (the
+    previous day's bar for `fetch()` and `poll()`, one daily bar for `history()`): see
+    `_daily_unit`.
 
     Returns:
         The query.
@@ -248,7 +262,7 @@ def _query(
         if parameter.name == "symbols":
             arguments["symbols"] = _symbol(name, spec, client, symbols=symbols)
         elif parameter.name == "timespan":
-            arguments["timespan"] = dm.Timespan.MINUTE if verb == "stream" else dm.Timespan.DAY
+            arguments["timespan"] = dm.Timespan.MINUTE if verb == "stream" else _daily_unit(spec)
         elif parameter.name == "limit" and verb in {"fetch", "poll"}:
             arguments["limit"] = _LIMIT
         elif parameter.default is not inspect.Parameter.empty:
