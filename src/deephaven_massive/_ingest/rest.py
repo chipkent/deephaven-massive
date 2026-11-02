@@ -134,7 +134,6 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
-    UnsupportedParameterError,
     cause_of,
     failure_text,
     from_wire,
@@ -697,6 +696,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
         patience: Patience,
+        on_missing: Callable[[Sequence[str]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -734,6 +734,9 @@ class RestReader:
             patience: The patience of the whole read (`patience()`, taken once when the read
                 began, on its own thread): the most time its requests wait out pauses, shared
                 by every path of a read that spans several.
+            on_missing: Given the symbols of the read that Massive answered with HTTP 404 (no
+                data), in call order, when there are any, for a `poll()` table's `Error`;
+                None to only log them.
 
         Returns:
             The rows, in call order and then page order, and the number of requests made.
@@ -775,6 +778,8 @@ class RestReader:
                 bounded_list(new),
                 rest_path.template,
             )
+        if missing and on_missing is not None:
+            on_missing(missing)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -1330,14 +1335,16 @@ class RestReader:
         executor: ThreadPoolExecutor,
         cancel: Cancel,
         pace: PaceCheck,
-    ) -> tuple[pa.Table, int, float]:
+    ) -> poll.CycleRows:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
-        A reactive symbol table can route a new symbol to a path that lacks a parameter the
-        caller set (`adjusted=False` on the crypto indicators). Retrying cannot fix that,
-        so its `ValueError` becomes `UnsupportedParameterError`, which fails the table. Before
-        reading, the cycle's requests per bucket go to `pace`, which warns once when the paced
-        ones outlast the interval.
+        One symbol never fails the table. A reactive symbol table can route a new symbol to a
+        path that lacks a parameter the caller set (`adjusted=False` on the crypto
+        indicators): the symbols of that path are left out of the cycle, with one WARNING per
+        session for each (`_plan_cycle`). A symbol Massive answers with HTTP 404 has no rows
+        (`read`). Both are named in the cycle's `left_out`, which the table's `Error` lists.
+        Before reading, the cycle's requests per bucket go to `pace`, which warns once when
+        the paced ones outlast the interval.
 
         Args:
             spec: The dataset.
@@ -1350,21 +1357,16 @@ class RestReader:
             pace: The table's pace check.
 
         Returns:
-            The cycle's rows, its request count, and the seconds of rate-limit pauses its
-            reads wait out (`patience()`, taken on the poller's thread before any fan-out).
+            The cycle's read (`poll.CycleRows`): its rows, its request count, the seconds of
+            rate-limit pauses its reads wait out (`patience()`, taken on the poller's thread
+            before any fan-out), and the symbols it left out, each with why.
 
-        Raises:
-            UnsupportedParameterError: If a path of the cycle does not take a parameter the
-                caller set.
-
-        Any other error is that of `read_fetch`.
+        Errors are those of `read_fetch`, but for a parameter a path does not take.
         """
-        try:
-            planned = self.plan_fetch(spec, request, symbols, cancel=cancel)
-        except ValueError as error:
-            raise UnsupportedParameterError(str(error)) from error
+        planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
         patience = self.patience()  # once for every path, on this thread, before any fan-out
+        missing: list[str] = []
         table, requests = self._read_planned(
             spec,
             request,
@@ -1375,8 +1377,69 @@ class RestReader:
             executor=executor,
             cancel=cancel,
             patience=patience,
+            on_missing=missing.extend,
         )
-        return table, requests, patience.seconds
+        left_out.extend(f"{symbol} (HTTP 404: no data)" for symbol in missing)
+        return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
+
+    def _plan_cycle(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: NormalizedSymbols | None,
+        *,
+        cancel: Cancel,
+    ) -> tuple[list[tuple[RestPath, list[Call]]], list[str]]:
+        """Plan a `poll()` cycle path by path, leaving out each path that refuses a parameter.
+
+        A path that does not take a parameter the caller set (`shared_params` raises
+        `ValueError`) is left out with its symbols, and the cycle reads every other path. Each
+        symbol left out this way logs one WARNING per session, naming the path and the
+        parameter, and DEBUG on later cycles.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments.
+            symbols: The cycle's static symbols.
+            cancel: The poller's stop token, for a read of the crypto ticker list.
+
+        Returns:
+            Each path the cycle reads with its calls (`plan_fetch`), and each symbol left out
+            with why, such as `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take
+            ['adjusted'])"`.
+
+        A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair`.
+        """
+        if symbols == ():
+            return [], []
+        planned = []
+        left_out: list[str] = []
+        for template, own in fetch_paths(spec, symbols):
+            try:
+                planned.append(
+                    self._plan_path(
+                        spec, request, template=template, own=own, split=None, cancel=cancel
+                    )
+                )
+            except ValueError as error:
+                reason = str(error).removeprefix(f"{spec.name}: ")
+                # Only a reactive table's symbols can meet a refusing path here: static
+                # symbols were planned when the table was made, so `own` is a tuple.
+                names = cast("tuple[str, ...]", own)
+                left_out.extend(f"{name} ({reason})" for name in names)
+                new = [
+                    name for name in names if self.state.first("refused", spec.name, template, name)
+                ]
+                logger.log(
+                    logging.WARNING if new else logging.DEBUG,
+                    "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error "
+                    "and polls the other symbols",
+                    spec.name,
+                    bounded_list(names),
+                    reason,
+                    "it" if len(names) == 1 else "them",
+                )
+        return planned, left_out
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
         """Check, before any symbol is known, that some fetch path can take the parameters.
@@ -1448,21 +1511,46 @@ class RestReader:
         """
         if symbols == ():
             return []  # an emptied symbol table asks for nothing, whatever the paths take
-        planned = []
-        for template, own in fetch_paths(spec, symbols):
-            rest_path = self.rest_path(template)
-            calls = plan_calls(
-                spec,
-                rest_path,
-                request,
-                symbols=own,
-                dates=(request.start, request.end),
-                split=functools.partial(self.crypto_pair, cancel=cancel)
-                if split is None
-                else split,
-            )
-            planned.append((rest_path, calls))
-        return planned
+        return [
+            self._plan_path(spec, request, template=template, own=own, split=split, cancel=cancel)
+            for template, own in fetch_paths(spec, symbols)
+        ]
+
+    def _plan_path(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        template: str,
+        own: NormalizedSymbols | None,
+        split: CryptoSplit | None,
+        cancel: Cancel | None,
+    ) -> tuple[RestPath, list[Call]]:
+        """Plan one fetch path's calls for its symbols (`plan_calls`).
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            template: The path's template (`fetch_paths`).
+            own: The symbols the path reads.
+            split: Splits a crypto pair, or None for `crypto_pair` (`plan_fetch`).
+            cancel: The read's stop token, for a read of the crypto ticker list, or None.
+
+        Returns:
+            The path and its calls.
+
+        A parameter the path does not take raises the `ValueError` of `shared_params`.
+        """
+        rest_path = self.rest_path(template)
+        calls = plan_calls(
+            spec,
+            rest_path,
+            request,
+            symbols=own,
+            dates=(request.start, request.end),
+            split=functools.partial(self.crypto_pair, cancel=cancel) if split is None else split,
+        )
+        return rest_path, calls
 
     def read_fetch(
         self,
@@ -1544,6 +1632,7 @@ class RestReader:
         cancel: Cancel | None,
         patience: Patience,
         on_recency: Callable[[Recency], None] | None = None,
+        on_missing: Callable[[Sequence[str]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
@@ -1567,6 +1656,8 @@ class RestReader:
             cancel: Ends the reads' waits when set, or None.
             patience: The patience of the whole read, shared by every path's requests.
             on_recency: Receives each page's recency evidence (`read`), or None.
+            on_missing: Receives each path's symbols Massive answered with HTTP 404 (`read`),
+                or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
@@ -1588,6 +1679,7 @@ class RestReader:
                 executor=executor,
                 cancel=cancel,
                 patience=patience,
+                on_missing=on_missing,
             )
             tables.append(table)
             requests += made
@@ -2007,8 +2099,8 @@ class RestEndpoints:
         A parameter the caller set that a path of the call does not take raises `ValueError`
         before the table exists. With static symbols every path is planned now; with a reactive
         table, whose symbols choose the paths at each cycle, only a parameter that no fetch path
-        takes fails here (`RestReader.check_parameters`), and one the cycle's path lacks fails
-        the table then (`UnsupportedParameterError`).
+        takes fails here (`RestReader.check_parameters`), and the symbols of a path that lacks
+        one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
         """
         reader = self._reader("poll")
         if isinstance(request.symbols, SymbolTable):

@@ -467,8 +467,9 @@ When a weekday's flat file is missing (not out yet, or never published):
   range; a WARNING and the table's description name the days. If your plan lacks the files, or
   S3 rejects your S3 keys, `AUTO` reads REST instead, with a WARNING.
 - **REST cannot serve the read (such as trades of `dm.ALL`), or `source=FLAT_FILES`:** a day
-  with a later day's file is taken for a holiday; otherwise the call fails. With `FLAT_FILES`,
-  files your plan lacks are an error too.
+  with a later day's file is taken for a holiday, and a WARNING and the table's description
+  name it, since Massive's file may simply be missing; otherwise the call fails. With
+  `FLAT_FILES`, files your plan lacks are an error too.
 
 Split-adjusted bars come only from REST, one symbol at a time (every symbol at once only for
 1-day bars), so split-adjusted minute bars of `dm.ALL` have no source: pass `adjusted=False`
@@ -782,13 +783,18 @@ wrong.
   warns without stopping it, joined with `;`: a watchlist row in the wrong spelling; options
   contracts waiting for room (`over capacity: <n>/1000; <k> deferred`); a subscription Massive
   has not confirmed (`no acknowledgement from Massive for ...`; the library re-sends it); a
-  `dm.ALL` stream's symbols whose rows are being dropped; a connection that is down or quiet.
-  `Query` shows the call that opened it, `Recency` whether its data is real-time (`REALTIME`),
-  delayed (`DELAYED`), or not yet shown to be either (`UNKNOWN`), `RowsPublished` counts rows
-  delivered, and `SchemaDrift` lists fields Massive added (`WebSocket:zz+`), stopped sending
-  (`REST:size-`), or sent with a value that does not fit (`REST:exchange?`). A streamed row
-  whose symbol or time cannot be read is dropped and logged; 100 such rows in a row, with none
-  delivered, fail the streams, since Massive has most likely changed its format.
+  `dm.ALL` stream's symbols whose rows are being dropped; a connection that is down or quiet;
+  a poll's symbols left out of its latest cycle (`no rows this cycle for ...`: Massive has no
+  data for them, or their endpoint does not take an argument you passed). `Gaps` keeps every
+  span over which a live table's rows may be missing (an outage it recovered from, a run of
+  failed poll cycles), after the `Error` note has cleared. `Query` shows the call that opened
+  it, `Recency` whether its data is real-time (`REALTIME`), delayed (`DELAYED`), or not yet
+  shown to be either (`UNKNOWN`), `RowsPublished` counts rows delivered, and `SchemaDrift`
+  lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), sent with a
+  value that does not fit (`REST:exchange?`), or sent as a whole number too large for its
+  decimal column, which holds it rounded (`WebSocket:s~`), and counts the rows dropped because
+  their symbol or time cannot be read (`REST:3 rows dropped`). 100 such streamed rows in a
+  row, with none delivered, fail the streams, since Massive has most likely changed its format.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,
@@ -1053,7 +1059,8 @@ this section) and look at what the library did.
 | `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
-| `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows. |
+| `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows, and `Gaps` keeps the span whose rows may be missing. |
+| `no rows this cycle for ...` in `m.streams()` | A poll left those symbols out: Massive answered that it has no data for them (`HTTP 404`), or their endpoint does not take an argument you passed (such as `adjusted=False` for a crypto pair). The other symbols keep polling; fix or remove the symbols named. |
 | `... longer than MassiveConfig.max_outage`, from a stream or from `... poll(): ...` | The outage, or the failing or silent poll cycles, outlasted `max_outage`, so the table stopped rather than show stale data. Fix any error it names, then call the verb again; raise `max_outage` to wait longer. See [live table lifetime](#live-tables). |
 | `no acknowledgement from Massive for ...` in `m.streams()` | Massive has not confirmed the subscription; the library re-sends it until it does. If the note stays, the rows of those symbols may be missing: report it. |
 | `over capacity: <n>/1000; <k> deferred` in `m.streams()` | The options connection is full; the extra contracts subscribe when others leave. Watch fewer contracts. See [`symbols`](#symbols). |

@@ -820,6 +820,10 @@ class DriftReport:
         unconvertible: Wire keys (for a flat file, headers) outside the key columns that held,
             in some row, a value that does not fit the field's type or its named conversion
             (decoded as null).
+        rounded: Wire keys of `long` fields widened into a `double` column (by the lattice
+            join, `WireType.common_type`) that held, in some row, a whole number beyond 2**53,
+            which a `double` holds only rounded. The value is served rounded, never nulled.
+            The decoders never set it: the widening happens after decoding, in the library.
         statuses: REST envelope `status` values outside the documented ones (`OK`,
             `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
             Always empty for WebSocket and flat files.
@@ -827,10 +831,10 @@ class DriftReport:
             fit.
         dropped_reason: Why the first dropped row was dropped, naming the key and quoting its
             value, or `""` when no row was. Not part of equality, the hash, or the `repr`.
-        samples: For each wire key in `extra`, `missing`, or `unconvertible`, the first row
-            that showed it (`DriftSample`), so a drift WARNING can quote a symbol and a value;
-            a key may have none (a flat-file header the file lacks). Read-only. Not part of
-            equality, the hash, or the `repr`: two reports of the same drift are equal
+        samples: For each wire key in `extra`, `missing`, `unconvertible`, or `rounded`, the
+            first row that showed it (`DriftSample`), so a drift WARNING can quote a symbol and
+            a value; a key may have none (a flat-file header the file lacks). Read-only. Not
+            part of equality, the hash, or the `repr`: two reports of the same drift are equal
             whichever rows showed it.
 
     Example:
@@ -846,6 +850,7 @@ class DriftReport:
     extra: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
     unconvertible: frozenset[str] = frozenset()
+    rounded: frozenset[str] = frozenset()
     statuses: frozenset[str] = frozenset()
     dropped_rows: int = 0
     dropped_reason: str = dataclasses.field(default="", compare=False, hash=False, repr=False)
@@ -859,8 +864,8 @@ class DriftReport:
 
     @property
     def fields_drifted(self) -> bool:
-        """True when some field is extra, missing, or held a value that does not fit."""
-        return bool(self.extra or self.missing or self.unconvertible)
+        """True when some field is extra, missing, held a value that does not fit, or rounded."""
+        return bool(self.extra or self.missing or self.unconvertible or self.rounded)
 
     def merge(self, other: DriftReport) -> DriftReport:
         """Return the drift of two payloads read as one, such as the two parts of a REST page.
@@ -877,6 +882,7 @@ class DriftReport:
             extra=self.extra | other.extra,
             missing=self.missing | other.missing,
             unconvertible=self.unconvertible | other.unconvertible,
+            rounded=self.rounded | other.rounded,
             statuses=self.statuses | other.statuses,
             dropped_rows=self.dropped_rows + other.dropped_rows,
             dropped_reason=self.dropped_reason or other.dropped_reason,

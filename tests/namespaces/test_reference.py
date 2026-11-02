@@ -836,8 +836,9 @@ class _Statuses:
         on_recency: Callable[[object], None],
         executor: ThreadPoolExecutor,
         cancel: object,
-    ) -> tuple[pa.Table, int, float]:
-        return self.tables.pop(0) if len(self.tables) > 1 else self.tables[0], 1, 600.0
+    ) -> poll.CycleRows:
+        rows = self.tables.pop(0) if len(self.tables) > 1 else self.tables[0]
+        return poll.CycleRows(rows, 1, 600.0)
 
 
 def _until(condition: Callable[[], bool]) -> None:

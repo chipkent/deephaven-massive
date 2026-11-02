@@ -2018,8 +2018,8 @@ def test_one_odd_row_costs_the_call_only_itself(
         (
             "stocks.dividends: dropped 1 REST row(s) whose key cannot be read, the first at GET "
             f"{DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), which the "
-            "dataset needs; such rows are dropped and counted, and the running count is logged at "
-            "DEBUG"
+            "dataset needs; such rows are dropped and counted: the running count is logged at "
+            "DEBUG and shown in the SchemaDrift of each live table that lost them"
         ),
     ]
 
