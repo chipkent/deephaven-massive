@@ -138,6 +138,30 @@ _INDEX_HOUR: Final = (
 )
 """Why an index bar of a day or longer ends at 01:00 New York time."""
 
+_FINISHED_ROWS: Final = (
+    "A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its "
+    'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
+    "read after their window ended. That test reads the local clock, which can be off, and a "
+    "row read within moments of its end, or from a delayed feed, may still lack the window's "
+    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
+    "as sent) only keeps a finished row out longer."
+)
+"""How every `TimestampEnd` description tells finished rows from unfinished ones."""
+
+_KEPT_STAMP: Final = (
+    "A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps "
+    "that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which "
+    "day it covers is not known."
+)
+"""What happens to a bar whose stamp the library does not expect, said on `TimestampStart`."""
+
+_ANY_ZONE: Final = (
+    "A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, "
+    "so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of "
+    "`Date` to 12 hours after 00:00 UTC of the next day, with a WARNING."
+)
+"""The window of a crypto day summary not in UTC, said on its `TimestampStart` and end."""
+
 _NULL_DATE: Final = (
     "Joining an intraday row to the same day's daily bar on `Date` attaches values not known "
     "until that day ended, and a null `Date` matches another null, so join longer bars on "
@@ -234,9 +258,10 @@ def _start_sentence(spec: DatasetSpec) -> str:
     """
     zone = _zone_word(spec)
     if spec.times is RowTimes.DAY:
+        utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The start of the day the summary covers, as an Instant: 00:00 "
-            f"{_ZONE_CLOCKS[str(zone)]} of `Date`."
+            f"{_ZONE_CLOCKS[str(zone)]} of `Date`.{utc}"
         )
     if spec.asset_class is AssetClass.FUTURES:
         return "The start of the bar's window, as an Instant: Massive's own window start."
@@ -244,7 +269,7 @@ def _start_sentence(spec: DatasetSpec) -> str:
         return (
             "The start of the bar the value is computed at, as an Instant. A bar of a day or "
             "longer starts at 00:00 of its window's first day in the day zone of the symbol's "
-            "class (UTC for forex and crypto, New York otherwise)."
+            f"class (UTC for forex and crypto, New York otherwise). {_KEPT_STAMP}"
         )
     first = (
         "a week's Monday, a month's, quarter's, or year's first weekday"
@@ -255,8 +280,8 @@ def _start_sentence(spec: DatasetSpec) -> str:
     return (
         "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
         f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "
-        "serves it; each "
-        "source's own stamp, quoted next, is moved there."
+        f"serves it. {_KEPT_STAMP} Every other stamp, as each source sends it (quoted next), "
+        "is moved there."
     )
 
 
@@ -273,9 +298,10 @@ def _end_sentence(spec: DatasetSpec) -> str:
     indices = spec.asset_class is AssetClass.INDICES
     if spec.times is RowTimes.DAY:
         later = f" {_INDEX_HOUR}" if indices else ""
+        utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The exclusive end of the day the summary covers, as an Instant: 00:00 "
-            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{later}"
+            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{later}{utc} {_FINISHED_ROWS}"
         )
     if spec.asset_class is AssetClass.FUTURES:
         return (
@@ -283,7 +309,9 @@ def _end_sentence(spec: DatasetSpec) -> str:
             "WebSocket bar at the later of that and Massive's `e`); a bar of a session or "
             "longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is "
             "its last session. history() returns a bar of several sessions, or of a week or "
-            "longer, only once no later session can still join it."
+            f"longer, only once no later session can still join it. {_FINISHED_ROWS} A bar of "
+            "several sessions or longer read before its last session passes that test once its "
+            "latest session so far has ended, though later sessions can still join it."
         )
     where = (
         f"00:00 {_ZONE_CLOCKS[zone]}"
@@ -293,7 +321,7 @@ def _end_sentence(spec: DatasetSpec) -> str:
     later = f" {_INDEX_HOUR}" if indices else ""
     return (
         f"{_WINDOW_END} An intraday bar ends its length after its start; a bar of a day or longer "
-        f"at {where} after its window's last day.{later}"
+        f"at {where} after its window's last day.{later} {_FINISHED_ROWS}"
     )
 
 

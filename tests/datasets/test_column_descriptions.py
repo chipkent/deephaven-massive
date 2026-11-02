@@ -329,7 +329,12 @@ def test_a_bars_start_is_described_as_the_window_start(
         f"00:00 {zone} of its window's first day ("
     )
     assert first in described
-    assert "each source's own stamp, quoted next, is moved there. From REST" in described
+    assert (
+        "Every other stamp, as each source sends it (quoted next), is moved there. From REST"
+        in (described)
+    )
+    # A stamp Massive is not known to use is kept, said before the sources' own stamps.
+    assert "keeps that stamp, has a null `Date`, and ends one period after it" in described
 
 
 def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
@@ -354,8 +359,8 @@ def test_the_library_describes_its_time_columns() -> None:
     stock_end = description(stocks.BARS, "TimestampEnd")
     assert stock_end.startswith("The exclusive end of the bar's window, as an Instant")
     assert 'on=["Symbol", "Timestamp>=TimestampEnd"]' in stock_end
-    assert stock_end.endswith("at 00:00 New York time after its window's last day.")
-    assert description(indices.BARS, "TimestampEnd").endswith("Chicago day is not verified.")
+    assert "at 00:00 New York time after its window's last day. A row read before" in stock_end
+    assert "Chicago day is not verified. A row read" in description(indices.BARS, "TimestampEnd")
     assert description(stocks.BARS, "Date").startswith(
         "The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart`"
     )
@@ -373,11 +378,16 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
     )
     assert description(stocks.DAILY_OPEN_CLOSE, "TimestampEnd") == (
         "The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of "
-        "the next day."
+        f"the next day. {FINISHED}"
     )
     assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd").endswith(
-        "Chicago day is not verified."
+        f"Chicago day is not verified. {FINISHED}"
     )
+    # A crypto summary not in UTC gets its date's widest window in any zone.
+    for name in ("TimestampStart", "TimestampEnd"):
+        assert "from 14 hours before 00:00 UTC of `Date` to 12 hours after" in description(
+            crypto.DAILY_OPEN_CLOSE, name
+        )
     assert description(crypto.DAILY_OPEN_CLOSE, "Date").startswith(
         "The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`"
     )
@@ -386,6 +396,30 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
     )
     assert "day zone of the symbol's class" in description(indicators.SMA, "TimestampEnd")
     assert "day zone of the symbol's class" in description(indicators.SMA, "Date")
+
+
+FINISHED = (
+    "A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its "
+    'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
+    "read after their window ended. That test reads the local clock, which can be off, and a "
+    "row read within moments of its end, or from a delayed feed, may still lack the window's "
+    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
+    "as sent) only keeps a finished row out longer."
+)
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    [stocks.BARS, futures.BARS, crypto.DAILY_OPEN_CLOSE, indicators.SMA, indicators.MACD],
+    ids=lambda spec: spec.name,
+)
+def test_every_end_says_how_to_keep_only_finished_rows(dataset: DatasetSpec) -> None:
+    # Every dataset with `TimestampEnd` says the same thing in the same words.
+    assert FINISHED in description(dataset, "TimestampEnd")
+
+
+def test_a_futures_end_says_a_longer_bar_can_still_grow() -> None:
+    assert "though later sessions can still join it" in description(futures.BARS, "TimestampEnd")
 
 
 def test_a_column_note_follows_the_description() -> None:

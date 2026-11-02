@@ -422,7 +422,11 @@ and the trade count. These rules hold for every `bars()` dataset.
 - **Join on the end.** A bar's values are final only once its window has ended, so join other
   data on `TimestampEnd`: `trades.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])` gives
   each trade the latest bar that had closed by then. Minute bars of every class end on whole
-  minutes, so a stock's and an index's 10:31 bars join exactly on `TimestampEnd`.
+  minutes, so a stock's and an index's 10:31 bars join exactly on `TimestampEnd`. A row read
+  before its window ended (today's bar from `fetch()`, an indicator's latest value) has
+  `TimestampInsert` before `TimestampEnd` and can still change:
+  `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window
+  ended.
 - **`Date`** is the bar's trading day. It is null for a bar that spans more than one date: a
   bar of several days, a week or longer, or an intraday bar across midnight.
 - **Which bars `history()` returns.** Only bars whose whole window lies inside the range and has
@@ -432,10 +436,15 @@ and the trade count. These rules hold for every `bars()` dataset.
 - **Odd stamps.** Massive stamps the same bar differently on different sources, such as a daily
   stock bar at 00:00 on one and at the 16:00 close on another; the library moves each known
   stamp to the start of its day, so every source gives the same rows. A bar stamped at a time it
-  does not expect, such as a daily bar at 14:30, is still served, labelled by the day its stamp
-  falls on, with one WARNING per dataset and timespan: check its dates before you rely on them,
-  and report the WARNING on the [issues page](https://github.com/chipkent/deephaven-massive/issues).
-  A crypto `daily_open_close` row that Massive marks as not UTC is treated the same way.
+  does not expect, such as a daily bar at 14:30, could cover that day or the next, so it is
+  served as Massive stamped it: `TimestampStart` is the stamp, `TimestampEnd` one period later
+  (no earlier than the end of any such period that holds the stamp), and `Date` is empty, with
+  one WARNING per dataset. `history()` returns such a bar only when the range holds that whole window, so it may need a
+  range one period longer. Please report the WARNING on the
+  [issues page](https://github.com/chipkent/deephaven-massive/issues). A crypto
+  `daily_open_close` row that Massive marks as not UTC keeps its `Date`, but its window is the
+  widest that date has in any time zone, from 14 hours before UTC midnight to 12 hours after the
+  next.
 
 <a id="history-sources"></a>
 
@@ -1050,7 +1059,7 @@ this section) and look at what the library did.
 | `MassiveSession #1 was closed; this table no longer updates` | The session was closed. Take `table.snapshot()` to keep the rows; create a new session for new tables. |
 | `Can not listen to failed table` | Deephaven builds nothing on a failed table. Work on `table.snapshot()`. |
 | `... inside a Deephaven console command, which holds the update graph's lock` | A long command paused every live table. Pass `wait=False` to long reads. |
-| `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
+| `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served at its own stamp with no `Date`. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
 | `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows. |

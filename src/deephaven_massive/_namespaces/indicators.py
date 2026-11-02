@@ -20,9 +20,11 @@ one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exc
 crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
 carries the stamp of the aggregate it is computed over, which the aggregates range puts at
 00:00 of the period's first day (01:00 New York time for indices), so it is labelled as that
-class's bars are. A value stamped otherwise is still returned, labelled by the day its stamp
-falls on, and logs one WARNING per dataset and timespan per session, since it may cover other
-days than its label.
+class's bars are. A value stamped otherwise is still returned, as Massive stamped it: it keeps
+that stamp, ends one period later, has a null `Date`, and logs one WARNING per dataset per
+session, since which day it covers is not known. `fetch()` and `poll()` return what Massive
+reports now, the current period's still-changing value included; a row whose `TimestampEnd`
+is after its `TimestampInsert` was read before its period ended.
 
 Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
@@ -252,7 +254,9 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed.
+        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
+        value, which changes until the period ends; keep finished values with
+        `t.where("TimestampEnd <= TimestampInsert")`.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -321,7 +325,9 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed.
+        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
+        value, which changes until the period ends; keep finished values with
+        `t.where("TimestampEnd <= TimestampInsert")`.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -389,7 +395,9 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed.
+        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
+        value, which changes until the period ends; keep finished values with
+        `t.where("TimestampEnd <= TimestampInsert")`.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -461,7 +469,9 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed.
+        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
+        value, which changes until the period ends; keep finished values with
+        `t.where("TimestampEnd <= TimestampInsert")`.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
