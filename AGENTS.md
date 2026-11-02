@@ -12,7 +12,7 @@ Run everything from the repository root, through `uv run`. The tests need JDK 17
 ```bash
 uv sync --upgrade                        # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                       # full gate: ruff, format, mypy, pytest (up to 4 workers), 100% coverage
+./scripts/check.sh                       # full gate: ruff, format, mypy; the whole suite with 100% coverage only if the change can affect the tests
 ./scripts/check.sh full --all            # whole suite; plain full (and pre-push) tests only what CI would
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy only
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
