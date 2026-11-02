@@ -779,6 +779,32 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     assert not table.j_table.isFailed()
 
 
+def test_a_gap_starts_where_the_failed_cycle_started_not_at_its_last_page(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # Each cycle reads for 40 s and receives a page at its end. The failing cycle starts at
+    # 08:01:40 and fails after its page at 08:02:20: it published nothing, so its rows are
+    # missing from its start, not from its last page.
+    script.clock, script.took, script.late_page = clock, 40.0, True
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    next_cycle(clock)
+    script.rows(("AAPL", 2.0))
+    next_cycle(clock)
+    (row,) = stream_rows()
+    assert (row["Error"], row["Gaps"]) == (
+        None,
+        "2027-01-15T08:01:40Z to 2027-01-15T08:03:20Z",
+    )
+    del table
+
+
 def test_a_failed_cycle_that_received_no_page_counts_its_whole_run(
     *,
     massive_session: dm.MassiveSession,
@@ -1856,6 +1882,21 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
     assert any("no data for 1 [MSFT]" in r.getMessage() for r in caplog.records)
+    # The quiet poll never uses up the WARNING a later fetch() of the symbol owes.
+    caplog.clear()
+    fetched = build_query(ignoring_session._core, SMA, symbols=["MSFT"])
+    assert isinstance(fetched, Query)
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
+        fetched.fetch()
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "indicators.sma: no data for 1 [MSFT]: Massive answered HTTP 404 from "
+                "/v1/indicators/sma/{stockTicker}, so they are left out"
+            ),
+        )
+    ]
 
 
 def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(

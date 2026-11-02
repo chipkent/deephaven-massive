@@ -436,7 +436,8 @@ class StreamRow:
         gaps: Every time span over which the stream's rows may be missing, oldest first: a
             WebSocket outage it recovered from (from the last frame before the drop to the
             data's return), or a run of failed `poll()` cycles before a good one (from the
-            run's first failed cycle to the good cycle's start). Each is a pair of epoch
+            start of the run's first failed cycle, which published nothing, to the good
+            cycle's start). Each is a pair of epoch
             nanoseconds. Not a column of its own: the `Gaps` column shows them (`gaps_text`),
             on a stopped stream too, so the record outlasts the `Error` note that announced
             each one.

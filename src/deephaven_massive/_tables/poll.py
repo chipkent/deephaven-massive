@@ -71,8 +71,9 @@ does not include would otherwise log twenty WARNINGs for one cause. Any
 other error, also one while publishing, is shown in the row's `Error` with the time of the last
 good cycle (or, before one, of the poll's start); the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds, recording the run in the row's
-`Gaps`: from its first failed cycle's last progress to the good cycle's start, the time over
-which rows may be missing, a record that outlasts the note. A run of failing cycles fails the
+`Gaps`: from its first failed cycle's start (that cycle published nothing, whatever pages it
+received) to the good cycle's start, the time over which rows may be missing, a record that
+outlasts the note. A run of failing cycles fails the
 table, in every mode and naming the last good cycle, once one of its failures comes
 `MassiveConfig.max_outage` seconds or more after its first failed cycle last made progress:
 the rows since then may be missing, and a table that kept running would show stale data as if
@@ -531,6 +532,7 @@ class Poller:
         "_failing",
         "_failing_at",
         "_failing_since",
+        "_gap_from",
         "_good_at",
         "_interval",
         "_key_names",
@@ -629,6 +631,10 @@ class Poller:
         self._succeeded = False
         self._failing_since: float | None = None
         self._failing_at = 0.0
+        # When the current run's rows may have started to go missing: its first failed
+        # cycle's start (wall-clock), since that cycle published nothing, whatever pages it
+        # received. Only the poller thread touches it.
+        self._gap_from = 0.0
         # The current cycle's start (monotonic, and wall-clock); only the poller thread
         # touches them.
         self._began = 0.0
@@ -1009,7 +1015,7 @@ class Poller:
                 "missing, recorded in its Gaps",
                 self._spec.name,
                 self._stream_id,
-                utc_text(self._failing_at),
+                utc_text(self._gap_from),
                 utc_text(self._began_at),
             )
         return True
@@ -1018,13 +1024,13 @@ class Poller:
         """Return the gap a good cycle ends: the run of failing cycles before it, if any.
 
         Returns:
-            `(start, end)` in epoch nanoseconds, from the run's first failed cycle's last
-            progress (`_failing_at`) to this cycle's start; None when no cycle failed since the
-            last good one.
+            `(start, end)` in epoch nanoseconds, from the run's first failed cycle's start
+            (`_gap_from`: that cycle published nothing, even when it received pages before it
+            failed) to this cycle's start; None when no cycle failed since the last good one.
         """
         if self._failing_since is None:
             return None
-        return int(self._failing_at * 1e9), int(self._began_at * 1e9)
+        return int(self._gap_from * 1e9), int(self._began_at * 1e9)
 
     def _fail_fatal(self, core: SessionCore, error: MassiveError) -> None:
         """Fail the table with a cycle's fatal error; a failure that raises is logged at ERROR.
@@ -1081,6 +1087,7 @@ class Poller:
             # From its last progress: its start, or its latest page.
             self._failing_since = progress
             self._failing_at = self._began_at + (progress - self._began)
+            self._gap_from = self._began_at  # it published nothing from its start
         down = self._clock.monotonic() - self._failing_since
         if down >= self._max_outage:
             self._fail_fatal(core, self._outage_failure(error, down))

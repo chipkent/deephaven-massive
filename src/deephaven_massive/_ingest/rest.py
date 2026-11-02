@@ -818,7 +818,9 @@ class RestReader:
         """Log the symbols Massive answered with HTTP 404: at `level` for those new this session.
 
         One line per read names each symbol once per session at `level`, however many there
-        are; the others, and every symbol under a `level` of DEBUG, log at DEBUG.
+        are; the others, and every symbol under a `level` of DEBUG, log at DEBUG. A DEBUG line
+        marks no symbol as named, so a poll under `unavailable_symbols=IGNORE` never takes
+        the WARNING a later `fetch()` of the same symbol owes.
 
         Args:
             spec: The dataset.
@@ -826,7 +828,11 @@ class RestReader:
             missing: The symbols (a futures session's with its session), in call order.
             level: The level of the symbols not yet named this session.
         """
-        new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
+        new = (
+            [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
+            if level > logging.DEBUG
+            else []
+        )
         logger.log(
             level if new else logging.DEBUG,
             "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",

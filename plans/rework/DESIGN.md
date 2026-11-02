@@ -3726,8 +3726,9 @@ sees:
   Any other error sets the stream's `Error` in `m.streams()` to the error followed by "; last
   good cycle at <time>" (or "; no good cycle since the poll started at <time>"), keeps the
   previous rows, and the next cycle runs as scheduled. The first good cycle after a run of
-  failures clears that `Error` and records the run in the stream's `Gaps`, from the run's
-  start to the good cycle's start, the span over which rows may be missing, and logs it at
+  failures clears that `Error` and records the run in the stream's `Gaps`, from its first
+  failed cycle's start (that cycle published nothing, even when pages arrived before it
+  failed) to the good cycle's start, the span over which rows may be missing, and logs it at
   INFO. A run of failing cycles begins with
   the first failed cycle after a good cycle, at that cycle's start, or at its latest page when
   it received one; a failure that comes `max_outage` seconds or more after the run began
@@ -4384,7 +4385,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
 | `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, the symbols the latest good `poll()` cycle left out, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
-| `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the run's start to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
+| `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the start of its first failed cycle (which published nothing, whatever pages it received) to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
 | `CreatedAt` | `Instant` |
 | `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (rows whose key could not be read), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
 
