@@ -748,6 +748,17 @@ converted = dm.canonicalize_symbols(
     convention=dm.SymbolConvention.YAHOO,
     on_error=dm.OnError.LOG,
 )
+
+# A watchlist you can edit: an input table. A fetch() of it follows it, reading each symbol
+# you add. You should see a new table, dividends, with AAPL's dividends, then MSFT's join it
+# a few seconds after the second add.
+from deephaven import dtypes as dht
+from deephaven import input_table
+
+names = input_table({"Symbol": dht.string}, key_cols="Symbol")
+names.add(new_table([string_col("Symbol", ["AAPL"])]))
+dividends = m.stocks.dividends(names).fetch()
+names.add(new_table([string_col("Symbol", ["MSFT"])]))
 ```
 
 **You should see** `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, then a line starting
@@ -755,6 +766,9 @@ converted = dm.canonicalize_symbols(
 that names the conventions to choose from. `converted` holds `BRK.B`, `AAPL`, and an empty
 row: with `dm.OnError.LOG` a symbol that cannot be converted becomes empty and is logged,
 instead of stopping everything (`dm.OnError.RAISE`) or passing silently (`dm.OnError.IGNORE`).
+`dividends` is a refreshing table: it shows AAPL's dividends, then MSFT's join it once they are
+read. Its row in `streams` has `Kind` `read`, and `m.symbol_reads()` shows each symbol `DONE`.
+Delete a row from `names` and that symbol's dividends leave the table at once.
 
 ### 13. Check the debug log (`13_check_the_log.py`)
 

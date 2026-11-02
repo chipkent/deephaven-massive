@@ -21,3 +21,14 @@ converted = dm.canonicalize_symbols(
     convention=dm.SymbolConvention.YAHOO,
     on_error=dm.OnError.LOG,
 )
+
+# A watchlist you can edit: an input table. A fetch() of it follows it, reading each symbol
+# you add. You should see a new table, dividends, with AAPL's dividends, then MSFT's join it
+# a few seconds after the second add.
+from deephaven import dtypes as dht
+from deephaven import input_table
+
+names = input_table({"Symbol": dht.string}, key_cols="Symbol")
+names.add(new_table([string_col("Symbol", ["AAPL"])]))
+dividends = m.stocks.dividends(names).fetch()
+names.add(new_table([string_col("Symbol", ["MSFT"])]))
