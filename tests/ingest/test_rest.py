@@ -3802,18 +3802,18 @@ def test_an_indicator_takes_the_day_zone_of_its_symbols_class(
     ]
 
 
-def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_label(
+def test_futures_bars_of_two_sessions_named_by_dates_keep_the_buckets_inside_the_range(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Monday 03-25 to Friday 03-29, 2024. Whether a two-session bar is labelled with its first
-    # or its last session is not documented, so only the labels that fit the week either way
-    # are requested and kept: Tuesday to Thursday. A bar must also end by the range's end,
-    # 17:00 Chicago on Friday, with its sessions counted with the holiday allowance.
-    def bar(label: str, opens: datetime) -> dict[str, object]:
-        return {"ticker": "ESM4", "session_end_date": label, "window_start": epoch_ns(opens)}
+    # Monday 03-25 to Friday 03-29, 2024. Massive's 2-session bars are buckets of two UTC
+    # days from 00:00 UTC, each labelled with its last session. Good Friday folded into the
+    # session of Monday 04-01, which opened on Thursday 03-28, so the bucket of 03-27 and
+    # 03-28 is labelled 04-01, after the range, and is left out.
+    def bar(day: int, label: str) -> dict[str, object]:
+        start = datetime(2024, 3, day, tzinfo=UTC)
+        return {"ticker": "ESM4", "session_end_date": label, "window_start": epoch_ns(start)}
 
-    labels = {"2024-03-25": 22, "2024-03-26": 25, "2024-03-28": 27, "2024-03-29": 28}
-    bars = [bar(label, datetime(2024, 3, day, 17, tzinfo=CHICAGO)) for label, day in labels.items()]
+    bars = [bar(23, "2024-03-25"), bar(25, "2024-03-27"), bar(27, "2024-04-01")]
     fake_rest.reply("/futures/v1/aggs/ESM4", Reply(envelope(bars)))
     out = history(
         session,
@@ -3824,12 +3824,14 @@ def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_
         timespan=Timespan.SESSION,
         multiplier=2,
     )
-    assert fake_rest.get_queries()[0][1]["resolution"] == ["2session"]
-    # The label is not the bar's day: a bar of two sessions has no `Date`. The bar opening
-    # Monday evening may end as late as Friday's close, so it is kept; the one opening
-    # Wednesday evening may end on Tuesday 04-02 (Good Friday folds), after the range.
+    query = fake_rest.get_queries()[0][1]
+    assert query["resolution"] == ["2session"]
+    # Requested from 00:00 UTC on the Saturday before the first Monday.
+    assert query["window_start.gte"] == [str(epoch_ns(datetime(2024, 3, 23, tzinfo=UTC)))]
+    # A bar of two sessions has no `Date`; it ends at 17:00 Chicago on its label.
     assert [(r["Date"], r["TimestampEnd"]) for r in out] == [
-        (None, epoch_ns(datetime(2024, 3, 29, 17, tzinfo=CHICAGO))),
+        (None, epoch_ns(datetime(2024, 3, 25, 17, tzinfo=CHICAGO))),
+        (None, epoch_ns(datetime(2024, 3, 27, 17, tzinfo=CHICAGO))),
     ]
 
 

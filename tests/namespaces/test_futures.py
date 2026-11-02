@@ -1179,67 +1179,125 @@ def test_futures_datasets_take_contracts_and_spreads(massive_session: dm.Massive
             massive_session.futures.trades(bad)
 
 
-def test_bars_of_several_sessions_by_date_fit_under_both_readings_of_their_label(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # Whether Massive labels a 2-session bar with its first session or its last is not
-    # documented, so a bar is selected only when both readings fit the range: Tuesday to
-    # Thursday of 2025-02-03 to 02-07, never the Monday (its other session may be the Friday
-    # before) or the Friday (its other session may be the Monday after). It is kept only when
-    # it has ended by Friday's close, counting its sessions with a fold and a holiday allowed,
-    # which leaves only the bar opening Monday evening.
-    def bar(label: str) -> dict[str, object]:
-        start = chicago_open(date.fromisoformat(label) - timedelta(days=1))
-        return {"ticker": "GCJ5", "session_end_date": label, "window_start": start, "close": 1.0}
-
-    labels = ["2025-02-03", "2025-02-04", "2025-02-05", "2025-02-06", "2025-02-07"]
-    fake_rest.reply(
-        "/futures/v1/aggs/GCJ5", Reply({"status": "OK", "results": [*map(bar, labels)]})
-    )
-    q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION, multiplier=2)
-    out = rows(q.history("2025-02-03", "2025-02-07", source=dm.HistorySource.REST))
-    assert [r["TimestampStart"] for r in out] == [bar(labels[1])["window_start"]]
-    # A bar of several sessions has no single date; it ends at the latest its sessions can:
-    # the second weekday session from its start's date, plus one for a fold and one for a
-    # holiday.
-    assert {r["Date"] for r in out} == {None}
-    assert out[0]["TimestampEnd"] == chicago_open(date(2025, 2, 7))
+def utc_ns(day: str) -> int:
+    # 00:00 UTC on an ISO date, where Massive starts a futures bucket.
+    return int(datetime.fromisoformat(day).replace(tzinfo=UTC).timestamp()) * NS
 
 
-def test_bars_of_several_sessions_are_kept_once_their_latest_end_has_passed(
+def serve_buckets(fake_rest: FakeRestServer, buckets: list[tuple[str, str]]) -> None:
+    # ESZ6 bars of a session or longer as Massive sent them on 2026-11-02: each bucket's
+    # first UTC day and its label, the bucket's last session.
+    results = [
+        {"ticker": "ESZ6", "session_end_date": label, "window_start": utc_ns(day), "close": 1.0}
+        for day, label in buckets
+    ]
+    fake_rest.reply("/futures/v1/aggs/ESZ6", Reply({"status": "OK", "results": results}))
+
+
+AFTER_THE_LIVE_RUN = datetime(2026, 11, 2, 12, tzinfo=CHICAGO)
+"""Monday 2026-11-02 at noon Chicago, when the live run read the bars these tests replay."""
+
+
+def test_a_month_bar_by_date_needs_the_session_that_opens_on_its_last_day(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # On Friday 2025-02-07 at noon, the 2-session bar that opened Monday evening may still be
-    # open: counted with a fold and a holiday, its last session would close Friday at 17:00.
-    now = datetime(2025, 2, 7, 12, tzinfo=CHICAGO)
-    monkeypatch.setattr(history_source, "_now", lambda: now)
-    labels = ["2025-02-04", "2025-02-05"]
-    fake_rest.reply(
-        "/futures/v1/aggs/GCJ5",
-        Reply(
-            {
-                "status": "OK",
-                "results": [
-                    {
-                        "ticker": "GCJ5",
-                        "session_end_date": label,
-                        "window_start": chicago_open(date.fromisoformat(label) - timedelta(days=1)),
-                        "close": 1.0,
-                    }
-                    for label in labels
-                ],
-            }
-        ),
-    )
-    q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION, multiplier=2)
-    early = rows(q.history("2025-02-03", None, source=dm.HistorySource.REST))
-    assert early == []
-    monkeypatch.setattr(history_source, "_now", lambda: now + timedelta(hours=5))
-    late = rows(q.history("2025-02-03", None, source=dm.HistorySource.REST))
-    assert [r["TimestampEnd"] for r in late] == [chicago_open(date(2025, 2, 7))]
+    # A session belongs to the day it opens, the evening before its date, so September 2026's
+    # bar holds the sessions of 09-02 to 10-01 and is labelled 10-01.
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    months = [
+        ("2026-08-01", "2026-09-01"),
+        ("2026-09-01", "2026-10-01"),
+        ("2026-10-01", "2026-10-30"),
+    ]
+    serve_buckets(fake_rest, months)
+    q = rest_session.futures.bars("ESZ6", dm.Timespan.MONTH)
+    out = rows(q.history("2026-09-01", "2026-10-01", source=dm.HistorySource.REST))
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Date"]) for r in out] == [
+        (utc_ns("2026-09-01"), chicago_open(date(2026, 10, 1)), None)
+    ]
+    [(_, query)] = fake_rest.get_queries()
+    assert query["window_start.gte"] == [str(utc_ns("2026-09-01"))]
+    assert query["window_start.lt"] == [str(chicago_open(date(2026, 10, 1)) + 3600 * NS)]
+    # Ending on 09-30 leaves out September's last session, so no month bar fits.
+    serve_buckets(fake_rest, months)
+    assert rows(q.history("2026-09-01", "2026-09-30", source=dm.HistorySource.REST)) == []
+
+
+# The ESZ6 2-session bars Massive sent from 2026-08-01: each covers two calendar days, so the
+# one of Thursday 08-13 holds Friday's session alone.
+TWO_SESSIONS = [
+    ("2026-08-01", "2026-08-03"),
+    ("2026-08-03", "2026-08-05"),
+    ("2026-08-05", "2026-08-07"),
+    ("2026-08-09", "2026-08-11"),
+    ("2026-08-11", "2026-08-13"),
+    ("2026-08-13", "2026-08-14"),
+    ("2026-08-15", "2026-08-17"),
+]
+
+
+def test_bars_of_several_sessions_by_date_keep_every_bucket_inside_the_range(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sessions 2026-08-03 to 08-14: the bucket of Saturday 08-01 holds Monday's session alone,
+    # so it is the first; the bucket of 08-15 holds Monday 08-17's, after the range.
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    serve_buckets(fake_rest, TWO_SESSIONS)
+    q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION, multiplier=2)
+    out = rows(q.history("2026-08-03", "2026-08-14", source=dm.HistorySource.REST))
+    assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (utc_ns(day), chicago_open(date.fromisoformat(label))) for day, label in TWO_SESSIONS[:6]
+    ]
+    assert {r["Date"] for r in out} == {None}
+    # Requested from 00:00 UTC on the Saturday before the first Monday.
+    [(_, query)] = fake_rest.get_queries()
+    assert query["window_start.gte"] == [str(utc_ns("2026-08-01"))]
+
+
+def test_bars_of_several_sessions_by_instants_keep_the_buckets_at_the_range_s_edges(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # From 00:00 UTC on 08-01 to 00:00 UTC on 08-15: the first bucket starts exactly at the
+    # range's start, before its session's 17:00 Chicago open, and the last ends at 17:00
+    # Chicago on 08-14, before the range's end; both are kept.
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    serve_buckets(fake_rest, TWO_SESSIONS)
+    q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION, multiplier=2)
+    start, end = datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 8, 15, tzinfo=UTC)
+    out = rows(q.history(start, end, source=dm.HistorySource.REST))
+    assert [r["TimestampStart"] for r in out] == [utc_ns(day) for day, _ in TWO_SESSIONS[:6]]
+
+
+def test_a_bar_whose_bucket_is_still_open_is_left_out(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The 2-month bars of ESZ6 on 2026-11-02: November and December's bucket has seen only
+    # the session of 11-02 so far, so it is left out until no later session can join it.
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    buckets = [
+        ("2026-07-01", "2026-09-01"),
+        ("2026-09-01", "2026-10-30"),
+        ("2026-11-01", "2026-11-02"),
+    ]
+    serve_buckets(fake_rest, buckets)
+    q = rest_session.futures.bars("ESZ6", dm.Timespan.MONTH, multiplier=2)
+    out = rows(q.history("2026-07-01", None, source=dm.HistorySource.REST))
+    assert [r["TimestampEnd"] for r in out] == [
+        chicago_open(date(2026, 9, 1)),
+        chicago_open(date(2026, 10, 30)),
+    ]
 
 
 def test_history_with_dates_refuses_a_session_end_date_filter(

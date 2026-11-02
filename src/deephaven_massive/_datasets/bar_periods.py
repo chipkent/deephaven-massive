@@ -1,29 +1,37 @@
 """Bar periods: which bars of a timespan lie wholly inside a range, and the days a bar covers.
 
-A bar is kept only when its whole window lies inside the range (`bar_starts`, `bar_sessions`):
-an intraday or 1-day bar's window is its own interval. Massive starts a week on its Sunday, at
-00:00 in the class day zone, and stamps the week's bar there. For stocks and options, which do
-not trade at weekends, a week's window is its Monday to Friday and months, quarters, and years
-are calendar periods less their leading and trailing weekend days. Indices (which can update
-around the clock), forex (which trades from Sunday evening UTC), and crypto keep their weekends:
-their weeks run Sunday to Saturday and their months, quarters, and years are whole calendar
-periods. A futures week is the Monday-to-Friday week of session dates. A bar of several units
-spans that many. A bar of several days, of every class but futures, spans that many calendar
-days, weekends included, as Massive counts them: a 2-day stock bar stamped on a Friday holds
-Friday and Saturday, so Friday's trading alone, and the next one is stamped on the Sunday. A
-futures bar of several sessions counts weekdays, and without a holiday calendar its end allows
-for holidays (`last_trading_day`). A bar is kept only when its conservative end, the `TimestampEnd`
-it gets, lies inside the range and has passed (`history_source`), so a bar whose window may not
-have ended yet (the current month, say) is never returned. There is no holiday calendar: a stock
-week whose Friday is a holiday still runs Monday to Friday.
+A bar is kept only when its whole window lies inside the range (`bar_starts`): an intraday or
+1-day bar's window is its own interval. Massive starts a week on its Sunday, at 00:00 in the
+class day zone, and stamps the week's bar there. For stocks and options, which do not trade at
+weekends, a week's window is its Monday to Friday and months, quarters, and years are calendar
+periods less their leading and trailing weekend days. Indices (which can update around the
+clock), forex (which trades from Sunday evening UTC), and crypto keep their weekends: their
+weeks run Sunday to Saturday and their months, quarters, and years are whole calendar periods.
+A bar of several units spans that many. A bar of several days spans that many calendar days,
+weekends included, as Massive counts them: a 2-day stock bar stamped on a Friday holds Friday
+and Saturday, so Friday's trading alone, and the next one is stamped on the Sunday. A bar is
+kept only when the `TimestampEnd` it gets lies inside the range and has passed
+(`history_source`), so a bar whose window may not have ended yet (the current month, say) is
+never returned. There is no holiday calendar: a stock week whose Friday is a holiday still runs
+Monday to Friday.
 
-A request that must reach whole futures sessions by time (futures bars named by date) starts
-`FUTURES_HOLIDAY_MARGIN` before the first session's regular open (`futures_bar_request`), and
-its rows are kept by their session, `Date`.
+**Futures bars of a session or longer** are buckets of whole UTC days. Massive puts each
+session in the bucket that holds the day the session opens (17:00 Chicago, the evening before
+its date), starts the bar's `window_start` at 00:00 UTC on the bucket's first day, and labels
+the bar with the bucket's last session (`session_end_date`). A bucket of `n` sessions is `n`
+calendar days, so it can hold fewer than `n` sessions; a week is 7 days, and months, quarters,
+and years are calendar periods (`futures_bucket_end`). A bar has certainly ended once its
+label's session has closed and, when the label may not yet be the bucket's last session, one
+weekday after the latest session the bucket can hold (`futures_bar_ended`). Named by session
+dates, such bars are requested from the first bucket that can start inside the range
+(`futures_bar_request`, `futures_first_bucket_day`). Intraday futures bars sit on whole units of
+UTC time like every other class's; named by date, their request starts
+`FUTURES_HOLIDAY_MARGIN` before the first session's regular open, and their rows are kept by
+their session, `Date`.
 
-`history_source` keeps the bars `bar_starts` and `bar_sessions` admit, and `row_times` fills a
-bar's window from `bar_days`, `last_trading_day`, and `futures_period_last`. Every function is
-pure and thread-safe.
+`history_source` keeps the bars `bar_starts` admits, and `row_times` fills a bar's window from
+`bar_days` and judges whether a futures bar has ended with `futures_bar_ended`. Every function
+is pure and thread-safe.
 """
 
 from __future__ import annotations
@@ -45,9 +53,8 @@ from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     FUTURES_HOLIDAY_MARGIN,
     add_weekdays,
-    futures_session,
+    futures_session_end,
     futures_session_open,
-    weekday_on_or_after,
     weekday_on_or_before,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
@@ -59,12 +66,12 @@ if TYPE_CHECKING:
 __all__ = [
     "FUTURES_BAR_CLOSE",
     "bar_days",
-    "bar_sessions",
     "bar_starts",
+    "futures_bar_ended",
     "futures_bar_request",
-    "futures_period_last",
+    "futures_bucket_end",
+    "futures_first_bucket_day",
     "intraday",
-    "last_trading_day",
     "unit_ns",
 ]
 
@@ -82,8 +89,6 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 _DAYS_A_WEEK: Final = 7
 
-_WEEKEND_DAYS: Final = 2
-
 _INTRADAY_SECONDS: Final[Mapping[Timespan, int]] = {
     Timespan.SECOND: 1,
     Timespan.MINUTE: 60,
@@ -99,22 +104,135 @@ _PERIOD_MONTHS: Final[Mapping[Timespan, int]] = {
 """The calendar months of one bar unit of a timespan longer than a week."""
 
 
-def futures_bar_request(span: DaySpan) -> TimeRange:
+def futures_bar_request(span: DaySpan, *, timespan: Timespan, multiplier: int) -> TimeRange:
     """Return the `window_start` range that reaches every futures bar of whole sessions.
 
-    From the first session's regular open less `FUTURES_HOLIDAY_MARGIN`, so a session a holiday
-    opened early is reached, to `FUTURES_BAR_CLOSE` (18:00 Chicago time) on the last session
-    date. The rows of other sessions the range also returns are dropped by their session.
+    The range ends at `FUTURES_BAR_CLOSE` (18:00 Chicago time) on the last session date. It
+    starts:
+
+    - for intraday and 1-session bars, at the first session's regular open less
+      `FUTURES_HOLIDAY_MARGIN`, so a session a holiday opened early is reached; the rows of
+      other sessions the range also returns are dropped by their session, `Date`;
+    - for bars of several sessions, at 00:00 UTC on `futures_first_bucket_day`, the first
+      bucket day whose sessions all lie on or after the first date;
+    - for week, month, quarter, and year bars, at 00:00 UTC on the first day of the period
+      that holds the first date: a week's Sunday, or a month's, quarter's, or year's 1st.
 
     Args:
         span: The sessions.
+        timespan: The bar unit.
+        multiplier: How many units one bar spans, at least 1.
 
     Returns:
         The instants to request, in UTC.
     """
-    lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
-    upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO)
-    return TimeRange(lower.astimezone(UTC), upper.astimezone(UTC))
+    upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO).astimezone(UTC)
+    if intraday(timespan) or (timespan is Timespan.SESSION and multiplier == 1):
+        lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
+        return TimeRange(lower.astimezone(UTC), upper)
+    if timespan is Timespan.SESSION:
+        return TimeRange(_utc_midnight(futures_first_bucket_day(span.first)), upper)
+    period = _Periods(AssetClass.FUTURES, timespan).anchor(span.first)
+    return TimeRange(_utc_midnight(period), upper)
+
+
+def _utc_midnight(day: date) -> datetime:
+    """Return 00:00 UTC on a day: where a futures bucket of that first day starts.
+
+    Args:
+        day: The day.
+
+    Returns:
+        The aware instant, in UTC.
+    """
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
+def futures_first_bucket_day(first: date) -> date:
+    """Return the earliest day a futures bucket may start on and hold no session before `first`.
+
+    A session opens on its own date or an earlier day, never before the weekend that precedes
+    it, so a bucket that starts on day `d` holds only sessions on or after the first weekday on
+    or after `d`. That weekday is on or after `first` exactly when `d` is on or after the day
+    after the last weekday before `first`: `first` itself on a Tuesday to Friday, and the
+    Saturday before on a Monday, Saturday, or Sunday.
+
+    Args:
+        first: The first session date of a range.
+
+    Returns:
+        The day.
+    """
+    return weekday_on_or_before(first - _ONE_DAY) + _ONE_DAY
+
+
+def futures_bucket_end(first_day: date, *, timespan: Timespan, multiplier: int) -> date:
+    """Return the day after a futures bar's bucket, from the bucket's first day.
+
+    Massive's grid: `multiplier` calendar days for bars of sessions, `7 * multiplier` days for
+    weeks, and `multiplier` calendar months, quarters, or years from the period that holds the
+    first day.
+
+    Args:
+        first_day: The bucket's first day, the UTC date of the bar's `window_start`.
+        timespan: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans, at least 1.
+
+    Returns:
+        The first day after the bucket.
+    """
+    return _Periods(AssetClass.FUTURES, timespan).shift(first_day, multiplier)
+
+
+def _latest_possible_session(after: date) -> date:
+    """Return the latest session date a session opening inside a bucket of days can have.
+
+    A session that opens on a Sunday to Thursday, at 17:00 Chicago time or later, ends on the
+    next day; a session of a product that trades by day only (livestock opens at 08:30) ends
+    on the day it opens, which can be a Friday. Nothing opens on a Saturday. So the bound is
+    the day after the bucket's last Sunday to Thursday, or its last Friday when that is later.
+
+    Args:
+        after: The first day after the bucket.
+
+    Returns:
+        The latest possible session date, a weekday.
+    """
+    day = after - _ONE_DAY
+    if day.weekday() == calendar.SATURDAY:
+        day -= _ONE_DAY
+    return day if day.weekday() == calendar.FRIDAY else day + _ONE_DAY
+
+
+def futures_bar_ended(
+    first_day: date, label: date, *, timespan: Timespan, multiplier: int
+) -> datetime:
+    """Return the instant from which a futures bar of a session or longer has certainly ended.
+
+    A 1-session bar has ended at its `TimestampEnd`, 17:00 Chicago time on its label. A longer
+    bar's label is the last session Massive has seen in its bucket, which is its last session
+    only once the bucket is over: a session a holiday folded, or one that has not traded yet,
+    can still follow. So when the label is earlier than the latest session the bucket can
+    hold, the bar has ended only once one weekday more than that latest session has closed,
+    and in any case not before its label's session closed.
+
+    Args:
+        first_day: The bucket's first day, the UTC date of the bar's `window_start`.
+        label: The bar's `session_end_date`.
+        timespan: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans, at least 1.
+
+    Returns:
+        The aware instant, in Chicago time.
+    """
+    closes = futures_session_end(label)
+    if timespan is Timespan.SESSION and multiplier == 1:
+        return closes
+    after = futures_bucket_end(first_day, timespan=timespan, multiplier=multiplier)
+    latest = _latest_possible_session(after)
+    if label >= latest:
+        return closes
+    return futures_session_end(add_weekdays(latest, 1))
 
 
 def intraday(timespan: Timespan) -> bool:
@@ -134,19 +252,18 @@ class _Periods:
     """The bar periods of one asset class and timespan of a day or longer.
 
     A period is named by its *anchor*, its first calendar day: for a week, the Sunday Massive
-    starts it on, or for futures the Monday of its Monday-to-Friday week of sessions. A day
-    belongs to the period whose *membership* starts on or before it; a period's *window* is
-    the days its bar covers. For stocks and options, which do not trade at weekends, the window
-    of a week, month, quarter, or year leaves out the period's leading and trailing weekend
-    days (a week runs Monday to Friday, and March 2024 from Friday the 1st to Friday the 29th).
-    A futures week's Saturday and Sunday belong to the week after them, as their trading does.
-    An index can update around the clock (`I:AAVE100`), so its windows are whole calendar
-    periods, weekends included, as are those of forex and crypto: a week runs Sunday to
-    Saturday and March 2024 from the 1st to the 31st, for its start and its end alike. There
-    is no holiday calendar: a holiday is a weekday like any other.
+    starts it on. A period's *window* is the days its bar covers. For stocks and options, which
+    do not trade at weekends, the window of a week, month, quarter, or year leaves out the
+    period's leading and trailing weekend days (a week runs Monday to Friday, and March 2024
+    from Friday the 1st to Friday the 29th). An index can update around the clock
+    (`I:AAVE100`), so its windows are whole calendar periods, weekends included, as are those
+    of forex and crypto: a week runs Sunday to Saturday and March 2024 from the 1st to the
+    31st, for its start and its end alike. A futures bar's periods are UTC calendar days, and
+    so are its buckets (`futures_bucket_end`): a bucket of sessions counts calendar days, as
+    Massive does. There is no holiday calendar: a holiday is a weekday like any other.
 
     Attributes:
-        asset_class: The class; futures days are trading sessions.
+        asset_class: The class.
         timespan: The bar unit: `DAY`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
     """
 
@@ -154,7 +271,7 @@ class _Periods:
     timespan: Timespan
 
     def day_of(self, moment: datetime) -> date:
-        """Return the day an instant belongs to: its session for futures, else its zone date.
+        """Return the day an instant belongs to: its date in the class day zone.
 
         Args:
             moment: An aware instant.
@@ -162,12 +279,10 @@ class _Periods:
         Returns:
             The day.
         """
-        if self.asset_class is AssetClass.FUTURES:
-            return futures_session(moment)
         return moment.astimezone(day_zone(self.asset_class)).date()
 
     def day_start(self, day: date) -> datetime:
-        """Return the instant a day starts: its session's regular open for futures, else midnight.
+        """Return the instant a day starts: midnight in the class day zone.
 
         Args:
             day: The day.
@@ -184,34 +299,22 @@ class _Periods:
             day: The day.
 
         Returns:
-            The period's first day: for a week, the Sunday on or before the day, or for
-            futures the Monday. (The Saturday and Sunday before a futures week still belong to
-            it, through `membership`.)
+            The period's first day: for a week, the Sunday on or before the day; for a month,
+            quarter, or year, its 1st.
         """
         span = self.timespan
         if span is Timespan.WEEK:
-            first = calendar.MONDAY if self.asset_class is AssetClass.FUTURES else calendar.SUNDAY
-            return day - timedelta(days=(day.weekday() - first) % _DAYS_A_WEEK)
+            return day - timedelta(days=(day.weekday() - calendar.SUNDAY) % _DAYS_A_WEEK)
         if span in _PERIOD_MONTHS:
             size = _PERIOD_MONTHS[span]
             return date(day.year, (day.month - 1) // size * size + 1, 1)
         return day
 
-    @property
-    def sessions(self) -> bool:
-        """True when the periods are futures sessions, counted as weekdays.
-
-        Futures sessions end on weekdays only. The days of every other class are calendar
-        days, for a bar of several days too: Massive stamps 2-day stock bars on a Friday and
-        then on the Sunday, each holding its own two calendar days.
-        """
-        return self.asset_class is AssetClass.FUTURES and self.timespan is Timespan.SESSION
-
     def shift(self, anchor: date, count: int) -> date:
         """Return the anchor `count` periods after another (before, when negative).
 
-        Futures sessions count weekdays (`add_weekdays`): the session after Friday's is
-        Monday's. Days count calendar days, and weeks and longer periods whole periods.
+        Days and futures sessions count calendar days, and weeks and longer periods whole
+        periods: a month's shift lands on the 1st.
 
         Args:
             anchor: A period's anchor.
@@ -221,23 +324,12 @@ class _Periods:
             The anchor.
         """
         span = self.timespan
-        if self.sessions:
-            return add_weekdays(anchor, count)
         if span is Timespan.WEEK:
             return anchor + timedelta(days=_DAYS_A_WEEK * count)
         if span in _PERIOD_MONTHS:
             months = anchor.year * 12 + anchor.month - 1 + _PERIOD_MONTHS[span] * count
             return date(months // 12, months % 12 + 1, 1)
         return anchor + timedelta(days=count)
-
-    def _weekend_leads(self) -> bool:
-        """Tell whether a week's leading Saturday and Sunday belong to it: a futures week's do.
-
-        Returns:
-            True for a futures week, whose Monday-to-Friday sessions follow the weekend before
-            it; False for every other class, whose week starts on its Sunday.
-        """
-        return self.timespan is Timespan.WEEK and self.asset_class is AssetClass.FUTURES
 
     def _trimmed(self) -> bool:
         """Tell whether a period's window leaves out its leading and trailing weekend days.
@@ -280,34 +372,6 @@ class _Periods:
             end -= _ONE_DAY
         return end
 
-    def membership(self, anchor: date) -> date:
-        """Return the first day that belongs to a period.
-
-        Args:
-            anchor: The period's anchor.
-
-        Returns:
-            The Saturday before a futures week; otherwise the anchor.
-        """
-        if self._weekend_leads():
-            return anchor - timedelta(days=_WEEKEND_DAYS)
-        return anchor
-
-    def last_member(self, anchor: date) -> date:
-        """Return the last day that belongs to a period.
-
-        Args:
-            anchor: The period's anchor.
-
-        Returns:
-            The day before the next period's first member: for a futures week, its Friday;
-            for a futures session, the session's own date (a Saturday or Sunday ends no
-            session).
-        """
-        if self.sessions:
-            return anchor
-        return self.membership(self.shift(anchor, 1)) - _ONE_DAY
-
     def admitted(self, first: date, last: date, multiplier: int) -> tuple[date, date]:
         """Return the anchors of the first and last bars whose whole window lies in the days.
 
@@ -317,13 +381,8 @@ class _Periods:
             multiplier: How many periods one bar spans.
 
         Returns:
-            The first and last anchors; the first is after the last when no bar fits. For
-            futures sessions both are weekdays: the first on or after `first`, and the last
-            `multiplier - 1` weekdays before the last weekday on or before `last`.
+            The first and last anchors; the first is after the last when no bar fits.
         """
-        if self.sessions:
-            low = weekday_on_or_after(first)
-            return low, add_weekdays(weekday_on_or_before(last), 1 - multiplier)
         low = self.anchor(first)
         if self.window_start(low) < first:
             low = self.shift(low, 1)
@@ -362,16 +421,16 @@ def bar_starts(
     A bar is kept only when its whole window lies inside `span`. An intraday bar sits on whole
     units of UTC time (so on whole hours of every zone the library uses) and spans `multiplier`
     units from its start. A bar of a day or longer spans `multiplier` periods from the period
-    its start belongs to (`_Periods`): days, futures sessions, weeks, or calendar months,
-    quarters, and years. A week starts on its Sunday. A stock or option week covers Monday to
-    Friday and its longer periods lose their leading and trailing weekend days, while indices,
-    forex, and crypto keep whole calendar weeks (Sunday to Saturday) and periods. Days are
-    those of the class's day zone; for futures they are sessions, which open at 17:00 Chicago
-    time on the day before.
+    its start belongs to (`_Periods`): days, weeks, or calendar months, quarters, and years. A
+    week starts on its Sunday. A stock or option week covers Monday to Friday and its longer
+    periods lose their leading and trailing weekend days, while indices, forex, and crypto keep
+    whole calendar weeks (Sunday to Saturday) and periods. Days are those of the class's day
+    zone. Futures bars of a session or longer are UTC-day buckets that this function does not
+    select: `history_source` keeps them by their filled window (`futures_bar_ended`).
 
     Args:
         asset_class: The class whose days apply (`day_class`), or `ClassFromPrefix.ANY` for New
-            York days.
+            York days; futures only for intraday bars.
         span: The range the bars must lie in. Pass an end no later than now, so a bar that
             has not finished yet is left out.
         timespan: The bar unit.
@@ -397,57 +456,9 @@ def bar_starts(
     if periods.day_start(last + _ONE_DAY) > span.end:
         last -= _ONE_DAY
     first_period, last_period = periods.admitted(first, last, multiplier)
-    lower = periods.day_start(periods.membership(first_period))
-    upper = periods.day_start(periods.membership(periods.shift(last_period, 1)))
+    lower = periods.day_start(first_period)
+    upper = periods.day_start(periods.shift(last_period, 1))
     return TimeRange(lower, max(lower, upper))
-
-
-def bar_sessions(span: DaySpan, *, timespan: Timespan, multiplier: int) -> DaySpan:
-    """Return the session labels (`Date`) of the futures bars whose whole window lies in sessions.
-
-    A futures bar of a session or longer is labelled with a session date. A bar of one unit
-    covers the period that date belongs to: the session, a Monday-to-Friday week, or a
-    calendar month, quarter, or year of session dates less its leading and trailing weekend
-    days. A bar of `multiplier` units covers that many periods, but Massive does not document
-    whether its label is the first period's session or the last's, so a bar is kept only when
-    it fits under both readings: its label's period and the `multiplier - 1` periods after it,
-    and its label's period and the `multiplier - 1` periods before it, all lie inside `span`.
-    Sessions count as weekdays (there is no holiday calendar).
-
-    Args:
-        span: The sessions the bars must lie in. End it no later than the last finished
-            session, so a bar that has not finished yet is left out.
-        timespan: The bar unit: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
-        multiplier: How many units one bar spans, at least 1.
-
-    Returns:
-        The session dates to keep; empty when no bar fits.
-    """
-    periods = _Periods(AssetClass.FUTURES, timespan)
-    low, high = periods.admitted(span.first, span.last, multiplier)
-    # Labelled with its last period, a bar kept must start no earlier than `low`.
-    earliest = periods.shift(low, multiplier - 1)
-    return DaySpan(periods.membership(earliest), periods.last_member(high))
-
-
-def last_trading_day(first: date, sessions: int) -> date:
-    """Return the latest day a run of trading days can end on, without a holiday calendar.
-
-    A futures bar of several sessions covers `sessions` trading days from `first`, and every
-    weekday holiday inside it pushes its end one weekday later. Without a holiday calendar the
-    end allows one holiday, and one more for every five further sessions: the exchanges never
-    close on more weekdays than that within a run (from 2024-12-24 the New York exchange holds
-    six sessions over eight weekdays), and the bound holds for every run of the NYSE and CME
-    calendars of 2024 to 2026. A join on the end therefore never sees the bar early.
-
-    Args:
-        first: The first trading day (for futures, session) of the run.
-        sessions: How many trading days it spans, at least 1.
-
-    Returns:
-        The weekday `sessions - 1` trading days plus the holiday allowance after `first`.
-    """
-    return add_weekdays(first, sessions + (sessions - 1) // 5)
 
 
 def bar_days(
@@ -480,26 +491,6 @@ def bar_days(
     periods = _Periods(asset_class, timespan)
     anchor = periods.anchor(day)
     return periods.window_start(anchor), periods.window_end(periods.shift(anchor, multiplier - 1))
-
-
-def futures_period_last(label: date, *, timespan: Timespan, multiplier: int) -> date:
-    """Return the last weekday a futures bar of a week or longer can cover, from its label.
-
-    The label is a session of the bar's first period or of its last; which is not documented.
-    Read as the first, the bar ends with the last weekday of the `multiplier`-th period from
-    the label's, which is the later of the two readings, so it is the conservative end.
-
-    Args:
-        label: The bar's `session_end_date`.
-        timespan: The bar unit: `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
-        multiplier: How many units one bar spans, at least 1.
-
-    Returns:
-        The last weekday of the bar's last period under the later reading.
-    """
-    periods = _Periods(AssetClass.FUTURES, timespan)
-    last = periods.shift(periods.anchor(label), multiplier - 1)
-    return periods.window_end(last) - _ONE_DAY
 
 
 def unit_ns(timespan: Timespan) -> int:

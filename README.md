@@ -406,7 +406,19 @@ and the trade count. These rules hold for every `bars()` dataset.
   days at either end. Indices, forex, and crypto, which can trade at weekends, cover whole
   calendar weeks (Sunday to Saturday), months, quarters, and years. A bar of several days spans
   that many calendar days, weekends included, as Massive counts them: a 2-day stock bar stamped
-  on a Friday holds Friday's trading alone. A futures bar covers its trading sessions.
+  on a Friday holds Friday's trading alone.
+- **Futures bars of a session or longer.** Massive groups whole sessions into blocks of
+  calendar days in UTC, and a session belongs to the day it opens, the evening before its date.
+  `TimestampStart` is 00:00 UTC on the block's first day and `TimestampEnd` 17:00 Chicago time
+  on the bar's last session, Massive's `session_end_date`. So a month bar holds the sessions
+  that open in that month: September 2026's runs from the session of September 2 to that of
+  October 1. An n-session bar covers n calendar days, so over a weekend it holds fewer than n
+  sessions. With dates, `history()` returns a bar only when all its sessions lie in the range,
+  so a month bar needs the range to reach the session that opens on the month's last day:
+
+  | Call | Returns |
+  |---|---|
+  | `m.futures.bars("ESZ6", dm.Timespan.MONTH).history("2026-09-01", "2026-10-01")` | September's bar: `TimestampStart` 2026-09-01 00:00 UTC, `TimestampEnd` 2026-10-01 17:00 Chicago time. The same call ending `"2026-09-30"` returns no bar. |
 - **Join on the end.** A bar's values are final only once its window has ended, so join other
   data on `TimestampEnd`: `trades.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])` gives
   each trade the latest bar that had closed by then. Minute bars of every class end on whole

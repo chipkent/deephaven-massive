@@ -400,9 +400,9 @@ class _Futures(Namespace):
         Each row is one bar of `multiplier` times `timespan`. A futures trading day is a session
         ending at 17:00 Chicago time, so daily bars are `Timespan.SESSION`: there is no `DAY` and no
         `previous_day_bar()`. One-second and one-minute bars also stream; every other length is
-        history only. A session bar ends at 17:00 Chicago time on its session date; a bar of several
-        sessions or a week or longer ends as late as either reading of its label and holidays allow,
-        and `history()` keeps it only when it fits the range under both (README.md#bars). REST
+        history only. A bar of a session or longer starts at 00:00 UTC on the first day of
+        Massive's block of days and ends at 17:00 Chicago time on its last session; with dates,
+        `history()` keeps it only when all its sessions lie in the range (README.md#bars). REST
         rejects a multiplier above its unit's maximum (`60` minutes; use one hour) with
         `MassiveError`.
 

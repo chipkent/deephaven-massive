@@ -341,7 +341,8 @@ def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
     assert date_text.startswith("The futures session of the bar (its trading date)")
     assert "From REST `session_end_date`" in date_text
     end = description(futures.BARS, "TimestampEnd")
-    assert "17:00 Chicago time on its session date" in end
+    assert "17:00 Chicago time on its label, Massive's `session_end_date`, which is its last" in end
+    assert "only once no later session can still join it" in end
     assert "the later of that and Massive's `e`" in end
     trades = description(futures.TRADES, "Date")
     assert "the session Massive's futures schedules place it in" in trades
