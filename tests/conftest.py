@@ -1931,8 +1931,7 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
     A test that would send a class on Basic more than 5 requests is skipped once the run knows
     its plans (`_live_tests_need_a_key`), since the plans are probed only when the first live
     test runs. Each test's `settles` and `verifies` items and its `needs` are kept for the
-    summary, and each item's title: the first line of the docstring of the first test that
-    answers it.
+    summary, and each item's title (`summary.question_titles`).
 
     Args:
         config: The pytest configuration, whose stash keeps the items.
@@ -1943,20 +1942,19 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
         return
     items.sort(key=lambda item: plans.SOME_BASIC not in _requirements(item))
     settled = config.stash.setdefault(_SETTLED, {})
-    titles = config.stash.setdefault(_TITLES, {})
+    docs: list[tuple[tuple[str, ...], str]] = []
     for item in live:
         settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
         verifies = tuple(str(a) for m in item.iter_markers("verifies") for a in m.args)
         settled[item.nodeid] = (settles, verifies, _requirements(item))
-        doc = inspect.getdoc(getattr(item, "function", None)) or ""
-        for answered in (*settles, *verifies):
-            titles.setdefault(answered, doc.partition("\n")[0])
+        docs.append(((*settles, *verifies), inspect.getdoc(getattr(item, "function", None)) or ""))
         if not pacing.basic_reads(_requirements(item)):
             continue
         count = pacing.declared_requests(item.get_closest_marker("requests"))
         current = item.get_closest_marker("timeout")
         base = float(current.args[0]) if current is not None and current.args else 100.0
         item.add_marker(pytest.mark.timeout(base + _REQUEST_SECONDS * count), append=False)
+    config.stash[_TITLES] = summary.question_titles(docs)
 
 
 @pytest.fixture(autouse=True)

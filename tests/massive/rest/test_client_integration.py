@@ -104,7 +104,8 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
 
 @pytest.mark.needs("some:basic")
 @pytest.mark.integration_rate_limits
-@pytest.mark.settles("65", "66", "67")
+@pytest.mark.settles("65", "67")
+@pytest.mark.verifies("66")
 @pytest.mark.timeout(330)
 def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
     send: Callable[[Request], tuple[int, str]],
@@ -132,9 +133,11 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
        that slides from each request, one at a minute boundary a fixed window, and one later
        than 60 s after the last answered request means refused requests count against it.
 
-    The evidence answers each question; the test asserts only that the class was refused
-    within its first seven requests, which a class on Basic always is. A failure there means
-    the class is not on Basic, and the rest of the evidence would say nothing.
+    The evidence answers each question. The test asserts that the class was refused within its
+    first seven requests, which a class on Basic always is (a failure there means the class is
+    not on Basic, and the rest of the evidence would say nothing), and that none of the first
+    five requests of data outside every subscription was refused with HTTP 429: the library
+    charges that data to a bucket of its own, never to the spent class.
     """
     name, request = basic_class, by_class[basic_class]
     threading.Event().wait(_MINUTE)
@@ -149,9 +152,11 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
             break
         evidence(f"    {described}")
     assert refused, f"no {name} request was refused: is {name} on Basic?"
+    unassigned_statuses: list[int] = []
     for number in range(1, 2 * _LIMIT + 1):
         unassigned = _UNASSIGNED[number % len(_UNASSIGNED)]
         status, described = send(unassigned)
+        unassigned_statuses.append(status)
         evidence(
             f"unassigned request {number} of {unassigned[0]} at {time.monotonic() - start:.1f} s:"
             f" HTTP {status}; {described}"
@@ -164,11 +169,15 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
             break
     else:
         evidence(f"still refused {_PROBE_FOR:.0f} s after the first request")
+    assert 429 not in unassigned_statuses[:_LIMIT], (
+        f"data outside every subscription was refused with the {name} minute spent: "
+        f"{unassigned_statuses}"
+    )
 
 
 @pytest.mark.needs("some:basic")
 @pytest.mark.integration_rate_limits
-@pytest.mark.settles("66")
+@pytest.mark.verifies("66")
 @pytest.mark.requests(8)
 @pytest.mark.timeout(150)
 def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
@@ -192,18 +201,19 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
        refuses.
     3. Sends the class's request once more, which Basic refuses.
 
-    Records each answer's status, rate-limit headers, and time. Reading it: a lookup of the
-    class's own market refused with HTTP 429 while the control is answered means Massive
-    charges it to the class, so the library must charge market-filtered lookups, and the
-    crypto ticker list, to the class rather than to `other`; answered means Massive counts it
-    elsewhere, as the library assumes. The test asserts only that the first five requests
-    were answered and the last refused: otherwise another client of the key used the class,
-    or it is not on Basic, and the lookups' answers say nothing.
+    Records each answer's status, rate-limit headers, and time. The test asserts that the
+    first five requests were answered and the last refused (otherwise another client of the
+    key used the class, or it is not on Basic, and the lookups' answers say nothing). Passes
+    when, besides, no lookup of the class's own market was refused with HTTP 429: Massive
+    counts it elsewhere, as the library assumes. A refused lookup means Massive charges it to
+    the class, so the library must charge market-filtered lookups, and the crypto ticker list,
+    to the class rather than to `other`.
     """
     name, request = market_lookup.name, by_class[market_lookup.name]
     threading.Event().wait(_MINUTE)
     start = time.monotonic()
     spent = []
+    charged: list[str] = []
     for number in range(1, _LIMIT + 1):
         status, described = send(request)
         spent.append(status)
@@ -212,6 +222,8 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     for market in (*market_lookup.markets, market_lookup.other_market):
         status, described = send(("/v3/reference/tickers", {}, {"market": market, "limit": 1}))
         whose = "another class's, the control" if market == market_lookup.other_market else name
+        if status == 429 and market != market_lookup.other_market:
+            charged.append(market)
         evidence(
             f"ticker lookup market={market} ({whose}) at {time.monotonic() - start:.1f} s: "
             f"HTTP {status}; {described}"
@@ -223,6 +235,7 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     )
     assert 429 not in spent, f"{name} refused one of its first five requests: another client?"
     assert status == 429, f"{name} answered a sixth request within a minute: is it on Basic?"
+    assert not charged, f"Massive charged the lookups of markets {charged} to {name}"
 
 
 @pytest.fixture

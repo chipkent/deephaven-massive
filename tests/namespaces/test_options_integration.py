@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -60,6 +61,7 @@ PeriodBarReport: TypeAlias = (
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
+_NEW_YORK = ZoneInfo("America/New_York")
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
 _SNAPSHOT = "/v3/snapshot"
 
@@ -278,7 +280,7 @@ def test_underlying_spelling_on_the_options_endpoints(
 
 
 @pytest.mark.needs("options:starter")
-@pytest.mark.settles("46")
+@pytest.mark.verifies("46")
 @pytest.mark.timeout(400)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
@@ -298,16 +300,19 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     `additional_underlyings` (or `<missing>`), `cfi`, `correction`, and `shares_per_contract`
     of up to three of each, and the library's columns for the first. A root listed before the
     first day the key's Options plan keeps, by the documented history windows, is not read; its
-    line says "outside the plan's history". Reading it: standard contracts without
-    `additional_underlyings` (or with `[]`) and adjusted ones with a non-empty list mean null
-    and `[]` both mark a standard deliverable; an adjusted contract with neither means only
-    `Cfi` or the root's trailing digit can tell. A root found by neither lookup, with the page
-    counts showing the listing was read past it, is not kept by Massive for that day.
-
+    line says "outside the plan's history". Passes when some root was read and no standard
+    contract carries a non-empty `additional_underlyings`, so null and `[]` both mark a standard
+    deliverable, as the chain's documented recipe assumes. Reading the rest: an adjusted
+    contract with no list (a split's, which changes only the share count) means only `Cfi` or
+    the root's trailing digit can tell it from a standard one. A root found by neither lookup,
+    with the page counts showing the listing was read past it, is not kept by Massive for that
+    day.
     """
     first = plan_history_start("options")
     found = 0
-    roots = (*_ADJUSTED, ("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
+    standard = (("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
+    roots = (*_ADJUSTED, *standard)
+    listed_extra: list[str] = []
     for root, underlying, listed in roots:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
         if first is not None and listed < first:
@@ -327,6 +332,8 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
         rows = list({str(row["ticker"]): row for row in matching}.values())
         found += bool(rows)
         evidence(f"    {len(rows)} contracts of root {root}")
+        if (root, underlying, listed) in standard:
+            listed_extra += [str(r["ticker"]) for r in rows if r.get("additional_underlyings")]
         for row in rows[:3]:
             present = {key: row.get(key, "<missing>") for key in _DELIVERABLE_FIELDS}
             evidence(f"    {row.get('ticker')} underlying={row.get('underlying_ticker')} {present}")
@@ -342,6 +349,7 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
             )
             evidence(f"    library contracts({ticker}): {shown}")
     assert found
+    assert not listed_extra, f"standard contracts with further deliverables: {listed_extra[:5]}"
 
 
 _DAY_FILE = "us_options_opra/day_aggs_v1"
@@ -349,6 +357,25 @@ _SPY_PREV = "/v2/aggs/ticker/{stocksTicker}/prev"
 _SPX_SPELLINGS = ("SPX", "I:SPX", "SPXW")
 """The `underlying_ticker` spellings tried for SPXW contracts, which the reference may file
 under any of them."""
+
+
+_DAY_STAMPS = frozenset({(0, 0), (13, 0), (13, 15), (16, 0), (16, 15)})
+"""The New York times of day (hour, minute) at which the library expects an option's 1-day bar
+stamp: midnight, and the closes of a half day and a full day, for equity and index options."""
+
+
+def _day_stamp(millis: int, day: date) -> bool:
+    """Tell whether an option 1-day bar's stamp is one the library expects for its day.
+
+    Args:
+        millis: The stamp, in epoch milliseconds.
+        day: The bar's trading day.
+
+    Returns:
+        True for a `_DAY_STAMPS` time, to the second, of `day` in New York.
+    """
+    local = datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK)
+    return local.date() == day and local.second == 0 and (local.hour, local.minute) in _DAY_STAMPS
 
 
 def _monthly_expiry_after(day: date) -> date:
@@ -575,7 +602,7 @@ def test_option_day_and_week_bar_stamps_from_rest(
 
 
 @pytest.mark.needs("options:starter", "s3", "stocks:basic")
-@pytest.mark.settles("51")
+@pytest.mark.verifies("51")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(100)
 def test_option_day_bar_stamps_of_the_day_file(
@@ -596,8 +623,10 @@ def test_option_day_bar_stamps_of_the_day_file(
     day whose week has ended and the full trading day before it. Records its file rows, each
     `window_start` in UTC and New York time, beside the range endpoint's bars around those
     days and which day's bar each matches with the largest relative error, and the library's
-    `history(source=FLAT_FILES)` windows. Reading it: a stamp at 00:00 New York time and a
-    match on the same day confirm one day label for the files and REST.
+    `history(source=FLAT_FILES)` windows. Passes when the file holds a candidate of each root
+    on both days, stamped where the library expects an option's 1-day bar: at 00:00, 13:00,
+    13:15, 16:00, or 16:15 New York time of its own day. Reading the rest: a match with the
+    range bar of the same day confirms one day label for the files and REST.
     """
     days = stamp_days["day"]
     roots = _stamp_candidates(range_bars, days)
@@ -618,9 +647,24 @@ def test_option_day_bar_stamps_of_the_day_file(
         )
         evidence(f"library {ticker} history(FLAT_FILES): {outcome}")
     assert all(chosen.values()), f"the day files hold no candidate on both days: {roots}"
+    odd = [
+        (ticker, day, bar[0])
+        for ticker in filter(None, chosen.values())
+        for day, bars in files[ticker].items()
+        for bar in bars
+        if not _day_stamp(bar[0], day)
+    ]
+    assert not odd, f"day-file stamps the library does not expect: {odd}"
 
 
-@pytest.mark.needs("options:basic", "stocks:basic")
+_SPLIT_SYMBOL = "NVDA"
+_SPLIT_DAY = date(2024, 6, 10)
+_SPLIT_RATIO = 10
+"""A forward split whose underlying has listed options: NVDA's 10-for-1 of 2024-06-10. Recent
+forward splits are mostly thin over-the-counter tickers without listed options."""
+
+
+@pytest.mark.needs("options:developer")
 @pytest.mark.settles("57")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -628,51 +672,42 @@ def test_option_bars_across_the_underlyings_split(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    classes_on_basic: frozenset[str],
-    recent_splits: Callable[[dm.MassiveSession], list[Any]],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether option bars are split-adjusted for their underlying's split.
 
-    Finds the year's most recent forward splits (`m.stocks.splits`) and, for the first of
-    three (one with Options on Basic, two contracts requests each) whose underlying lists a
-    call as of the execution date expiring a week or more after it, records that contract's
-    day bars from three days before the split to two days after, with `adjusted=true` and
-    `adjusted=false`. Reading it: prices before the split that differ by its ratio mean options
-    are adjusted in full like stocks; equal prices, or no bars before the split under the
-    post-split ticker, mean the contract was renamed instead, and the docstrings must say so.
-    Skips when no recent split tried has a listed option.
+    Takes NVDA's 10-for-1 split of 2024-06-10 and an NVDA call listed as of that day expiring a
+    week or more after it, and records the contract's day bars from three days before the split
+    to two days after, with `adjusted=true` and `adjusted=false`. It needs Options Developer:
+    Basic and Starter keep two years of history, and the split is older. Reading it: prices
+    before the split that differ by its ratio mean options are adjusted in full like stocks;
+    equal prices, or no bars before the split under the post-split ticker, mean the contract
+    was renamed instead, and the docstrings must say so. Skips when Massive lists no such call.
     """
     contracts = source(Transport.REST, _CONTRACTS)
-    found = None
-    tried = 1 if "options" in classes_on_basic else 3
-    for split in recent_splits(live_session)[:tried]:
-        query = {
-            "underlying_ticker": split.symbol,
-            "as_of": split.executed,
-            "contract_type": "call",
-            "expiration_date.gte": split.executed + timedelta(days=7),
-            "limit": 1,
-        }
-        for expired in (False, True):
-            rows = live_rest.get(contracts, {}, query | {"expired": expired}, bucket="options").rows
-            if rows:
-                found = split, str(rows[0]["ticker"])
-                break
-        if found:
+    query = {
+        "underlying_ticker": _SPLIT_SYMBOL,
+        "as_of": _SPLIT_DAY,
+        "contract_type": "call",
+        "expiration_date.gte": _SPLIT_DAY + timedelta(days=7),
+        "limit": 1,
+    }
+    contract = None
+    for expired in (False, True):
+        rows = live_rest.get(contracts, {}, query | {"expired": expired}, bucket="options").rows
+        if rows:
+            contract = str(rows[0]["ticker"])
             break
-        evidence(f"{split.symbol}: no call listed as of {split.executed}; next")
-    if found is None:
-        pytest.skip("no recent forward split whose underlying lists an option")
-    split, contract = found
-    evidence(f"{contract}: a call on {split.symbol}, split {split.ratio}:1 on {split.executed}")
+    if contract is None:
+        pytest.skip(f"Massive lists no {_SPLIT_SYMBOL} call as of {_SPLIT_DAY}")
+    evidence(f"{contract}: a call on {_SPLIT_SYMBOL}, split {_SPLIT_RATIO}:1 on {_SPLIT_DAY}")
     # A request that fails raises; an empty result is evidence in itself (a renamed contract).
     for adjusted in (True, False):
         rows = table_rows(
             live_session.options.bars(contract, dm.Timespan.DAY, adjusted=adjusted).history(
-                split.executed - timedelta(days=3),
-                split.executed + timedelta(days=2),
+                _SPLIT_DAY - timedelta(days=3),
+                _SPLIT_DAY + timedelta(days=2),
                 source=dm.HistorySource.REST,
             )
         )
