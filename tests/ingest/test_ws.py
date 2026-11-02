@@ -1750,6 +1750,26 @@ def test_a_futures_watchlist_waits_for_its_first_contracts_schedules_before_it_s
     ws_session.session.release(result)
 
 
+def test_a_futures_watchlist_starts_each_lookup_while_an_earlier_change_waits(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker waits for one change's schedules at a time, but every added contract's
+    # lookup starts as the change is reported, so lookups never queue behind a wait.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
+    result = ws_session.query(FUTURES, watchlist).blink()
+    ws_session.subscribed("T.GCQ6-GCJ7")
+    schedules = GatedSchedules(monkeypatch)
+    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
+    assert schedules.waiting.wait(TIMEOUT)  # the worker waits for ESZ5's schedule
+    watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
+    looked_up(ws_session, "NQZ5")  # asked for while the worker still waits
+    assert [contracts for contracts, _, _ in schedules.waits] == [["ESZ5"]]
+    schedules.gate.set()
+    ws_session.subscribed("T.ESZ5", "T.NQZ5")
+    ws_session.session.release(result)
+
+
 def test_a_futures_watchlist_removal_never_overtakes_a_waiting_addition(
     ws_session: WsSession, fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1856,9 +1876,8 @@ def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
 
 
 UNLISTED_ERROR = (
-    "skipped crypto pairs 1 [X:ETHTUSD], which Massive's crypto ticker list does not split "
-    "(cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot be split into its two currencies: Massive's "
-    "reference data does not list it); delete a row and add it again to look it up again"
+    "skipped crypto pairs 1 [X:ETHTUSD], which Massive's crypto ticker list does not hold; a "
+    "skipped pair stays skipped until its row is deleted and added again"
 )
 
 
@@ -1900,43 +1919,69 @@ def test_a_watchlist_pair_massive_does_not_list_is_skipped_and_shown(
     ws_session.session.release(result)
 
 
-def test_a_failed_read_of_the_pair_list_is_retried_then_the_pair_is_skipped(
+def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_are_skipped(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Three pairs added during an outage: each try reads the list once for all of them, not
+    # once per pair, and after the last try every pair still unsplit is skipped.
     monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (0.0, 0.0))
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
+    outage = dm.MassiveError("the list read timed out")
+    added = ["X:ADAUSD", "X:DOTUSD", "X:SOLUSD"]
+    for symbol in added:
+        ws_session.pair_answers[symbol] = outage
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["X:BTCUSD"])]))
     result = ws_session.query(CRYPTO, watchlist).append_only()
     ws_session.subscribed("XT.BTC-USD")
     with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.ws"):
-        watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+        watchlist.add(new_table([string_col("Symbol", added)]))
         wait_for(lambda: stream_error(ws_session, dh_to_pylist) is not None)
     assert stream_error(ws_session, dh_to_pylist) == (
-        "skipped crypto pairs 1 [X:DOTUSD], which Massive's crypto ticker list does not split "
-        "(cannot stream 'X:DOTUSD': the list read timed out); delete a row and add it again to "
-        "look it up again"
+        "skipped crypto pairs 3 [X:ADAUSD, X:DOTUSD, X:SOLUSD], since Massive's crypto ticker "
+        "list could not be read (cannot stream 'X:ADAUSD': the list read timed out); a skipped "
+        "pair stays skipped until its row is deleted and added again"
     )
-    # The first try and one retry after each delay.
-    assert [symbol for symbol, _ in lookups(ws_session)].count("X:DOTUSD") == 3
+    # The first try and one retry after each delay, each stopped by its first failed read.
+    tried = [symbol for symbol, _ in lookups(ws_session) if symbol != "X:BTCUSD"]
+    assert tried == ["X:ADAUSD"] * 3
     retries = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     retry = (
-        f"{ws_session.session._core.label}: cannot stream 'X:DOTUSD': the list read timed out; "
-        "trying again in 0 s"
+        "crypto stream 1: cannot stream 'X:ADAUSD': the list read timed out; trying 3 "
+        "[X:ADAUSD, X:DOTUSD, X:SOLUSD] again in 0 s"
     )
     assert retries == [retry, retry]
-    # Deleting the row and adding it again looks it up again, and it now splits.
-    watchlist.delete(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    # Deleting a row and adding it again looks it up again, and it now splits.
+    watchlist.delete(new_table([string_col("Symbol", added)]))
     wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
     watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
     ws_session.subscribed("XT.DOT-USD")
     ws_session.session.release(result)
+
+
+def test_a_retry_tries_only_the_pairs_not_yet_split(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first pair splits and the list read fails at the second: the retry starts there.
+    monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (0.0,))
+    lookup = ws_session.connections._crypto_pair
+    failures = [dm.MassiveError("the list read timed out")]
+
+    def flaky(symbol: str) -> tuple[str, str]:
+        if symbol == "X:DOTUSD" and failures:
+            raise failures.pop()
+        return lookup(symbol)
+
+    ws_session.connections._crypto_pair = flaky
+    ws_session.pair_answers.update({"X:ADAUSD": ("ADA", "USD"), "X:DOTUSD": ("DOT", "USD")})
+    skipped = ws_session.connections._split_pairs(1, frozenset({"X:ADAUSD", "X:DOTUSD"}))
+    assert skipped == {}
+    assert [symbol for symbol, _ in lookups(ws_session)] == ["X:ADAUSD", "X:DOTUSD"]
 
 
 def test_a_retried_read_of_the_pair_list_that_then_succeeds_subscribes(
@@ -1972,7 +2017,13 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
 ) -> None:
     monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (3600.0,))  # a retry would hang the test
     ws_session.pair_answers["X:DOTUSD"] = error
-    assert ws_session.connections._split("X:DOTUSD") == f"cannot stream 'X:DOTUSD': {error}"
+    skipped = ws_session.connections._split_pairs(1, frozenset({"X:DOTUSD", "X:SOLUSD"}))
+    # One read: the pairs after the first are skipped with it, never read on their own.
+    why = f"cannot stream 'X:DOTUSD': {error}"
+    assert skipped == {"X:DOTUSD": (ws._SkipReason.LIST_UNREAD, why)} | {
+        "X:SOLUSD": (ws._SkipReason.LIST_UNREAD, why)
+    }
+    assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
 def test_a_close_stops_the_wait_to_retry_a_pair(
@@ -1981,9 +2032,12 @@ def test_a_close_stops_the_wait_to_retry_a_pair(
     monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (3600.0,))  # only a close ends the wait
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
     ws_session.connections.close()
-    assert ws_session.connections._split("X:DOTUSD") == (
-        "cannot stream 'X:DOTUSD': the list read timed out"
-    )
+    assert ws_session.connections._split_pairs(1, frozenset({"X:DOTUSD"})) == {
+        "X:DOTUSD": (
+            ws._SkipReason.LIST_UNREAD,
+            "cannot stream 'X:DOTUSD': the list read timed out",
+        )
+    }
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
@@ -1995,7 +2049,9 @@ def test_skipped_pairs_of_a_freed_session_are_not_shown(
     updates: list[object] = []
     monkeypatch.setattr(ws_session.session._core, "update_streams", updates.append)
     monkeypatch.setattr(ws_session.connections, "_core", lambda: None)
-    ws_session.connections._show_skipped_pairs(stream_id, {"X:ETHTUSD": "not listed"}, frozenset())
+    ws_session.connections._show_skipped_pairs(
+        stream_id, {"X:ETHTUSD": (ws._SkipReason.UNLISTED, "not listed")}, frozenset()
+    )
     monkeypatch.undo()
     assert updates == []
     ws_session.session.release(result)
@@ -2013,14 +2069,15 @@ def test_a_lookup_that_finishes_after_its_stream_ended_changes_nothing(
     assert ws_session.urls == []  # no connection was opened for it
 
 
-def test_a_lookup_defect_after_its_stream_ended_fails_nothing(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_a_change_defect_after_its_stream_ended_fails_nothing(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def broken(_symbol: str) -> str | None:
-        raise RuntimeError("the lookup broke")
+    def broken(_stream_id: int, _added: frozenset[str], _removed: frozenset[str]) -> None:
+        raise RuntimeError("the change broke")
 
-    monkeypatch.setattr(ws_session.connections, "_split", broken)
-    ws_session.connections._change_pairs(999, frozenset({"X:DOTUSD"}), frozenset())
+    ws_session.connections._run_change(
+        broken, stream_id=999, added=frozenset({"X:DOTUSD"}), removed=frozenset()
+    )
     # The defect is logged once, with its trace; no stream is left to fail.
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
     assert ws_session.urls == []
@@ -2055,13 +2112,44 @@ def test_an_unexpected_lookup_failure_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["Error"] == (
-        "looking up the crypto pairs ['X:DOTUSD'] failed: RuntimeError('the lookup broke'). "
-        + LIBRARY_BUG
+        "the watchlist change of stream 1 (added 1 [X:DOTUSD], removed 0 []) failed: "
+        "RuntimeError('the lookup broke'). " + LIBRARY_BUG
     )
     # A defect of the library: one ERROR, with its trace, for the lookup and the stream it fails.
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
         (f"{ws_session.session._core.label}: {row['Error']}", True)
+    ]
+
+
+@pytest.mark.parametrize("dataset", [CRYPTO, FUTURES], ids=["crypto", "futures"])
+def test_a_defect_after_the_lookup_fails_the_stream(
+    ws_session: WsSession,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    dataset: DatasetSpec,
+) -> None:
+    # Nothing reads the worker's futures: a defect anywhere in a change, past the lookup too,
+    # is logged with its trace and fails the stream rather than vanishing.
+    def broken(_stream_id: int, _added: frozenset[str], _removed: frozenset[str]) -> None:
+        raise RuntimeError("posting broke")
+
+    monkeypatch.setattr(ws_session.connections, "_post_change", broken)
+    symbol = "X:BTCUSD" if dataset is CRYPTO else "GCQ6-GCJ7"
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    result = ws_session.query(dataset, watchlist).append_only()
+    watchlist.add(new_table([string_col("Symbol", [symbol])]))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
+        (
+            (
+                f"{ws_session.session._core.label}: the watchlist change of stream 1 (added 1 "
+                f"[{symbol}], removed 0 []) failed: RuntimeError('posting broke'). {LIBRARY_BUG}"
+            ),
+            True,
+        )
     ]
 
 

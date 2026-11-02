@@ -2438,10 +2438,12 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   or whose currencies do not join to it, refuses it with a `MassiveError` naming the ticker.
   A ticker a symbol table adds later is skipped instead: never subscribed, logged at WARNING,
   and listed in the stream's `Error` in `m.streams()` (its own warning part) until the table
-  no longer holds it, while the stream keeps its other pairs; deleting the row and adding it
-  again looks it up again. A failed read of the list is retried after 2 s and 8 s
-  (`PAIR_RETRY_DELAYS`) before the ticker is skipped; a refusal no retry can fix (a pair the
-  list does not hold, a rejected key, a plan without reference data) skips it at once. Nothing
+  no longer holds it, while the stream keeps its other pairs; a skipped pair stays skipped
+  until its row is deleted and added again. A pair the list does not hold is skipped at once. A
+  failed read of the list is retried for the change's whole batch of tickers, after 2 s and 8 s
+  (`PAIR_RETRY_DELAYS`), each try reading the list at most once for the tickers not yet split;
+  the tickers still unsplit after the last try are skipped, and the `Error` says the list could
+  not be read. A rejected key or a plan without reference data skips them at once. Nothing
   falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
   fails a `poll()` table, since every later cycle would read the same list. Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
@@ -3079,8 +3081,9 @@ subscribes, until their products and schedules are loaded or failed, at most 15 
 console command holding the update graph's lock may run it, and such a caller waits at most 1 s
 (`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it waits. The contracts a
 symbol table holds when the stream opens, and those it adds later, wait the same 15 s on the
-session's `symbol changes` worker (section 18.1), never on the table's listener: the verb
-returns at once, and each contract subscribes once its schedule loads. That worker runs each
+session's `symbol changes` worker (section 18.1), never on the table's listener, which only
+starts their lookups: the verb returns at once, and each contract subscribes once its schedule
+loads. That worker runs each
 session's futures and crypto changes one at a time, in order, so a removal never overtakes an
 addition still waiting, and a contract the table no longer holds is never subscribed again. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
@@ -4667,7 +4670,7 @@ without the GIL.
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read after 2 s and 8 s and skipping a ticker it cannot split (its `Error` part in `m.streams()`), or failing the stream (`Flusher.fail`) on a defect; then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
