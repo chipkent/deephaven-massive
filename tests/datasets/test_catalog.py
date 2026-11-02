@@ -509,11 +509,11 @@ def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys(
 
 def test_rows_several_symbols_return_are_found_by_poll_keys() -> None:
     # A row that answers several symbols' requests is kept once, by its poll keys, which
-    # must exist and never be null.
+    # must exist; a key whose null is a value may be among them.
     with pytest.raises(ValueError, match=r"reference.exchanges: a dataset whose symbols overlap"):
         change(EXCHANGES, poll_keys=(), revision_keys=("Name",), symbols_overlap=True)
-    with pytest.raises(ValueError, match=r"symbols overlap cannot have nullable_poll_keys"):
-        change(EXCHANGES, nullable_poll_keys={"Id": "absent"}, symbols_overlap=True)
+    nullable = change(EXCHANGES, nullable_poll_keys={"Id": "absent"}, symbols_overlap=True)
+    assert nullable.symbols_overlap
     assert change(EXCHANGES, symbols_overlap=True).symbols_overlap
 
 
@@ -676,10 +676,18 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
         asset_class=AssetClass.STOCKS,
         fetch_path=path,
         symbol_param="tickers.any_of",
+        symbols_overlap=True,
         poll_keys=("Cik",),
         page_size=100,
     )
     assert problems(sheets) == ()
+    # Its rows list several tickers, so two tickers' requests can return one row.
+    assert problems(change(sheets, symbols_overlap=False)) == (
+        (
+            "overlapping symbols: stocks.balance_sheets: tickers.any_of filters a field listing "
+            "several tickers, so one row can answer two tickers' requests; set symbols_overlap"
+        ),
+    )
     columns = Catalog((sheets,)).dataset_schema(sheets).column_names
     assert "Tickers" in columns
     assert "Symbol" not in columns

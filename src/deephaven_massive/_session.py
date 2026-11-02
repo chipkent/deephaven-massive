@@ -395,7 +395,8 @@ class MassiveSession:
             sort: The field to sort by (`"ticker"`); past 250 tickers it orders each request's rows,
                 not all of them. See README.md#sort-order-limit.
             order: The sort direction, per request the same way. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
+            limit: The most rows for each named ticker, each sent in its own request. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters; `type` is refused, since Massive rejects it beside
                 tickers. See README.md#filters.
 

@@ -325,7 +325,8 @@ class _Indices(Namespace):
             symbols: Indices with the `I:` prefix, or `dm.ALL`. See README.md#symbols.
             sort: `"ticker"`. See README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
                 `ticker_lte`. See README.md#filters.
 

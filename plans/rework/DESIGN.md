@@ -1878,11 +1878,23 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` is a total-row cap, except where each request names one symbol: a per-symbol path
-  (the indicators) or a symbol parameter that takes one ticker
-  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
+- `limit` caps each named symbol's rows wherever symbols are named (a list, or a static or
+  live table), and the total rows with `symbols=None` or `dm.ALL` (decisions 74 and 81).
+  Under a `limit`, every request names one symbol: a per-symbol path (the indicators), a
+  symbol parameter that takes one ticker (`reference.tickers`, `stocks.ipos`,
+  `reference.news`), and a list parameter (`ticker.any_of`, `tickers`), which then carries
+  one ticker a request instead of up to `symbols_per_request`. Each request is capped on its
+  own, so one ticker's rows never crowd out another's, and a `poll(REPLACE)` that gains a
+  symbol never pushes another symbol's rows out of the cycle (which would delete them).
+  Without a `limit` nothing changes: a list parameter still carries many tickers a request.
+  The split changes only how requests are made, never a value. Where one row can answer
+  several tickers' requests (`DatasetSpec.symbols_overlap`: news, financial statements, the
+  insider and 8-K disclosure filings, Benzinga news, each of whose rows lists its tickers), a
+  row several requests return is kept once, at its first copy, by its `poll_keys`, a null in
+  a `nullable_poll_keys` column counting as a value; the catalog's `overlapping symbols`
+  gate requires the flag on every dataset whose symbol parameter filters such a list. The
+  extra requests count against the rate governor, run at most `max_concurrency` at a time,
+  and appear in the slow-poll WARNING's request count. Page size is internal. The README states the rule once, and each dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is the path's documented maximum (or
   `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
@@ -7303,6 +7315,7 @@ document already reflects them.
     ([section 7](#7-query-classes-and-verbs)).
 74. **`limit` caps each symbol's rows where a request names one symbol** (2026-10-30, owner),
     so a few symbols with many rows never crowd out the rest; elsewhere it stays a total cap.
+    Decision 81 extends it to every dataset with named symbols.
 75. **Price columns lead every table** (2026-10-30, owner): the naming policy's rule 6b,
     applied at refresh time by `naming.lead_order`.
 76. **The debug log says what it needs to** (2026-10-30, owner). A rate-limit pause logs its
@@ -7362,6 +7375,18 @@ document already reflects them.
     since the log belongs to the process, not to a session. The vocabulary layer's rule becomes
     "no network I/O and no threads", since `_config` reads the file
     ([section 5](#5-massiveconfig)).
+81. **`limit` means N rows per symbol wherever symbols are named** (owner decision D3(a),
+    2026-11-02). On the datasets that sent many tickers in one request (dividends, splits,
+    short interest, short volume, share float, financials, filings, partners, the snapshots,
+    and the options and futures snapshots and contracts), `limit` was one total cap across
+    them, so one ticker's rows could fill it, and under `poll(REPLACE)` a symbol added to a
+    live table could push another's rows out of the cycle and delete them. Now a `limit`
+    with named symbols (a list, or a static or live table) sends one request per symbol, each
+    with that `limit`; with `symbols=None` or `dm.ALL` it stays one total cap; without a
+    `limit` nothing changes; datasets that already sent one symbol per request are unchanged.
+    The requests respect `max_concurrency` and the rate governor, the slow-poll WARNING counts
+    them all, and only how requests are made changes, never Massive's values. A row that
+    several tickers' requests return is kept once ([section 8](#8-namespace-tree)).
 
 ## 23. Open verification items
 

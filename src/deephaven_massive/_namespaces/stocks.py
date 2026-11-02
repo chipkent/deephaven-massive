@@ -855,7 +855,8 @@ class _Stocks(Namespace):
             sort: The field to sort by, such as `"ex_dividend_date"`. See
                 README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"distribution_type": "special"}`. See
                 README.md#filters.
 
@@ -911,7 +912,8 @@ class _Stocks(Namespace):
             end: The last execution date. See README.md#start-and-end.
             sort: The field to sort by, such as `"execution_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
                 See README.md#filters.
 
@@ -1024,7 +1026,8 @@ class _Stocks(Namespace):
             end: The last settlement date. See README.md#start-and-end.
             sort: The field to sort by, such as `"settlement_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. See
                 README.md#filters.
 
@@ -1079,7 +1082,8 @@ class _Stocks(Namespace):
             end: The last trading day. See README.md#start-and-end.
             sort: The field to sort by, such as `"date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. See
                 README.md#filters.
 
@@ -1131,7 +1135,8 @@ class _Stocks(Namespace):
             sort: The field to sort by, such as `"free_float_percent"`. See
                 README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. See
                 README.md#filters.
 
