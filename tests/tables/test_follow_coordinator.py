@@ -20,8 +20,9 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
-from deephaven.update_graph import exclusive_lock
+from deephaven.update_graph import exclusive_lock, shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -29,14 +30,11 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
-from deephaven_massive._tables.diagnostics import (
-    FLAT_FILES_AND_REST,
-    SymbolReadRow,
-    SymbolReadState,
-)
+from deephaven_massive._tables.diagnostics import FLAT_FILES_AND_REST
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
+from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
     SymbolFailure,
@@ -125,7 +123,10 @@ class Script:
 
 
 def watchlist(*symbols: str) -> Table:
-    table = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    # A user's watchlist, created under the update graph's lock: a table created while a cycle
+    # runs and written at once can notify twice in one step, which ends the process.
+    with shared_lock(get_exec_ctx().update_graph):
+        table = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     if symbols:
         add(table, *symbols)
     return table
@@ -235,10 +236,13 @@ def test_a_symbol_goes_queued_loading_done(
     assert (done.rows, done.error, done.transport) == (2, None, Transport.REST)
     assert done.read_at == done.added_at == int(clock.time() * 1e9)
     drain()
-    shown = {r["Symbol"]: r for r in dh_to_pylist(massive_session.symbol_reads())}
-    assert shown["AAPL"]["State"] == "DONE"
-    assert shown["AAPL"]["Transport"] == "REST"
-    assert shown["MSFT"]["State"] == "LOADING"
+    view = massive_session.symbol_reads()
+
+    def shown() -> dict[str, tuple[str, str]]:
+        return {r["Symbol"]: (r["State"], r["Transport"]) for r in dh_to_pylist(view)}
+
+    until(lambda: shown() == {"AAPL": ("DONE", "REST"), "MSFT": ("LOADING", None)})
+    massive_session.release(view)
     hold.set()
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
     massive_session.release(result)
@@ -284,7 +288,7 @@ def test_a_permanent_failure_fails_only_its_symbol(
     assert (failed.attempts, failed.next_attempt_at, failed.rows) == (1, None, 0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "AAPL failed after 1 attempts (permanent)" in warnings[0]
+    assert "AAPL failed after 1 attempt (permanent)" in warnings[0]
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
@@ -564,7 +568,7 @@ def test_release_while_loading_stops_every_symbol(
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
     wait_state(massive_session, "MSFT", SymbolReadState.STOPPED)
     gate.set()
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
     drain()
     assert state(massive_session, "AAPL") is SymbolReadState.STOPPED  # the late outcome is dropped
 
@@ -600,7 +604,7 @@ def test_close_marks_every_unfinished_symbol_closed(
     gate.set()  # its rows land after the close: the row stays CLOSED
     until(lambda: massive_session._core.follows.thread is None)
     assert state(massive_session, "AAPL") is SymbolReadState.CLOSED
-    assert result.j_table.isFailed()
+    until(lambda: bool(result.j_table.isFailed()))  # delivered on the next update cycle
 
 
 def test_a_symbol_table_view_after_close_keeps_the_final_rows(
@@ -611,7 +615,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     drain()
     view = massive_session.symbol_reads()
     massive_session.close()
-    assert [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")]
+    until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
     with pytest.raises(MassiveError, match=r"is closed$"):
         massive_session.symbol_reads()
     massive_session.release(view)
@@ -625,10 +629,10 @@ def test_two_results_of_one_table_keep_rows_of_their_own(
     first = follow(massive_session, wl, Script(massive_session))
     second = follow(massive_session, wl, Script(massive_session))
     until(lambda: [r.state for r in reads(massive_session).values()] == [SymbolReadState.DONE] * 2)
-    drain()
-    shown = sorted(
-        (r["StreamId"], r["Symbol"]) for r in dh_to_pylist(massive_session.symbol_reads())
-    )
+    view = massive_session.symbol_reads()
+    until(lambda: len(dh_to_pylist(view)) == 2)
+    shown = sorted((r["StreamId"], r["Symbol"]) for r in dh_to_pylist(view))
+    massive_session.release(view)
     assert [symbol for _, symbol in shown] == ["AAPL", "AAPL"]
     assert shown[0][0] != shown[1][0]
     massive_session.release(first)
@@ -727,8 +731,9 @@ def test_the_flat_files_and_rest_label(
     until(
         lambda: stream(massive_session, drain, dh_to_pylist)["Transport"] == "flat files and REST"
     )
-    (shown,) = dh_to_pylist(massive_session.symbol_reads())
-    assert shown["Transport"] == "flat files and REST"
+    view = massive_session.symbol_reads()
+    until(lambda: [r["Transport"] for r in dh_to_pylist(view)] == ["flat files and REST"])
+    massive_session.release(view)
     massive_session.release(result)
 
 
@@ -744,7 +749,10 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     wait_state(massive_session, "TSLA", SymbolReadState.LOADING)
     until(lambda: stream(massive_session, drain, dh_to_pylist)["RowsPublished"] == 4)
     summary = stream(massive_session, drain, dh_to_pylist)
-    symbols = dh_to_pylist(massive_session.symbol_reads())
+    view = massive_session.symbol_reads()
+    until(lambda: sum(r["Rows"] for r in dh_to_pylist(view)) == 4)
+    symbols = dh_to_pylist(view)
+    massive_session.release(view)
     assert summary["SymbolCount"] == len(symbols)
     assert summary["RowsPublished"] == sum(r["Rows"] for r in symbols)
     assert summary["Loading"] == sum(
@@ -773,7 +781,11 @@ def test_one_coordinator_and_pool_serve_every_result(
     for result in results:
         massive_session.release(result)
     del results
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
+    thread = massive_session._core.follows.thread
+    assert thread is not None
+    assert thread.is_alive()  # one coordinator for the session's life, idle now
+    massive_session.close()
     until(lambda: not [t for t in threading.enumerate() if t.name.startswith(f"{prefix} follow")])
 
 
@@ -801,7 +813,7 @@ def test_a_dying_coordinator_fails_every_followed_table(
     assert "massive #" in caplog.text
     assert "died; its queue is no longer handled" in caplog.text
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
-    assert massive_session._core.follows.thread is None
+    assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
         errors = [w.row.error for w in massive_session._core._workers.values()]
     assert all("the follow coordinator died" in (e or "") for e in errors)
@@ -823,7 +835,7 @@ def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
     with exclusive_lock(massive_session._core.exec_ctx.update_graph):
         massive_session.release(result)
     del result
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_sixteen_threads_editing_one_watchlist_while_four_results_follow_it(

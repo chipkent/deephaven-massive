@@ -33,8 +33,6 @@ from deephaven_massive._tables.diagnostics import (
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
-    SYMBOL_READ_KEYS,
-    SYMBOL_READS,
     ConnectionRow,
     ConnectionState,
     Diagnostics,
@@ -47,8 +45,6 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
-    SymbolReadRow,
-    SymbolReadState,
     as_row,
     describe_symbols,
     gaps_text,
@@ -56,6 +52,8 @@ from deephaven_massive._tables.diagnostics import (
     shown_query,
 )
 from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.publisher import BlinkPublisher
+from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS, SymbolReadRow, SymbolReadState
 from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
@@ -155,31 +153,6 @@ def test_column_sets() -> None:
         "UpdatedAt",
     )
     assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED"]
-    assert SYMBOL_READS.column_names == (
-        "StreamId",
-        "Symbol",
-        "Dataset",
-        "State",
-        "Transport",
-        "AddedAt",
-        "ReadAt",
-        "Rows",
-        "Attempts",
-        "NextAttemptAt",
-        "Error",
-        "UpdatedAt",
-    )
-    assert SYMBOL_READ_KEYS == ("StreamId", "Symbol")
-    assert [s.value for s in SymbolReadState] == [
-        "QUEUED",
-        "LOADING",
-        "RETRYING",
-        "DONE",
-        "FAILED",
-        "REMOVED",
-        "STOPPED",
-        "CLOSED",
-    ]
     assert [s.value for s in LimitSource] == ["DECLARED", "LEARNED"]
 
 
@@ -1138,8 +1111,22 @@ def test_pascal_case(path: str, expected: str) -> None:
     assert pascal_case(path) == expected
 
 
-# --- m.symbol_reads() -------------------------------------------------------------------------
+# --- A followed read's row ----------------------------------------------------------------------
 
+
+def test_a_followed_read_row_shows_its_loading_count() -> None:
+    assert as_row(_stream(loading=2))["Loading"] == 2
+    assert as_row(STREAM)["Loading"] is None
+
+
+def test_a_followed_read_update_sets_its_loading_and_transport() -> None:
+    row = _stream(transport=Transport.REST)
+    updated = StreamUpdate(loading=3, transport=FLAT_FILES_AND_REST).apply(row)
+    assert (updated.loading, updated.transport) == (3, FLAT_FILES_AND_REST)
+    assert StreamUpdate().apply(updated) == updated
+
+
+# --- m.symbol_reads() -------------------------------------------------------------------------
 
 _SYMBOL_READ = SymbolReadRow(
     stream_id=7,
@@ -1155,51 +1142,55 @@ def _symbol_read(symbol: str = "AAPL", **changes: object) -> SymbolReadRow:
     return dataclasses.replace(_SYMBOL_READ, symbol=symbol, **cast("dict[str, Any]", changes))
 
 
-def test_symbol_read_rows_map_fields_to_columns() -> None:
-    shown = as_row(_symbol_read(state=SymbolReadState.DONE, transport=Transport.FLAT_FILES, rows=3))
-    assert list(shown) == list(SYMBOL_READS.column_names)
-    assert (shown["State"], shown["Transport"], shown["Rows"]) == ("DONE", "flat files", 3)
-    assert as_row(_symbol_read(transport=FLAT_FILES_AND_REST))["Transport"] == (
-        "flat files and REST"
+def _reads(to_list: Rows, diagnostics: Diagnostics) -> list[tuple[int, str, str]]:
+    return sorted(
+        (r["StreamId"], r["Symbol"], r["State"]) for r in to_list(diagnostics.symbol_reads)
     )
-    assert as_row(_stream(loading=2))["Loading"] == 2
-    assert as_row(STREAM)["Loading"] is None
 
 
-def test_symbol_read_rows_replace_by_their_key(
+def test_symbol_reads_show_the_latest_row_of_each_key(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    assert diagnostics.symbol_reads.is_refreshing
+    assert [c.name for c in diagnostics.symbol_reads.columns] == list(SYMBOL_READS.column_names)
     diagnostics.write(_symbol_read())
     diagnostics.write(_symbol_read("MSFT"))
     diagnostics.write(_symbol_read(stream_id=8))
+    assert diagnostics.barrier().wait(TIMEOUT)
     diagnostics.write(_symbol_read(state=SymbolReadState.LOADING, attempts=1))
     assert diagnostics.barrier().wait(TIMEOUT)
-    rows = sorted(
-        (r["StreamId"], r["Symbol"], r["State"]) for r in dh_to_pylist(diagnostics.symbol_reads)
-    )
-    assert rows == [(7, "AAPL", "LOADING"), (7, "MSFT", "QUEUED"), (8, "AAPL", "QUEUED")]
+    expected = [(7, "AAPL", "LOADING"), (7, "MSFT", "QUEUED"), (8, "AAPL", "QUEUED")]
+    _until(lambda: _reads(dh_to_pylist, diagnostics) == expected)
     diagnostics.release()
 
 
-def test_five_thousand_queued_symbols_go_in_one_add(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+def test_five_thousand_symbol_reads_go_in_one_add(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    adds: list[int] = []
+    add = BlinkPublisher.add
+
+    def counting(publisher: BlinkPublisher, rows: Table) -> None:
+        adds.append(rows.size)
+        add(publisher, rows)
+
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    counting = CountingTable(diagnostics.symbol_reads)
-    diagnostics._symbol_reads = cast("InputTable", counting)
-    diagnostics.write(_symbol_read("FIRST"))
-    assert counting.entered.wait(TIMEOUT)  # the writer holds this add; the rest queue behind
+    counting_table = CountingTable(diagnostics.streams)
+    diagnostics._streams = cast("InputTable", counting_table)
+    diagnostics.write(STREAM)
+    assert counting_table.entered.wait(TIMEOUT)  # the writer holds this batch; the rest queue
+    monkeypatch.setattr(BlinkPublisher, "add", counting)
     for n in range(5_000):
         diagnostics.write(_symbol_read(f"S{n}"))
-    counting.gate.set()
+    counting_table.gate.set()
     assert diagnostics.barrier().wait(TIMEOUT)
-    assert counting.adds == 2
-    assert len(dh_to_pylist(counting.table)) == 5_001
+    assert adds == [5_000]
+    _until(lambda: len(dh_to_pylist(diagnostics.symbol_reads)) == 5_000)
     diagnostics.release()
 
 
-def test_a_malformed_symbol_read_row_is_logged_and_skipped(
+def test_a_malformed_symbol_read_is_logged_and_skipped(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
@@ -1207,13 +1198,32 @@ def test_a_malformed_symbol_read_row_is_logged_and_skipped(
         diagnostics.write(_symbol_read("BAD", rows=cast("int", "many")))
         diagnostics.write(_symbol_read())
         assert diagnostics.barrier().wait(TIMEOUT)
-    assert "failed to write a symbol_reads row" in caplog.text
-    assert [r["Symbol"] for r in dh_to_pylist(diagnostics.symbol_reads)] == ["AAPL"]
+        diagnostics.write(_symbol_read("WORSE", rows=cast("int", "many")))  # nothing to add
+        assert diagnostics.barrier().wait(TIMEOUT)
+    assert caplog.text.count("failed to write a symbol_reads row") == 2
+    _until(lambda: _reads(dh_to_pylist, diagnostics) == [(7, "AAPL", "QUEUED")])
     diagnostics.release()
 
 
-def test_a_followed_read_update_sets_its_loading_and_transport() -> None:
-    row = _stream(transport=Transport.REST)
-    updated = StreamUpdate(loading=3, transport=FLAT_FILES_AND_REST).apply(row)
-    assert (updated.loading, updated.transport) == (3, FLAT_FILES_AND_REST)
-    assert StreamUpdate().apply(updated) == updated
+def test_a_failing_symbol_reads_publish_is_logged(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_publisher: BlinkPublisher, _rows: Table) -> None:
+        raise RuntimeError("the publisher is broken")
+
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    monkeypatch.setattr(BlinkPublisher, "add", broken)
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
+        diagnostics.write(_symbol_read())
+        assert diagnostics.barrier().wait(TIMEOUT)
+    assert "failed to update the symbol_reads table" in caplog.text
+    diagnostics.release()
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    pause = threading.Event()
+    for _ in range(int(TIMEOUT / 0.01)):
+        if condition():
+            return
+        pause.wait(0.01)
+    assert condition()

@@ -111,8 +111,6 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
-    SymbolReadRow,
-    SymbolReadState,
     describe_symbols,
     shown_query,
 )
@@ -124,6 +122,7 @@ from deephaven_massive._tables.execution_context import (
 )
 from deephaven_massive._tables.follow_coordinator import FollowCoordinator
 from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
+from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -248,6 +247,7 @@ def _collect_session(
     *,
     results: ResultRegistry,
     closers: list[Callable[[], None]],
+    follows: FollowCoordinator,
 ) -> None:
     """Finalizer of a session freed without `close()`: clean up, without waiting.
 
@@ -266,11 +266,13 @@ def _collect_session(
         diagnostics: The session's diagnostics.
         results: The session's result registry, retired here.
         closers: The session's registered closers; emptied here.
+        follows: The session's follow coordinator, whose thread the reaper stops.
     """
     pending = tuple(closers)
     closers.clear()
     if pending:
         reaper.submit(functools.partial(_close_collected, label, pending))
+    reaper.submit(follows.stop)  # a freed session follows nothing: its results all stopped
     reaper.submit(diagnostics.stop)  # after the closers, whose rows it still applies
     results.retire()  # the reaper ends once no result it may still have to release is tracked
 
@@ -459,6 +461,7 @@ class SessionCore:
             self.diagnostics,
             results=self.results,
             closers=self._closers,
+            follows=self.follows,
         )
         finalizer.atexit = False
 
@@ -1672,6 +1675,7 @@ class SessionCore:
                 closer()
             except Exception:
                 logger.exception("%s: a transport failed to close. %s", self.label, LIBRARY_BUG)
+        self.follows.stop()  # the events queued before it are handled; nothing is joined
         # The writer's `InputTable.add` waits for an update cycle, which cannot run while this
         # thread holds the update graph's lock: waiting for the writer there would never end.
         self.diagnostics.release(wait=not locked)

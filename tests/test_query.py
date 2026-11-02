@@ -2050,8 +2050,10 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 
 
 def live(*symbols: str) -> Table:
-    # A refreshing, keyed watchlist holding the symbols.
-    table = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    # A refreshing, keyed watchlist holding the symbols, created under the update graph's lock:
+    # a table created while a cycle runs and written at once can notify twice in one step.
+    with shared_lock(get_exec_ctx().update_graph):
+        table = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     if symbols:
         table.add(new_table([string_col("Symbol", list(symbols))]))
     return table
@@ -2061,7 +2063,7 @@ def follows(m: dm.MassiveSession) -> None:
     # Waits until no followed read of the session is left: its coordinator has ended.
     pause = threading.Event()
     for _ in range(int(TIMEOUT / 0.01)):
-        if m._core.follows.thread is None:
+        if m._core.follows.following == 0:
             return
         pause.wait(0.01)
     raise AssertionError("a followed read kept running")
@@ -2207,7 +2209,7 @@ def test_an_empty_refreshing_table_returns_an_empty_following_result(
     assert result.is_refreshing
     assert result.size == 0
     assert rest.by_symbol == []
-    assert rest.checks == []  # with no symbol, the first read checks the parameters
+    assert [verb for verb, _, _ in rest.checks] == ["history"]  # checked with no symbol too
     massive_session.release(result)
     follows(massive_session)
 

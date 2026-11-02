@@ -3,7 +3,8 @@
 They are the tables behind `m.connections()`, `m.streams()`, `m.rate_limits()`, and
 `m.symbol_reads()`.
 
-All four are keyed Deephaven `input_table`s that the library writes and users read:
+The first three are keyed Deephaven `input_table`s that the library writes and users read;
+the fourth is the `last_by` of a blink table (`_tables/symbol_read_rows.py`):
 
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
@@ -15,9 +16,10 @@ All four are keyed Deephaven `input_table`s that the library writes and users re
 - **symbol_reads**: one row per symbol of each followed read: whether it is queued, loading,
   waiting to retry, done, failed, removed, stopped, or closed, with its source, its rows, its
   attempts, and its latest error. Keyed by `StreamId` and `Symbol`. The session's follow
-  coordinator (`_tables/follow_coordinator.py`) makes the rows, and the session core queues
-  them (`SessionCore.write_symbol_reads`), so a row written `CLOSED` at `m.close()` is never
-  overwritten.
+  coordinator (`_tables/follow_coordinator.py`) makes the rows (`_tables/symbol_read_rows.py`)
+  and the session core queues them (`SessionCore.write_symbol_reads`). The writer publishes
+  them to a blink table of their own, and the table is that blink table's `last_by` on the
+  key, so each key shows its latest row: no input table holds them.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -80,12 +82,20 @@ from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
+from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive._tables.symbol_read_rows import (
+    SYMBOL_READ_KEYS,
+    SYMBOL_READS,
+    SymbolReadRow,
+    symbol_read_values,
+)
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -104,8 +114,6 @@ __all__ = [
     "SCHEMA_DRIFT_SHOWN",
     "STREAMS",
     "STREAM_KEYS",
-    "SYMBOL_READS",
-    "SYMBOL_READ_KEYS",
     "ConnectionRow",
     "ConnectionState",
     "Diagnostics",
@@ -119,8 +127,6 @@ __all__ = [
     "StreamRow",
     "StreamState",
     "StreamUpdate",
-    "SymbolReadRow",
-    "SymbolReadState",
     "as_row",
     "describe_symbols",
     "gaps_text",
@@ -340,30 +346,6 @@ STREAMS: Final = Schema(
 STREAM_KEYS: Final = ("StreamId",)
 """The key column of `m.streams()`."""
 
-SYMBOL_READS: Final = Schema(
-    "symbol_reads",
-    tuple(
-        Column(name, column_type)
-        for name, column_type in (
-            ("StreamId", _L),
-            ("Symbol", _S),
-            ("Dataset", _S),
-            ("State", _S),
-            ("Transport", _S),
-            ("AddedAt", _T),
-            ("ReadAt", _T),
-            ("Rows", _L),
-            ("Attempts", _I),
-            ("NextAttemptAt", _T),
-            ("Error", _S),
-            ("UpdatedAt", _T),
-        )
-    ),
-)
-"""The columns of `m.symbol_reads()`."""
-
-SYMBOL_READ_KEYS: Final = ("StreamId", "Symbol")
-"""The key columns of `m.symbol_reads()`."""
 
 RATE_LIMITS: Final = Schema(
     "rate_limits",
@@ -630,68 +612,9 @@ class StreamUpdate:
         return tuple(sorted(notes.items(), key=lambda item: _NOTE_ORDER[item[0]]))
 
 
-class SymbolReadState(StrEnum):
-    """The `State` of a row of `m.symbol_reads()`: where one symbol of a followed read stands.
-
-    A symbol starts `QUEUED` when its row enters the symbol table, becomes `LOADING` when a
-    read of it begins, and `DONE` once its rows are in the result. A read that fails in a way
-    that may pass makes it `RETRYING` until its next attempt; one that fails for good, or the
-    last retry, makes it `FAILED`. `REMOVED`, `STOPPED`, and `CLOSED` end its following: its
-    row left the symbol table, the result was released and nothing uses it any more, or the
-    session closed.
-    """
-
-    QUEUED = "QUEUED"
-    LOADING = "LOADING"
-    RETRYING = "RETRYING"
-    DONE = "DONE"
-    FAILED = "FAILED"
-    REMOVED = "REMOVED"
-    STOPPED = "STOPPED"
-    CLOSED = "CLOSED"
-
-
 FLAT_FILES_AND_REST: Final = "flat files and REST"
 """The `Transport` text of a followed read whose flat-file read also read days from REST: the
 files of some days were missing, and REST served them."""
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class SymbolReadRow:
-    """One row of `m.symbol_reads()`. Timestamps are epoch nanoseconds; None is null.
-
-    Made by the session's follow coordinator, the only owner of a followed read's per-symbol
-    state, and written through `SessionCore.write_symbol_reads`; immutable.
-
-    Attributes:
-        stream_id: The followed read's `StreamId` in `m.streams()` (a key).
-        symbol: The canonical symbol (a key).
-        dataset: The dataset's name, such as `"stocks.bars"`.
-        state: Where the symbol stands (`SymbolReadState`).
-        transport: The source of its latest read: `Transport.REST`, `Transport.FLAT_FILES`, or
-            `FLAT_FILES_AND_REST`; None before its first read began.
-        added_at: When its row last entered the symbol table.
-        read_at: When the download whose rows the result holds began, so the rows are
-            Massive's answer as of then; None while it has none.
-        rows: Its rows in the result.
-        attempts: Reads started since it was last added.
-        next_attempt_at: When its next read begins; set only while `RETRYING`.
-        error: The text of its latest failure; None once a read succeeds.
-        updated_at: When the row was made.
-    """
-
-    stream_id: int
-    symbol: str
-    dataset: str
-    state: SymbolReadState
-    transport: Transport | str | None = None
-    added_at: int
-    read_at: int | None = None
-    rows: int = 0
-    attempts: int = 0
-    next_attempt_at: int | None = None
-    error: str | None = None
-    updated_at: int
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -733,7 +656,7 @@ class RateLimitRow:
     updated_at: int
 
 
-def as_row(row: ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow) -> dict[str, object]:
+def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
     A `Transport` value becomes its user-facing label (`TRANSPORT_LABELS`), so the tables spell
@@ -743,11 +666,10 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow) -> dic
     A stream's `Gaps` is its `gaps` as `gaps_text` writes them, whatever its state.
 
     Args:
-        row: A connection, stream, rate-limit, or symbol-read row.
+        row: A connection, stream, or rate-limit row.
 
     Returns:
-        A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, `RATE_LIMITS`, or
-        `SYMBOL_READS`.
+        A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`.
     """
     shown = {
         pascal_case(f.name): _shown(getattr(row, f.name))
@@ -1135,7 +1057,7 @@ _Item: TypeAlias = "ConnectionRow | StreamRow | SymbolReadRow | threading.Event 
 
 
 class Diagnostics:
-    """The session's four diagnostics tables and the single thread that writes them.
+    """The session's diagnostics tables and the single thread that writes three of them.
 
     Created by `SessionCore` on the caller thread, inside the session's execution context, so
     the tables live in a session-owned liveness scope. A daemon writer (`QueueWorker`) takes
@@ -1158,6 +1080,7 @@ class Diagnostics:
 
     __slots__ = (
         "_connections",
+        "_exec_ctx",
         "_rate_due",
         "_rate_limits",
         "_rate_pending",
@@ -1166,6 +1089,7 @@ class Diagnostics:
         "_released",
         "_scope",
         "_streams",
+        "_symbol_read_publisher",
         "_symbol_reads",
         "_writer",
     )
@@ -1177,7 +1101,7 @@ class Diagnostics:
         *,
         on_death: Callable[[BaseException], None] | None = None,
     ) -> None:
-        """Create the four input tables inside a new session-owned scope and start the writer.
+        """Create the three input tables inside a new session-owned scope and start the writer.
 
         If creating a table or starting the writer fails, the scope (with any table already
         created in it) is released and the exception propagates.
@@ -1188,6 +1112,7 @@ class Diagnostics:
             on_death: Runs if the writer dies on something it cannot carry on after
                 (`QueueWorker`).
         """
+        self._exec_ctx = exec_ctx
         self._release_lock = threading.Lock()
         self._released = False
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
@@ -1208,9 +1133,21 @@ class Diagnostics:
                 self._rate_limits: InputTable = input_table(
                     col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
                 )
-                self._symbol_reads: InputTable = input_table(
-                    col_defs(SYMBOL_READS), key_cols=list(SYMBOL_READ_KEYS)
-                )
+                # Under the update graph's shared lock: no cycle refreshes the new blink table
+                # in the step that stamped it. It never fails, so it holds no failure pin for
+                # `release_later` to release.
+                lock = exec_ctx.update_graph.j_update_graph.sharedLock()
+                lock.lock()
+                try:
+                    blink, self._symbol_read_publisher = blink_publisher(
+                        "massive.symbol_reads",
+                        col_defs(SYMBOL_READS),
+                        on_shutdown=_nothing,
+                        release_later=functools.partial(release_scope, exec_ctx),
+                    )
+                    self._symbol_reads: Table = _latest_symbol_reads(blink)
+                finally:
+                    lock.unlock()
             self._writer: QueueWorker[_Item] = QueueWorker(
                 exec_ctx,
                 name,
@@ -1240,8 +1177,8 @@ class Diagnostics:
         return self._rate_limits
 
     @property
-    def symbol_reads(self) -> InputTable:
-        """The table behind `m.symbol_reads()`."""
+    def symbol_reads(self) -> Table:
+        """The table behind `m.symbol_reads()`: the latest row of each key."""
         return self._symbol_reads
 
     @property
@@ -1374,7 +1311,6 @@ class Diagnostics:
                 (self._streams, STREAMS, lambda: list(streams.values())),
                 (self._connections, CONNECTIONS, lambda: list(connections.values())),
                 (self._rate_limits, RATE_LIMITS, self._pull_rate_limits if pull else list),
-                (self._symbol_reads, SYMBOL_READS, lambda: list(symbol_reads.values())),
             ):
                 try:  # one table's failure never costs the others their rows
                     self._add(table, schema, rows())
@@ -1382,6 +1318,12 @@ class Diagnostics:
                     logger.exception(
                         "diagnostics: failed to update the %s table. %s", schema.name, LIBRARY_BUG
                     )
+            try:
+                self._publish_symbol_reads(list(symbol_reads.values()))
+            except Exception:
+                logger.exception(
+                    "diagnostics: failed to update the symbol_reads table. %s", LIBRARY_BUG
+                )
         finally:
             for barrier in barriers:
                 barrier.set()
@@ -1417,11 +1359,36 @@ class Diagnostics:
         self._rate_due = None
         self._apply([_RATE_LIMITS_CHANGED])
 
+    def _publish_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
+        """Publish symbol-read rows with one conversion and one `add`, skipping bad rows.
+
+        Args:
+            rows: The rows, at most one per key.
+        """
+        if not rows:
+            return
+        values = [symbol_read_values(row) for row in rows]
+        try:
+            batch = SYMBOL_READS.to_arrow(values)
+        except MassiveError:  # a row does not fit: find it, keep the others
+            batches = []
+            for one in values:
+                try:
+                    batches.append(SYMBOL_READS.to_arrow([one]))
+                except Exception:
+                    logger.exception(
+                        "diagnostics: failed to write a symbol_reads row. %s", LIBRARY_BUG
+                    )
+            if not batches:
+                return
+            batch = pa.concat_tables(batches)
+        self._symbol_read_publisher.add(dh_arrow.to_table(batch))
+
     @staticmethod
     def _add(
         table: InputTable,
         schema: Schema,
-        rows: list[ConnectionRow] | list[StreamRow] | list[RateLimitRow] | list[SymbolReadRow],
+        rows: list[ConnectionRow] | list[StreamRow] | list[RateLimitRow],
     ) -> None:
         """Add rows to a table with one conversion and one `add`, skipping rows that do not fit.
 
@@ -1469,3 +1436,19 @@ def pascal_case(path: str) -> str:
     """
     words = re.split(r"[._]+", path)
     return "".join(word[:1].upper() + word[1:] for word in words if word)
+
+
+def _latest_symbol_reads(blink: Table) -> Table:
+    """Return each key's latest symbol-read row (in a frame of its own: no session in reach).
+
+    Args:
+        blink: The blink table of rows.
+
+    Returns:
+        Its `last_by` on `SYMBOL_READ_KEYS`, in `SYMBOL_READS`'s column order.
+    """
+    return blink.last_by(list(SYMBOL_READ_KEYS)).view(list(SYMBOL_READS.column_names))
+
+
+def _nothing() -> None:
+    """The symbol-read blink table's shutdown callback: nothing stops with it."""

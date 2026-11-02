@@ -18,6 +18,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import table_publisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
@@ -29,11 +30,11 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import AuthenticationError, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator, followed_read
-from deephaven_massive._tables.diagnostics import SymbolReadState
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
 from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
     SymbolFailure,
@@ -111,7 +112,10 @@ class Script:
 
 
 def watchlist(*symbols: str | None, keyed: bool = True) -> Table:
-    table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
+    # A user's watchlist, created under the update graph's lock: a table created while a cycle
+    # runs and written at once can notify twice in one step, which ends the process.
+    with shared_lock(get_exec_ctx().update_graph):
+        table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
     if symbols:
         table.add(new_table([string_col("Symbol", list(symbols))]))
     return table
@@ -464,7 +468,7 @@ def test_release_marks_the_row_released_and_stops_the_reads(
     drain()
     (row,) = stream_rows()
     assert row["State"] == "RELEASED"
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_a_derived_table_keeps_the_result_following(
@@ -486,7 +490,7 @@ def test_a_derived_table_keeps_the_result_following(
     del derived
     with shared_lock(massive_session._core.exec_ctx.update_graph):
         scope.release()
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_close_inside_a_console_command_fails_the_table_and_joins_nothing(
@@ -557,7 +561,7 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
         follow(massive_session, wl, script)
     drain()
     until(lambda: massive_session._core._workers == {})
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
     assert script.calls == []
 
 
