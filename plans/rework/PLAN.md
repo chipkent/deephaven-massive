@@ -2593,14 +2593,16 @@ publisher.
 plan-retirement.
 
 **Files.** Create `.github/workflows/release.yml`, `.github/cliff.toml`, and
-`docs/dev/releasing.md`; let `.github/workflows/ci.yml` be called by another workflow; set the
-version to `0.1.0rc1`.
+`docs/dev/releasing.md`; let `.github/workflows/ci.yml` be called by another workflow and build
+a given release version. The version comes from the git tag (#413).
 
 **Tasks.**
-- [ ] One manual run on `main`: refuse a malformed version or one whose tag exists, run the
-      whole CI workflow on `main`'s newest commit, then tag that commit `v<version>` and create
-      a GitHub Release with generated notes and the CI build's wheel and sdist; a candidate is
-      a pre-release. A `dry_run` input stops before tagging.
+- [ ] One manual run on `main`, given the version: refuse a version not in PEP 440 form, whose
+      tag exists, or not greater than every tagged version; run the whole CI workflow on
+      `main`'s newest commit, building the wheel and sdist with that version and checking both
+      carry it; then tag that commit `v<version>` and create a GitHub Release with generated
+      notes and both files; a candidate is a pre-release. A `dry_run` input stops before
+      tagging.
 - [ ] A PyPI job through trusted publishing (`id-token: write`), off until the owner sets
       `PUBLISH_TO_PYPI`. The owner configures the PyPI project and the trusted publisher.
 - [ ] The rehearsal: the owner runs the workflow on `main` (a dry run first, then a real one),
@@ -2640,9 +2642,9 @@ planned PR depends on this one.
 
 **Depends on.** plan-retirement, release-workflow. **Parallel with.** nothing.
 
-**Files.** Modify `README.md` (the install line becomes `pip install deephaven-massive`) and
-`pyproject.toml` (the version goes from `0.1.0rc1` to `0.1.0`). No changelog file: the release
-notes are generated from the pull request titles.
+**Files.** Modify `README.md` (the install line becomes `pip install deephaven-massive`). No
+version edit (the release run takes the version) and no changelog file (the release notes are
+generated from the pull request titles).
 
 **Tasks.**
 - [ ] The README edit.

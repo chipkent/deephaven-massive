@@ -1,18 +1,29 @@
 name: Release
 
-# Run by hand, on main: from the Actions tab (Release, Run workflow) or with
-# `gh workflow run release.yml`. One run does the whole release of the version in
-# pyproject.toml, in order: it checks that the version is new and well formed, runs the same
-# tests as every pull request on main's newest commit and builds the wheel and the sdist once,
-# and only when all of that passes tags that commit v<version> and creates the GitHub Release,
-# with generated notes and both distributions attached. Publishing to PyPI is a separate last
-# job that stays off until the repository variable PUBLISH_TO_PYPI is set to true. The version
-# itself changes in an ordinary pull request beforehand, since main accepts changes only
-# through pull requests. docs/dev/releasing.md explains the steps.
+# Run by hand, on main, with the version to release: from the Actions tab (Release, Run
+# workflow) or with `gh workflow run release.yml -f version=0.1.0rc1`. The git tag is the one
+# source of the package's version, so nothing is edited to release. One run, in order:
+#
+# 1. checks the version: PEP 440 form X.Y.Z[aN|bN|rcN], no tag v<version> yet, and greater
+#    than every existing version tag; and writes the release notes;
+# 2. runs the same tests as every pull request on main's newest commit, and builds the wheel
+#    and the sdist once with that version, checking that both carry it exactly;
+# 3. only when all of that passes, tags that commit v<version> and creates the GitHub Release,
+#    with the notes and both files attached;
+# 4. publishes to PyPI, a job that stays off until the repository variable PUBLISH_TO_PYPI is
+#    set to true.
+#
+# docs/dev/releasing.md explains the steps.
 
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: >-
+          The version to release, without the leading v: 0.1.0 for a final release, 0.1.0rc1
+          for a release candidate (a1 and b1 for an alpha or a beta).
+        type: string
+        required: true
       dry_run:
         description: >-
           Dry run: check the version, run the tests, build, and write the release notes, but
@@ -47,40 +58,57 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Every tag, to refuse a version already released and to find the previous release.
+          # Every tag, to compare the version with the released ones and to find the previous
+          # release.
           fetch-depth: 0
-      - name: Check that the version in pyproject.toml is well formed and not yet released
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          # Only packaging and git-cliff are installed below; nothing to cache.
+          enable-cache: false
+      - name: Check that the version is well formed, new, and greater than every release
         id: check
-        # The version in pyproject.toml is the one source of the package's version: the wheel,
-        # the sdist, and deephaven_massive.__version__ all take it from there, and the tag is
-        # v followed by it. A version is X.Y.Z, optionally followed by aN, bN or rcN for an
-        # alpha, beta or release candidate, which is released as a GitHub pre-release. The
-        # runner's own Python reads the file: it needs only the standard library.
+        env:
+          VERSION: ${{ inputs.version }}
+        # PEP 440 is Python's version standard, which pip and PyPI order versions by:
+        # 0.1.0rc1 < 0.1.0rc2 < 0.1.0. The form allowed here is the subset this project uses.
+        # The comparison uses packaging, the library pip itself orders versions with.
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF" != refs/heads/main ]; then
             echo "::error::a release is made only from main, not $GITHUB_REF: run the workflow on main"
             exit 1
           fi
-          version=$(python3 -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          tag="v$version"
-          echo "commit: $GITHUB_SHA; pyproject.toml version: $version"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
-            echo "::error::the version in pyproject.toml, '$version', is not X.Y.Z, X.Y.ZaN, X.Y.ZbN or X.Y.ZrcN"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+            echo "::error::the version '$VERSION' is not X.Y.Z, X.Y.ZaN, X.Y.ZbN or X.Y.ZrcN, such as 0.1.0 or 0.1.0rc1 (no leading v)"
             exit 1
           fi
+          tag="v$VERSION"
           if git rev-parse --verify --quiet "refs/tags/$tag" > /dev/null; then
-            echo "::error::the tag $tag already exists: merge a pull request that sets the next version in pyproject.toml, then run the release again"
+            echo "::error::the tag $tag already exists: that version is released; choose the next one"
             exit 1
           fi
-          if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then prerelease=true; else prerelease=false; fi
-          echo "tag to create: $tag; pre-release: $prerelease"
-          printf 'version=%s\ntag=%s\nprerelease=%s\n' "$version" "$tag" "$prerelease" >> "$GITHUB_OUTPUT"
-      - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          # Only git-cliff is installed below; there are no project dependencies to cache.
-          enable-cache: false
+          git tag --list 'v[0-9]*' > "$RUNNER_TEMP/tags.txt"
+          uv run --no-project --with packaging==26.3 python -I - "$VERSION" "$RUNNER_TEMP/tags.txt" <<'EOF'
+          import sys
+          from packaging.version import InvalidVersion, Version
+
+          new = Version(sys.argv[1])
+          released = []
+          for line in open(sys.argv[2], encoding="utf-8"):
+              try:
+                  released.append(Version(line.strip().removeprefix("v")))
+              except InvalidVersion:
+                  print(f"ignoring the tag {line.strip()}, which is not a version")
+          highest = max(released, default=None)
+          if highest is not None and new <= highest:
+              print(f"::error::{new} is not greater than {highest}, the highest version already tagged")
+              sys.exit(1)
+          print(f"{new} is greater than every tagged version (highest: {highest})")
+          EOF
+          if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ ]]; then prerelease=true; else prerelease=false; fi
+          echo "commit: $GITHUB_SHA; tag to create: $tag; pre-release: $prerelease"
+          printf 'version=%s\ntag=%s\nprerelease=%s\n' "$VERSION" "$tag" "$prerelease" >> "$GITHUB_OUTPUT"
       - name: Write the release notes from the pull request titles
         env:
           TAG: ${{ steps.check.outputs.tag }}
@@ -128,14 +156,16 @@ jobs:
     # The same tests as every pull request: this runs the CI workflow itself on the commit
     # being released, with every job (Python 3.11 to 3.14, the free-threaded 3.14t with the
     # GIL off, and the lowest declared dependency versions). Its build job builds the wheel and
-    # the sdist, checks the wheel in a clean environment, and keeps both as the run's "dist"
-    # artifact. A run that is not a pull request runs every job. If any fails, nothing below
-    # runs.
+    # the sdist with the version being released, installs the wheel in a clean environment,
+    # fails unless deephaven_massive.__version__ and the sdist both equal that version, and
+    # keeps both files as the run's "dist" artifact. If any job fails, nothing below runs.
     name: CI
     needs: prepare
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml
+    with:
+      release-version: ${{ needs.prepare.outputs.version }}
 
   release:
     name: tag and create the GitHub Release
@@ -209,11 +239,13 @@ jobs:
   pypi:
     # Off until the owner turns it on. The job runs only when the repository variable
     # PUBLISH_TO_PYPI is exactly "true" (Settings, Secrets and variables, Actions, Variables);
-    # unset, or any other value, skips it, as does a dry run. Publishing also needs a trusted
-    # publisher for this repository, this workflow file, and the environment below, configured
-    # on PyPI: with trusted publishing, PyPI accepts a short-lived token that GitHub signs for
-    # this job, so no PyPI token is stored anywhere. It runs last because a version published
-    # to PyPI can never be uploaded again: a failure anywhere earlier publishes nothing.
+    # unset, or any other value, skips it, as does a dry run. Release candidates are published
+    # too; pip installs them only when asked (--pre or an exact version). Publishing also needs
+    # a trusted publisher for this repository, this workflow file, and the environment below,
+    # configured on PyPI: with trusted publishing, PyPI accepts a short-lived token that GitHub
+    # signs for this job, so no PyPI token is stored anywhere. It runs last because a version
+    # published to PyPI can never be uploaded again: a failure anywhere earlier publishes
+    # nothing.
     name: publish to PyPI
     needs: [prepare, release]
     if: ${{ !inputs.dry_run && vars.PUBLISH_TO_PYPI == 'true' }}

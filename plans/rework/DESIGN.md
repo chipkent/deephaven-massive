@@ -6448,19 +6448,22 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   ignore, so it needs no approval.
 - **Release by one manual run; PyPI publishing off until the owner turns it on.**
   `.github/workflows/release.yml` runs only when started by hand (`workflow_dispatch`) on
-  `main`. One run reads `project.version`, a static version in `pyproject.toml` (no version
-  derived from git), which an ordinary pull request sets beforehand; refuses a version not of
-  the form `X.Y.Z[aN|bN|rcN]` or whose tag `v<version>` exists; runs the whole CI workflow on
-  `main`'s newest commit through `workflow_call`, which builds and checks the wheel and sdist
-  once; and only then pushes the annotated tag `v<version>` on that exact commit with the run's
+  `main`, with the version as a required input; nothing is edited to release, since the tag is
+  the only source of the version (see the next bullets). One run refuses a version not of the
+  PEP 440 form `X.Y.Z[aN|bN|rcN]`, whose tag `v<version>` exists, or that is not greater than
+  every tagged version (`packaging.version` order); runs the whole CI workflow on `main`'s
+  newest commit through `workflow_call`, whose build job builds the wheel and sdist once with
+  that version (`SETUPTOOLS_SCM_PRETEND_VERSION`) and fails unless the installed
+  `deephaven_massive.__version__` and the sdist's `PKG-INFO` equal it; and only then pushes the annotated tag `v<version>` on that exact commit with the run's
   own `GITHUB_TOKEN` and creates a GitHub Release, marked as a pre-release for a candidate,
   with both distributions attached and notes that git-cliff (`.github/cliff.toml`) generates
   from the squash-merged pull request titles, grouped by Conventional Commits type. A
   `dry_run` input does everything but tag, release, and publish. There is no hand-written
   changelog: the generated notes are the history. Publishing to PyPI through trusted
   publishing (`id-token: write`, no long-lived token) is the last job and runs only when the
-  repository variable `PUBLISH_TO_PYPI` is `true`. The first release candidate is 0.1.0rc1.
-  **Hazard:** a PyPI version can never be re-uploaded, so a release run after the switch is on
+  repository variable `PUBLISH_TO_PYPI` is `true`, release candidates included. Candidate tags
+  and GitHub pre-releases stay after the final release. The first release candidate is
+  0.1.0rc1. **Hazard:** a PyPI version can never be re-uploaded, so a release run after the switch is on
   is final. `docs/dev/releasing.md` gives the steps.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`.
@@ -6769,9 +6772,11 @@ document already reflects them.
     is started by hand on `main`; once the full CI workflow passes on `main`'s newest commit,
     it tags that commit `v<version>` and creates the GitHub Release, with generated notes and
     the wheel and sdist. Its PyPI job (trusted publishing, no long-lived token) runs only when
-    the repository variable `PUBLISH_TO_PYPI` is `true`. The version is static in
-    `pyproject.toml` and changes in an ordinary pull request. No hand-written changelog. The
-    first release candidate is 0.1.0rc1 ([section 20.1](#201-tooling-configuration)).
+    the repository variable `PUBLISH_TO_PYPI` is `true`, release candidates included. The git
+    tag is the only source of the version (hatch-vcs); the run takes the version as an input,
+    in PEP 440 form, greater than every tagged version, and builds the files with it. Candidate
+    tags and pre-releases stay after the final release. No hand-written changelog. The first
+    release candidate is 0.1.0rc1 ([section 20.1](#201-tooling-configuration)).
 45. **`columns()` on every query** (2026-10-26). A public method, not a verb, returning a
     static table `Name`, `Type`, `Description`, `SuppliedBy` built from the dataset schema with
     no network call, so console and notebook users can read what each column means without the
