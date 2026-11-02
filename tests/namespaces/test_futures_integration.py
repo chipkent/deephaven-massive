@@ -28,6 +28,8 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from tests._live import futures_bar_buckets
+from tests._live.calendar import months_before
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from tests._live.futures_bar_buckets import Bar
     from tests._live.ticker_lists import SpreadRead
 
 pytestmark = pytest.mark.integration
@@ -47,6 +50,9 @@ WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 SpreadReads: TypeAlias = (
     "Callable[[Sequence[Mapping[str, Any]]], tuple[list[SpreadRead], list[str]]]"
+)
+RestRows: TypeAlias = (
+    "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
 )
 SpreadReport: TypeAlias = (
     "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]]"
@@ -627,3 +633,228 @@ def _midnight(day: date) -> datetime:
         The instant.
     """
     return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
+_BUCKET_PRODUCTS = ("ES", "ZC", "LE")
+"""Products whose sessions open at different hours: ES at 17:00 Chicago time, corn at 19:00
+(after midnight UTC), and live cattle at 08:30, a day session."""
+
+_ALL_ROWS = 50_000
+"""The largest page Massive serves; `rest_rows` follows the pages beyond it."""
+
+
+def _bars(
+    rest_rows: RestRows, contract: str, resolution: str, *, since: datetime, end: datetime
+) -> list[Bar]:
+    """Read every bar of one contract and resolution, from `since` (the `{from}`) to `end`.
+
+    Returns:
+        The bars, oldest first.
+    """
+    query = {
+        "resolution": resolution,
+        "window_start.gte": since,
+        "window_start.lt": end,
+        "sort": "window_start.asc",
+        "limit": _ALL_ROWS,
+    }
+    rows = rest_rows(_AGGS, {"ticker": contract}, query)
+    return [futures_bar_buckets.bar_of(row) for row in rows]
+
+
+def _judge(
+    contract: str,
+    resolution: str,
+    bars: Sequence[Bar],
+    *,
+    inputs: futures_bar_buckets.BucketInputs,
+    since: datetime,
+    evidence: Evidence,
+) -> str:
+    """Check every bar of one read against its bucket's contents; record each and the verdict.
+
+    Returns:
+        The verdict line (`bucket_verdict`), labelled with the read's `{from}`.
+    """
+    read_from = futures_bar_buckets.utc_midnight_ns(since.date())
+    verdicts = []
+    for bar in bars:
+        line, found = futures_bar_buckets.bucket_check(
+            resolution, bar, inputs, read_from_ns=read_from
+        )
+        evidence(f"{contract} from {since:%Y-%m-%d} {line}")
+        verdicts.append(found)
+    verdict = futures_bar_buckets.bucket_verdict(resolution, verdicts)
+    return f"{verdict} (read from {since:%Y-%m-%d})"
+
+
+def _shorter_bars(
+    rest_rows: RestRows, contract: str, first: date, *, end: datetime, evidence: Evidence
+) -> futures_bar_buckets.BucketInputs:
+    """Read the 1-session and minute bars a contract's longer bars are checked against.
+
+    The 1-session bars run from two months before the month that starts on `first`, so a
+    2-month bucket holding it is covered; the minute bars from a week before it. Both end at
+    `end`.
+
+    Returns:
+        The bars, and the spans they cover.
+    """
+    sessions_from = _midnight(months_before(first, 2))
+    minutes_from = _midnight(first - timedelta(days=7))
+    sessions = _bars(rest_rows, contract, "1session", since=sessions_from, end=end)
+    minutes = _bars(rest_rows, contract, "1min", since=minutes_from, end=end)
+    evidence(f"{contract}: {len(sessions)} 1-session bars, {len(minutes)} minute bars")
+    return futures_bar_buckets.BucketInputs(
+        sessions=sessions,
+        sessions_from_ns=futures_bar_buckets.utc_midnight_ns(sessions_from.date()),
+        minutes=minutes,
+        minutes_from_ns=futures_bar_buckets.utc_midnight_ns(minutes_from.date()),
+        until_ns=min(futures_bar_buckets.utc_midnight_ns(end.date()), time.time_ns()),
+    )
+
+
+def _grid(
+    rest_rows: RestRows,
+    contract: str,
+    inputs: futures_bar_buckets.BucketInputs,
+    *,
+    first: date,
+    end: datetime,
+    evidence: Evidence,
+) -> list[str]:
+    """Read 2-session bars from an even and an odd epoch day; check each and compare the reads.
+
+    Returns:
+        The verdict lines: each read's bucket checks, and the grid verdict.
+    """
+    even, odd = futures_bar_buckets.even_and_odd_days(first)
+    reads, verdicts = {}, []
+    for day in (even, odd):
+        since = _midnight(day)
+        reads[day] = _bars(rest_rows, contract, "2session", since=since, end=end)
+        verdicts.append(
+            _judge(contract, "2session", reads[day], inputs=inputs, since=since, evidence=evidence)
+        )
+    after = futures_bar_buckets.utc_midnight_ns(max(even, odd) + timedelta(days=2))
+    grid = futures_bar_buckets.grid_verdict(reads[even], reads[odd], after_ns=after)
+    verdicts.append(f"2session from the even day {even} and the odd day {odd}: {grid}")
+    return verdicts
+
+
+def _bucket_verdicts(
+    rest_rows: RestRows, contract: str, month: tuple[date, date], *, evidence: Evidence
+) -> tuple[list[str], bool]:
+    """Read one contract's bars around a month and record every bucket check.
+
+    Returns:
+        The contract's verdict lines, and whether it had both 1-session and minute bars.
+    """
+    first, end = month[0], _midnight(month[1] + timedelta(days=8))
+    inputs = _shorter_bars(rest_rows, contract, first, end=end, evidence=evidence)
+    placed = [s for s in inputs.sessions if s.start_ns >= inputs.minutes_from_ns]
+    lines, placement = futures_bar_buckets.placements(placed, inputs.minutes)
+    for line in lines:
+        evidence(f"{contract} {line}")
+    verdicts = [f"1session placement: {placement}"]
+    verdicts.extend(_grid(rest_rows, contract, inputs, first=first, end=end, evidence=evidence))
+    for resolution in ("1week", "1month"):
+        bars = _bars(rest_rows, contract, resolution, since=_midnight(first), end=end)
+        if resolution == "1week":
+            starts = Counter(f"{futures_bar_buckets.utc_day(bar.start_ns):%a}" for bar in bars)
+            verdicts.append(f"1week bars start on (UTC day) {dict(starts)}")
+        verdicts.append(
+            _judge(
+                contract, resolution, bars, inputs=inputs, since=_midnight(first), evidence=evidence
+            )
+        )
+    since = _midnight(months_before(first, 2))
+    verdicts.extend(_clipping(rest_rows, contract, inputs, since=since, end=end, evidence=evidence))
+    return verdicts, bool(inputs.sessions and inputs.minutes)
+
+
+def _clipping(
+    rest_rows: RestRows,
+    contract: str,
+    inputs: futures_bar_buckets.BucketInputs,
+    *,
+    since: datetime,
+    end: datetime,
+    evidence: Evidence,
+) -> list[str]:
+    """Read one 2-month bucket from before its start and from a month into it; compare the two.
+
+    The first read, from `since`, may also return the bucket before, which `{from}` snaps
+    into; the bucket compared is the first that starts on or after `since`, so its sessions
+    were all read. The second read starts a month into that bucket.
+
+    Returns:
+        The verdict lines: each read's bucket checks, and the clipping verdict.
+    """
+    read = _bars(rest_rows, contract, "2month", since=since, end=end)
+    after = futures_bar_buckets.utc_midnight_ns(since.date())
+    whole = [bar for bar in read if bar.start_ns >= after][:1]
+    evidence(f"{contract} 2month from {since:%Y-%m-%d}: starts {[_ns_text(b) for b in read]}")
+    if not whole:
+        return [f"2month: no bar starts on or after {since:%Y-%m-%d}"]
+    inside = _midnight(months_before(futures_bar_buckets.utc_day(whole[0].start_ns), -1))
+    part = _bars(rest_rows, contract, "2month", since=inside, end=end)[:1]
+    return [
+        _judge(contract, "2month", whole, inputs=inputs, since=since, evidence=evidence),
+        _judge(contract, "2month", part, inputs=inputs, since=inside, evidence=evidence),
+        f"2month from {since:%Y-%m-%d} and from {inside:%Y-%m-%d}: "
+        + futures_bar_buckets.clipping_verdict(whole, part),
+    ]
+
+
+def _ns_text(bar: Bar) -> str:
+    """Write a bar's start for the evidence.
+
+    Returns:
+        Its `window_start` in UTC and Chicago time.
+    """
+    return futures_bar_buckets.stamp_text(bar.start_ns)
+
+
+@pytest.mark.needs("futures:starter")
+@pytest.mark.settles("40", "81")
+@pytest.mark.timeout(900)
+def test_futures_bar_buckets_against_the_bars_inside_them(
+    *,
+    recent_month: tuple[date, date],
+    front_contract: Callable[[str, date], str],
+    rest_rows: RestRows,
+    evidence: Evidence,
+) -> None:
+    """Which bucket each futures bar of a session or longer covers, checked against its contents.
+
+    A simpler rule for the library's futures bar windows needs Massive to put each whole session in
+    the bucket of the UTC day of its first minute, with buckets of whole UTC days on a fixed grid
+    from `window_start` (N days for N sessions, 7N for weeks, calendar months), each labelled with
+    its last session. For the contract of ES, corn (ZC), and live cattle (LE) that was front at the
+    end of the most recent whole month, it reads that month's minute bars (from a week before to a
+    week after) and 1-session bars (from two months before), and records: each 1-session bar's
+    `window_start` beside its session's first minute bar; 2-session bars read from an even and from
+    an odd epoch day, and whether the two reads share their windows (a fixed grid) or each starts at
+    its `{from}`; the UTC weekday 1-week bars start on; and each 2-session, week, month, and 2-month
+    bar against its bucket's candidate contents (the whole sessions starting in its UTC days, the
+    next N sessions, the minute bars of its UTC days, and the sessions from `{from}` when `{from}`
+    falls inside it), with each one's relative error and whether its last session is the bar's
+    label; and one 2-month bucket read from before it and from a month into it, the same bar or
+    clipped at `{from}`. It ends with a verdict line per question and contract. Reading it: whole
+    sessions in its UTC days matching every bar, a fixed grid, and the same 2-month bar from both
+    reads confirm the model; anything else says where it breaks.
+
+    It asserts only that each contract has 1-session and minute bars. Cost: about 10 REST
+    requests per contract (the minute bars take two or three pages), some 30 in all, so it
+    needs Futures Starter, which has no request limit.
+    """
+    found = {}
+    for product in _BUCKET_PRODUCTS:
+        contract = front_contract(product, recent_month[1])
+        found[contract] = _bucket_verdicts(rest_rows, contract, recent_month, evidence=evidence)
+    for contract, (lines, _) in found.items():
+        for line in lines:
+            evidence(f"VERDICT {contract} {line}")
+    empty = [contract for contract, (_, complete) in found.items() if not complete]
+    assert not empty, f"no 1-session or minute bars for {empty}"

@@ -182,6 +182,51 @@ def trading_day_before(day: date) -> date:
     return found
 
 
+def trading_day_after(day: date) -> date:
+    """Return the first trading day after a day.
+
+    Args:
+        day: The day.
+
+    Returns:
+        The trading day.
+    """
+    found = day + timedelta(days=1)
+    while not is_trading_day(found):
+        found += timedelta(days=1)
+    return found
+
+
+def index_check_days(day: date) -> tuple[date, ...]:
+    """Return the trading days the many-index check reads: recent ones, a Monday, a holiday's next.
+
+    They are the three trading days before `day` (the latest is the day `/prev` serves, whose
+    flat files exist only from 11:30 New York time the next day), the most recent Monday whose
+    files are published (`recent_monday`), and the first trading day after the most recent
+    weekday holiday, at least two days before `day` so its files are published. A day that is
+    two of these at once is read once.
+
+    Args:
+        day: The run's New York day.
+
+    Returns:
+        Four or five distinct trading days, oldest first.
+    """
+    latest = trading_day_before(day)
+    recent = [latest, trading_day_before(latest)]
+    recent.append(trading_day_before(recent[-1]))
+    published = day - timedelta(days=2)
+    holidays = sorted(
+        (h for year in (day.year - 1, day.year) for h in market_holidays(year)), reverse=True
+    )
+    after = next(
+        after
+        for holiday in holidays
+        if holiday.weekday() < 5 and (after := trading_day_after(holiday)) <= published
+    )
+    return tuple(sorted({*recent, recent_monday(day), after}))
+
+
 def recent_monday(day: date) -> date:
     """Return the most recent Monday that was a trading day and whose flat files are published.
 
