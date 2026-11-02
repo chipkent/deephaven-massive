@@ -73,6 +73,9 @@ Follow the `writing-to-the-owner` skill. In short:
 
 - Check each question against the owner's recorded decisions and `DESIGN.md` first; ask only
   what they do not settle.
+- Ask about a `DESIGN.md` change only when it changes what users see or the documented
+  contract. A fix that keeps the documented intent and changes only the mechanism records the
+  existing decision it follows, and the work proceeds.
 - Frame it in user terms, with a concrete example, every term defined, and one recommendation.
 - Research the facts and cite sources; never guess.
 - Never change a recommendation silently: say it changed and why.

@@ -12,7 +12,7 @@ Run everything from the repository root, through `uv run`. The tests need JDK 17
 ```bash
 uv sync --upgrade                        # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                       # full gate: ruff, format, mypy, pytest (up to 4 workers), 100% coverage
+./scripts/check.sh                       # full gate: ruff, format, mypy; the whole suite with 100% coverage only if the change can affect the tests
 ./scripts/check.sh full --all            # whole suite; plain full (and pre-push) tests only what CI would
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy only
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
@@ -57,7 +57,9 @@ uv build                                 # sdist and wheel
    and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
 9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
-   `DESIGN.md` first: an owner decision.
+   `DESIGN.md` first: an owner decision when it changes what users see or the documented
+   contract. A change that keeps the documented intent and changes only how it is achieved
+   records, in its PR, the existing owner decision it follows, and proceeds.
 10. **Tests mirror the package**, one leading underscore dropped per path component:
     `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
     packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the

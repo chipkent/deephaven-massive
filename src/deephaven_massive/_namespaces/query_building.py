@@ -740,8 +740,8 @@ def build_query(
             the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
             `date` or an aware `datetime`, and a list parameter's value the tuple of its
             comma-separated items); the `Request` holds those parsed values.
-        limit: The cap on each named symbol's rows, or on the total rows without named
-            symbols (`Request.limit`), or None for every row; a positive `int`.
+        limit: The cap on the total number of rows (`Request.limit`), or None for every row;
+            a positive `int`.
 
     Returns:
         An instance of the spec's query class (`query_class`, or the class `bar_query_class`
@@ -880,8 +880,7 @@ def list_query(
             key in `filters`; None when every argument has its wire name.
         sort: The field to sort by, or None for the endpoint's default.
         order: The sort direction, or None for the endpoint's default.
-        limit: The cap on each named symbol's rows, or on the total rows without named
-            symbols, or None for every row.
+        limit: The cap on the total number of rows, or None for every row.
         filters: The `filters` mapping, or None.
 
     Returns:

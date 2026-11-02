@@ -12,7 +12,7 @@ needs JDK 17 or later. Run everything from the repository root:
 ```bash
 uv sync --upgrade                          # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                         # full gate: lint, format, types, tests + coverage
+./scripts/check.sh                         # full gate: lint, format, types; tests + coverage only if the change can affect them
 ./scripts/check.sh full --all              # the whole suite, even for a docs-only change
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
 ```
