@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 from typing import NamedTuple
@@ -165,9 +166,12 @@ def decide(paths: list[str], rules: PathRules) -> Decision:
 
 
 def _git(*args: str) -> str | None:
-    """Return a git command's standard output, or `None` when it fails."""
-    result = subprocess.run(  # noqa: S603 - fixed git arguments, no shell
-        ["git", *args],  # noqa: S607 - git is found on PATH, as the hooks and check.sh find it
+    """Return a git command's standard output, or `None` when git is missing or fails."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    result = subprocess.run(  # noqa: S603 - git with fixed arguments, no shell
+        [git, *args],
         capture_output=True,
         text=True,
         check=False,
