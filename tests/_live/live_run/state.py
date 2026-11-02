@@ -9,6 +9,7 @@ after every change, so a crash or a Control-C never leaves it half written. It h
   prefixes the S3 pair reaches gets an id (`e1`, `e2`, ...), and the latest probe's id is the
   current one;
 - the planned stream day, and the days a stream day ran;
+- the planned stream night, the nights that ran, and the market closures Massive listed;
 - each attempt: one run of a group, in its own folder, with its child's pid and token;
 - each check: its status (`passed`, `failed`, `error`, `refused`, `skipped`, or `not run`), its
   reason, how many times it failed, and the entitlement of its last run and of its last pass.
@@ -130,6 +131,10 @@ class RunState:
         current: The latest probe's entitlement id, `""` before the first probe.
         stream_day: The planned stream day, ISO, or `""`.
         stream_days: The days a stream day ran, ISO.
+        stream_night: The planned stream night's evening, ISO, or `""`.
+        stream_nights: The evenings a stream night ran, ISO.
+        closures: Massive's upcoming market closures at the latest probe that read them: each
+            ISO date's status, `closed` or `early-close` (`run_probe.ProbeResult.closures`).
         attempts: Every attempt, oldest first.
         checks: Every check, by `key(group, name)`.
         known: Each pytest group's node ids at its latest collection.
@@ -146,6 +151,9 @@ class RunState:
     current: str = ""
     stream_day: str = ""
     stream_days: list[str] = field(default_factory=list)
+    stream_night: str = ""
+    stream_nights: list[str] = field(default_factory=list)
+    closures: dict[str, str] = field(default_factory=dict)
     attempts: list[Attempt] = field(default_factory=list)
     checks: dict[str, Check] = field(default_factory=dict)
     known: dict[str, list[str]] = field(default_factory=dict)

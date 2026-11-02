@@ -46,14 +46,27 @@ if TYPE_CHECKING:
 
     from tests._live.live_run.context import RunContext, RunMemory
 
-BUILT_IN_GROUPS: Final = ("responses", "stream-day", "throughput", "stream-day-reconcile")
+BUILT_IN_GROUPS: Final = (
+    "responses",
+    "stream-day",
+    "throughput",
+    "stream-day-reconcile",
+    "stream-night",
+    "stream-night-reconcile",
+)
 """The groups the program runs in a child of its own script."""
 
 STREAM_GRACE: Final = timedelta(minutes=10)
 """How long after its own end a streaming child gets before the program stops it."""
 
-STREAM_GROUPS: Final = ("stream-day", "throughput")
+STREAM_GROUPS: Final = ("stream-day", "throughput", "stream-night")
 """The groups whose child stops itself, two minutes before the group's stop."""
+
+RECONCILED: Final = {
+    "stream-day-reconcile": "stream-day",
+    "stream-night-reconcile": "stream-night",
+}
+"""The streaming group whose latest folder and day each reconciliation compares with history."""
 
 BASIC_REQUESTS_PER_MINUTE: Final = 5
 
@@ -62,7 +75,9 @@ def new_attempt(ctx: RunContext, state: RunState, group: str) -> Attempt:
     """Create a group's next attempt and its folder.
 
     A stream day's later attempts of the same day reuse its first folder, so the day's files
-    stay together and a restarted child records its gap there.
+    stay together and a restarted child records its gap there. A stream night's attempts are
+    dated by the night's evening, even those that start after midnight, and share its folder
+    the same way.
 
     Args:
         ctx: The command's context.
@@ -74,8 +89,10 @@ def new_attempt(ctx: RunContext, state: RunState, group: str) -> Attempt:
     """
     now = ctx.now()
     day = now.astimezone(NEW_YORK).date().isoformat()
+    if group == "stream-night":
+        day = state.stream_night
     same_day = [a for a in state.attempts if a.group == group and a.day == day]
-    if group == "stream-day" and same_day:
+    if group in {"stream-day", "stream-night"} and same_day:
         folder = same_day[0].folder
     else:
         folder = f"{group}/{day}-{len(same_day) + 1}"
@@ -446,23 +463,30 @@ def run_built_in_group(
         until: When the group ends; a streaming child ends itself two minutes before, and is
             stopped `STREAM_GRACE` after.
 
-    A stream day does not start with less free disk than `machine_checks.REQUIRED_DISK`; its
-    units stay due. Control-C stops the child; what finished is recorded, and the
-    `KeyboardInterrupt` goes on.
+    A stream day or night does not start with less free disk than
+    `machine_checks.REQUIRED_DISK`; its units stay due. A reconciliation reads the latest
+    attempt folder and day of the streaming group it compares (`RECONCILED`). Control-C stops
+    the child; what finished is recorded, and the `KeyboardInterrupt` goes on.
     """
     today = ctx.now().astimezone(NEW_YORK).date()
     due = due_names(state, group, today, any_time=group in state.any_time) or []
     attempt = new_attempt(ctx, state, group)
     folder = ctx.out / attempt.folder
-    if group == "stream-day" and (free := ctx.free_disk(ctx.out)) < REQUIRED_DISK:
+    if group in {"stream-day", "stream-night"} and (free := ctx.free_disk(ctx.out)) < REQUIRED_DISK:
         ctx.say(
-            f"stream-day: only {free >> 30} GB free under {ctx.out}; it needs "
+            f"{group}: only {free >> 30} GB free under {ctx.out}; it needs "
             f"{REQUIRED_DISK >> 30} GB: free some space, and it starts again"
         )
         attempt.status, attempt.ended = "finished", ctx.now().isoformat()
         run_state.save(ctx.out, state)
         return
-    streams = [a.folder for a in state.attempts if a.group == "stream-day"]
+    if group == "stream-day" and today.isoformat() not in state.stream_days:
+        state.stream_days.append(today.isoformat())
+    if group == "stream-night" and state.stream_night not in state.stream_nights:
+        state.stream_nights.append(state.stream_night)
+    streamed = RECONCILED.get(group, group)
+    streams = [a.folder for a in state.attempts if a.group == streamed]
+    days = state.stream_nights if streamed == "stream-night" else state.stream_days
     request = {
         "group": group,
         "due": due,
@@ -470,11 +494,9 @@ def run_built_in_group(
         "entitlement": state.current,
         "until": until.isoformat(),
         "stream_folder": str(ctx.out / streams[-1]) if streams else "",
-        "stream_day": state.stream_days[-1] if state.stream_days else "",
+        "stream_day": days[-1] if days else "",
     }
     (folder / "request.json").write_text(json.dumps(request, indent=1) + "\n", encoding="utf-8")
-    if group == "stream-day" and today.isoformat() not in state.stream_days:
-        state.stream_days.append(today.isoformat())
     ctx.say(f"{group}: {len(due)} checks")
     argv = [ctx.python, str(ctx.script), "_group", "--out", str(ctx.out)]
     argv += ["--attempt", attempt.folder, "--token", attempt.token]

@@ -14,9 +14,10 @@ test is over. Its modules:
 - `outcomes`: the pytest plugin that records each test phase as it runs;
 - `run_probe` and `machine_checks`: what the key can do, and whether the machine is ready;
 - `group_child`: the child side of the built-in groups;
-- `replies`, `stream_capture`, `stream_units`, `reconcile`, and `upgrade_check`: the built-in
-  groups: the documentation's examples, a trading day of streams and its throughput, the
-  comparison with history, and the attended upgrade check;
+- `replies`, `stream_capture`, `stream_night`, `stream_units`, `reconcile`, and
+  `upgrade_check`: the built-in groups: the documentation's examples, a trading day of streams
+  and its throughput, a night of crypto and futures streams, the comparison with history, and
+  the attended upgrade check;
 - `secret_scrub` and `results`: keeping the secrets out of the results; the status, the
   report, and the zip.
 

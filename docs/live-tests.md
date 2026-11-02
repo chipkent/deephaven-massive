@@ -305,13 +305,30 @@ evidence:
   1,000-contract cap per connection counts contracts or topics. The library counts topics.
 - **The index minute file's day** (`test_an_index_minute_file_holds_its_own_new_york_day`, in
   the main run; it needs Indices Starter and `s3`): whether `us_indices/minute_aggs_v1` holds
-  exactly its New York day. `history()` trims each index file to that day before joining REST
-  rows, so a failure means index ranges lose or repeat an hour at each midnight. To run it
-  alone:
+  only its own New York day. `history()` trims each index file to that day before joining REST
+  rows, so a failure means index ranges lose or repeat an hour at each midnight. Minutes REST
+  has and the file lacks are recorded, not failed: they are a gap in Massive's file, not a
+  wrong day. To run it alone:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
 ```
+
+## The debug log of a pytest run
+
+Every pytest run that selects a live test also writes the library's DEBUG log, so a failure
+can be diagnosed afterwards without another live run. Once the run's tests are chosen, and
+before any of them opens a session, it creates a new folder for the run,
+`live-debug-logs/<UTC time>-<process id>/`, and logs to `debug.log` inside it; git ignores the
+folder. The last lines of the run, under "live debug log", give the log's full path: send that
+file with a report of any failure. A run of unit tests only writes no log.
+
+The log never holds a secret: the library keeps the API key and the S3 pair out of every line,
+and the run checks anyway, scanning the folder for each secret set in its environment. If one
+is found, the same lines say so instead and name where: do not send that log; send the owner
+the list. A run whose environment already sets `DEEPHAVEN_MASSIVE_LOG_FILE` logs to that file
+and changes nothing; the live-run program below sets it for each of its children, so their
+logs stay in their attempt's folder. `DEEPHAVEN_MASSIVE_LOG` still chooses the level when set.
 
 ## The live-run program
 
@@ -341,7 +358,45 @@ uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-resu
 | `stream-day` | a full trading day of streams for every class the key can stream | 03:45 to 20:30 on a planned day |
 | `throughput` | every symbol's busiest streams, measured over an hour | 09:15 to 11:00 the next day |
 | `stream-day-reconcile` | the streamed minute bars against REST history | from 11:30 the next day |
+| `stream-night` | crypto and futures streams through one night | 16:30 on a planned evening to 09:30 the next morning |
+| `stream-night-reconcile` | the night's minute bars against REST history, overall and at each boundary | from 11:30 the morning after |
 | `half-day` | the bar-stamp tests | on the trading day after a half day |
+
+**The stream night.** A stream day stops at 20:30, so it never holds a stream through the hours
+only 24-hour markets trade, when the library dates rows across two boundaries: crypto's `Date`
+is the UTC date, which changes at 00:00 UTC, and a futures row's `Date` is its trading session,
+which the library takes from Massive's futures schedules and which changes when the evening's
+session closes at 16:00 Chicago time: a row in the pause before the 17:00 open already belongs
+to the next session. When the key streams crypto (a paid Currencies plan) or futures, the program
+plans a *stream night* and holds, from 16:30 New York time to 09:30 the next morning:
+
+- crypto: the trades, quotes, and minute bars of `X:BTCUSD` and `X:ETHUSD`;
+- futures: the minute bars of the front ES and NQ contracts, and from Futures Developer up
+  their trades and quotes.
+
+A night is planned for the first evening, after the probe that finds its checks due, whose
+next morning is a full trading day: a Sunday evening, when futures open for the week, or a
+Monday to Thursday evening that is itself a full trading day. Holidays and early closes come
+from the exchanges' fixed rules and from the closures Massive's market status lists as
+upcoming, which each probe reads. A night never shares a day with a stream day. That evening
+no other group starts from 16:15, and one still running is stopped then; a child that dies is
+started again, up to five times, until 09:00. The night writes what a stream day writes (rows
+by hour, per-minute counts, latency, samples, gaps), and at its end:
+
+- `hours.csv`, the rows of each stream per UTC hour;
+- `boundaries.csv`, the rows within 90 minutes before and after the 16:00 Chicago close
+  (futures) and 00:00 UTC (crypto), with their `Date` values: futures rows must move from the
+  evening's session to the morning's, the pause's included (on a Sunday nothing trades before
+  the close, so only the side after is judged), crypto rows from one UTC date to the next;
+- `summary.json`, with the gaps, the most reconnects of each connection, and the quiet hours.
+
+A unit fails when one of its streams failed, the night's gaps passed 30 minutes, an hour its
+market was open went without a row (futures pause from 16:00 to 17:00 Chicago time; crypto
+never closes), or a row near a boundary carries the wrong `Date`. The next day,
+`stream-night-reconcile` compares the night's minute bars with REST history of both dates,
+kept to the night's hours, over the whole night and within 90 minutes on each side of each
+boundary; a bar whose `Date` differs from history's fails its unit. `status` shows the next
+stream night, and `REPORT.md` in each zip has a section per night.
 
 Each group runs in a child process, with the probed plans in `MASSIVE_LIVE_PLANS`, the
 library's debug log in the attempt's folder (`<group>/<date>-<n>/debug.log`), and a pytest

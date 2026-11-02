@@ -245,6 +245,8 @@ vendor/massive-previous/
 # rows, so they are never committed.
 live-checks.log
 live-evidence-*.log
+# The DEBUG log of each pytest run that selected a live test (tests/_live/debug_log_file.py).
+live-debug-logs/
 # The plans the live tests probed today; it names the key only by a digest.
 .live-plans.json
 

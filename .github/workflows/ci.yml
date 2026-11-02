@@ -1,9 +1,10 @@
 name: CI
 
 # A pull request into main runs only the jobs its changes can affect. Every other run, a push to
-# main, the weekly run, and a pull request into another branch, runs every job. The lint job
-# decides, from the files the pull request changes, and the ci-ok job, the single required
-# check, passes only when every job the change selected passed and every other job was skipped.
+# main, the weekly run, a release, and a pull request into another branch, runs every job. The
+# lint job decides, from the files the pull request changes, and the ci-ok job, the single
+# required check, passes only when every job the change selected passed and every other job was
+# skipped.
 # Requiring the jobs themselves would not work: a skipped matrix job reports no status under
 # its entries' names, so a pull request that skips the tests would wait forever.
 
@@ -16,6 +17,18 @@ on:
     # release that breaks the library is caught within a week even when nothing reaches main
     # and the open pull requests skip the tests.
     - cron: "23 7 * * 1"
+  # The release workflow runs this workflow on the commit it releases, and tags and releases
+  # that commit only when every job passes. The run takes the release's manual start as its
+  # event, so every job runs.
+  workflow_call:
+    inputs:
+      release-version:
+        description: >-
+          The version being released, such as 0.1.0rc1. The build job gives the wheel and the
+          sdist exactly this version, which the tag created after this run will carry, and the
+          wheel check fails unless both carry it.
+        type: string
+        required: true
 
 concurrency:
   # One run per pull request, and one per event kind on main: a new push cancels the run it
@@ -77,9 +90,10 @@ jobs:
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
           # Files no job reads: the plans, the developer and live-test guides, the agent
-          # instructions and skills, the pull request and issue templates, and the settings of
-          # Dependabot and of the local git hooks, which CI does not run.
-          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.pre-commit-config\.yaml$)'
+          # instructions and skills, the pull request and issue templates, the settings of
+          # Dependabot and of the local git hooks, which CI does not run, and the release notes
+          # settings, which only the release workflow reads.
+          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)'
           # A change to a workflow or a composite action runs everything.
           workflows='^\.github/(workflows|actions)/'
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An
@@ -296,7 +310,18 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Build wheel and sdist
-        run: uv build --python 3.11
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
+        # The version comes from the git tag. A release builds before its tag exists, so it
+        # hands the tag's version to setuptools-scm, which reads the version for hatch-vcs.
+        # Every other run builds the development version git gives.
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_VERSION:-}" ]; then
+            echo "building release version $RELEASE_VERSION"
+            export SETUPTOOLS_SCM_PRETEND_VERSION="$RELEASE_VERSION"
+          fi
+          uv build --python 3.11
       - name: Check the distributions ship the wire schema and no refresh code or vendor files
         # The refresh runs from a source checkout only; the generated spec/*.json (the REST,
         # WebSocket, and flat-file schemas and the vendor's field descriptions) are package
@@ -334,11 +359,20 @@ jobs:
         # server, imports every module the wheel ships, renders the dataset reference from the
         # installed catalog and compares it with docs/datasets/, and opens a session. -I keeps
         # PYTHONPATH and the script's directory off sys.path, and the script fails if the
-        # package is imported from the checkout's src/ rather than the wheel.
+        # package is imported from the checkout's src/ rather than the wheel. For a release it
+        # also fails unless deephaven_massive.__version__ and the sdist's PKG-INFO are exactly
+        # the version being released.
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
         run: |
+          set -euo pipefail
           uv venv --python 3.11 "$RUNNER_TEMP/smoke"
           uv pip install --python "$RUNNER_TEMP/smoke/bin/python" dist/*.whl deephaven-server
-          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_wheel.py docs/datasets
+          version=()
+          if [ -n "${RELEASE_VERSION:-}" ]; then
+            version=(--version "$RELEASE_VERSION" --sdist "dist/deephaven_massive-$RELEASE_VERSION.tar.gz")
+          fi
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_wheel.py docs/datasets "${version[@]}"
       - name: Check that a build of a tagged commit carries exactly the tag's version
         # The package's version comes from the git tag, so a release's files must carry its
         # tag's version. This tags the checkout with a version no release uses, locally only

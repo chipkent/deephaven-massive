@@ -3,7 +3,8 @@
 `scripts/live_run.py _group --out DIR --attempt FOLDER --token T` starts an embedded Deephaven
 server, then calls `run_group` here. It reads the attempt's `request.json`, which the program
 wrote (`attempts.run_built_in_group`): the group, its due checks, the key's tiers, the
-entitlement id, the group's end, and for a reconciliation the stream day and its folder. It
+entitlement id, the group's end, the stream night's evening for a stream night, and for a
+reconciliation the stream day or night and its folder. It
 runs the group, and appends one line per check to `results.jsonl` as each finishes, so a child
 that dies keeps what it finished. The upgrade check also writes its verdict there.
 
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from tests._live.calendar import NEW_YORK
-from tests._live.live_run import reconcile, replies, stream_capture, upgrade_check
+from tests._live.live_run import reconcile, replies, stream_capture, stream_night, upgrade_check
 from tests._live.live_run.outcomes import append_line
 from tests._live.plans import LivePlans
 
@@ -89,6 +90,25 @@ def run_group(
             elif group == "throughput":
                 stream_capture.run_throughput(
                     m, units=due, tiers=tiers, folder=folder, until=until, report=report
+                )
+            elif group == "stream-night":
+                stream_night.run_stream_night(
+                    m,
+                    units=due,
+                    tiers=tiers,
+                    night=date.fromisoformat(request["stream_day"]),
+                    folder=folder,
+                    until=until,
+                    report=report,
+                )
+            elif group == "stream-night-reconcile":
+                reconcile.run_night_reconcile(
+                    m,
+                    units=due,
+                    stream_folder=Path(request["stream_folder"]),
+                    night=date.fromisoformat(request["stream_day"]),
+                    folder=folder,
+                    report=report,
                 )
             else:
                 reconcile.run_reconcile(
