@@ -532,6 +532,8 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     assert request_of(contracts()) == {"symbols": None, "params": {}, "filters": {}}
     # False, the default, is Massive's own, so it is not sent, also beside named contracts.
     assert request_of(contracts(expired=False)) == request_of(contracts())
+    # The contracts list finds no contract for `I:SPX`: an index is sent bare.
+    assert request_of(contracts(underlying="I:SPX"))["params"] == {"underlying_ticker": "SPX"}
     assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
@@ -1012,6 +1014,34 @@ def test_contracts_list_or_read_each_contract(
     assert [(r["Symbol"], r["Underlying"], r["ExpirationDate"]) for r in described] == [
         (one, "AAPL", "2021-11-19")
     ]
+
+
+def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Massive's contracts list takes and writes `SPX`, while the chain writes `I:SPX`: the
+    # library sends the bare ticker and shows the canonical one, so the two tables join.
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive")
+    reply = Reply(body(load_fixture, "contracts_index.json"))
+    fake_rest.reply("/v3/reference/options/contracts", reply)
+    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+    assert fake_rest.get_queries() == [
+        ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
+    ]
+    assert [(r["Symbol"], r["Underlying"], r["OptionRoot"]) for r in listed] == [
+        ("O:SPX261120C00400000", "I:SPX", "SPX"),
+        ("O:SPX261120C00600000", "I:SPX", "SPX"),
+    ]
+    messages = [r.getMessage() for r in caplog.records]
+    assert "options.contracts sends underlying='I:SPX' as underlying_ticker='SPX'" in messages
+    assert (
+        "options.contracts: 2 of 2 Underlying values from /v3/reference/options/contracts are "
+        "indices by their CFI code and get the I: prefix, the first 'SPX'"
+    ) in messages
 
 
 def test_a_list_argument_with_named_contracts_fails_before_any_request(

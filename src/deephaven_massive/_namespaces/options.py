@@ -17,9 +17,13 @@ Every method takes only that form (`check_symbol` in `_datasets/symbols.py`), an
 `dm.canonical_symbol_option` converts the bare or space-padded OCC forms. Every options dataset
 also has `OptionRoot`, the OCC root read from the symbol (`SPXW`, `AAPL1`). The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
-contract to as `Underlying`, exactly as Massive sends it: it names the linked instrument, not
-the deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100
-shares of it. Neither column is ever mapped to the other.
+contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
+deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
+of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
+too. The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes
+it bare (`SPX`, and no contract for `I:SPX`), so `contracts` sends it bare
+(`wire_symbols.contracts_underlying`) and its rows' index underlyings get their `I:` back by
+their CFI code (`wire_symbols.index_underlyings`).
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -33,6 +37,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import check_symbol, is_canonical, symbol_class
+from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -310,7 +315,8 @@ def _underlying(value: object) -> str:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
 
     Returns:
-        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted.
+        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted. The contracts
+        list takes an index bare, which `contracts` writes (`contracts_underlying`).
 
     Raises:
         TypeError: If `value` is not a `str`.
@@ -767,7 +773,8 @@ class _Options(Namespace):
         Args:
             symbols: Contracts to describe, as Massive's tickers; None, the default, lists
                 contracts. `dm.ALL` is refused. See README.md#symbols.
-            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`.
+            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
+                the rows' `Underlying` is the same canonical ticker.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
             as_of: The day whose contracts to list; None for today. See README.md#as-of.
             expired: True lists expired contracts only; False, the default, those still trading.
@@ -806,8 +813,17 @@ class _Options(Namespace):
                 f"{symbols!r} is an underlying, not an options contract: list its contracts "
                 f"with m.options.contracts(underlying={symbols!r})"
             )
+        wire_underlying = None
+        if underlying is not None:
+            # The contracts list finds no contract for `I:SPX`; it takes and writes `SPX`.
+            wire_underlying = contracts_underlying(_underlying(underlying))
+            logger.debug(
+                "options.contracts sends underlying=%r as underlying_ticker=%r",
+                underlying,
+                wire_underlying,
+            )
         params: dict[str, object] = {
-            "underlying_ticker": None if underlying is None else _underlying(underlying),
+            "underlying_ticker": wire_underlying,
             "contract_type": _contract_type(contract_type),
             "as_of": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             "expired": _expired(expired),

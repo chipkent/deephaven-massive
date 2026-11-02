@@ -305,7 +305,7 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     template = cast("str", spec_of(name).fetch_path)
     body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
     fake_rest.reply(template, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
+    table = cast("Query", factory(rest_session, name)(start="2024-01-02")).poll(60, mode=mode)
     rows = _rows_when(table, len(body["results"]))
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
@@ -329,7 +329,7 @@ def test_a_filing_under_two_filers_polls_as_two_rows(
     owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
     body["results"] = [first, owner]
     fake_rest.reply(path, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60)
+    table = cast("Query", factory(rest_session, name)(start="2024-01-02")).poll(60)
     rows = _rows_when(table, 2)
     assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
         [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
@@ -360,7 +360,7 @@ def _poll_lines(
     # line is published.
     path = cast("str", spec_of(name).fetch_path)
     server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
-    table = cast("Query", factory(session, name)(start="2025-01-02")).poll(60)
+    table = cast("Query", factory(session, name)(start="2024-01-02")).poll(60)
     return table, _rows_when(table, len(lines))
 
 

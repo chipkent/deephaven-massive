@@ -227,15 +227,15 @@ def test_each_symbol_class_is_served_by_its_own_path(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", sample(load_fixture, "sma_stock"))
-    crypto = envelope({"values": [{"timestamp": 1517529600000, "value": 9001.5}]})
+    crypto = envelope({"values": [{"timestamp": 1577923200000, "value": 9001.5}]})
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(crypto))
     query = rest_session.indicators.sma(
         ["X:BTCUSD", "AAPL"],
         50,
         timespan=dm.Timespan.HOUR,
         series_type=dm.SeriesType.OPEN,
-        start=datetime(2018, 2, 2, tzinfo=UTC),
-        end=datetime(2018, 2, 3, tzinfo=UTC),
+        start=datetime(2020, 1, 2, tzinfo=UTC),
+        end=datetime(2020, 1, 3, tzinfo=UTC),
         order=dm.Order.ASC,
         limit=10,
     )
@@ -247,8 +247,8 @@ def test_each_symbol_class_is_served_by_its_own_path(
         "order": ["asc"],
         "expand_underlying": ["false"],
         "limit": ["10"],  # the page size, capped by the total-row limit
-        "timestamp.gte": ["1517529600000"],
-        "timestamp.lt": ["1517616000000"],
+        "timestamp.gte": ["1577923200000"],
+        "timestamp.lt": ["1578009600000"],
     }
     # `adjusted=True`, the default, reaches only the stock path: the crypto path has no such
     # parameter, and a pair has no splits.
@@ -474,3 +474,109 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
         [str(int(datetime(2025, 1, 2, 5, tzinfo=UTC).timestamp() * 1000))],
         [str(int(datetime(2025, 1, 3, 5, tzinfo=UTC).timestamp() * 1000))],
     )
+
+
+def indicator_values(*days: datetime) -> Reply:
+    """Return an indicator answer with a value at each stamp, newest first, as Massive sends."""
+    rows = [{"timestamp": int(d.timestamp() * 1000), "value": 1.0} for d in sorted(days)[::-1]]
+    return Reply(envelope({"values": rows}))
+
+
+# Massive ignores `timestamp.lt` on the indicator paths: asked for the week of 2026-10-26, it
+# also sends the values of the days since, up to today's. A stock's daily value is stamped at
+# 00:00 New York time (04:00 UTC in October, 05:00 UTC once New York leaves daylight time on
+# 2026-11-01), a crypto pair's at 00:00 UTC.
+STOCK_DAYS = [datetime(2026, 10, day, 4, tzinfo=UTC) for day in range(26, 31)]
+STOCK_TODAY = datetime(2026, 11, 2, 5, tzinfo=UTC)
+CRYPTO_DAYS = [datetime(2026, 10, 26, tzinfo=UTC) + timedelta(days=n) for n in range(6)]
+CRYPTO_LATER = [datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 2, tzinfo=UTC)]
+
+
+def serve_past_the_end(fake_rest: FakeRestServer) -> None:
+    fake_rest.reply("/v1/indicators/sma/AAPL", indicator_values(*STOCK_DAYS, STOCK_TODAY))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", indicator_values(*CRYPTO_DAYS, *CRYPTO_LATER))
+
+
+def days_by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+    days: dict[str, list[str]] = {}
+    for row in rows:
+        days.setdefault(row["Symbol"], []).append(row["Date"])
+    return {symbol: sorted(found) for symbol, found in days.items()}
+
+
+EXPECTED_DAYS = {
+    "AAPL": [f"2026-10-{day}" for day in range(26, 31)],
+    "X:BTCUSD": [f"2026-10-{day}" for day in range(26, 32)],
+}
+
+
+def test_a_fetch_drops_the_values_massive_sends_past_its_end(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
+    serve_past_the_end(fake_rest)
+    query = rest_session.indicators.sma(
+        ["AAPL", "X:BTCUSD"],
+        5,
+        start=date(2026, 10, 26),
+        end=date(2026, 10, 31),
+        timespan=dm.Timespan.DAY,
+    )
+    assert days_by_symbol(dh_to_pylist(query.fetch())) == EXPECTED_DAYS
+    dropped = sorted(
+        r.getMessage() for r in caplog.records if "outside the bounds sent" in r.getMessage()
+    )
+    crypto = (
+        "indicators.sma: page 1 of /v1/indicators/sma/{cryptoTicker} for X:BTCUSD: dropped 2 "
+        "of 8 rows outside the bounds sent (timestamp.gte=2026-10-26 00:00:00+00:00, "
+        "timestamp.lt=2026-11-01 00:00:00+00:00), which Massive did not apply; the page's "
+        "TimestampStart ran from 2026-10-26 00:00:00+00:00 to 2026-11-02 00:00:00+00:00"
+    )
+    stock = (
+        "indicators.sma: page 1 of /v1/indicators/sma/{stockTicker} for AAPL: dropped 1 of 6 "
+        "rows outside the bounds sent (timestamp.gte=2026-10-26 04:00:00+00:00, "
+        "timestamp.lt=2026-11-01 04:00:00+00:00), which Massive did not apply; the page's "
+        "TimestampStart ran from 2026-10-26 04:00:00+00:00 to 2026-11-02 05:00:00+00:00"
+    )
+    assert dropped == [crypto, stock]
+
+
+def test_a_poll_drops_the_values_massive_sends_past_its_end(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    serve_past_the_end(fake_rest)
+    query = rest_session.indicators.sma(
+        ["AAPL", "X:BTCUSD"],
+        5,
+        start=date(2026, 10, 26),
+        end=date(2026, 10, 31),
+        timespan=dm.Timespan.DAY,
+    )
+    table = query.poll(60)
+    rows = rows_when(table, lambda found: len(found) == 11)
+    assert days_by_symbol(rows) == EXPECTED_DAYS
+    rest_session.release(table)
+
+
+def test_the_bounds_test_the_stamp_massive_sent_before_it_is_moved(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # A daily value stamped 02:00 New York time lies inside a range that starts at 01:00; the
+    # library then moves the stamp to 00:00, before that start. The bounds keep the value,
+    # since they apply to the stamp Massive filtered on.
+    stamp = datetime(2025, 1, 1, 7, tzinfo=UTC)
+    fake_rest.reply("/v1/indicators/sma/AAPL", indicator_values(stamp))
+    start = datetime(2025, 1, 1, 6, tzinfo=UTC)
+    query = rest_session.indicators.sma("AAPL", 20, start=start, end=start + timedelta(days=1))
+    out = dh_to_pylist(query.fetch())
+    assert [r["TimestampStart"] for r in out] == [datetime(2025, 1, 1, 5, tzinfo=UTC)]

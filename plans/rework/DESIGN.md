@@ -1970,9 +1970,14 @@ Notation:
 
 Every options dataset has `OptionRoot`, the OCC root read from `Symbol` (`SPXW`, `AAPL1`;
 [section 19.4](#194-generated-schemas)). `underlying=` takes Massive's exact stock or index
-ticker (`AAPL`, `BRK.B`, `I:SPX`), case kept, and is sent as given. `Underlying` is exactly the
-field Massive sends: it names the instrument Massive links the contract to, not the
-deliverable, and is never derived from or mapped to the root (`AAPL1` is never `AAPL`). The
+ticker (`AAPL`, `BRK.B`, `I:SPX`), case kept. The chain sends it as given; the contracts list
+sends an index bare (`SPX`), since Massive's `underlying_ticker` finds no contract for `I:SPX`
+and every contract of `SPX`. `Underlying` is Massive's field in the canonical form: the chain
+and the snapshots write an index as `I:SPX`, and the contracts list writes it bare, so a
+contracts row whose CFI code marks an option on an index (an `O`, then its fourth letter `I`,
+as in `OCEICS`) gets the `I:` prefix, and the two tables join on `Underlying`. It names the
+instrument Massive links the contract to, not the deliverable, and is never derived from or
+mapped to the root (`AAPL1` is never `AAPL`). The
 contracts dataset exposes the raw deliverable fields with their vendor descriptions:
 `SharesPerContract`, `AdditionalUnderlyings` (JSON text of further deliverables), `Cfi`, and
 `Correction`. There is no derived "standard deliverable" flag until a live check settles the
@@ -2362,7 +2367,12 @@ segments instead ([section 13.4](#134-rest)). `futures.bars`, whose path
 `/futures/v1/aggs/{ticker}` has no such segments, declares the instant pair
 `window_start.gte`/`window_start.lt`. Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
-`ValueError`.
+`ValueError`. A `fetch()` or `poll()` keeps only the rows inside the bounds it sent, testing
+each row's axis field as Massive should have, since Massive does not apply every bound (the
+indicator endpoints ignore `timestamp.lt` and return the latest values past the end). An
+instant bound tests an instant column and a day a calendar-date column; a bound whose kind
+differs from its column's tests nothing, so a row is never dropped by comparing a date with an
+instant.
 
 ## 10. Symbols and `ALL`
 
@@ -2575,8 +2585,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `Symbol` and `RawSymbol` together, so each unreadable spelling is its own row: it neither
   fails the null-key check nor merges with another, and `REPLACE` removes it when it leaves.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
-  instrument, it is `Underlying`, exactly as Massive sends it: on the options rows that carry
-  one (the chain and the snapshots from `underlying_asset.ticker`, the contracts from
+  instrument, it is `Underlying`, in the canonical form (an options contracts row's bare
+  index underlying gets its `I:` by its CFI code, [section 8.2](#82-moptions)): on the
+  options rows that carry one (the chain and the snapshots from `underlying_asset.ticker`, the contracts from
   `underlying_ticker`; WebSocket and flat-file options rows carry none) and on
   `related_companies` rows. A non-instrument fan-out key
   keeps the generated column the dataset declares as its `fanout` key (`filer_cik` becomes
@@ -6024,8 +6035,8 @@ a dataset of `ClassFromPrefix.ANY` takes the field's own description.
    declared key columns of the dataset, and the time columns the library fills (`Date`,
    `TimestampStart`, `TimestampEnd`, `TimestampInsert`), get a library sentence ("The
    instrument, in the library's canonical symbol form.", "The row's primary time, as an
-   Instant.", "The instrument Massive links the row to, exactly as Massive sends it; for an
-   option, the linked instrument, not what the contract delivers."; a bar's
+   Instant.", "The instrument Massive links the row to, in the library's canonical symbol
+   form; for an option, the linked instrument, not what the contract delivers."; a bar's
    `TimestampStart` "The start of the bar's window, as an Instant." and, for every class with a
    day zone, where a bar of a day or longer starts, since the library's start is not the
    end-of-day stamp some sources' descriptions quote; `TimestampEnd`, `Date`, and
@@ -7383,7 +7394,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 42 | Whether `IssuerCik` and `TransactionDate` identify one row of the insider activity, and `IssuerCik` and `OwnerCik` one row of the insider holdings; the vendor documents one row per issuer and transaction date, and one per reporting owner per issuer, but marks none of the four fields required | Both datasets replace their `poll()` table keyed by those columns; a null key fails the table, and two rows sharing a key would keep only one | `tests/namespaces/test_stocks.py`: each key column is needed to tell the fixture's rows apart | `tests/namespaces/test_stocks_integration.py`: a year of NVDA's activity and NVDA's holdings; record and refuse any key shared by two rows |
 | 43 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | Stock part settled by the live check of 2026-10-30: of the `WARRANT`, `UNIT`, `RIGHT`, and `PFD` tickers, the only spellings outside a root and one suffix were 61 NYSE warrants, 60 written `ROOT.WS` (`AAC.WS`) and one `ROOT.WS.A` (`NE.WS.A`), which the canonical grammar already reads: an upper-case root and the CQS suffixes `.X` (one or more dotted parts), `pX`, `r`, and `w`. The live check had used a stricter pattern of its own; it now asks the library's converter. The partner datasets were not entitled on the test keys, so their spellings stay open. The conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unreadable_symbols` (kept in `RawSymbol` and logged by default) | `tests/datasets/test_symbols.py`: the grammar, `AAC.WS` and `NE.WS.A` among the canonical tickers, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling `dm.canonical_symbol_stock` refuses |
 | 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_wire_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
-| 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
+| 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field in the canonical form: the chain writes `I:SPX`, and a contracts row's bare `SPX` gets its `I:` by its CFI code; the chain takes `underlying=` as given, the contracts list takes an index bare (`I:SPX` finds no contract there); nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
 | 46 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
 | 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | A root of upper-case letters and digits, a month code, and a one- or two-digit year; a year is never rewritten, and `ESZ25` is not `ESZ5`; combos are item 48. The live check of 2026-10-30 read `contracts(product_code='NG', limit=20)` as 20 rows of `NG:BF F0-G0-H0`: the library reads those 20 rows as one page (its page size is the cap) and refuses a repeated `next_url`, so it repeats no page; Massive sent them. Without `date`, the endpoint returns each contract's point-in-time history: the run of 2026-10-31 found the raw page's 1,000 NG rows to be 1,000 distinct `(ticker, date)` pairs of 3 tickers, and the library's 20 rows one ticker on 20 dates, daily history and not duplicates. That page held only spreads, since the check sent no `type=single`; the check now asks for single contracts, so the two-digit-year shapes are still to be recorded | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `ESZ` and `esz5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape, and the `(ticker, date)` pairs of the raw page and of the library's rows |
 | 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | Any run of upper-case letters and digits joined by single `-`, `:`, or spaces is a combo, taken as written, so every ticker Massive lists round-trips; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: every futures ticker of the vendored samples and the live evidence round-trips as `symbols` and as a symbol-table row, a made-up combo is accepted, and a single contract and a combo refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |

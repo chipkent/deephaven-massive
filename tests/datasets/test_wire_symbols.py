@@ -237,3 +237,28 @@ def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:
         assert spellings[:2] == (symbol, symbol[2:])
         assert all(canonical_from_wire(CRY, s) == symbol for s in spellings)
     assert {"X:BTC-PYUSD", "BTC/PYUSD", "X:BTCPY-USD"} <= set(wire_spellings(CRY, "X:BTCPYUSD"))
+
+
+# --- Option underlyings ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [("I:SPX", "SPX"), ("I:NDX", "NDX"), ("AAPL", "AAPL"), ("BRK.B", "BRK.B"), ("KIMpL", "KIMpL")],
+)
+def test_the_contracts_list_takes_an_index_underlying_bare(symbol: str, expected: str) -> None:
+    assert wire_symbols.contracts_underlying(symbol) == expected
+
+
+def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
+    # An SPX call is `OCEICS` (fourth letter I, an index); an AAPL call `OCASPS` (S, a stock).
+    underlyings = pa.array(["SPX", "I:NDX", "AAPL", "VIX", None, "SPX"], pa.string())
+    cfi = pa.array(["OCEICS", "OPEICS", "OCASPS", None, "OCEICS", "FFICSX"], pa.string())
+    assert wire_symbols.index_underlyings(underlyings, cfi).to_pylist() == [
+        "I:SPX",
+        "I:NDX",
+        "AAPL",
+        "VIX",  # no code: kept as written
+        None,
+        "SPX",  # a futures code, not an option's
+    ]

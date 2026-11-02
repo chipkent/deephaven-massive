@@ -6,10 +6,14 @@ batches of the dataset's merged schema, one page at a time:
 - `RowConverter` decodes a page against the path's generated fields (`_massive.to_batch`), renames
   its columns for the dataset (`source_columns.rename`), converts its timestamps
   (`_datasets/timestamps.py`), widens each column to its merged type
-  (`source_columns.widen`), and reads its symbols into the canonical form (`WireSymbols`). A row
+  (`source_columns.widen`), and reads its symbols into the canonical form (`WireSymbols`), an
+  options row's index underlying included (`wire_symbols.index_underlyings`). A row
   that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
   symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
   dataset through a projection.
+- `RowConverter.sent_bounds` and `keep_sent_bounds` keep the rows of a `fetch()` or `poll()`
+  request inside the time-axis bounds it sent, which Massive does not always apply itself
+  (the indicator endpoints ignore `timestamp.lt`).
 - `stamped` applies the stamp rule of bars of a day or longer (`row_times.stamp_rule`), which
   serves every bar and warns on a stamp Massive is not known to use; `keep_window` and
   `whole_bars` keep the rows a `history()` window holds.
@@ -26,18 +30,27 @@ decision (`host_decision.py`) uses the same error-row rule.
 from __future__ import annotations
 
 import functools
+import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
+from deephaven_massive._datasets.epoch import epoch_ns
+from deephaven_massive._datasets.filters import param_base
 from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, within
-from deephaven_massive._datasets.source_columns import rename, required_fields, widen
+from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.source_columns import KEY_COLUMNS, rename, required_fields, widen
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import first_failure, masked_instants, mismatch_message
-from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
+from deephaven_massive._datasets.wire_symbols import (
+    WireSymbols,
+    index_underlyings,
+    unreadable_symbol_message,
+)
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, DriftSample, to_batch
@@ -47,17 +60,54 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
-    from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._massive import RestPath
 
 __all__ = [
     "RowConverter",
+    "SentBound",
     "is_error_row",
+    "keep_sent_bounds",
     "keep_window",
     "stamped",
     "whole_bars",
 ]
+
+logger = logging.getLogger(__name__)
+
+_UNDERLYING: Final = KEY_COLUMNS["fanout"]
+"""The column naming the instrument a row is linked to, such as an option's underlying."""
+
+_CFI: Final = "Cfi"
+"""The column of a row's CFI code (ISO 10962), which the options contracts list carries."""
+
+_COMPARISONS: Final = {
+    "gte": pc.greater_equal,
+    "gt": pc.greater,
+    "lte": pc.less_equal,
+    "lt": pc.less,
+}
+"""The test each suffix of a time-axis parameter puts on the rows' value, by suffix."""
+
+_INSTANT_RANGE: Final = (-(2**63) + 1, 2**63 - 1)
+"""The nanoseconds an `Instant` column can hold; the least 64-bit value is Deephaven's null."""
+
+
+@dataclass(frozen=True, slots=True)
+class SentBound:
+    """One time-axis bound a `fetch()` or `poll()` request sent, as a test on its rows.
+
+    Attributes:
+        name: The wire parameter, such as `"timestamp.lt"`; its suffix is the comparison.
+        column: The dataset column that holds the parameter's row field, such as
+            `TimestampStart` for an indicator's `timestamp` or `ExDividendDate`.
+        value: The bound in the column's terms: an instant for an `Instant` column, the
+            `yyyy-MM-dd` day for a text column of calendar dates.
+    """
+
+    name: str
+    column: str
+    value: pa.Scalar
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -193,9 +243,10 @@ class RowConverter:
 
         Returns:
             The batch in the dataset's schema, with the derived columns (`OptionRoot`,
-            `RawSymbol`) computed from the symbols; and the drift of its timestamps: the rows
-            dropped for their time column, and the wire keys of the other epoch fields that
-            held a value out of bounds, each with its first such value.
+            `RawSymbol`) computed from the symbols and an index `Underlying` given its `I:`
+            prefix by the row's CFI code (`_canonical_underlyings`); and the drift of its
+            timestamps: the rows dropped for their time column, and the wire keys of the other
+            epoch fields that held a value out of bounds, each with its first such value.
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
@@ -240,6 +291,7 @@ class RowConverter:
                     elif first is not None:
                         odd[source.field.wire_key] = DriftSample(None, str(first))
             arrays[name] = widen(values, target)
+        self._canonical_underlyings(arrays)
         converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
         if dropped is not None:
@@ -247,6 +299,141 @@ class RowConverter:
             count = rows - converted.num_rows
             drift = drift.merge(DriftReport(dropped_rows=count, dropped_reason=reason))
         return converted, drift
+
+    def _canonical_underlyings(self, arrays: dict[str, pa.Array]) -> None:
+        """Give a page's index underlyings their `I:` prefix (`wire_symbols.index_underlyings`).
+
+        Massive's options contracts list writes an index underlying bare (`SPX`); the CFI code
+        of each row says whether its underlying is an index. Only a page with both an
+        `Underlying` and a `Cfi` column is read. Logs one DEBUG line for a page where any value
+        changed, with the count and the first value.
+
+        Args:
+            arrays: The page's columns by name; its `Underlying` is replaced in place.
+        """
+        if _UNDERLYING not in arrays or _CFI not in arrays:
+            return
+        underlyings = arrays[_UNDERLYING]
+        canonical = index_underlyings(underlyings, arrays[_CFI])
+        changed = pc.fill_null(pc.not_equal(underlyings, canonical), fill_value=False)
+        count = pc.sum(changed).as_py() or 0
+        if count:
+            logger.debug(
+                "%s: %d of %d %s values from %s are indices by their CFI code and get the "
+                "I: prefix, the first %r",
+                self.dataset,
+                count,
+                len(underlyings),
+                _UNDERLYING,
+                self.rest_path.template,
+                pc.filter(underlyings, changed)[0].as_py(),
+            )
+        arrays[_UNDERLYING] = canonical
+
+    def sent_bounds(
+        self, axis: tuple[str, str] | None, query: Mapping[str, object]
+    ) -> tuple[SentBound, ...]:
+        """Return the time-axis bounds a request sent, as tests on this path's rows.
+
+        A request sends its dataset's time axis (`DatasetSpec.time_axis`) as the bounds of
+        `start` and `end` (`rest_requests.axis_query`): an instant on an instant axis, a day on
+        a calendar-date axis, each with the suffix that keeps the dataset's own semantics
+        (`.gte` and `.lt` half-open, `.gte` and `.lte` inclusive). Applying the same test to
+        the rows keeps exactly the rows Massive should have returned. A bound is kept only
+        when its kind matches its column's: an instant bound on an `Instant` column, a day on
+        a text column. A bound of any other pairing, or on a field the path's rows do not
+        carry, tests nothing and is logged at DEBUG, so no row is ever dropped by comparing a
+        date with an instant.
+
+        Args:
+            axis: The dataset's time axis, or None for a dataset without one.
+            query: The query the request sent, by wire name.
+
+        Returns:
+            The bounds to keep the rows inside; empty when the request sent none.
+        """
+        bounds = []
+        for name in axis or ():
+            if name not in query:
+                continue
+            sent, base = query[name], param_base(name)
+            found = next(
+                (
+                    (column_type, column)
+                    for column_type, column, source in self.columns
+                    if source is not None and source.field is not None
+                    if source.field.wire_key == base
+                ),
+                None,
+            )
+            value = None if found is None else _bound_value(found[0], sent)
+            if found is None:
+                reason = "its rows carry no such field"
+            elif name.rpartition(".")[2] not in _COMPARISONS:
+                reason = "its suffix is no comparison"
+            elif value is None:
+                reason = f"{found[1]} is {found[0]}, another kind of value"
+            else:
+                bounds.append(SentBound(name, found[1], value))
+                continue
+            logger.debug(
+                "%s: %s=%r sent to %s tests none of its rows (%s), so they are kept whatever "
+                "their %s",
+                self.dataset,
+                name,
+                sent,
+                self.rest_path.template,
+                reason,
+                base,
+            )
+        return tuple(bounds)
+
+
+def _bound_value(column_type: ColumnType, sent: object) -> pa.Scalar | None:
+    """Return a sent time-axis bound in its column's terms, or None when the kinds differ.
+
+    Args:
+        column_type: The type of the column the bound tests.
+        sent: The value the request sent: an aware `datetime` on an instant axis, a `date`
+            on a calendar-date axis (`rest_requests.axis_query`).
+
+    Returns:
+        An instant scalar for an `Instant` column and an aware `datetime`; the `yyyy-MM-dd`
+        text of a `date` for a text column; None for every other pairing.
+    """
+    if column_type is ColumnType.INSTANT and isinstance(sent, datetime):
+        # A bound past an instant column's range (`end` in the year 2999) holds every row.
+        nanoseconds = min(max(epoch_ns(sent), _INSTANT_RANGE[0]), _INSTANT_RANGE[1])
+        return pa.scalar(nanoseconds, ColumnType.INSTANT.arrow_type)
+    if column_type is ColumnType.STRING and type(sent) is date:
+        return pa.scalar(sent.isoformat())
+    return None
+
+
+def keep_sent_bounds(batch: pa.RecordBatch, bounds: Sequence[SentBound]) -> pa.RecordBatch:
+    """Keep the rows a request's time-axis bounds hold (`RowConverter.sent_bounds`).
+
+    Massive does not apply every bound it is sent: the indicator endpoints ignore
+    `timestamp.lt` and return the latest values past the end. This applies each bound to the
+    rows as Massive should have. It runs before a bar's stamp is moved (`stamped`), on the
+    value Massive filtered on. A calendar-date column holds `yyyy-MM-dd` text, which orders as
+    its days do. A row whose value is null is kept: it is not outside the bounds.
+
+    Args:
+        batch: Rows in the dataset's schema, before their stamps are moved.
+        bounds: The bounds the request sent.
+
+    Returns:
+        The rows inside every bound.
+    """
+    if not bounds:
+        return batch
+    masks = []
+    for bound in bounds:
+        values = batch.column(bound.column)
+        test = _COMPARISONS[bound.name.rpartition(".")[2]](values, bound.value)
+        masks.append(pc.fill_null(test, fill_value=True))
+    return batch.filter(functools.reduce(pc.and_, masks))
 
 
 def whole_bars(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:

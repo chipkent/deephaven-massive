@@ -73,8 +73,8 @@ KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
     TIMESTAMP: "The row's primary time, as an Instant.",
     "Underlying": (
-        "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
-        "the linked instrument, not what the contract delivers."
+        "The instrument Massive links the row to, in the library's canonical symbol form; for "
+        "an option, the linked instrument, not what the contract delivers."
     ),
 }
 """The library's own sentence for each renamed key column of every dataset; its description

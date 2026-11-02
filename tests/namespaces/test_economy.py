@@ -181,14 +181,14 @@ def test_each_series_fetches_its_vendor_sample(
     factory = getattr(rest_session.economy, series.method)
     out = dh_to_pylist(
         factory(
-            start="2020-01-01", end=date(2025, 12, 31), sort="date", order=dm.Order.DESC
+            start="1962-01-01", end=date(2025, 12, 31), sort="date", order=dm.Order.DESC
         ).fetch()
     )
     (request,) = fake_rest.requests
     assert urlsplit(request.target).path == series.path
     # The endpoints have no `order`: its direction becomes the suffix of `sort`.
     assert parse_qs(urlsplit(request.target).query) == {
-        "date.gte": ["2020-01-01"],
+        "date.gte": ["1962-01-01"],
         "date.lte": ["2025-12-31"],
         "sort": ["date.desc"],
         "limit": ["50000"],
