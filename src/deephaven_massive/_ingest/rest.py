@@ -285,16 +285,16 @@ def _bare_index(request: Request, call: Call) -> str | None:
 def _frozen(value: object) -> object:
     """Return a value as a hashable equal of itself, for comparing whole rows.
 
+    No dataset has a struct or map column, so a cell is a scalar or a list of them.
+
     Args:
-        value: One cell as `pa.Table.to_pylist` gives it: a scalar, a list, or a dict.
+        value: One cell as `pa.Table.to_pylist` gives it: a scalar or a list.
 
     Returns:
-        The value, with each list as a tuple and each dict as a tuple of its items, inside out.
+        The value, with each list as a tuple, inside out.
     """
     if isinstance(value, list):
         return tuple(_frozen(item) for item in value)
-    if isinstance(value, dict):
-        return tuple((key, _frozen(item)) for key, item in value.items())
     return value
 
 
