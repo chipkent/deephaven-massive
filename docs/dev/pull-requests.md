@@ -1,14 +1,23 @@
 # Pull request titles and descriptions
 
-**The goal: a reader skimming only the headings, the first words of each bullet, and the table
-rows comes away with every fact that matters**: what changed, why, the decisions, how it was
-checked, and what is left. Nothing important hides in a paragraph, and nothing is left out to
-save space.
+**Every PR description reads as if an O'Reilly technical editor wrote it, and a reader
+skimming only the headings, the first words of each bullet, and the table rows comes away with
+every fact that matters**: what changed, why, the decisions, how it was checked, and what is
+left. Nothing important hides in a paragraph, and nothing is left out to save space.
 
-The bar is O'Reilly-edited text: concise, plain, scannable, and free of agent narration. The
-owner reads every description to decide whether to merge; a reviewer with no context and a
-user reading months later must both understand it. The same bar applies to issue bodies and to
-agents' reports: same goal, same banned patterns, same checklist.
+An editor's text has:
+
+- precise, plain words;
+- every term defined, or avoided;
+- one name for each thing, used consistently;
+- active voice;
+- one idea per sentence and per bullet;
+- no filler, hype, or hedging;
+- correct grammar and parallel structure.
+
+The owner reads every description to decide whether to merge; a reviewer with no context and a
+user reading months later must both understand it. Issue bodies and agents' reports meet the
+same bar, with the same banned patterns and checklist.
 
 `.github/pull_request_template.md` holds the skeleton; the `writing-a-pr-description` skill
 walks through a draft.
@@ -55,20 +64,19 @@ Prefer scannable structure: short headings, bullets, numbered steps, and tables.
 one idea, short, and parallel to its neighbors. Use a paragraph only where prose reads better:
 the Summary, or one decision that needs a sentence of reasoning. No walls of text.
 
-### Sections and budgets
+As long as the content needs and no longer: cut padding, repetition and narration, never facts.
 
-An ordinary PR stays under about **350 words**; a large one (a new subsystem, many behaviors)
-under about **650**. Over that, move detail into the docs and link to it, or split the PR.
+### Sections
 
-| Section | Content | Budget |
-|---|---|---|
-| Summary | What the PR does and why, for a reader with no context; then, if needed, a **Check before merging** list. No file or internal names. | 2–4 sentences; up to 3 check items |
-| Why | The problem, with one concrete example a user would hit. | 1–3 bullets |
-| What changes | One bullet per user-visible change, with before and after wherever the API or a result changes. | One line per bullet |
-| Decisions | Each choice the PR makes or applies, and each departure from the plan, with its reason. A table works well. "None" when there are none. | One row or line each |
-| How it works | The approach a reviewer needs, by idea, never file by file. | Up to about 6 bullets |
-| Verification | Each check and its result; what is not yet run, and how to run it. | A short table or list |
-| Follow-ups | Work left out, with its issue or reason. "None" when there is none. | One line each |
+| Section | Content |
+|---|---|
+| Summary | What the PR does and why, in its first sentences, for a reader with no context; then, if needed, a **Check before merging** list. No file or internal names. |
+| Why | The problem, with a concrete example a user would hit. |
+| What changes | One bullet per user-visible change, with before and after wherever the API or a result changes. |
+| Decisions | Each choice the PR makes or applies, and each departure from the plan, with its reason. A table works well. "None" when there are none. |
+| How it works | The approach a reviewer needs, by idea, never file by file. |
+| Verification | Each check and its result; what is not yet run, and how to run it. |
+| Follow-ups | Work left out, with its issue or reason. "None" when there is none. |
 
 Then `Closes #<issue>` on its own line, then the required footer.
 
@@ -129,12 +137,19 @@ Run it on every draft, and before every push that changes the PR:
 1. **Skim only the headings and the first words of each bullet: do you have every fact?** What
    changed, why, the decisions, how it was checked, what is left. Promote anything buried in a
    paragraph to a bullet or a row.
-2. **Read the first three sentences alone.** A reader with no context can say what the PR does
+2. **Read it as an O'Reilly technical editor would, and fix what they'd mark**: each item of
+   the list at the top of this page.
+3. **Read the first three sentences alone.** A reader with no context can say what the PR does
    and why.
-3. **Cut 30%.** Delete every sentence the reader can't act on or learn from, and every fact
-   stated twice.
-4. **Sweep for the banned patterns** above.
-5. **Check the length**: `wc -w <file>` within the section budgets and the total.
+4. **Cut padding, never facts.** Delete every sentence that is padding, repetition, or
+   narration; keep every fact the reader needs, however complex the PR.
+5. **Sweep for the banned patterns** above, starting with a grep for narration and hedges, and
+   fix every hit that is one:
+
+   ```bash
+   grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>
+   ```
+
 6. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
    title that meets the rules, text that describes the branch after this push, and the issue in
    `closingIssuesReferences`.

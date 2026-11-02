@@ -116,21 +116,21 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
 
 ## 4. Edit the PR description
 
-This step must pass before the push. A description that is long, narrated, or hides a fact in
-a paragraph is a finding like any bug. The owner's verdict on such text: "rambly", "agent
-slop".
+This step must pass before the push. A description that is padded, narrated, hard to scan, or
+hides a fact in a paragraph is a finding like any bug. The owner's verdict on such text:
+"rambly", "agent slop". Length is not the test: a complex PR may need more words, and no fact
+the reader needs is ever cut.
 
 1. Write the description to a file, or fetch the current one:
    `gh pr view <n> --json body --jq .body > <file>`. Rewrite it to the branch's final state.
 2. Run the self-edit checklist in `docs/dev/pull-requests.md` on the file, every item, and
    edit until each passes. Item 1 comes first: skim only the headings and the first words of
-   each bullet, and check that every fact is there.
-3. Check the length with `wc -w <file>`: about 350 words for an ordinary PR, 650 for a large
-   one. Over budget, cut or move detail into the docs; never drop a fact the reader needs.
-4. Grep for the banned patterns the page lists:
+   each bullet, and check that every fact is there. Item 2 next: read it as an O'Reilly
+   technical editor would, and fix what they'd mark.
+3. Grep for narration and hedges, as the checklist's banned-pattern item shows:
    `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
    Fix every hit that is narration, a hedge, or filler.
-5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
+4. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
    `gh pr view <n> --json closingIssuesReferences`.
 
 ## 5. Check the conversation

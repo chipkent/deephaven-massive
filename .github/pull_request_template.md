@@ -1,22 +1,23 @@
 <!--
-The standard is docs/dev/pull-requests.md. Goal: a reader skimming only the headings and the
-first words of each bullet gets every fact that matters. Prefer bullets and tables; no
-narration, no file-by-file tour. About 350 words for an ordinary PR. Run its self-edit
-checklist, and rewrite the whole description to the final state on every push.
+The standard is docs/dev/pull-requests.md: it reads as if an O'Reilly technical editor wrote
+it, and a reader skimming only the headings and the first words of each bullet gets every fact
+that matters. Prefer bullets and tables. As long as the content needs and no longer: cut
+padding, repetition and narration, never facts. Run its self-edit checklist, and rewrite the
+whole description to the final state on every push.
 -->
 
 ## Summary
 
-<!-- 2-4 sentences: what the PR does and why, for a reader with no context. No file or internal
-names. Then, if needed, a "Check before merging" list of up to 3 items. -->
+<!-- What the PR does and why, in the first sentences, for a reader with no context. No file or
+internal names. Then, if needed, a "Check before merging" list. -->
 
 ## Why
 
-<!-- 1-3 bullets: the problem, with one concrete example a user would hit. -->
+<!-- The problem, with a concrete example a user would hit. -->
 
 ## What changes
 
-<!-- One short bullet per user-visible change; before and after wherever the API or a result changes. -->
+<!-- One bullet per user-visible change; before and after wherever the API or a result changes. -->
 
 ## Decisions
 
@@ -24,7 +25,7 @@ names. Then, if needed, a "Check before merging" list of up to 3 items. -->
 
 ## How it works
 
-<!-- Up to about 6 bullets, by idea, never file by file. -->
+<!-- The approach a reviewer needs, by idea, never file by file. -->
 
 ## Verification
 
