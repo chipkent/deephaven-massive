@@ -214,6 +214,8 @@ def _rest_days(
     day's own instants would drop them. Every other dataset is read one day at a time, clipped
     to the range: a range of days reads the whole day, and a range of instants the day's
     instants inside it (for futures, its session's hours), which tile with the files' days.
+    Each day's window is built for the call's instant (`HistoryWindow.now`), never the clock's,
+    so a day read later keeps exactly the rows the call's own window would.
 
     Args:
         spec: The dataset.
@@ -248,7 +250,7 @@ def _rest_days(
             start = max(cast("datetime", request.start), opens)
             end = closes if request.end is None else min(cast("datetime", request.end), closes)
         one = replace(request, start=start, end=end)
-        one_window = history_window(spec, one, start=start, end=end)
+        one_window = history_window(spec, one, start=start, end=end, now=window.now)
         tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
     return tables
 

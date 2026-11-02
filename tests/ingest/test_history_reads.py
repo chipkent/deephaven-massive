@@ -61,6 +61,7 @@ class _Rest:
     def __init__(self, session: dm.MassiveSession) -> None:
         self.session = session
         self.calls: list[tuple[object, object, tuple[date, ...] | None]] = []
+        self.nows: list[datetime] = []
 
     def history(
         self,
@@ -73,6 +74,7 @@ class _Rest:
         days: tuple[date, ...] | None = None,
     ) -> Table:
         self.calls.append((request.start, request.end, days))
+        self.nows.append(window.now)
         return _empty(self.session, spec)
 
 
@@ -155,6 +157,30 @@ def test_a_range_of_instants_reads_each_missing_day_clipped_to_it(
     _read(massive_session, files, start=start, end=end)
     # The missing day from its New York midnight to the range's end.
     assert rest.calls == [(datetime(2025, 3, 4, 5, tzinfo=UTC), end, None)]
+
+
+def test_a_missing_day_read_later_keeps_the_call_s_instant(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # The call began at 12:00 UTC on Tuesday; its missing day is read later, and its window is
+    # still built for the call's instant, not the clock's.
+    start = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    call = datetime(2025, 3, 4, 12, tzinfo=UTC)
+    request = Request(symbols=("AAPL",), start=start, end=None)
+    window = history_window(TRADES, request, start=start, end=None, now=call)
+    files = _files(massive_session, unread=(TUESDAY,))
+    read_history(
+        TRADES,
+        request,
+        window,
+        core=massive_session._core,
+        files=cast("FlatFileHistory", files),
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    assert rest.nows == [call]
 
 
 @pytest.mark.parametrize(("spec", "forced"), [(TRADES, True), (VALUES, False)])

@@ -119,7 +119,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -164,6 +164,7 @@ from deephaven_massive._errors import (
     from_wire,
 )
 from deephaven_massive._ingest.history_reads import read_history
+from deephaven_massive._ingest.symbol_reads import read_flat_files_by_symbol
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -198,6 +199,7 @@ if TYPE_CHECKING:
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Field, FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 
@@ -908,6 +910,53 @@ class FlatFileHistory:
             call=call,
             stop=stop,
             forced=forced,
+        )
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read `read_history` for the symbols in one scan, and split its rows by symbol.
+
+        See `FlatFileTransport.history_by_symbol`: the symbols are read together, as one
+        `history()` call of them reads them (`read_history`, with the REST reads it adds under
+        `AUTO`), and the rows are split by their `Symbol`
+        (`symbol_reads.read_flat_files_by_symbol`). An empty window reads nothing.
+
+        Args:
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with the parsed bounds; its symbols are ignored.
+            window: The call's window.
+            symbols: The canonical symbols to read.
+            dates: The partition dates of the files the window needs.
+            call: The call's id.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
+            stop: A read's stop token; None for a read only the session's close stops.
+
+        Returns:
+            Each symbol, in the order given, with its outcome; a failed scan is every symbol's
+            failure.
+
+        Errors are those of `symbol_reads.read_flat_files_by_symbol`.
+        """
+        asked = replace(request, symbols=tuple(sorted(dict.fromkeys(symbols))))
+        return read_flat_files_by_symbol(
+            self._core,
+            spec,
+            symbols,
+            window=window,
+            call=call,
+            read=lambda: self.read_history(
+                spec, asked, window, dates=dates, call=call, forced=forced, stop=stop
+            )[0],
         )
 
     def _read(

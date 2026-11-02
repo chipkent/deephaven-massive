@@ -58,7 +58,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   once (each read has a `Cancel` token of its own, set when a fan-out ends, and a `poll()`
   cycle's token follows its poller's). The token is also the read's lane in the governor:
   the reads, poll cycles, and host decisions waiting on a bucket take turns, whatever their
-  number of threads.
+  number of threads. A read by symbol (`RestReader.read_each`, for a table that follows a
+  live symbol table) instead returns each request's failure, so one symbol's failure never
+  ends another's read; only a rejected API key ends it (`_ingest/symbol_reads.py`).
 - **Rate limits.** Each request is charged to its Massive subscription (`DatasetSpec`'s class,
   or for a dataset with a path per symbol class the class of the request's symbols; a request
   of no class goes to the class its `market` filter names, else to the unpaced `other`
@@ -116,7 +118,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar, cast
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -131,6 +133,7 @@ from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    AuthenticationError,
     EntitlementError,
     ErrorCause,
     MassiveError,
@@ -172,6 +175,12 @@ from deephaven_massive._ingest.rest_rows import (
     whole_bars,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
+from deephaven_massive._ingest.symbol_reads import (
+    RestUnit,
+    fetch_units,
+    history_units,
+    read_rest_by_symbol,
+)
 from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
 from deephaven_massive._tables import poll
@@ -198,7 +207,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.transports import HostDecision
+    from deephaven_massive._tables.transports import HostDecision, SymbolOutcome
 
 __all__ = [
     "RestEndpoints",
@@ -208,6 +217,11 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_Item = TypeVar("_Item")
+"""What one task of a fan-out is given: a planned call, or a path and a call."""
+_Done = TypeVar("_Done")
+"""What one task of a fan-out returns."""
 
 _ROW_NUMBER: Final = "__row_number"
 """The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
@@ -785,6 +799,158 @@ class RestReader:
                 outcomes = [run(call) for call in calls]
             else:
                 outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
+        self._warn_missing(spec, rest_path.template, outcomes)
+        batches = [batch for outcome in outcomes for batch in outcome.batches]
+        table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
+        return table, sum(outcome.requests for outcome in outcomes)
+
+    def read_each(
+        self,
+        spec: DatasetSpec,
+        units: Sequence[RestUnit],
+        *,
+        request: Request,
+        window: HistoryWindow | None,
+        current: bool,
+        cancel: Cancel | None,
+        patience: Patience,
+    ) -> tuple[list[pa.Table | MassiveError], int]:
+        """Make each planned request and return each one's rows or failure, in plan order.
+
+        The read by symbol (`_ingest/symbol_reads.py`): unlike `read`, a request that fails
+        leaves the others running, so one symbol's failure never ends another's read. The
+        requests may span several paths. They run on this thread when there is one, else on a
+        pool of `min(max_concurrency, requests)` threads made for this read, and listen to a
+        `Cancel` token of the read's own (following `cancel`), which is also the read's lane in
+        the rate governor. Each is made as `read` makes it (`_call`), capped at
+        `Request.limit`, and one WARNING per path names the symbols Massive answered HTTP 404
+        for on their first request, which have no rows.
+
+        Args:
+            spec: The dataset.
+            units: The planned requests, each with its path.
+            request: The normalized arguments, as `read` takes them.
+            window: The `history()` window whose rows to keep, or None for `fetch()`.
+            current: True when the pages are checked for a `DELAYED` label (`read`).
+            cancel: Ends the read's waits when set, or None.
+            patience: The patience of the whole read, shared by every request.
+
+        Returns:
+            Each request's rows (an Arrow table of the dataset's schema) or its
+            `MassiveError`, in plan order, and the number of requests that were answered.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key on any request: every request
+                would be refused, so the requests not yet made are cancelled.
+
+        Any exception that is not a `MassiveError`, a defect, is raised as `read` raises it.
+        """
+        converters: dict[str, RowConverter] = {}
+        for rest_path, _ in units:
+            if rest_path.template not in converters:
+                converters[rest_path.template] = RowConverter.build(
+                    self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
+                )
+        with Cancel(*(() if cancel is None else (cancel,))) as stop:
+            run = functools.partial(
+                self._call_alone,
+                converters,
+                spec=spec,
+                request=request,
+                limit=request.limit,
+                window=window,
+                current=current,
+                stop=stop,
+                patience=patience,
+            )
+            if len(units) <= 1:
+                done = [run(unit) for unit in units]
+            else:
+                done = self._fan_out(run, units, executor=None, stop=stop)
+        answered = [
+            (rest_path.template, outcome)
+            for (rest_path, _), outcome in zip(units, done, strict=True)
+            if isinstance(outcome, _Outcome)
+        ]
+        for template in converters:
+            self._warn_missing(spec, template, [o for t, o in answered if t == template])
+        results: list[pa.Table | MassiveError] = [
+            pa.Table.from_batches(
+                outcome.batches, schema=converters[rest_path.template].arrow_schema
+            )
+            if isinstance(outcome, _Outcome)
+            else outcome
+            for (rest_path, _), outcome in zip(units, done, strict=True)
+        ]
+        return results, sum(outcome.requests for _, outcome in answered)
+
+    def _call_alone(
+        self,
+        converters: Mapping[str, RowConverter],
+        unit: RestUnit,
+        *,
+        spec: DatasetSpec,
+        request: Request,
+        limit: int | None,
+        window: HistoryWindow | None,
+        current: bool,
+        stop: Cancel,
+        patience: Patience,
+    ) -> _Outcome | MassiveError:
+        """Make one request of a read by symbol, returning its failure instead of raising it.
+
+        Args:
+            converters: Each path's conversion, by template.
+            unit: The request and its path.
+            spec: The dataset.
+            request: The normalized arguments.
+            limit: The cap on the request's rows, or None.
+            window: The `history()` window whose rows to keep, or None.
+            current: Whether the pages are checked for a `DELAYED` label.
+            stop: The read's token.
+            patience: The read's patience.
+
+        Returns:
+            The request's outcome (`_call`), or the `MassiveError` it failed with.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key, which fails the whole read.
+        """
+        rest_path, call = unit
+        try:
+            return self._call(
+                converters[rest_path.template],
+                call,
+                spec=spec,
+                request=request,
+                limit=limit,
+                window=window,
+                current=current,
+                on_recency=None,
+                record=None,
+                stop=stop,
+                patience=patience,
+            )
+        except AuthenticationError:
+            raise  # every request of the read would be refused: the whole read fails
+        except MassiveError as error:
+            logger.debug(
+                "%s: the request of %s for %s failed, and fails only its own symbols: %s",
+                spec.name,
+                rest_path.template,
+                ", ".join(own_symbols(spec, call.symbol, call.query)) or "no symbol",
+                error,
+            )
+            return error
+
+    def _warn_missing(self, spec: DatasetSpec, template: str, outcomes: Sequence[_Outcome]) -> None:
+        """Warn once per read about the symbols Massive has no data for, each once per session.
+
+        Args:
+            spec: The dataset.
+            template: The path the outcomes' requests read.
+            outcomes: The outcomes of the read's requests of that path.
+        """
         missing = [o.missing for o in outcomes if o.missing is not None]
         # One WARNING per read, naming each symbol once per session, however many there are.
         new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
@@ -793,20 +959,17 @@ class RestReader:
                 "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",
                 spec.name,
                 bounded_list(new),
-                rest_path.template,
+                template,
             )
-        batches = [batch for outcome in outcomes for batch in outcome.batches]
-        table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
-        return table, sum(outcome.requests for outcome in outcomes)
 
     def _fan_out(
         self,
-        run: Callable[[Call], _Outcome],
-        calls: Sequence[Call],
+        run: Callable[[_Item], _Done],
+        calls: Sequence[_Item],
         *,
         executor: ThreadPoolExecutor | None,
         stop: Cancel,
-    ) -> list[_Outcome]:
+    ) -> list[_Done]:
         """Run several calls concurrently and return their outcomes in call order.
 
         When a call fails, or this thread is interrupted, the read's token is set before the
@@ -1608,11 +1771,7 @@ class RestReader:
             spec,
             request,
             planned,
-            current=spec.serves_current_data
-            or (
-                spec.latest_is_current
-                and reaches_now(request.end, spec.asset_class, now=datetime.now(UTC))
-            ),
+            current=_fetch_is_current(spec, request),
             record=record,
             executor=executor,
             cancel=cancel,
@@ -1971,6 +2130,67 @@ class RestEndpoints:
         """
         self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
 
+    def fetch_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read `fetch` for each symbol: each one's rows, or the failure that ended its read.
+
+        See `RestTransport.fetch_by_symbol` for what is read and returned, and
+        `_ingest/symbol_reads.py` for how a failure is classed. The requests are planned with
+        the crypto pairs split by Massive's ticker list, so a pair the list does not hold
+        fails alone; a parameter a symbol's path does not take fails that path's symbols.
+        Before the first request, one INFO line announces a read whose paced requests cannot
+        all start within a minute (`rate_limits.announce`).
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments; its symbols are ignored.
+            symbols: The canonical symbols to read.
+            call: The call's id, which names the read's fan-out threads.
+            stop: A read's stop token, or None.
+
+        Returns:
+            Each symbol, in the order given, with its outcome.
+
+        Errors are those of `symbol_reads.read_rest_by_symbol`.
+        """
+        reader = self._reader(f"call-{call}")
+        cancel = _token(stop)
+        units, failed = fetch_units(
+            reader,
+            spec,
+            request,
+            symbols=symbols,
+            columns=self._core.dataset_schema(spec).column_names,
+            cancel=cancel,
+        )
+        announce(
+            self._state.client.governor,
+            f"{spec.name} fetch",
+            [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+        )
+        return read_rest_by_symbol(
+            reader,
+            self._core,
+            spec,
+            request=request,
+            symbols=symbols,
+            units=units,
+            failed=failed,
+            window=None,
+            current=_fetch_is_current(spec, request),
+            call=call,
+            cancel=cancel,
+            to_table=functools.partial(self._static, spec),
+        )
+
     def history(
         self,
         spec: DatasetSpec,
@@ -2066,6 +2286,64 @@ class RestEndpoints:
         A parameter the path does not take raises the `ValueError` of `shared_params`.
         """
         _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read REST `history` for each symbol over the call's window, each one's own outcome.
+
+        See `RestTransport.history_by_symbol` for what is read and returned. The requests are
+        those `history` makes for the symbols on the history path (`history_calls`), with the
+        crypto pairs split by Massive's ticker list; an empty window makes none, and every
+        symbol has no rows. Before the first request, one INFO line announces a long download
+        (`rate_limits.announce`).
+
+        Args:
+            spec: The dataset; REST can serve the request with explicit symbols.
+            request: The normalized arguments, with the parsed bounds; its symbols are ignored.
+            window: The call's window.
+            symbols: The canonical symbols to read.
+            call: The call's id, which names the read's fan-out threads.
+            stop: A read's stop token, or None.
+
+        Returns:
+            Each symbol, in the order given, with its outcome.
+
+        Errors are those of `symbol_reads.read_rest_by_symbol`.
+        """
+        reader = self._reader(f"call-{call}")
+        cancel = _token(stop)
+        units, failed = history_units(
+            reader, spec, request, window=window, symbols=symbols, cancel=cancel
+        )
+        announce(
+            self._state.client.governor,
+            f"{spec.name} history",
+            [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+            shape=ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED,
+            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+        )
+        return read_rest_by_symbol(
+            reader,
+            self._core,
+            spec,
+            request=request,
+            symbols=symbols,
+            units=units,
+            failed=failed,
+            window=window,
+            current=False,
+            call=call,
+            cancel=cancel,
+            to_table=functools.partial(self._static, spec),
+        )
 
     def poll(
         self,
@@ -2170,6 +2448,23 @@ def _poll_recency(spec: DatasetSpec) -> Recency | None:
         snapshot does); reference, economy, and partner data never carry one.
     """
     return None if spec.current_subscription is None else Recency.UNKNOWN
+
+
+def _fetch_is_current(spec: DatasetSpec, request: Request) -> bool:
+    """Tell whether a `fetch()`'s pages are checked for a `DELAYED` label (`RestReader.read`).
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments, whose `end` says whether the read reaches now.
+
+    Returns:
+        True for a dataset of current data, and for one whose latest values are computed
+        from current data (`DatasetSpec.latest_is_current`) when the request's range reaches
+        the present (`dates.reaches_now`, by the clock).
+    """
+    return spec.serves_current_data or (
+        spec.latest_is_current and reaches_now(request.end, spec.asset_class, now=datetime.now(UTC))
+    )
 
 
 def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:

@@ -375,7 +375,8 @@ _tables/                 the Deephaven side: tables, liveness, library threads
                          live set, the worker-table registry, diagnostics_view, attach, close()
                          (sections 4.3, 6)
   transports.py          the transport ports (RestTransport, StreamTransport,
-                         FlatFileTransport), IngestPorts, StreamHandle, HostDecision
+                         FlatFileTransport), IngestPorts, StreamHandle, HostDecision; the
+                         outcomes of a read by symbol (SymbolRows, SymbolFailure, FailureKind)
   execution_context.py   entered(), the execution-context and update-graph probes
   liveness.py            result and stream scopes, ResultRegistry, records, Reaper,
                          QueueWorker (section 6.1)
@@ -421,6 +422,9 @@ _ingest/                 the only holder of wire clients
                          merge to tables, missing-file policy, drift routing (section 16)
   history_reads.py       a flat-file history() call's fallback to REST: the days and refused
                          files REST serves under AUTO, the errors otherwise (section 16)
+  symbol_reads.py        reads by symbol for fetch() and history(): their requests, each
+                         symbol's rows or failure, and whether a failure is transient or
+                         permanent
   futures_calendar.py    the futures schedule calendar that dates streamed futures rows by
                          their trading session (section 12)
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,

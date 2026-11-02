@@ -1,0 +1,547 @@
+"""Tests for reads by symbol: each symbol's rows or its own failure, through the transports.
+
+The REST reads run against the fake REST server; the flat-file read is replaced by a scripted
+table or failure, since only the split of its rows and failures by symbol is this module's.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
+
+import pyarrow as pa
+import pytest
+from deephaven import arrow as dh_arrow
+
+import deephaven_massive as dm
+from deephaven_massive import _session
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.history_source import history_window
+from deephaven_massive._datasets.request import Request
+from deephaven_massive._enums import AssetClass
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    EntitlementError,
+    ErrorCause,
+    MassiveError,
+    RowDataError,
+    UnsupportedParameterError,
+)
+from deephaven_massive._ingest import rate_limits
+from deephaven_massive._ingest.flatfiles import FlatFileHistory
+from deephaven_massive._ingest.rest import UnlistedPairError
+from deephaven_massive._ingest.symbol_reads import failure_kind, read_flat_files_by_symbol
+from deephaven_massive._massive import Transport
+from deephaven_massive._tables.columns import dataset_table
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
+
+    from deephaven.table import Table
+
+    from deephaven_massive._datasets.history_source import HistoryWindow
+    from deephaven_massive._tables.transports import SymbolOutcome
+
+LOGGER = "deephaven_massive._ingest.symbol_reads"
+REST_LOGGER = "deephaven_massive._ingest.rest"
+R = Transport.REST
+NS = 10**9
+
+DIVIDENDS_PATH = "/stocks/v1/dividends"
+DIVIDENDS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.dividends",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=DIVIDENDS_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    symbols_per_request=2,
+)
+# The same rows, as a dataset whose symbols' requests may return the same row.
+OVERLAPPING = dataclasses.replace(DIVIDENDS, name="stocks.overlapping", symbols_overlap=True)
+CRYPTO_LAST_PATH = "/v1/last/crypto/{from}/{to}"
+CRYPTO_LAST = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="crypto.last",
+    asset_class=AssetClass.CRYPTO,
+    fetch_path=CRYPTO_LAST_PATH,
+    serves_current_data=True,
+    keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
+)
+NEWS_PATH = "/v2/reference/news"
+# A list whose rows name no symbol and whose path takes none: no request names a symbol.
+NEWS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="reference.news",
+    fetch_path=NEWS_PATH,
+    keys={(R, NEWS_PATH): SourceKeys()},
+)
+TRADES_PATH = "/v3/trades/{stockTicker}"
+TRADES = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.trades",
+    asset_class=AssetClass.STOCKS,
+    history_path=TRADES_PATH,
+    time_axis=("timestamp.gte", "timestamp.lt"),
+    keys={
+        (R, TRADES_PATH): SourceKeys(
+            KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
+        )
+    },
+)
+SPECS = (DIVIDENDS, OVERLAPPING, CRYPTO_LAST, NEWS, TRADES)
+
+TICKERS_PATH = "/v3/reference/tickers"
+MONDAY = date(2025, 3, 3)
+MIDNIGHT = datetime(2025, 3, 3, 5, tzinfo=UTC)
+"""00:00 on Monday in New York."""
+
+
+@pytest.fixture
+def session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[dm.MassiveSession]:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    # One request at a time, so a script of replies for one path answers them in plan order.
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=1)
+    )
+    yield m
+    m.close()
+
+
+def _rows(outcome: SymbolOutcome) -> list[dict[str, Any]]:
+    assert isinstance(outcome, SymbolRows)
+    return cast("list[dict[str, Any]]", dh_arrow.to_arrow(outcome.table).to_pylist())
+
+
+def _failure(outcome: SymbolOutcome) -> SymbolFailure:
+    assert isinstance(outcome, SymbolFailure)
+    return outcome
+
+
+def _dividend(ticker: str, amount: float) -> dict[str, object]:
+    return {"ticker": ticker, "cash_amount": amount, "ex_dividend_date": "2025-02-10", "id": ticker}
+
+
+def _trade(nanos: int) -> dict[str, object]:
+    return {"sip_timestamp": nanos, "price": 1.0, "size": 10}
+
+
+def _fetch(
+    m: dm.MassiveSession, spec: DatasetSpec, symbols: list[str], *, adjusted: bool | None = None
+) -> Mapping[str, SymbolOutcome]:
+    rest = m._core.rest_transport()
+    return rest.fetch_by_symbol(spec, Request(adjusted=adjusted), symbols=symbols, call=7)
+
+
+def _history(
+    m: dm.MassiveSession,
+    symbols: list[str],
+    window: HistoryWindow,
+    *,
+    adjusted: bool | None = None,
+) -> Mapping[str, SymbolOutcome]:
+    rest = m._core.rest_transport()
+    asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted)
+    return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7)
+
+
+def _monday() -> HistoryWindow:
+    asked = Request(start=MONDAY, end=MONDAY)
+    return history_window(TRADES, asked, start=MONDAY, end=MONDAY, now=MIDNIGHT + timedelta(7))
+
+
+# --- Classes of failure -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
+        (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
+        (MassiveError("connection reset"), FailureKind.TRANSIENT),
+        (MassiveError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        (EntitlementError("not in the plan", status=403), FailureKind.PERMANENT),
+        (RowDataError("every row was dropped"), FailureKind.PERMANENT),
+        (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
+        (UnlistedPairError("X:NOPEUSD is not listed"), FailureKind.PERMANENT),
+        (MassiveError("unreadable", cause=ErrorCause.LIBRARY_DEFECT), FailureKind.PERMANENT),
+        (MassiveError("HTTP 400", status=400), FailureKind.PERMANENT),
+    ],
+)
+def test_a_failure_is_transient_only_when_its_cause_may_pass(
+    error: MassiveError, kind: FailureKind
+) -> None:
+    assert failure_kind(error) is kind
+
+
+# --- fetch by symbol ----------------------------------------------------------------------------
+
+
+def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two symbols a request: AAPL and MSFT share the first, NVDA and TSLA the second.
+    first = [_dividend("AAPL", 0.25), _dividend("MSFT", 0.83), _dividend("IBM", 1.67)]
+    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(first)), refusal)
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, DIVIDENDS, ["TSLA", "MSFT", "AAPL", "NVDA", "AAPL"])
+    assert list(out) == ["TSLA", "MSFT", "AAPL", "NVDA"]  # as given, each once
+    sent = [query["ticker.any_of"] for _, query in fake_rest.get_queries()]
+    assert sent == [["AAPL,MSFT"], ["NVDA,TSLA"]]
+    assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["AAPL"])] == [("AAPL", 0.25)]
+    assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["MSFT"])] == [("MSFT", 0.83)]
+    nvda, tsla = _failure(out["NVDA"]), _failure(out["TSLA"])
+    assert nvda.error is tsla.error
+    assert isinstance(nvda.error, EntitlementError)
+    assert nvda.kind is FailureKind.PERMANENT
+    # The row of a symbol no one asked for belongs to no symbol's read.
+    unowned = [r for r in caplog.records if "name none of those symbols" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in unowned] == [
+        (
+            logging.WARNING,
+            (
+                "stocks.dividends: 1 of the 3 rows Massive returned from /stocks/v1/dividends "
+                "for 2 [AAPL, MSFT] name none of those symbols, so no symbol's read owns them "
+                "and they are left out"
+            ),
+        )
+    ]
+    # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
+    failed = [r for r in caplog.records if "fails this symbol alone" in r.getMessage()]
+    assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
+    assert (
+        failed[0]
+        .getMessage()
+        .startswith(
+            "call 7 stocks.dividends TSLA: the read from REST failed (permanent), which fails this "
+            "symbol alone: stocks.dividends: the Stocks subscription of your plan does not include "
+        )
+    )
+
+
+def test_a_batch_whose_rows_all_belong_to_its_symbols_warns_nothing(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([_dividend("MSFT", 0.83)])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
+    assert [len(_rows(outcome)) for outcome in out.values()] == [0, 1]
+    assert "name none" not in caplog.text
+
+
+def test_an_unowned_row_warns_once_per_dataset_and_path(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([_dividend("IBM", 1.67)])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for _ in range(2):
+            assert _rows(_fetch(session, DIVIDENDS, ["AAPL", "MSFT"])["AAPL"]) == []
+    unowned = [r.levelno for r in caplog.records if "name none" in r.getMessage()]
+    assert unowned == [logging.WARNING, logging.DEBUG]
+
+
+def test_overlapping_symbols_are_read_one_a_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Each symbol's rows are those its own request returned, the shared row in both.
+    fake_rest.reply(
+        DIVIDENDS_PATH,
+        Reply(envelope([_dividend("AAPL", 0.25)])),
+        Reply(envelope([_dividend("AAPL", 0.25), _dividend("MSFT", 0.83)])),
+    )
+    out = _fetch(session, OVERLAPPING, ["AAPL", "MSFT"])
+    sent = [query["ticker.any_of"] for _, query in fake_rest.get_queries()]
+    assert sent == [["AAPL"], ["MSFT"]]
+    assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
+    assert [r["Symbol"] for r in _rows(out["MSFT"])] == ["AAPL", "MSFT"]
+
+
+def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(NEWS_PATH, Reply(envelope([{"id": "n1", "title": "news"}])))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = _fetch(session, NEWS, ["AAPL"])
+    assert _rows(out["AAPL"]) == []
+    assert "returned from /v2/reference/news for no symbol name none" in caplog.text
+
+
+def test_a_crypto_pair_massive_does_not_list_fails_alone(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    fake_rest.reply(TICKERS_PATH, Reply(envelope([listed])), Reply(envelope([])))
+    last = {
+        "status": "OK",
+        "symbol": "BTC-USD",
+        "last": {"price": 90000.5, "timestamp": 1741000000000},
+    }
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
+    assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
+    nope = _failure(out["X:NOPEUSD"])
+    assert isinstance(nope.error, UnlistedPairError)
+    assert nope.kind is FailureKind.PERMANENT
+    # No request was made for the pair the list does not hold.
+    assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
+        "/v1/last/crypto/BTC/USD"
+    ]
+
+
+def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
+    aapl, msft = _failure(out["AAPL"]), _failure(out["MSFT"])
+    assert aapl.error is msft.error
+    assert isinstance(aapl.error, UnsupportedParameterError)
+    assert str(aapl.error) == "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']"
+    assert aapl.kind is FailureKind.PERMANENT
+    assert fake_rest.get_queries() == []
+
+
+def test_a_rejected_key_fails_the_whole_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply({"status": "ERROR"}, status=401))
+    with pytest.raises(dm.AuthenticationError):
+        _fetch(session, DIVIDENDS, ["AAPL", "MSFT", "NVDA"])
+
+
+def test_a_rejected_key_while_splitting_a_pair_fails_the_whole_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(TICKERS_PATH, Reply({"status": "ERROR"}, status=401))
+    with pytest.raises(dm.AuthenticationError):
+        _fetch(session, CRYPTO_LAST, ["X:BTCUSD"])
+
+
+def test_a_session_closed_during_the_read_fails_it(session: dm.MassiveSession) -> None:
+    rest = session._core.rest_transport()
+    session.close()
+    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
+        rest.fetch_by_symbol(DIVIDENDS, Request(), symbols=["AAPL"], call=7)
+
+
+# --- history by symbol --------------------------------------------------------------------------
+
+
+def test_each_symbol_s_history_ends_in_its_own_outcome(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pause beyond the read's patience: the read gives up on the symbol at once.
+    monkeypatch.setattr(rate_limits, "READ_PATIENCE", 300.0)
+    start = MIDNIGHT.timestamp() * NS
+    fake_rest.reply("/v3/trades/AAPL", Reply(envelope([_trade(int(start) + 1)])))
+    # MSFT has no data: HTTP 404 on its first request.
+    fake_rest.reply("/v3/trades/NVDA", Reply({"status": "ERROR"}, status=403))
+    fake_rest.reply("/v3/trades/TSLA", Reply(b"oops", status=500))
+    gone = "/v3/trades/AMZN?cursor=gone"
+    fake_rest.reply(gone, Reply(b'{"status":"NOT_FOUND"}', status=404))
+    fake_rest.reply(
+        "/v3/trades/AMZN",
+        Reply(envelope([_trade(int(start) + 2)], next_url=f"{fake_rest.url}{gone}")),
+    )
+    slow = Reply({"status": "ERROR", "message": "slow down"}, status=429)
+    # Last in plan order: the pause holds the whole stocks bucket for the read.
+    fake_rest.reply("/v3/trades/WMT", dataclasses.replace(slow, headers={"Retry-After": "700"}))
+    symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "WMT"]
+    with caplog.at_level(logging.WARNING):
+        out = _history(session, symbols, _monday())
+    assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
+    assert _rows(out["MSFT"]) == []
+    kinds = {symbol: _failure(out[symbol]).kind for symbol in ["NVDA", "TSLA", "AMZN", "WMT"]}
+    assert kinds == {
+        "NVDA": FailureKind.PERMANENT,
+        "TSLA": FailureKind.TRANSIENT,
+        "AMZN": FailureKind.TRANSIENT,
+        "WMT": FailureKind.TRANSIENT,
+    }
+    assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
+    assert str(_failure(out["WMT"]).error).startswith("rate limited: ")
+    # MSFT's missing data warns as history() warns it; no failure warns.
+    warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
+    assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == [
+        (
+            "stocks.trades: no data for 1 [MSFT]: Massive answered HTTP 404 from "
+            "/v3/trades/{stockTicker}, so they are left out"
+        )
+    ]
+
+
+def test_every_history_read_keeps_the_rows_of_the_call_s_fixed_instant(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The call began at 12:00 New York on Monday and reads through then; its symbols are read
+    # later, when the clock has moved on, and keep only the rows before the call's instant.
+    call = MIDNIGHT + timedelta(hours=12)
+    asked = Request(start=MIDNIGHT, end=None)
+    window = history_window(TRADES, asked, start=MIDNIGHT, end=None, now=call)
+    assert window.now == call
+    before, after = int(call.timestamp()) * NS - 1, int(call.timestamp()) * NS + 1
+    fake_rest.reply("/v3/trades/AAPL", Reply(envelope([_trade(before), _trade(after)])))
+    rest = session._core.rest_transport()
+    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL"], call=7)
+    assert len(_rows(out["AAPL"])) == 1
+    [(_, query)] = fake_rest.get_queries(one_value=True)
+    assert query["timestamp.lt"] == str(int(call.timestamp()) * NS)
+
+
+def test_an_empty_window_reads_nothing(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    asked = Request(start=MIDNIGHT, end=MIDNIGHT)
+    window = history_window(TRADES, asked, start=MIDNIGHT, end=MIDNIGHT, now=MIDNIGHT)
+    assert window.empty
+    rest = session._core.rest_transport()
+    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL", "MSFT"], call=7)
+    assert [_rows(outcome) for outcome in out.values()] == [[], []]
+    assert fake_rest.get_queries() == []
+
+
+def test_a_history_parameter_the_path_does_not_take_fails_every_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    out = _history(session, ["AAPL", "MSFT"], _monday(), adjusted=False)
+    assert {_failure(o).kind for o in out.values()} == {FailureKind.PERMANENT}
+    assert isinstance(_failure(out["AAPL"]).error, UnsupportedParameterError)
+    assert fake_rest.get_queries() == []
+
+
+# --- Flat files ---------------------------------------------------------------------------------
+
+FLAT_TRADES = _session.CATALOG.by_name["stocks.trades"]
+"""A dataset with flat files, from the real catalog."""
+
+
+def _flat_rows(m: dm.MassiveSession, symbols: list[str | None]) -> Table:
+    schema = m._core.dataset_schema(FLAT_TRADES)
+    rows = pa.Table.from_pylist([{"Symbol": s} for s in symbols], schema=schema.arrow_schema())
+    with entered(m._core.exec_ctx):
+        return dataset_table(rows, schema.date_columns)
+
+
+def _flat_window() -> HistoryWindow:
+    asked = Request(start=MONDAY, end=MONDAY)
+    return history_window(FLAT_TRADES, asked, start=MONDAY, end=MONDAY, now=MIDNIGHT + timedelta(7))
+
+
+def test_a_flat_file_scan_is_split_by_symbol(massive_session: dm.MassiveSession) -> None:
+    table = _flat_rows(massive_session, ["AAPL", "MSFT", "AAPL"])
+    out = read_flat_files_by_symbol(
+        massive_session._core,
+        FLAT_TRADES,
+        ["NVDA", "AAPL", "MSFT"],
+        window=_flat_window(),
+        call=7,
+        read=lambda: table,
+    )
+    assert list(out) == ["NVDA", "AAPL", "MSFT"]
+    assert [len(_rows(outcome)) for outcome in out.values()] == [0, 2, 1]
+
+
+def test_a_failed_flat_file_scan_fails_every_symbol_with_one_error(
+    massive_session: dm.MassiveSession,
+) -> None:
+    refusal = EntitlementError("stocks.trades: S3 refused the flat files", status=403)
+
+    def read() -> Table:
+        raise refusal
+
+    out = read_flat_files_by_symbol(
+        massive_session._core,
+        FLAT_TRADES,
+        ["AAPL", "MSFT"],
+        window=_flat_window(),
+        call=7,
+        read=read,
+    )
+    assert [_failure(o).error for o in out.values()] == [refusal, refusal]
+
+
+def test_rejected_flat_file_credentials_fail_the_whole_read(
+    massive_session: dm.MassiveSession,
+) -> None:
+    def read() -> Table:
+        raise dm.AuthenticationError("S3 rejected the credentials")
+
+    with pytest.raises(dm.AuthenticationError, match="S3 rejected"):
+        read_flat_files_by_symbol(
+            massive_session._core, FLAT_TRADES, ["AAPL"], window=_flat_window(), call=7, read=read
+        )
+
+
+def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Built from Arrow, not formulas: a formula's query scope would capture this frame, and
+    # with it the session.
+    schema = massive_session._core.dataset_schema(FLAT_TRADES).arrow_schema()
+    columns = {field.name: pa.nulls(1, field.type) for field in schema if field.name != "Price"}
+    columns |= {"Symbol": pa.array(["AAPL"]), "Exchange": pa.array(["NYSE"])}
+    columns["Extra"] = pa.array([1])
+    with entered(massive_session._core.exec_ctx):
+        broken = dh_arrow.to_table(pa.table(columns))
+    with caplog.at_level(logging.ERROR, LOGGER):
+        out = read_flat_files_by_symbol(
+            massive_session._core,
+            FLAT_TRADES,
+            ["AAPL"],
+            window=_flat_window(),
+            call=7,
+            read=lambda: broken,
+        )
+    failure = _failure(out["AAPL"])
+    assert failure.kind is FailureKind.PERMANENT
+    assert failure.error.cause is ErrorCause.LIBRARY_DEFECT
+    assert str(failure.error) == (
+        "stocks.trades: AAPL's rows from flat files lack Price; have Extra, which the dataset "
+        f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"
+    )
+    assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+
+def test_the_flat_file_transport_reads_the_symbols_in_one_scan(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[object] = []
+
+    def read_history(
+        self: FlatFileHistory, spec: DatasetSpec, request: Request, *_: object, **__: object
+    ) -> tuple[Table, str | None]:
+        asked.append(request.symbols)
+        return _flat_rows(massive_session, ["AAPL"]), None
+
+    monkeypatch.setattr(FlatFileHistory, "read_history", read_history)
+    files = FlatFileHistory(massive_session._core, cast("Any", None))
+    request = Request(start=MONDAY, end=MONDAY)
+    out = files.history_by_symbol(
+        FLAT_TRADES,
+        request,
+        _flat_window(),
+        symbols=["MSFT", "AAPL", "MSFT"],
+        dates=(MONDAY,),
+        call=7,
+        forced=False,
+    )
+    assert asked == [("AAPL", "MSFT")]
+    assert [len(_rows(outcome)) for outcome in out.values()] == [0, 1]
+    # An empty window reads nothing.
+    empty = history_window(FLAT_TRADES, request, start=MIDNIGHT, end=MIDNIGHT, now=MIDNIGHT)
+    nothing = files.history_by_symbol(
+        FLAT_TRADES, request, empty, symbols=["AAPL"], dates=(), call=8, forced=False
+    )
+    assert _rows(nothing["AAPL"]) == []
+    assert len(asked) == 1

@@ -44,7 +44,7 @@ file not there yet says so (`PUBLICATION_NOTE`).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -155,7 +155,10 @@ class HistoryWindow:
     """What one `history()` call reads and keeps; built by `history_window`.
 
     Made once per call on the caller thread and handed to the transport that serves it;
-    frozen, so the transport's reader threads may share it.
+    frozen, so the transport's reader threads may share it. It holds the instant it was built
+    for (`now`), so every read of the call keeps the same rows whenever it runs: a day the
+    flat files lack, read from REST later in the call, builds its own window with that
+    instant rather than the clock's.
 
     Attributes:
         span: The bounds by kind: the whole days (for futures, sessions) of two dates, or the
@@ -172,6 +175,8 @@ class HistoryWindow:
         bars: For a dataset of bars, the window its bars must lie in once their time columns
             are filled (`row_times.within`); the transports drop every other bar. None for
             ticks, which have no bar window.
+        now: The instant the window was built for: the end of a range that ends now, and
+            the instant by which a kept bar has ended. An aware UTC `datetime`.
     """
 
     span: TimeRange | DaySpan
@@ -179,6 +184,7 @@ class HistoryWindow:
     sessions: DaySpan | None
     requested: TimeRange | None
     bars: BarBounds | None = None
+    now: datetime = field(kw_only=True)
 
     @property
     def empty(self) -> bool:
@@ -216,10 +222,11 @@ def history_window(
         start: The first day or instant.
         end: The last day, the first instant excluded, or None for now.
         classes: The classes of the request's symbols, for `dates.day_class`.
-        now: The current instant; None reads the clock.
+        now: The instant the window is built for, such as the instant a `history()` call
+            began, so a later read of the same call keeps the same rows; None reads the clock.
 
     Returns:
-        The window.
+        The window, holding the instant it was built for (`HistoryWindow.now`).
 
     An unparseable or naive bound, a date mixed with a datetime, or a reversed range raises
     the `ValueError` of `dates.bounds`. Futures trades and quotes named by session dates raise
@@ -234,7 +241,7 @@ def history_window(
     instants = span if isinstance(span, TimeRange) else span.instants(day_zone(asset_class))
     timespan = request.timespan
     if not spec.is_bars or timespan is None:
-        return HistoryWindow(span, instants, None, instants)
+        return HistoryWindow(span, instants, None, instants, now=moment)
     ended = TimeRange(instants.start, min(instants.end, moment))
     last = instants.end if isinstance(span, TimeRange) else day_end(asset_class, span.last)
     if futures and not intraday(timespan):
@@ -253,14 +260,14 @@ def history_window(
             whole.earliest.isoformat(),
             whole.latest.isoformat(),
         )
-        return HistoryWindow(span, ended, None, instants, whole)
+        return HistoryWindow(span, ended, None, instants, whole, now=moment)
     keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
     # Futures intraday bars named by instants take `window_start` exactly. The aggregates' `{from}`
     # starts where the first whole period's days begin, so the bar of that period is returned
     # whether Massive selects bars by their stamp or builds them from `{from}`.
     requested = instants if futures else TimeRange(keep.start, instants.end)
     whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
-    return HistoryWindow(span, keep, None, requested, whole)
+    return HistoryWindow(span, keep, None, requested, whole, now=moment)
 
 
 def _futures_sessions(
@@ -305,7 +312,7 @@ def _futures_sessions(
                 f"{spec.name}: history() dates set session_end_date themselves; drop the "
                 "session_end_date filter, or pass datetimes to combine it with a time range"
             )
-        return HistoryWindow(span, None, span, None)
+        return HistoryWindow(span, None, span, None, now=now)
     multiplier = request.multiplier
     requested = futures_bar_request(span, timespan=timespan, multiplier=multiplier)
     latest = min(futures_session_end(span.last), now)
@@ -314,13 +321,13 @@ def _futures_sessions(
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(AssetClass.FUTURES, ended, timespan=timespan, multiplier=multiplier)
-        return HistoryWindow(span, keep, span, requested, whole)
+        return HistoryWindow(span, keep, span, requested, whole, now=now)
     if timespan is Timespan.SESSION and multiplier == 1:
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         # Only finished sessions, and no session ends on a Saturday or Sunday.
         last = min(span.last, futures_session(now) - _ONE_DAY)
         finished = DaySpan(weekday_on_or_after(span.first), weekday_on_or_before(last))
-        return HistoryWindow(span, None, finished, requested, whole)
+        return HistoryWindow(span, None, finished, requested, whole, now=now)
     first_bucket = futures_first_bucket_day(span.first)
     earliest = max(datetime.combine(first_bucket, time(), tzinfo=UTC), requested.start)
     completion = FuturesBarCompletion(timespan, multiplier, now)
@@ -340,7 +347,7 @@ def _futures_sessions(
         span.first.isoformat(),
         span.last.isoformat(),
     )
-    return HistoryWindow(span, None, span, requested, whole)
+    return HistoryWindow(span, None, span, requested, whole, now=now)
 
 
 def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:
