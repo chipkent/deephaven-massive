@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -113,6 +114,11 @@ A slot lost during the case then ends in the slot message or a pass, never in a 
 
 _TIMEOUTS = {"history": _HISTORY_TIMEOUT, "stream": _STREAM_TIMEOUT}
 """The verbs whose cases may take longer than `_CASE_TIMEOUT`, and their limits."""
+
+_SOURCE_CHOICE = re.compile(r" history: AUTO read \S+ \(.*\); the read leaves .* null")
+"""The library's once-per-session notice that an `AUTO` history read chose the source that
+leaves some columns null, such as "futures.trades history: AUTO read REST (1 symbols <
+flat_file_symbol_threshold 50); the read leaves Correction, Exchange null, ..."."""
 
 _LIMIT = 5
 
@@ -490,15 +496,24 @@ class _Case:
     def drift(self) -> list[str]:
         """Return what the case saw drift: the library's warnings and any `SchemaDrift`.
 
+        The notice that an `AUTO` history read chose a source leaving some columns null
+        (`_SOURCE_CHOICE`) is the documented behavior of a small read, not drift: it is
+        recorded as evidence and left out.
+
         Returns:
             One line per WARNING or worse a `deephaven_massive` logger emitted during the
-            case, and per non-empty `SchemaDrift` of the session's streams and connections.
+            case, the source-choice notice excepted, and per non-empty `SchemaDrift` of the
+            session's streams and connections.
         """
-        found = [
-            f"{record.levelname} {record.name}: {record.getMessage()}"
-            for record in self.caplog.records
-            if record.levelno >= logging.WARNING and record.name.startswith("deephaven_massive")
-        ]
+        found = []
+        for record in self.caplog.records:
+            if record.levelno < logging.WARNING or not record.name.startswith("deephaven_massive"):
+                continue
+            message = record.getMessage()
+            if _SOURCE_CHOICE.search(message):
+                self.evidence(f"source choice: {message}")
+                continue
+            found.append(f"{record.levelname} {record.name}: {message}")
         for view in (self.session.streams(), self.session.connections()):
             found.extend(
                 f"SchemaDrift {r['SchemaDrift']}" for r in self.table_rows(view) if r["SchemaDrift"]
