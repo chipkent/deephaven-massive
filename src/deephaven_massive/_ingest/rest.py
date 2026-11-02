@@ -127,6 +127,7 @@ from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
+from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -151,6 +152,7 @@ from deephaven_massive._ingest.rate_limits import (
 from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_requests import (
+    BARE_INDEX_PARAM,
     Call,
     CryptoSplit,
     axis_query,
@@ -161,6 +163,8 @@ from deephaven_massive._ingest.rest_requests import (
     shared_params,
 )
 from deephaven_massive._ingest.rest_rows import (
+    CFI,
+    UNDERLYING,
     RowConverter,
     keep_window,
     stamped,
@@ -260,6 +264,22 @@ class UnlistedPairError(PermanentError):
     does not list the ticker, or gives currencies that do not join to it
     (`RestReader.crypto_pair`). A `poll()` table fails with it.
     """
+
+
+def _bare_index(request: Request, call: Call) -> str | None:
+    """Return the index a call asked for by its bare ticker (`SPX` sent for `I:SPX`).
+
+    Args:
+        request: The normalized arguments, which keep the canonical ticker.
+        call: The planned call, whose query holds the ticker as sent.
+
+    Returns:
+        The canonical index when the call sent it without its `I:`; None for any other call.
+    """
+    asked = dict(request.params).get(BARE_INDEX_PARAM)
+    if isinstance(asked, str) and asked != call.query.get(BARE_INDEX_PARAM, asked):
+        return asked
+    return None
 
 
 def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
@@ -892,6 +912,7 @@ class RestReader:
         stamps = stamp_rule(spec, request, warnings=self.warnings, asset_class=zone_class)
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
+        bare_index = _bare_index(request, call)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -924,6 +945,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
+                if bare_index is not None:
+                    self._check_index_rows(spec, batches, bare_index, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
@@ -980,6 +1003,70 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _check_index_rows(
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, template: str
+    ) -> None:
+        """Warn about rows of an index's contracts that do not read as that index's.
+
+        The contracts list takes an index bare (`SPX` for `I:SPX`), and a row gets its `I:`
+        back only when its CFI code marks an option on an index
+        (`rest_rows.RowConverter`). A bare ticker can also name a stock (`DJT` is a stock;
+        `I:DJT` is not one of Massive's indices), so a row whose code marks another kind of
+        option is Massive's answer about another instrument: it keeps the underlying Massive
+        wrote, and one WARNING per dataset and index per session names the request and the
+        rows. A row without a CFI code keeps the bare ticker, since nothing says it is an
+        index: one WARNING per dataset per session says so. Neither drops a row.
+
+        Args:
+            spec: The dataset.
+            batches: One page's rows in the dataset's schema.
+            index: The canonical index the call asked for, such as `I:SPX`.
+            template: The path, for the messages.
+        """
+        if not batches:
+            return
+        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
+        other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=True)
+        if not pc.any(other).as_py():
+            return
+        cfi = pa.chunked_array([batch.column(CFI) for batch in batches])
+        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
+        no_code = pc.and_(other, pc.is_null(cfi))
+        other_kind = pc.and_(other, pc.is_valid(cfi))
+        if pc.any(other_kind).as_py() and self.state.first("index-other-kind", spec.name, index):
+            shown = list(
+                zip(
+                    pc.filter(symbols, other_kind).to_pylist()[:5],
+                    pc.filter(underlyings, other_kind).to_pylist()[:5],
+                    pc.filter(cfi, other_kind).to_pylist()[:5],
+                    strict=True,
+                )
+            )
+            logger.warning(
+                "%s: asked %s for the contracts of %s by its bare ticker, %s=%s, and %d rows "
+                "are not options on an index by their CFI code, so Massive answered about "
+                "another instrument; they keep the underlying Massive wrote. The first "
+                "(Symbol, Underlying, Cfi): %s",
+                spec.name,
+                template,
+                index,
+                BARE_INDEX_PARAM,
+                contracts_underlying(index),
+                pc.sum(other_kind).as_py(),
+                shown,
+            )
+        if pc.any(no_code).as_py() and self.state.first("index-no-cfi", spec.name):
+            logger.warning(
+                "%s: %d rows of the contracts of %s from %s have no CFI code, so nothing says "
+                "their underlying is an index and they keep Massive's bare %r; the first: %s",
+                spec.name,
+                pc.sum(no_code).as_py(),
+                index,
+                template,
+                contracts_underlying(index),
+                pc.filter(symbols, no_code)[0].as_py(),
+            )
 
     def _check_recency(
         self,

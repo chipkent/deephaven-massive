@@ -6,7 +6,8 @@ batches of the dataset's merged schema, one page at a time:
 - `RowConverter` decodes a page against the path's generated fields (`_massive.to_batch`), renames
   its columns for the dataset (`source_columns.rename`), converts its timestamps
   (`_datasets/timestamps.py`), widens each column to its merged type
-  (`source_columns.widen`), and reads its symbols into the canonical form (`WireSymbols`). A row
+  (`source_columns.widen`), and reads its symbols into the canonical form (`WireSymbols`), an
+  options row's index underlying included (`wire_symbols.index_underlyings`). A row
   that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
   symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
   dataset through a projection.
@@ -26,18 +27,28 @@ decision (`host_decision.py`) uses the same error-row rule.
 from __future__ import annotations
 
 import functools
+import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, within
-from deephaven_massive._datasets.source_columns import RoundedFields, rename, required_fields
+from deephaven_massive._datasets.source_columns import (
+    KEY_COLUMNS,
+    RoundedFields,
+    rename,
+    required_fields,
+)
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import first_failure, masked_instants, mismatch_message
-from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
+from deephaven_massive._datasets.wire_symbols import (
+    WireSymbols,
+    index_underlyings,
+    unreadable_symbol_message,
+)
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, DriftSample, to_batch
@@ -52,12 +63,22 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath
 
 __all__ = [
+    "CFI",
+    "UNDERLYING",
     "RowConverter",
     "is_error_row",
     "keep_window",
     "stamped",
     "whole_bars",
 ]
+
+logger = logging.getLogger(__name__)
+
+UNDERLYING: Final = KEY_COLUMNS["fanout"]
+"""The column naming the instrument a row is linked to, such as an option's underlying."""
+
+CFI: Final = "Cfi"
+"""The column of a row's CFI code (ISO 10962), which the options contracts list carries."""
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -193,11 +214,12 @@ class RowConverter:
 
         Returns:
             The batch in the dataset's schema, with the derived columns (`OptionRoot`,
-            `RawSymbol`) computed from the symbols; and the drift of its timestamps and
-            widening: the rows dropped for their time column, the wire keys of the other epoch
-            fields that held a value out of bounds, and those of the `long` fields whose cast
-            to a `double` column rounded a value (`RoundedFields`), each with its first such
-            value.
+            `RawSymbol`) computed from the symbols and an index `Underlying` given its `I:`
+            prefix by the row's CFI code (`_canonical_underlyings`); and the drift of its
+            timestamps and widening: the rows dropped for their time column, the wire keys of
+            the other epoch fields that held a value out of bounds, and those of the `long`
+            fields whose cast to a `double` column rounded a value (`RoundedFields`), each with
+            its first such value.
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
@@ -244,6 +266,7 @@ class RowConverter:
             arrays[name] = rounded.widen(
                 values, column_type.arrow_type, wire_key=None if source is None else source.wire_key
             )
+        self._canonical_underlyings(arrays)
         converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         drift = DriftReport(unconvertible=frozenset(odd), samples=odd).merge(rounded.drift())
         if dropped is not None:
@@ -251,6 +274,36 @@ class RowConverter:
             count = rows - converted.num_rows
             drift = drift.merge(DriftReport(dropped_rows=count, dropped_reason=reason))
         return converted, drift
+
+    def _canonical_underlyings(self, arrays: dict[str, pa.Array]) -> None:
+        """Give a page's index underlyings their `I:` prefix (`wire_symbols.index_underlyings`).
+
+        Massive's options contracts list writes an index underlying bare (`SPX`); the CFI code
+        of each row says whether its underlying is an index. Only a page with both an
+        `Underlying` and a `Cfi` column is read. Logs one DEBUG line for a page where any value
+        changed, with the count and the first value.
+
+        Args:
+            arrays: The page's columns by name; its `Underlying` is replaced in place.
+        """
+        if UNDERLYING not in arrays or CFI not in arrays:
+            return
+        underlyings = arrays[UNDERLYING]
+        canonical = index_underlyings(underlyings, arrays[CFI])
+        changed = pc.fill_null(pc.not_equal(underlyings, canonical), fill_value=False)
+        count = pc.sum(changed).as_py() or 0
+        if count:
+            logger.debug(
+                "%s: %d of %d %s values from %s are indices by their CFI code and get the "
+                "I: prefix, the first %r",
+                self.dataset,
+                count,
+                len(underlyings),
+                UNDERLYING,
+                self.rest_path.template,
+                pc.filter(underlyings, changed)[0].as_py(),
+            )
+        arrays[UNDERLYING] = canonical
 
 
 def whole_bars(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
