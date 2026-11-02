@@ -89,9 +89,7 @@ def _script(server: FakeRestServer, held: dict[str, str]) -> None:
         snapshot("currencies", "tickers", {"ticker": "C:EURUSD"}),
     )
     timeframe = "REAL-TIME" if held["futures"] in {"advanced", "business"} else "DELAYED"
-    futures = Reply(
-        envelope([{"details": {"ticker": "ESZ6"}, "last_trade": {"timeframe": timeframe}}])
-    )
+    futures = Reply(envelope([{"ticker": "ESZ6", "last_trade": {"timeframe": timeframe}}]))
     server.reply("/futures/v1/snapshot", _REFUSED if held["futures"] == "basic" else futures)
     server.reply("/futures/v1/trades/ESZ6", answer("futures", 1))
 

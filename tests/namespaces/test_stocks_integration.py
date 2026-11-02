@@ -612,9 +612,11 @@ def test_stock_dividend_events_and_the_adjustment(
     """Whether `adjusted=true` applies a `stock_dividend` event of the splits dataset.
 
     Walks the most recent `stock_dividend` events of the year ending with the most recent whole
-    month, newest first, until one's ticker has day bars around its execution date (many such
-    tickers are thinly traded or delisted), at most `_DIVIDEND_TRIES` of them, and records that
-    ticker's day bars on both bases across the date. Skips as not exercised when none has bars.
+    month, newest first, until one's ticker has a day bar in the week before its execution date
+    (many such tickers are thinly traded or delisted), at most `_DIVIDEND_TRIES` of them, and
+    records each event's adjustment factor and that ticker's day bars on both bases across the
+    date. Skips as not exercised when none has such a bar; fails when the as-traded bars lack
+    the earlier day the adjusted ones hold.
     Reading it: prices before the date that differ by the event's factor mean such events are
     adjusted like splits; equal prices mean they are not, and the README's recipe should skip
     them.
@@ -630,19 +632,21 @@ def test_stock_dividend_events_and_the_adjustment(
             limit=_DIVIDEND_TRIES,
         ).fetch()
     )
-    evidence(f"stock_dividend events: {[(e['Symbol'], e['ExecutionDate']) for e in events]}")
+    listed = [(e["Symbol"], e["ExecutionDate"], e["HistoricalAdjustmentFactor"]) for e in events]
+    evidence(f"stock_dividend events (symbol, execution date, adjustment factor): {listed}")
     for event in events:
         day = date.fromisoformat(str(event["ExecutionDate"]))
         span = (day - timedelta(days=7), day + timedelta(days=3))
         symbol = str(event["Symbol"])
         adjusted = _days(live_session, symbol, span=span, adjusted=True, table_rows=table_rows)
-        if adjusted:
+        earlier = sorted(d for d in adjusted if d < day.isoformat())
+        if earlier:
             break
-        evidence(f"{symbol} has no day bar from {span[0]} to {span[1]}")
+        evidence(f"{symbol} has no day bar from {span[0]} to before {day}")
     else:
         pytest.skip(
             f"not exercised: none of {len(events)} stock_dividend events from {start} to {end} "
-            "has day bars around its date"
+            "has a day bar before its date"
         )
     traded = _days(live_session, symbol, span=span, adjusted=False, table_rows=table_rows)
     for row_day in sorted(adjusted):
@@ -650,7 +654,7 @@ def test_stock_dividend_events_and_the_adjustment(
             f"{symbol} {row_day}: adjusted close={adjusted[row_day]['Close']} "
             f"traded close={traded.get(row_day, {}).get('Close')}"
         )
-    assert traded, f"{symbol} has adjusted day bars but no as-traded ones"
+    assert earlier[-1] in traded, f"{symbol} has no as-traded bar of {earlier[-1]}"
 
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")

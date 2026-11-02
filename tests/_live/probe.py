@@ -250,7 +250,7 @@ def _contract_of(row: dict[str, Any]) -> str:
     """Return the contract a snapshot row names, or `""` when it names none.
 
     Args:
-        row: A row of SPY's option chain or of the futures snapshot.
+        row: A row of SPY's option chain, or of the futures snapshot (`_futures_contract`).
 
     Returns:
         Its `details.ticker`, or `""`.
@@ -380,6 +380,21 @@ def _session_volume(row: dict[str, Any]) -> float:
     return float(volume) if isinstance(volume, int | float) else 0.0
 
 
+def _futures_contract(row: dict[str, Any]) -> str:
+    """Return the contract a futures snapshot row names, or `""` when it names none.
+
+    The documentation's sample puts `ticker` on the row, while the OpenAPI specification puts
+    it under `details`, so both are read.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its `ticker`, else its `details.ticker`, else `""`.
+    """
+    return str(row.get("ticker") or "") or _contract_of(row)
+
+
 def _futures_plan(client: RestClient) -> str:
     """Probe the Futures plan: the ES snapshot (Starter), its front contract's trades and label.
 
@@ -402,12 +417,12 @@ def _futures_plan(client: RestClient) -> str:
     )
     if rows is None:
         return "basic"
-    labelled = [row for row in rows if _contract_of(row) and _recency_labels(row)]
+    labelled = [row for row in rows if _futures_contract(row) and _recency_labels(row)]
     if not labelled:
         msg = f"the ES snapshot names no contract with a recency label: {rows[:3]}"
         raise PlanProbeError(msg)
     front = max(labelled, key=_session_volume)
-    trades = ("/futures/v1/trades/{ticker}", {"ticker": _contract_of(front)}, {"limit": 1})
+    trades = ("/futures/v1/trades/{ticker}", {"ticker": _futures_contract(front)}, {"limit": 1})
     if entitled(client, trades, rows_prove=False) is None:
         return "starter"
     return "advanced" if "REAL-TIME" in _recency_labels(front) else "developer"

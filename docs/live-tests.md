@@ -90,8 +90,9 @@ consequences:
   stay within it, a test reads less on Basic than on a paid plan: fewer underlyings,
   symbols, or pages, or none of a part that repeats what another request shows (the
   underlying spellings read only the contracts of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`; the
-  split and dividend checks try only the newest event). Each such test's docstring says what
-  it leaves out, and its evidence has a line saying so. A unit test fails when a live test
+  split and cash-dividend checks try only the newest event, and the stock-dividend check at
+  most three). Each such test's docstring says what it leaves out, and its evidence has a line
+  saying so. A unit test fails when a live test
   that may read a class on Basic declares more than 5, and a live run skips such a test while
   its class is on Basic, with the reason "needs a paid <class> plan: N requests would take
   about M minutes on Basic". Each time a request waits, the run prints one line, such as
