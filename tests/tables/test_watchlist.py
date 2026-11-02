@@ -8,7 +8,7 @@ import time
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table, time_table, update_graph
+from deephaven import dtypes, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -93,8 +94,10 @@ def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
 
 
 @pytest.mark.parametrize("mode", list(OnError))
-def test_read_symbols_refuses_a_failed_table(dh_exec_ctx: object, mode: OnError) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_read_symbols_refuses_a_failed_table(
+    dh_exec_ctx: object, mode: OnError, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
         watch = dm.canonicalize_symbols(source, AssetClass.FOREX)
@@ -208,8 +211,10 @@ def watching(table: Table, mode: OnError = OnError.RAISE) -> Watching:
     return watch, seen, refused, skipped
 
 
-def test_a_watch_reports_changes_of_the_symbol_set(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_reports_changes_of_the_symbol_set(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watchlist.add(
         new_table([int_col("Key", [1, 2, 3]), string_col("Symbol", ["C:EURUSD", "C:EURUSD", None])])
     )
@@ -227,8 +232,10 @@ def test_a_watch_reports_changes_of_the_symbol_set(dh_exec_ctx: object) -> None:
     assert skipped == []
 
 
-def test_a_watch_refuses_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_refuses_a_late_row_that_is_not_canonical(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watch, seen, refused, skipped = watching(watchlist)
     watch.start()
     watchlist.add(
@@ -245,8 +252,10 @@ def test_a_watch_refuses_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -
     assert skipped == []
 
 
-def test_a_watch_skips_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_skips_a_late_row_that_is_not_canonical(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watchlist.add(new_table([int_col("Key", [1]), string_col("Symbol", ["eur/usd"])]))
     watch, seen, refused, skipped = watching(watchlist, OnError.LOG)
     watch.start()  # the replay reports the skipped row
@@ -268,8 +277,10 @@ def test_a_watch_skips_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -> 
     assert refused == []
 
 
-def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
-    watch, seen, _, skipped = watching(input_table({"Symbol": dtypes.string}))
+def test_an_empty_table_reports_nothing(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watch, seen, _, skipped = watching(dh_input_table({"Symbol": dtypes.string}))
     watch.start()
     assert seen == []
     assert skipped == []
@@ -300,8 +311,10 @@ def test_a_failing_watch_is_refused_and_logged_only_at_debug(
     assert refused == [expected]
 
 
-def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: object) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     scope = new_scope()
     with scope.open():
@@ -315,8 +328,10 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: obje
     scope.release()
 
 
-def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+def test_a_watch_lives_as_long_as_its_keeper(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     keeper_scope = new_scope()
     with keeper_scope.open():
         keeper = time_table("PT1s")
@@ -412,12 +427,15 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
 
 def test_watched_rows_keeps_the_watched_symbols_and_follows_the_watchlist(
     dh_exec_ctx: ExecutionContext,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     scope = new_scope()
     with scope.open():
-        prices = input_table({"Symbol": dtypes.string, "Price": dtypes.int32}, key_cols=["Symbol"])
+        prices = dh_input_table(
+            {"Symbol": dtypes.string, "Price": dtypes.int32}, key_cols=["Symbol"]
+        )
         prices.add(new_table([string_col("Symbol", ["A", "B", "C"]), int_col("Price", [1, 2, 3])]))
-        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
         kept = watched_rows(prices, watchlist)
     wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "B"])
@@ -460,7 +478,9 @@ def stamped(symbol: str, price: int) -> Table:
 
 
 def test_rows_since_added_hides_a_re_added_symbols_old_row(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     pins: list[LivenessScope] = []
     scope = new_scope()
@@ -468,7 +488,7 @@ def test_rows_since_added_hides_a_re_added_symbols_old_row(
         blink, publisher = blink_publisher(
             "latest", STAMPED, on_shutdown=lambda: None, release_later=pins.append
         )
-        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
         kept = rows_since_added(blink.last_by("Symbol"), watchlist)
 

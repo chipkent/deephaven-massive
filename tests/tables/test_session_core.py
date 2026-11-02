@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.request import StreamKey
     from deephaven_massive._tables.liveness import ResultRecord
@@ -796,6 +797,8 @@ def test_an_interrupt_while_a_reactive_key_is_stored_leaves_no_record(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # A reactive key holds a SymbolTable box, whose dataclass __hash__ is Python code, so the
     # key store in _claim is an interruptible checkpoint wherever the key's tuple hash is not
@@ -814,7 +817,7 @@ def test_an_interrupt_while_a_reactive_key_is_stored_leaves_no_record(
             super().__setitem__(key, value)
 
     monkeypatch.setattr(core, "_stream_ids", InterruptedStore())
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     with pytest.raises(KeyboardInterrupt):
         stream_query(massive_session, watchlist).blink()

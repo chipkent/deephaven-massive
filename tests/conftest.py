@@ -85,6 +85,7 @@ if TYPE_CHECKING:
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive import MassiveConfig, MassiveSession
     from deephaven_massive._enums import Subscription
@@ -454,6 +455,34 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
         return rows
 
     return to_pylist
+
+
+@pytest.fixture
+def dh_input_table(dh_exec_ctx: ExecutionContext) -> Callable[..., InputTable]:
+    """Return Deephaven's `input_table`, creating each table under the update graph's lock.
+
+    Every test creates its input tables through it. Deephaven stamps a new table with the
+    current update cycle's step, and a table created while a cycle runs can be refreshed in
+    that same cycle. A row added right after creation then makes the table notify twice in one
+    step, which Deephaven treats as fatal: the test process exits. No cycle runs while the
+    shared lock is held, so the stamp always precedes the table's first refresh. The library
+    creates its own input tables the same way.
+
+    Returns:
+        A function that takes `input_table`'s arguments (`col_defs`, and `key_cols` for a
+        keyed table) and returns the new table.
+    """
+    deephaven = importlib.import_module("deephaven")
+    update_graph = importlib.import_module("deephaven.update_graph")
+
+    def create(
+        col_defs: Mapping[str, Any], *, key_cols: str | list[str] | None = None
+    ) -> InputTable:
+        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+            table: InputTable = deephaven.input_table(dict(col_defs), key_cols=key_cols)
+        return table
+
+    return create
 
 
 _CONSOLE_COMMAND_TIMEOUT: Final = 30.0

@@ -17,7 +17,7 @@ from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
-from deephaven.update_graph import exclusive_lock
+from deephaven.update_graph import exclusive_lock, has_shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
@@ -412,6 +412,26 @@ def test_a_failed_table_creation_releases_the_scope(
     with pytest.raises(RuntimeError, match="no second table"):
         Diagnostics(dh_exec_ctx, "test diagnostics")
     assert scopes[0].j_scope is None  # released, with the first table in it
+
+
+def test_the_tables_are_created_under_the_update_graph_lock(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A table created while an update cycle runs can be refreshed in the step that stamped it;
+    # with the writer's first rows already queued, that refresh is a second notification in
+    # one step, which Deephaven treats as fatal. No cycle runs while the lock is held.
+    real_table = input_table
+    locked: list[bool] = []
+
+    def recording(col_defs: dict[str, DType], *, key_cols: list[str]) -> InputTable:
+        locked.append(has_shared_lock(dh_exec_ctx.update_graph))
+        return real_table(col_defs, key_cols=key_cols)
+
+    monkeypatch.setattr("deephaven_massive._tables.diagnostics.input_table", recording)
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics.release()
+    assert locked == [True, True, True]
+    assert not has_shared_lock(dh_exec_ctx.update_graph)  # let go once they exist
 
 
 def test_stop_does_not_wait(dh_exec_ctx: ExecutionContext) -> None:

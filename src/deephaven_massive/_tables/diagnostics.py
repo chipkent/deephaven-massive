@@ -23,11 +23,15 @@ rows hold the `Transport` member, and `as_row` writes its label. A stream's `Que
 over a long list stays readable.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
-thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
-`m.streams()` return a view of one, tracked like a live result (`SessionCore.diagnostics_view`),
-which keeps the session alive and current while it is held and keeps the table, with its final
-rows, after the scope is released. One daemon writer thread per session applies every row: the
-rest of the library hands it immutable row snapshots through a queue, so no caller, reaper,
+thread, under the update graph's shared lock, and released by `m.close()`. The lock keeps an
+update cycle from running while a table is created: Deephaven stamps a new table with the
+current cycle's step, and a cycle that then refreshed the table and found the writer's first
+rows would notify twice in one step, a fatal error that ends the process. Users never get the
+tables themselves: `m.connections()` and `m.streams()` return a view of one, tracked like a
+live result (`SessionCore.diagnostics_view`), which keeps the session alive and current while
+it is held and keeps the table, with its final rows, after the scope is released. One daemon
+writer thread per session applies every row: the rest of the library hands it immutable row
+snapshots through a queue, so no caller, reaper,
 or flush thread ever waits on the update graph for bookkeeping, and nothing is written from a
 Deephaven listener callback. The writer applies whatever is queued in one batch per table,
 keeping the latest row per key. Each row replaces the whole row for its key; the queue is first
@@ -1049,6 +1053,11 @@ class Diagnostics:
     ) -> None:
         """Create the three input tables inside a new session-owned scope and start the writer.
 
+        The tables are created under the update graph's shared lock, so this waits for a
+        running update cycle to end; it must not run on an update-graph thread or under a
+        library lock. A thread that already holds the update graph's lock, as the console
+        does, takes it again at once.
+
         If creating a table or starting the writer fails, the scope (with any table already
         created in it) is released and the exception propagates.
 
@@ -1066,18 +1075,26 @@ class Diagnostics:
         # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
         # read and written only by the writer thread.
         self._rate_due: float | None = None
+        # No update cycle runs under the lock, so none can refresh a table in the step that
+        # stamped it (see the module). The Java lock itself: `deephaven.update_graph.
+        # shared_lock` would wrap a failed creation's own error in a `DHError`.
+        lock = exec_ctx.update_graph.j_update_graph.sharedLock()
         self._scope = new_scope()
         try:
             with self._scope.open():
-                self._connections: InputTable = input_table(
-                    col_defs(CONNECTIONS), key_cols=list(CONNECTION_KEYS)
-                )
-                self._streams: InputTable = input_table(
-                    col_defs(STREAMS), key_cols=list(STREAM_KEYS)
-                )
-                self._rate_limits: InputTable = input_table(
-                    col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
-                )
+                lock.lock()
+                try:
+                    self._connections: InputTable = input_table(
+                        col_defs(CONNECTIONS), key_cols=list(CONNECTION_KEYS)
+                    )
+                    self._streams: InputTable = input_table(
+                        col_defs(STREAMS), key_cols=list(STREAM_KEYS)
+                    )
+                    self._rate_limits: InputTable = input_table(
+                        col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
+                    )
+                finally:
+                    lock.unlock()
             self._writer: QueueWorker[_Item] = QueueWorker(
                 exec_ctx,
                 name,

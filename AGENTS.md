@@ -178,6 +178,9 @@ These prevent deadlocks and leaks.
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.
+- **Create an input table under the UG lock**, in tests through the `dh_input_table` fixture.
+  Created while an update cycle runs, it can be refreshed in the step it was stamped with; a
+  row added at once then makes it notify twice in one step, and Deephaven exits the process.
 - **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
   flush routing are released there, not when a result record is released. The callback only
   updates the registry, queues a failure's pin release on the reaper, and calls

@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 import numpy as np
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 from deephaven.table_listener import listen
 from deephaven.time import to_j_instant, to_j_local_date, to_j_time_zone
 from deephaven.update_graph import shared_lock
@@ -891,8 +892,9 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
     rest: Recorder,
     flat: Recorder,
     monkeypatch: pytest.MonkeyPatch,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["MSFT", "AAPL"])]))
     reads: list[bool] = []
     iterate = Table.iter_tuple
@@ -1052,9 +1054,11 @@ def test_stream_verbs_build_results(
 
 
 def test_last_by_follows_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     current = trades(massive_session, watchlist).last_by()
     assert current.is_refreshing
     massive_session.release(current)
@@ -1238,9 +1242,11 @@ def assert_described(session: dm.MassiveSession, spec: DatasetSpec, table: Table
 
 
 def test_every_stream_shape_is_described(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     q, reactive = trades(massive_session), trades(massive_session, watchlist)
     results = [
@@ -1386,9 +1392,13 @@ FOREX_SPEC = DatasetSpec(
 
 
 def test_last_by_matches_the_rows_of_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    rows_when: RowsWhen,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["C:EURUSD", "C:GBPUSD"])]))
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
@@ -1422,9 +1432,13 @@ def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_rais
 
 
 def test_last_by_over_groups_of_symbols_filters_before_aggregating(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    rows_when: RowsWhen,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
     current = trades(massive_session, watchlist).last_by(by="Exchange")
     watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
