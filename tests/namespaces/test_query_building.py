@@ -32,7 +32,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
-from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
+from deephaven_massive._ingest.rest_requests import fetch_paths, own_symbols, plan_calls
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     ADJUSTED_PRICE,
@@ -1022,9 +1022,8 @@ def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:
 
 
 def _caps_each_symbol(spec: DatasetSpec) -> bool:
-    # Whether `limit` caps each symbol's (or each request's) rows when symbols are named: the
-    # reader caps each request that names one symbol, and each request of a dataset whose
-    # symbols overlap.
+    # Whether `limit` caps each symbol's rows when symbols are named: the reader caps each
+    # request on its own, and under a `limit` each request names one symbol.
     named = ("AAA", "BBB")
     calls = [
         call
@@ -1032,15 +1031,29 @@ def _caps_each_symbol(spec: DatasetSpec) -> bool:
         for call in plan_calls(
             spec,
             CATALOG.rest_path(template),
-            Request(symbols=named),
+            Request(symbols=named, limit=5),
             symbols=own,
             split=lambda symbol: (symbol, "USD"),
         )
     ]
-    return spec.symbols_overlap or any(call.symbol is not None for call in calls)
+    return any(len(own_symbols(spec, call.symbol, call.query)) == 1 for call in calls)
 
 
-def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> None:
+def _takes_all(m: dm.MassiveSession, spec: DatasetSpec) -> bool:
+    # Whether the dataset's method accepts `dm.ALL`, under which `limit` caps the total.
+    target: Any = m
+    for part in spec.name.split("."):
+        target = getattr(target, part)
+    try:
+        target(dm.ALL)
+    except (TypeError, ValueError) as error:
+        return "dm.ALL" not in str(error)
+    return True
+
+
+def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol(
+    massive_session: dm.MassiveSession,
+) -> None:
     wrong = []
     for spec, method in _dataset_methods():
         parameters = inspect.signature(method).parameters
@@ -1052,9 +1065,10 @@ def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> Non
         text = " ".join(found.group(1).split()) if found else ""
         symbols = parameters.get("symbols")
         each = symbols is not None and _caps_each_symbol(spec)
-        # `limit` caps the total on a dataset that sends its symbols together, and on one that
-        # caps each symbol when the symbols are optional and left out.
-        total = not each or symbols is None or symbols.default is not inspect.Parameter.empty
+        # `limit` caps the total on a dataset without symbols, and on one with symbols when they
+        # are optional and left out, or given as `dm.ALL`.
+        optional = symbols is None or symbols.default is not inspect.Parameter.empty
+        total = not each or optional or _takes_all(massive_session, spec)
         says_each = re.search(r"\b(each|per)\b", text, re.IGNORECASE) is not None
         says_total = re.search(r"\btotal\b", text) is not None
         if (says_each, says_total) != (each, total):

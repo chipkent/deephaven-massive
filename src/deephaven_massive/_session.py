@@ -385,17 +385,20 @@ class MassiveSession:
 
         One row per ticker: its latest trade, quote, minute and session bars, and, for options, the
         greeks, implied volatility, open interest, `Underlying`, and `OptionRoot`. A column another
-        class fills is null. Up to 250 tickers go in one request. A ticker Massive does not know or
-        the plan does not cover keeps its row, with `Error` and `Message` set.
+        class fills is null. Without a `limit`, up to 250 tickers go in one request; with one, each
+        ticker is its own request. A ticker Massive does not know or the plan does not cover keeps
+        its row, with `Error` and `Message` set.
 
         Args:
             symbols: Massive's exact tickers of any class (`AAPL`, `O:SPY251219C00600000`,
                 `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a table; a ticker without a prefix is a stock.
                 `dm.ALL` is refused: use a class's `snapshots(dm.ALL)`. See README.md#symbols.
-            sort: The field to sort by (`"ticker"`); past 250 tickers it orders each request's rows,
-                not all of them. See README.md#sort-order-limit.
+            sort: The field to sort by (`"ticker"`). It orders each request's rows, not all of
+                them: past 250 tickers, or for each ticker under a `limit`. See
+                README.md#sort-order-limit.
             order: The sort direction, per request the same way. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
+            limit: The most rows for each named ticker, each sent in its own request. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters; `type` is refused, since Massive rejects it beside
                 tickers. See README.md#filters.
 

@@ -1614,6 +1614,34 @@ def rest_session(
     m.close()
 
 
+def test_a_symbol_added_under_a_limit_leaves_the_other_symbols_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # One request for both tickers under a `limit` of 1 returns one row in all, so adding MSFT
+    # would push AAPL's row out of the cycle and REPLACE would delete it. Each ticker's own
+    # request keeps one row for each.
+    aapl = {"ticker": "AAPL", "cash_amount": 0.25}
+    msft = {"ticker": "MSFT", "cash_amount": 0.75}
+    fake_rest.reply(PATH, Reply(envelope([msft, aapl])))  # both tickers in one request
+    fake_rest.reply(f"{PATH}?limit=1&ticker.any_of=AAPL", Reply(envelope([aapl])))
+    fake_rest.reply(f"{PATH}?limit=1&ticker.any_of=MSFT", Reply(envelope([msft])))
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q = build_query(rest_session._core, DIVIDENDS, symbols=watch, limit=1)
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))
+    until(lambda: len(dh_to_pylist(watch)) == 2)
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25), ("MSFT", 0.75)])
+    rest_session.release(table)
+
+
 def test_query_poll_reads_the_fetch_path(
     *,
     rest_session: dm.MassiveSession,

@@ -85,6 +85,7 @@ def _list_spec(
     time_axis: tuple[str, str] | None = None,
     poll_mode: PollMode = PollMode.REPLACE,
     per_symbol: bool = False,
+    symbols_overlap: bool = False,
     symbols_as_written: bool = False,
 ) -> DatasetSpec:
     """Declare one partner dataset served by a single REST list path.
@@ -107,6 +108,8 @@ def _list_spec(
         time_axis: The wire parameter pair behind `start` and `end`, or None.
         poll_mode: The default `poll()` mode.
         per_symbol: True when the path takes one ticker per request.
+        symbols_overlap: True when a row lists every ticker it names (`tickers.any_of`), so
+            two named tickers' requests can return it (`DatasetSpec.symbols_overlap`).
         symbols_as_written: True when the symbols are a third party's global tickers, kept
             as Massive writes them (`DatasetSpec.symbols_as_written`).
 
@@ -129,6 +132,7 @@ def _list_spec(
         poll_mode=poll_mode,
         poll_keys=poll_keys,
         per_symbol=per_symbol,
+        symbols_overlap=symbols_overlap,
         page_size=page_size,
         symbols_as_written=symbols_as_written,
     )
@@ -249,6 +253,9 @@ BENZINGA_NEWS: Final = _list_spec(
     time="Published",
     time_axis=("published.gte", "published.lt"),
     symbol_param="tickers.any_of",
+    # A row lists every ticker it concerns, so under a `limit`, which sends each named
+    # ticker its own request, two tickers' requests can return it: it is kept once.
+    symbols_overlap=True,
     poll_mode=PollMode.APPEND,
     poll_keys=("BenzingaId",),
     # Below the documented 50,000: each article carries its whole HTML body, often several
@@ -449,7 +456,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -501,7 +509,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"rating_action": "upgrades"}`. See README.md#filters.
 
         Returns:
@@ -592,7 +601,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"last_updated"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"last_updated_gte": "2025-06-01"}`. See README.md#filters.
 
         Returns:
@@ -644,7 +654,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"positioning": "primary"}`. See README.md#filters.
 
         Returns:
@@ -696,7 +707,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"importance_gte": 3}`. See README.md#filters.
 
         Returns:
@@ -800,7 +812,8 @@ class _Benzinga(Namespace):
             sort: The wire field to sort by, such as `"published"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"channels_any_of": ["earnings"]}`. See README.md#filters.
 
         Returns:
@@ -883,7 +896,8 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -934,7 +948,8 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"effective_date": "2025-09-18"}`. See README.md#filters.
 
         Returns:
@@ -986,7 +1001,8 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1037,7 +1053,8 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1087,7 +1104,8 @@ class _EtfGlobal(Namespace):
             sort: The wire field to sort by, such as `"effective_date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
 
         Returns:
@@ -1169,7 +1187,8 @@ class _Tmx(Namespace):
             sort: The wire field to sort by, such as `"date"`. See
                 README.md#sort-order-limit.
             order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Such as `{"type": "earnings"}`. See README.md#filters.
 
         Returns:

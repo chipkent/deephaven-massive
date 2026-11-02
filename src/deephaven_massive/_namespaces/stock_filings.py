@@ -108,6 +108,7 @@ def _filing(
     nullable_poll_keys: Mapping[str, str] | None = None,
     keys: SourceKeys | None = None,
     page_size: int | None = None,
+    symbols_overlap: bool = False,
 ) -> DatasetSpec:
     """Return the spec of one filings dataset: axis `filing_date`, appended when polled.
 
@@ -123,6 +124,8 @@ def _filing(
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
         page_size: A page size below the largest `limit` the path documents, for rows that
             carry long text; None, the default, requests that largest `limit`.
+        symbols_overlap: True when a row lists every ticker it concerns (`tickers.any_of`),
+            so two named tickers' requests can return it (`DatasetSpec.symbols_overlap`).
 
     Returns:
         The spec.
@@ -139,6 +142,7 @@ def _filing(
         poll_keys=poll_keys,
         nullable_poll_keys={} if nullable_poll_keys is None else nullable_poll_keys,
         page_size=page_size,
+        symbols_overlap=symbols_overlap,
     )
 
 
@@ -183,6 +187,7 @@ DISCLOSURES_8K: Final = _filing(
     "disclosures_8k",
     _DISCLOSURES_8K,
     symbol_param="tickers.any_of",
+    symbols_overlap=True,
     poll_keys=("AccessionNumber", *_CATEGORIES, "SupportingText"),
     keys=_NO_KEYS,
     summary="Disclosures in 8-K current reports, classified by category, one row per disclosure.",
@@ -237,6 +242,7 @@ INITIAL_INSIDER_OWNERSHIP: Final = _filing(
     "initial_insider_ownership",
     _FORM_3,
     symbol_param="tickers.any_of",
+    symbols_overlap=True,
     poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
     nullable_poll_keys={**_INDIRECT, **_DERIVATIVE, "ExerciseDate": _DERIVATIVE_ONLY},
     keys=_NO_KEYS,
@@ -247,6 +253,7 @@ INSIDER_TRANSACTIONS: Final = _filing(
     "insider_transactions",
     _FORM_4,
     symbol_param="tickers.any_of",
+    symbols_overlap=True,
     poll_keys=(
         *_INSIDER_HOLDING,
         "RecordType",
@@ -291,6 +298,9 @@ INSIDER_ACTIVITY: Final = DatasetSpec(
     keys={(_R, _INSIDER_ACTIVITY): _NO_KEYS},
     time_axis=("transaction_date.gte", "transaction_date.lte"),
     symbol_param="tickers.any_of",
+    # A row lists every ticker it concerns, so under a `limit`, which sends each named
+    # ticker its own request, two tickers' requests can return it: it is kept once.
+    symbols_overlap=True,
     # One row sums every insider of one issuer on one transaction day. A filing that arrives
     # later for the same day revises that row's totals and `LastFilingDate`, so the row is
     # replaced, not appended.
@@ -305,6 +315,9 @@ INSIDER_HOLDINGS: Final = DatasetSpec(
     keys={(_R, _INSIDER_HOLDINGS): _NO_KEYS},
     time_axis=("last_filing_date.gte", "last_filing_date.lte"),
     symbol_param="tickers.any_of",
+    # A row lists every ticker it concerns, so under a `limit`, which sends each named
+    # ticker its own request, two tickers' requests can return it: it is kept once.
+    symbols_overlap=True,
     # One row is one reporting owner's current position in one issuer; each new filing by
     # that owner updates the row in place.
     poll_keys=("IssuerCik", "OwnerCik"),
@@ -378,7 +391,8 @@ def _insider_query(
         end: The last day of the dataset's date axis, or None.
         sort: The field to sort by, or None.
         order: The sort direction, or None.
-        limit: The cap on the total number of rows, or None.
+        limit: The cap on each named ticker's rows, or on the total rows without tickers, or
+            None.
         filters: The `filters` mapping, or None.
 
     Returns:
@@ -469,7 +483,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
                 README.md#filters.
 
@@ -526,7 +541,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"section": "risk_factors"}`. See
                 README.md#filters.
 
@@ -583,7 +599,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`. See
                 README.md#filters.
 
@@ -642,7 +659,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`. See
                 README.md#filters.
 
@@ -698,7 +716,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
                 README.md#filters.
 
@@ -819,7 +838,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
@@ -884,7 +904,8 @@ class _StockFilings(Namespace):
             end: The last filing date. See README.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"transaction_code": "P"}`. See
                 README.md#filters.
 
@@ -951,7 +972,8 @@ class _StockFilings(Namespace):
             sort: The field to sort by, such as `"net_value"`; the default is the newest transaction
                 date first. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
@@ -1023,7 +1045,8 @@ class _StockFilings(Namespace):
             sort: The field to sort by, such as `"shares_owned"`; the default is the most recent
                 latest-filing date first. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows per named symbol, or in total without symbols. See
+                README.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
