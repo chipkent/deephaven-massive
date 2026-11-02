@@ -636,17 +636,20 @@ def test_list_requests_send_symbols_sort_filters_and_page(
         limit=10,
         filters={"date_gte": date(2025, 1, 2), "rating_action_any_of": ["upgrades", "downgrades"]},
     ).fetch()
-    assert fake_rest.get_queries() == [
+    # A `limit` caps each named ticker's rows, so each ticker is its own request; the two run
+    # concurrently, so they are compared in ticker order.
+    assert sorted(fake_rest.get_queries(), key=lambda sent: sent[1]["ticker.any_of"]) == [
         (
             "/benzinga/v1/ratings",
             {
-                "ticker.any_of": ["AAPL,MSFT"],
+                "ticker.any_of": [ticker],
                 "sort": ["date.desc"],  # the endpoint takes the direction as a suffix
                 "date.gte": ["2025-01-02"],
                 "rating_action.any_of": ["upgrades,downgrades"],
                 "limit": ["10"],  # a row cap below the page size shrinks the page
             },
         )
+        for ticker in ("AAPL", "MSFT")
     ]
 
 

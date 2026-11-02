@@ -1061,14 +1061,16 @@ List datasets take `sort`, the field to order by, as Massive names it (such as
 the fields its endpoint documents, listed on its reference page; a dataset whose endpoint cannot
 sort has neither argument.
 
-`limit` caps the rows: the total across every symbol and page, so a symbol that comes first can
-use up the whole cap. Some datasets cap each request instead, because each request names one
-symbol: the indicators, `reference.tickers` and `stocks.ipos` when tickers are named, and
-`reference.news`, whose `sort` and `order` apply to each ticker's request too. On
-`options.contracts` with explicit symbols, each contract is one row, so `limit` has no effect.
-Each dataset's `help()` says when its `limit` is per symbol. A `fetch()` that follows a live
-symbol table caps each symbol's rows on every dataset. `limit` keeps the first rows in
-Massive's order, so ask for newest first when you want the latest:
+`limit` caps the rows of each symbol you name. Each named symbol gets its own request with its
+own cap, so `m.stocks.dividends(["AAPL", "MSFT", "KO"], limit=4)` returns up to four dividends
+of each, and a symbol with many rows never crowds out the others. The rows come symbol by
+symbol, with `sort` and `order` applied within each. Without named symbols (`symbols` left out,
+or `dm.ALL`), `limit` caps the total rows. Where one row lists several tickers (news, financial
+statements, insider filings), a row two of your tickers share appears once. One request per
+symbol counts against a Basic plan's five requests a minute, so a long list under a `limit`
+takes longer there. On `options.contracts` with explicit symbols, each contract is one row, so
+`limit` has no effect. `limit` keeps the first rows in Massive's order, so ask for newest first
+when you want the latest:
 `m.reference.news("AAPL", sort="published_utc", order=dm.Order.DESC, limit=50).poll(60)`. A news
 or filings poll needs a `start` or a `limit`: without either, every cycle would re-read the whole
 archive.
