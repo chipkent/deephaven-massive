@@ -667,6 +667,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
 | `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
+| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. `fetch()` and `poll()` of the two crypto REST paths that need the split are not covered. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 | `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
@@ -1427,9 +1428,17 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`watched_rows(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted from
-the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
-removed and re-added shows its stale row until its next tick. With keys that span symbols (for
+`rows_since_added(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted
+from the result. The underlying `last_by` state keeps every symbol ever seen, so the filter also
+hides a row received before its symbol last joined the table: a symbol that is removed and
+re-added shows no row until its next tick. `rows_since_added` (`_tables/watchlist.py`) joins
+each row with the time its symbol joined, computed by the engine in the cycle the symbol appears
+(`symbol_table.select_distinct("Symbol").update("AddedAt = now()")`, under a hidden name), and
+keeps rows with `TimestampInsert >= AddedAt`. The time comes from the engine, not from a library
+publisher, which would lag the table by a cycle and let the stale row through; the stream
+subscribes the symbol in reaction to the same change, so every row received for it comes later.
+A row a shared stream received just before the symbol joined is hidden until the next one. With
+keys that span symbols (for
 example `by="Exchange"`) the filter comes first, `watched_rows(blink,
 symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
@@ -1780,7 +1789,7 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   the class day zone, whatever `/prev` stamps, `TimestampEnd` 00:00 of the next day (01:00 New
   York time for indices); a stamp at a time of day Massive is not known to use is served as
   sent, with `TimestampEnd` a day later and a null `Date`, and logs one WARNING per form of
-  stamp per session (decision 81). Stock and
+  stamp per session (decision 82). Stock and
   option bars are split-adjusted unless `adjusted=False`, and every page's `adjusted` echo is
   checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, which
   the caller never passes, so the repr is the call alone: `m.stocks.previous_day_bar('AAPL')`.
@@ -2041,7 +2050,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryQuery | `C` | history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
 | `last_quote(symbols)` | Query | | `/v1/last_quote/currencies/{from}/{to}` per pair | |
-| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp is kept as sent with a null `Date` and an end a period later, and warns (decision 81), [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp is kept as sent with a null `Date` and an end a period later, and warns (decision 82), [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{C:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
@@ -2055,11 +2064,11 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `trades(symbols)` | StreamHistoryQuery | `XT` | history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `last_trade(symbols)` | Query | | `/v1/last/crypto/{from}/{to}` per pair | |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, kept at its stamp with a null `Date` and an end a period later, and logs one WARNING per form of stamp per session naming the symbol and the stamp (decision 81); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, kept at its stamp with a null `Date` and an end a period later, and logs one WARNING per form of stamp per session naming the symbol and the stamp (decision 82); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{X:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent; a row whose `isUTC` is false keeps its `Date` and `IsUtc`, gets the widest window its date has in any time zone, from 14 hours before 00:00 UTC to 12 hours after the next, and logs one WARNING per dataset per session, decision 81) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
+| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent; a row whose `isUTC` is false keeps its `Date` and `IsUtc`, gets the widest window its date has in any time zone, from 14 hours before 00:00 UTC to 12 hours after the next, and logs one WARNING per dataset per session, decision 82) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 
@@ -2129,13 +2138,13 @@ for stocks and 01:00 for indices. So a value of a day or longer is checked by th
 for its symbols' class (`row_times.stamp_rule` with the class): 00:00 in the day zone, or
 the indices' 01:00, on its period's first day. A value at any other stamp is served too, as
 sent: it keeps the stamp, ends one period later, has a null `Date`, and logs one WARNING per
-form of stamp per session naming the dataset, the path, the symbol, and the stamp (decision 81);
+form of stamp per session naming the dataset, the path, the symbol, and the stamp (decision 82);
 [section 23](#23-open-verification-items) item 61 checks it live.
 
 `fetch()` and `poll()` return what Massive reports now, the current period's value included,
 which changes until the period ends; `history()` is not offered, and would return finished
 periods only. Owner decision D2, 2026-11-02: keep the unfinished value; filter with
-`TimestampEnd <= TimestampInsert` (decision 82). The `TimestampEnd` description of every
+`TimestampEnd <= TimestampInsert` (decision 83). The `TimestampEnd` description of every
 dataset that has one says so, and each indicator docstring gives the filter. A
 `poll(mode=APPEND)` table keeps the first unfinished value it sees for a period, since its
 identity, `Symbol` and `TimestampStart`, does not change as the value does, so that table never
@@ -2435,9 +2444,24 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   keeps no list of quote currencies of its own. The session reads that list once, on first
   need, through its REST client, and keeps it for its life; a failed read is not kept, so the
   next need reads it again. A stream needs it when it starts or when a symbol table adds a
-  crypto ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
-  stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
-  currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
+  crypto ticker (on the session's `symbol changes` worker, section 18.1). At the start, a failed
+  read refuses the stream with the read's `MassiveError`, and a ticker the list does not hold,
+  or whose currencies do not join to it, refuses it with a `MassiveError` naming the ticker.
+  That holds for a list in code. A pair of a symbol table, present at the call or added later,
+  follows `MassiveConfig.unlisted_symbols` instead, as a misspelled row follows
+  `noncanonical_symbols`: under `LOG`, the default, and `IGNORE` the pair is skipped, never
+  subscribed, logged once (at WARNING under `LOG`), and, for a reactive table, listed in the
+  stream's `Error` in `m.streams()` (its own warning part) until the table no longer holds it,
+  while the stream keeps its other pairs; a table whose pairs are all unlisted raises at the
+  call. Under `RAISE` such a pair raises at the call and fails the stream when added later. A
+  skipped pair stays skipped until its row is deleted and added again. For a pair added later,
+  a failed read of the list is retried for the change's whole batch of tickers, after 2 s and
+  8 s (`PAIR_RETRY_DELAYS`), each try reading the list at most once for the tickers not yet
+  split; the tickers still unsplit after the last try are then treated as unlisted, and the
+  `Error` says the list could not be read. A rejected key or a plan without reference data
+  ends the retries at once. At the call there is no retry: a failed read treats the pairs it
+  could not split as unlisted, and the stream's worker looks a reactive table's skipped pairs
+  up again, with the retries, as it subscribes the table's rows. Nothing
   falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
   fails a `poll()` table, since every later cycle would read the same list. Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
@@ -2652,7 +2676,7 @@ has the same value set as that parameter.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 | `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
-| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unreadable_symbols`, and `unavailable_symbols`, and their `DEEPHAVEN_MASSIVE_*` variables |
+| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, and `unavailable_symbols` |
 | `ErrorCause` | EXPECTED, USER_DEFECT, LIBRARY_DEFECT | `expected`, `user_defect`, `library_defect` (no wire value; defined in `_errors.py`, beside the exception it describes) | `MassiveError.cause`, read only; it sets the level a failure is logged at |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
@@ -2916,7 +2940,7 @@ then computed from that day ("Time columns" below). The classes stamped are exac
 those of `dates.DAY_ZONES`. One call then returns the same rows whichever source answers it.
 Massive stamps the same bar differently by source, so each known stamp is moved back to 00:00
 of the day it falls on. Bars are always served; an unexpected stamp warns, never refuses
-(decision 70). A stamp Massive is not known to use is not moved (decision 81): which day it
+(decision 70). A stamp Massive is not known to use is not moved (decision 82): which day it
 covers would be a guess, and a wrong guess could put `TimestampEnd` before the data closed, a
 look-ahead. The row keeps Massive's stamp as `TimestampStart`, has a null `Date`, and ends at
 the stamp plus its period on the zone's wall clock (`row_times._plus_period`; a month's 31st
@@ -2998,7 +3022,7 @@ first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `Timestam
   the bar, and Massive may correct a bar afterwards. Bars have no plain `Timestamp`. A row
   read before its window ended has `TimestampInsert` before `TimestampEnd` and can still
   change, so `t.where("TimestampEnd <= TimestampInsert")` keeps only rows read after their
-  window ended; every `TimestampEnd` description says so (decision 82). A
+  window ended; every `TimestampEnd` description says so (decision 83). A
   `poll(mode=APPEND)` table of indicators keeps the first unfinished value it sees and never
   receives the finished one, so the filter drops that period for good. The test is exact by
   the library's windows except where it reads the local clock (which can be off), for a row
@@ -3092,12 +3116,17 @@ session and the library has no holiday calendar to rule that out, and a wrong da
 than none. Its `Timestamp` and every other column are kept, and the streams' `Error` is not
 touched: the stream is healthy. A miss whose lookup is still running logs at DEBUG; any other
 logs at WARNING once per product (or contract) and rule date. So that a stream's first rows
-are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
-asks for them and waits, before it subscribes, until their products and schedules are loaded
-or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
-no Deephaven call, so a console command holding the update graph's lock may run it, and such a
-caller waits at most 1 s (`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it
-waits. A wait
+are dated, a futures stream verb with explicit contracts asks for them and waits, before it
+subscribes, until their products and schedules are loaded or failed, at most 15 s
+(`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes no Deephaven call, so a
+console command holding the update graph's lock may run it, and such a caller waits at most 1 s
+(`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it waits. The contracts a
+symbol table holds when the stream opens, and those it adds later, wait the same 15 s on the
+session's `symbol changes` worker (section 18.1), never on the table's listener, which only
+starts their lookups: the verb returns at once, and each contract subscribes once its schedule
+loads. That worker runs each
+session's futures and crypto changes one at a time, in order, so a removal never overtakes an
+addition still waiting, and a contract the table no longer holds is never subscribed again. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
 the gap between one loaded session's close and the next one's first event gets the next
 session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
@@ -3990,7 +4019,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   class but futures, start at 00:00 of their day in the class day zone: every known stamp is
   moved there, and one Massive is not known to use for the class is kept as sent and logs one
   WARNING per form of stamp per session naming the path, the symbol, and the stamp
-  ([section 12](#12-timestamp-units-and-day-boundaries), decisions 70 and 81). Bars are stamped before
+  ([section 12](#12-timestamp-units-and-day-boundaries), decisions 70 and 82). Bars are stamped before
   `keep_window` drops the rows outside the window, so an unknown stamp outside it still warns.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
@@ -4533,7 +4562,7 @@ is no queue, rotation, JSON, custom field, or context variable: each line costs 
 
 **Correlation.** Every library thread is named after what owns it. A session's own threads are
 `massive #<session> <role>`: `reaper`, `diagnostics`, `poll-<stream id>` and its pool
-`poll-<stream id> rest_<n>`, `poll watch`, `crypto pairs`, and the call pools below. The threads of a
+`poll-<stream id> rest_<n>`, `poll watch`, `symbol changes`, and the call pools below. The threads of a
 connection group, which serve every session sharing its connections, are
 `massive group #<group> <role>`: `ws <host>/<cluster>`, `flush <host>/<cluster>`,
 `start <host>/<cluster>`, `move <host>/<cluster>`, and `futures schedules`. Each static
@@ -4701,7 +4730,7 @@ without the GIL.
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
@@ -7342,7 +7371,7 @@ document already reflects them.
     Massive is known to use for its class and timespan. Every bar of a day or longer of a class
     with a day zone is stamped the same way, at 00:00 of the day its stamp falls on in the class
     day zone, the best rule available, and its `Date`, `TimestampStart`, and `TimestampEnd`
-    follow from that day ([section 12](#12-timestamp-units-and-day-boundaries)); decision 81
+    follow from that day ([section 12](#12-timestamp-units-and-day-boundaries)); decision 82
     replaces this for a stamp Massive is not known to use, which is now kept as sent. An
     unexpected stamp logs one WARNING per dataset and timespan per session, through the session's
     once-per-session warnings: it names the dataset, the source, the stamp, and the stamps
@@ -7386,7 +7415,7 @@ document already reflects them.
     `daily_open_close` row whose `isUTC` is false is returned with the UTC day's window and
     logs one WARNING per dataset per session, through the session's once-per-session warnings
     as decision 70's bar stamps do: its day boundary differs from the other crypto tables', so
-    its dates may not line up with theirs. It never raises. Decision 81 replaces its window.
+    its dates may not line up with theirs. It never raises. Decision 82 replaces its window.
 78. **`AUTO` serves from whichever source can; it errors only when none can** (2026-10-30,
     owner). `history()` must return the data whenever any source can, and Massive's publish
     times are approximate and change, so nothing is guessed from the clock: the
@@ -7429,7 +7458,17 @@ document already reflects them.
     since the log belongs to the process, not to a session. The vocabulary layer's rule becomes
     "no network I/O and no threads", since `_config` reads the file
     ([section 5](#5-massiveconfig)).
-81. **A period stamped at an unexpected time keeps Massive's stamp** (owner decision D4,
+81. **A symbol problem is logged and the table continues, with an `OnError` setting for other
+    behavior** (2026-11-02, owner standard). Every per-symbol problem follows the pattern of
+    `noncanonical_symbols`: `LOG`, the default, skips the symbol, warns once per value, lists
+    it in the stream's `m.streams()` `Error`, and keeps running; `IGNORE` skips it quietly;
+    `RAISE` raises at the call and fails the result for a symbol added later; a table whose
+    symbols are all bad raises at the call. A crypto pair of a symbol table that Massive's
+    crypto ticker list does not hold follows it through `MassiveConfig.unlisted_symbols`, for
+    pairs present at the call and added later; a temporary failure to read the list is retried,
+    bounded, and then treated the same way, with an `Error` that says the list could not be
+    read ([section 10](#10-symbols-and-all)).
+82. **A period stamped at an unexpected time keeps Massive's stamp** (owner decision D4,
     2026-11-02; replaces part of decisions 70 and 77). A bar or indicator value of a day or
     longer whose stamp Massive is not known to use for its class and timespan is no longer
     moved to 00:00 of the day it falls on, which guessed the day and, when the guess was wrong,
@@ -7440,14 +7479,14 @@ document already reflects them.
     symbol, the raw stamp, the known stamps, and that `Date` is left empty. Keeping such a stamp
     fails and skips nothing: the row is supplied with Massive's stamp and a null `Date`, so it
     is not a one-bad-row failure and needs no `OnError` setting; the WARNING is right. A crypto
-    summary not in UTC follows the same rule of keeping Massive's data rather than guessing. A crypto `daily_open_close` row whose
-    `isUTC` is false keeps Massive's date and `IsUtc`, and its window is the widest its date has
-    in any time zone, 00:00 at UTC+14 to 24:00 at UTC-12, with the same kind of WARNING. Known
-    stamps still move to 00:00. The bars stay served (decision 70); `history()` keeps them by
+    summary not in UTC follows the same rule of keeping Massive's data rather than guessing: a
+    crypto `daily_open_close` row whose `isUTC` is false keeps Massive's date and `IsUtc`, and
+    its window is the widest its date has in any time zone, 00:00 at UTC+14 to 24:00 at UTC-12,
+    with the same kind of WARNING. Known stamps still move to 00:00. The bars stay served (decision 70); `history()` keeps them by
     the whole-window rule, on the conservative window. The runtime drift records
     (`SchemaDrift`) hold field drift of the wire payloads only, so the WARNING is the record
     ([section 12](#12-timestamp-units-and-day-boundaries)).
-82. **Indicators keep the current period's unfinished value** (owner decision D2, 2026-11-02:
+83. **Indicators keep the current period's unfinished value** (owner decision D2, 2026-11-02:
     keep the unfinished value; filter with `TimestampEnd <= TimestampInsert`). `fetch()` and
     `poll()` return what Massive reports now, today's still-changing value included, as
     before. Every `TimestampEnd` description says that a row read before its window ended has
@@ -7467,7 +7506,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, is served at its own stamp with a null `Date` and an end a period later, with one WARNING per form of stamp per session (decision 81). `AUTO` picks the source as for every dataset, so the stamp rule alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all warn, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time are served at their stamps with one WARNING | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
+| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, is served at its own stamp with a null `Date` and an end a period later, with one WARNING per form of stamp per session (decision 82). `AUTO` picks the source as for every dataset, so the stamp rule alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all warn, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time are served at their stamps with one WARNING | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; on a mismatch the overflow check and the [1990, 2100] bound drop every row and the page raises `RowDataError` | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path is masked | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | The magnitude rule (unit `MS_OR_NS`, written by the spec refresh), as for items 21 and 22; the unit found is logged once per column | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
