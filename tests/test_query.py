@@ -876,6 +876,8 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
     q = trades(massive_session)
     with pytest.raises(TypeError, match=r"source must be dm\.HistorySource"):
         q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"))
+    with pytest.raises(TypeError, match=r"reread must be dm\.Reread"):
+        q.history("2025-03-03", "2025-03-03", reread=cast("dm.Reread", "never"))
     with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
         q.history("2025-03-03T09:30", "2025-03-04")
     with pytest.raises(ValueError, match="must not be after end"):
@@ -885,15 +887,15 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
     assert flat.calls == []
 
 
-def test_history_reads_a_reactive_symbol_table_once_for_every_source(
+def test_history_reads_a_static_symbol_table_once_for_every_source(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
     flat: Recorder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["MSFT", "AAPL"])]))
+    # A refreshing table is followed instead (tests/tables/test_followed_read.py).
+    watchlist = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
     reads: list[bool] = []
     iterate = Table.iter_tuple
     expected = massive_session._core.exec_ctx.j_exec_ctx

@@ -133,6 +133,7 @@ def test_the_session_exposes_no_introspection_attributes(
         "snapshots",
         "stocks",
         "streams",
+        "symbol_reads",
     ]
 
 

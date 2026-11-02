@@ -463,11 +463,15 @@ class MassiveSession:
 
     @raises_through(SessionCore.diagnostics_view)
     def streams(self) -> Table:
-        """Return the live diagnostics table of streams, `poll()` tables, and background reads.
+        """Return the live diagnostics table of streams, `poll()` tables, and reads.
 
-        One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), and background
-        read (`read`, from `fetch(wait=False)` or `history(..., wait=False)`). A stream or poll
-        is `RUNNING`; a read is `LOADING`, then `DONE`, or `FAILED` with the error. `Error` also
+        One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), background read
+        (`read`, from `fetch(wait=False)` or `history(..., wait=False)`), and followed read
+        (`read`, a `history()` of a refreshing symbol table). A stream or poll is `RUNNING`; a
+        background read is `LOADING`, then `DONE`, or `FAILED` with the error; a followed read
+        is `LOADING` while a symbol is queued, loading, or waiting to retry, and `RUNNING` once
+        every symbol has landed or failed, and its `Error` groups its failed and retrying
+        symbols by cause (`m.symbol_reads()` has one row per symbol). `Error` also
         shows warnings that do not stop a stream: deferred options contracts; skipped symbol-table
         rows that are not Massive's exact tickers; topics Massive has not acknowledged (`no
         acknowledgement from Massive for ...`, re-sent until it does); a connection that is down
@@ -482,18 +486,19 @@ class MassiveSession:
         it: README.md#diagnostics.
 
         Returns:
-            A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that
-            built the query, such as `m.stocks.trades('AAPL')`), `SymbolCount` (null for
-            `dm.ALL`), `Symbols`, `HeldResults`, `Deferred`, `Transport` (`WebSocket` for a
-            stream, `REST` for a poll, and `REST` or `flat files` for a background read,
-            whichever it reads), `Host`, `Path`, `Recency` (`REALTIME`, `DELAYED`, or
-            `UNKNOWN`, which is never real-time; null for data of no single subscription and
-            for a background read), `RowsPublished`,
-            `RequestsPerCycle`, `State` (`RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
-            `CLOSED`), `Error`, `Gaps` (`<start> to <end>` in UTC, the latest five), `CreatedAt`,
-            and `SchemaDrift` (`transport:field+`, `transport:field-`, `transport:field?`,
-            `transport:field~`, and `transport:<n> rows dropped`, as in `connections()`). Each
-            column's tooltip says what it holds.
+            A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that built
+            the query, such as `m.stocks.trades('AAPL')`), `SymbolCount` (null for `dm.ALL`),
+            `Symbols`, `HeldResults`, `Deferred`, `Transport` (`WebSocket` for a stream, `REST` for
+            a poll, and `REST` or `flat files` for a background read, whichever it reads), `Host`,
+            `Path`, `Recency` (`REALTIME`, `DELAYED`, or `UNKNOWN`, which is never real-time; null
+            for data of no single subscription and for a background read), `RowsPublished` (a
+            followed read's: the rows now in its result), `Loading` (a followed read's symbols
+            queued, loading, or waiting to retry; null on every other row), `RequestsPerCycle`,
+            `State` (`RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or `CLOSED`), `Error`,
+            `Gaps` (`<start> to <end>` in UTC, the latest five), `CreatedAt`, and `SchemaDrift`
+            (`transport:field+`, `transport:field-`, `transport:field?`, `transport:field~`, and
+            `transport:<n> rows dropped`, as in `connections()`). Each column's tooltip says what it
+            holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -525,6 +530,45 @@ class MassiveSession:
         """
         return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
 
+    @raises_through(SessionCore.diagnostics_view)
+    def symbol_reads(self) -> Table:
+        """Return the live diagnostics table of each symbol of each followed `history()`.
+
+        A `history()` whose `symbols` is a refreshing table follows it: it reads each symbol as
+        it is added, and drops each one removed. This table has one row per symbol of each such
+        result, so a user sees which symbols are loading, which failed, and why. A symbol is
+        `QUEUED` when its row enters the symbol table, `LOADING` while it is read, and `DONE`
+        once its rows are in the result (0 rows when Massive has no data for it). A failure that
+        may pass (a rate limit beyond the read's patience, a network failure, a server error)
+        makes it `RETRYING`: it is read again 1, 5, and 15 minutes later, and `FAILED` after the
+        last; any other failure makes it `FAILED` at once. Deleting and re-adding its row reads
+        it again. The rows stay for the session's life, also after their result is released.
+        Each call returns a new live view; after `close()` it keeps its final rows. How to read
+        it: README.md#diagnostics.
+
+        Returns:
+            A live table keyed by `StreamId` (the result's row in `m.streams()`) and `Symbol`
+            (the canonical symbol), with `Dataset`, `State` (`QUEUED`, `LOADING`, `RETRYING`,
+            `DONE`, `FAILED`, `REMOVED` once its row left the symbol table, `STOPPED` once
+            the result was released and nothing uses it, or `CLOSED`), `Transport` (the
+            source of its latest read: `REST`, `flat files`, or `flat files and REST` when the
+            files of some days were missing), `AddedAt` (when its row last entered the symbol
+            table), `ReadAt` (when the download whose rows the result holds began: the rows
+            are Massive's answer as of then), `Rows` (its rows in the result), `Attempts`
+            (reads started since it was last added), `NextAttemptAt` (set only while
+            `RETRYING`), `Error` (its latest failure, with the HTTP status, the path, and the
+            `request_id`; null once a read succeeds), and `UpdatedAt`.
+
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
+
+        Example:
+            ::
+
+                failed = m.symbol_reads().where("State = `FAILED`")
+        """
+        return self._core.diagnostics_view(self._core.diagnostics.symbol_reads)
+
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
@@ -548,8 +592,9 @@ class MassiveSession:
             raise ValueError(
                 "table is not a live result of this session: release() takes a table that this "
                 "session returned from blink(), append_only(), ring(), last_by(), poll(), "
-                "fetch(wait=False), history(..., wait=False), connections(), streams(), or "
-                "rate_limits(). For a table derived from one, release the live table it came "
+                "fetch(wait=False), history(..., wait=False), history() of a refreshing "
+                "symbol table, connections(), streams(), rate_limits(), or symbol_reads(). "
+                "For a table derived from one, release the live table it came "
                 "from; a static fetch() or history() table has nothing to release"
             )
 

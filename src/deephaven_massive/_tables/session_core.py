@@ -17,9 +17,13 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
   the order the registry changed;
 - the worker-table registry: the `m.streams()` row of every *worker table*, a table one library
-  thread of its own fills (a `poll()` table's poller, or a background read's thread for
-  `fetch(wait=False)` and `history(..., wait=False)`), from its creation until its result is
-  released and its blink table has shut down;
+  thread of its own fills (a `poll()` table's poller, a background read's thread for
+  `fetch(wait=False)` and `history(..., wait=False)`, or the follow coordinator for a
+  `history()` of a refreshing symbol table), from its creation until its result is released
+  and its blink table has shut down;
+- the latest `m.symbol_reads()` row of every symbol of every followed read, kept for the
+  session's life so `close()` can mark the unfinished ones `CLOSED`, and the session's follow
+  coordinator (`follow_coordinator.py`), which owns the followed reads' per-symbol state;
 - the result registry and the reaper thread (`liveness.py`);
 - the diagnostics tables and their writer thread, the count of diagnostics views users hold, and
   the drift registry that every transport reports schema drift to (`diagnostics.py`);
@@ -107,6 +111,8 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
+    SymbolReadRow,
+    SymbolReadState,
     describe_symbols,
     shown_query,
 )
@@ -116,6 +122,7 @@ from deephaven_massive._tables.execution_context import (
     refuse_update_graph_thread,
     update_cycle,
 )
+from deephaven_massive._tables.follow_coordinator import FollowCoordinator
 from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
 
 if TYPE_CHECKING:
@@ -162,6 +169,16 @@ _live: dict[int, SessionCore] = {}
 _ACTIVE: Final = frozenset({StreamState.RUNNING, StreamState.LOADING})
 """The states of a table that is still publishing, or still loading: the ones a release marks
 `RELEASED`."""
+
+_FINAL_SYMBOL_READS: Final = frozenset(
+    {
+        SymbolReadState.FAILED,
+        SymbolReadState.REMOVED,
+        SymbolReadState.STOPPED,
+        SymbolReadState.CLOSED,
+    }
+)
+"""The `m.symbol_reads()` states a close leaves as they are: the symbol's following has ended."""
 
 _FINAL: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
 """The states no failure changes any more: a failed or closed table, and a read whose rows have
@@ -408,11 +425,16 @@ class SessionCore:
             _release_on, self._reaper, exec_ctx
         )
         self.drift: Final = DriftRegistry()
+        # Owns every followed read's per-symbol state; starts its thread with the first one.
+        self.follows: Final = FollowCoordinator(exec_ctx, thread_prefix, config.max_concurrency)
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamEntry] = {}
         # The worker tables (`poll()` tables and background reads), by stream id; they have no
         # key and no handle.
         self._workers: dict[int, _WorkerState] = {}
+        # The latest `m.symbol_reads()` row of each (followed read, symbol), for the session's
+        # life; guarded by `registry_lock`.
+        self._symbol_reads: dict[tuple[int, str], SymbolReadRow] = {}
         # How many diagnostics views (`diagnostics_view`) users hold.
         self._views = 0
         # Whether the core is in the live set; changed only by `_sync_live`.
@@ -1369,21 +1391,69 @@ class SessionCore:
         self.diagnostics.write(row)
         return True
 
+    def update_followed_read(self, stream_id: int, update: StreamUpdate, *, loading: bool) -> None:
+        """Apply a followed read's progress to its `m.streams()` row, and its state.
+
+        The follow coordinator calls this after each change of the read's symbols. Like
+        `update_streams` it sets the fields `update` names; unlike it, it also sets `State`:
+        `LOADING` while a symbol is queued, loading, or waiting to retry, `RUNNING` once every
+        symbol has landed or failed. Only a `LOADING` or `RUNNING` row changes state: a
+        released, failed, or closed one keeps its state. One short critical section under
+        `registry_lock`; an id that has left the registry is ignored. No Deephaven call, no
+        wait.
+
+        Args:
+            stream_id: The followed read's `StreamId`.
+            update: The fields to set.
+            loading: True while any current symbol is queued, loading, or waiting to retry.
+        """
+        state = StreamState.LOADING if loading else StreamState.RUNNING
+
+        def change(row: StreamRow) -> StreamRow:
+            row = update.apply(row)
+            return replace(row, state=state) if row.state in _ACTIVE else row
+
+        with self.registry_lock:
+            self._update_worker(stream_id, change)
+
+    def write_symbol_reads(self, rows: Sequence[SymbolReadRow]) -> None:
+        """Record and queue `m.symbol_reads()` rows, unless the session closed.
+
+        The follow coordinator calls this for every change of a followed read's symbols. The
+        rows are kept for the session's life, so `close()` can write every unfinished symbol
+        `CLOSED`; a row the close wrote `CLOSED` is never replaced, so a read that lands while
+        the session closes leaves it `CLOSED`, and after the close nothing is written. One
+        short critical section under `registry_lock`. No Deephaven call, no wait.
+
+        Args:
+            rows: The new rows, each the whole current state of its (read, symbol).
+        """
+        with self.registry_lock:
+            if self._closed:
+                return
+            for row in rows:
+                key = (row.stream_id, row.symbol)
+                current = self._symbol_reads.get(key)
+                if current is not None and current.state is SymbolReadState.CLOSED:
+                    continue
+                self._symbol_reads[key] = row
+                self.diagnostics.write(row)
+
     def diagnostics_view(self, table: Table) -> Table:
         """Return a new view of a diagnostics table, tracked like a live result.
 
-        `m.connections()`, `m.streams()`, and `m.rate_limits()` call this. The view is built in
-        its own result scope on the caller thread, inside the session's execution context, and
-        counts as a held diagnostics view until it is released or collected, which keeps the
-        session in the live set: a view a user holds stays current. After `close()` it keeps
-        the diagnostics table, and so its final rows, alive. If building or tracking the view
-        raises anything, even `KeyboardInterrupt`, the scope and the count are released first;
-        a `DHError` from a `close()` that released the diagnostics tables meanwhile becomes the
-        closed session's `MassiveError`.
+        `m.connections()`, `m.streams()`, `m.rate_limits()`, and `m.symbol_reads()` call this. The
+        view is built in its own result scope on the caller thread, inside the session's execution
+        context, and counts as a held diagnostics view until it is released or collected, which
+        keeps the session in the live set: a view a user holds stays current. After `close()` it
+        keeps the diagnostics table, and so its final rows, alive. If building or tracking the view
+        raises anything, even `KeyboardInterrupt`, the scope and the count are released first; a
+        `DHError` from a `close()` that released the diagnostics tables meanwhile becomes the closed
+        session's `MassiveError`.
 
         Args:
-            table: `diagnostics.connections`, `diagnostics.streams`, or
-                `diagnostics.rate_limits`.
+            table: `diagnostics.connections`, `diagnostics.streams`,
+                `diagnostics.rate_limits`, or `diagnostics.symbol_reads`.
 
         Returns:
             The view: every column of `table`, the same rows.
@@ -1547,8 +1617,9 @@ class SessionCore:
         Idempotent. Under `registry_lock` it only collects: it marks the session closed, takes
         the closers, marks every stream and worker table `CLOSED` in `m.streams()` with the error
         text below (a released stream that a derived table or an open panel still keeps alive
-        included; a `FAILED` row, or a read's `DONE` row, keeps its state), and gathers those
-        whose tables still run. Then,
+        included; a `FAILED` row, or a read's `DONE` row, keeps its state), marks every
+        symbol of a followed read that is still queued, loading, retrying, or done `CLOSED` in
+        `m.symbol_reads()`, and gathers those whose tables still run. Then,
         outside every lock, verbs waiting for a stream that is still opening wake and raise
         `MassiveError` (the opener releases the stream when its open returns); every gathered
         table fails with `MassiveError("MassiveSession #1 was closed; this table no longer
@@ -1591,6 +1662,12 @@ class SessionCore:
                     self.diagnostics.write(closed)
             for stream_id in tuple(self._workers):
                 self._update_worker(stream_id, functools.partial(_closed_row, error=text))
+            now = time.time_ns()
+            for key, read in tuple(self._symbol_reads.items()):
+                if read.state not in _FINAL_SYMBOL_READS:
+                    closed_read = replace(read, state=SymbolReadState.CLOSED, updated_at=now)
+                    self._symbol_reads[key] = closed_read
+                    self.diagnostics.write(closed_read)
         for ready in opening:  # waiting verbs wake and raise MassiveError
             ready.set()
         failed = self._fail_all(fails, MassiveError(text))

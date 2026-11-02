@@ -32,6 +32,8 @@ from deephaven_massive._tables.diagnostics import (
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
+    SYMBOL_READ_KEYS,
+    SYMBOL_READS,
     ConnectionRow,
     ConnectionState,
     Diagnostics,
@@ -44,6 +46,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
+    SymbolReadState,
     as_row,
     describe_symbols,
     gaps_text,
@@ -109,6 +112,7 @@ def test_column_sets() -> None:
         "Path",
         "Recency",
         "RowsPublished",
+        "Loading",
         "RequestsPerCycle",
         "State",
         "Error",
@@ -149,6 +153,31 @@ def test_column_sets() -> None:
         "UpdatedAt",
     )
     assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED"]
+    assert SYMBOL_READS.column_names == (
+        "StreamId",
+        "Symbol",
+        "Dataset",
+        "State",
+        "Transport",
+        "AddedAt",
+        "ReadAt",
+        "Rows",
+        "Attempts",
+        "NextAttemptAt",
+        "Error",
+        "UpdatedAt",
+    )
+    assert SYMBOL_READ_KEYS == ("StreamId", "Symbol")
+    assert [s.value for s in SymbolReadState] == [
+        "QUEUED",
+        "LOADING",
+        "RETRYING",
+        "DONE",
+        "FAILED",
+        "REMOVED",
+        "STOPPED",
+        "CLOSED",
+    ]
     assert [s.value for s in LimitSource] == ["DECLARED", "LEARNED"]
 
 

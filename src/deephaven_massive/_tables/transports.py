@@ -150,9 +150,12 @@ class SymbolRows:
             (`SessionCore.dataset_schema`), in the order the transport returned them; empty
             when Massive has no data for the symbol (HTTP 404 on its first request, or no row
             in the range).
+        with_rest_days: True when a flat-file read also read some days from REST, since their
+            files were missing; False for a read from one source.
     """
 
     table: Table
+    with_rest_days: bool = False
 
 
 @dataclass(frozen=True, slots=True)
