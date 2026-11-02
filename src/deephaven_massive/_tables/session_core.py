@@ -93,7 +93,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, TypeVar, cast
 
 from deephaven.dherror import DHError
-from deephaven.update_graph import shared_lock
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
@@ -115,6 +114,7 @@ from deephaven_massive._tables.execution_context import (
     holds_update_graph_lock,
     refuse_update_graph_thread,
     update_cycle,
+    wait_for_update_cycle,
 )
 from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
 
@@ -138,7 +138,12 @@ if TYPE_CHECKING:
         StreamTransport,
     )
 
-__all__ = ["PAUSED_TABLES_WARNING_SECONDS", "SESSION_WARNINGS", "SessionCore"]
+__all__ = [
+    "CLOSE_SHOWN_TIMEOUT",
+    "PAUSED_TABLES_WARNING_SECONDS",
+    "SESSION_WARNINGS",
+    "SessionCore",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +171,10 @@ _ACTIVE: Final = frozenset({StreamState.RUNNING, StreamState.LOADING})
 _FINAL: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
 """The states no failure changes any more: a failed or closed table, and a read whose rows have
 landed. `close()` and a dying thread fail only the tables in none of them."""
+
+CLOSE_SHOWN_TIMEOUT: Final = 30.0
+"""The most seconds `close()` waits, while a diagnostics view is held, for the update cycle that
+shows the final diagnostics rows; past it, `close()` returns after a WARNING."""
 
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
@@ -376,22 +385,12 @@ class SessionCore:
         self.catalog: Final = catalog
         self.registry_lock: Final = threading.RLock()
         me = weakref.ref(self)
-        # The diagnostics come first: creating their tables is the step most likely to fail,
-        # and nothing has started a thread yet if it does.
-        self.diagnostics: Final = Diagnostics(
+        # The reaper comes first: the diagnostics tables' publishers release their scopes on it.
+        self._reaper = Reaper(
             exec_ctx,
-            f"{thread_prefix} diagnostics",
-            on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
+            f"{thread_prefix} reaper",
+            on_death=functools.partial(SessionCore._thread_died, me, "reaper"),
         )
-        try:
-            self._reaper = Reaper(
-                exec_ctx,
-                f"{thread_prefix} reaper",
-                on_death=functools.partial(SessionCore._thread_died, me, "reaper"),
-            )
-        except BaseException:  # the writer is running: stop it, or it holds the tables forever
-            self.diagnostics.stop()
-            raise
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper, exec_ctx)
         # Queues work on the reaper, after everything queued before it, for callers that must
         # not do it themselves: a listener on an update-graph thread, or a shutdown callback,
@@ -407,6 +406,16 @@ class SessionCore:
         self.release_later: Final[Callable[[LivenessScope], None]] = functools.partial(
             _release_on, self._reaper, exec_ctx
         )
+        try:
+            self.diagnostics: Final = Diagnostics(
+                exec_ctx,
+                f"{thread_prefix} diagnostics",
+                release_later=self.release_later,
+                on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
+            )
+        except BaseException:  # the reaper is running: stop it, or its thread runs forever
+            self._reaper.stop()
+            raise
         self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamEntry] = {}
@@ -1369,7 +1378,7 @@ class SessionCore:
         self.diagnostics.write(row)
         return True
 
-    def diagnostics_view(self, table: Table) -> Table:
+    def diagnostics_view(self, table: Table, schema: Schema) -> Table:
         """Return a new view of a diagnostics table, tracked like a live result.
 
         `m.connections()`, `m.streams()`, and `m.rate_limits()` call this. The view is built in
@@ -1384,9 +1393,11 @@ class SessionCore:
         Args:
             table: `diagnostics.connections`, `diagnostics.streams`, or
                 `diagnostics.rate_limits`.
+            schema: The table's schema (`CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`), whose
+                columns the view lists, in its order.
 
         Returns:
-            The view: every column of `table`, the same rows.
+            The view: the schema's columns of `table`, the same rows.
 
         Raises:
             MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), also when
@@ -1399,7 +1410,7 @@ class SessionCore:
             self._sync_live()
         scope: LivenessScope | None = None
         try:
-            columns = [column.name for column in table.columns]
+            columns = [column.name for column in schema.columns]
             with entered(self.exec_ctx):
                 result, scope = make_result(self.exec_ctx, lambda: table.view(columns))
             self.results.track(
@@ -1544,32 +1555,30 @@ class SessionCore:
     def close(self) -> None:
         """Close the session: fail every live table, run the closers, release the diagnostics.
 
-        Idempotent. Under `registry_lock` it only collects: it marks the session closed, takes
-        the closers, marks every stream and worker table `CLOSED` in `m.streams()` with the error
-        text below (a released stream that a derived table or an open panel still keeps alive
-        included; a `FAILED` row, or a read's `DONE` row, keeps its state), and gathers those
-        whose tables still run. Then,
-        outside every lock, verbs waiting for a stream that is still opening wake and raise
-        `MassiveError` (the opener releases the stream when its open returns); every gathered
+        Idempotent. Under `registry_lock` it only collects: it marks the session closed, takes the
+        closers, marks every stream and worker table `CLOSED` in `m.streams()` with the error text
+        below (a released stream that a derived table or an open panel still keeps alive included; a
+        `FAILED` row, or a read's `DONE` row, keeps its state), and gathers those whose tables still
+        run. Then, outside every lock, verbs waiting for a stream that is still opening wake and
+        raise `MassiveError` (the opener releases the stream when its open returns); every gathered
         table fails with `MassiveError("MassiveSession #1 was closed; this table no longer
         updates")`, and with it every table derived from it (a failed table keeps its rows for
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop; a
-        background read's thread stops with its table's failure, and its requests with the
-        session's REST client); the
-        final rows are written and the diagnostics scope released, and `close()` returns once
-        the update cycle that applied them has ended, so a held view shows them. On a thread
-        that holds the update graph's lock, such as a console command's, no cycle can run until
-        the lock is released, so `close()` waits for neither the rows nor the cycle: the
-        diagnostics writer applies the rows, and a held view shows them, once the caller
-        releases the lock. There the closers join no thread either (`WsConnections.close`):
-        while they would wait no live table updates, and the threads, daemons that never need
-        the lock, end on their own. Results stay tracked, so garbage collection and `release()`
-        still free them. Logs "MassiveSession #1 closed; N live tables failed, streams [...]",
-        with the stream ids of the failed tables (`bounded_list`): a WARNING when N > 0, INFO
-        otherwise. On an
-        update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even
-        when the session is already closed.
+        background read's thread stops with its table's failure, and its requests with the session's
+        REST client); the final rows are added and the diagnostics scope released, and, while a
+        diagnostics view is held, `close()` returns once an update cycle has taken the rows in, so
+        the view shows them (after `CLOSE_SHOWN_TIMEOUT` seconds it returns anyway, after a
+        WARNING). On a thread that holds the update graph's lock, such as a console command's, no
+        cycle can run until the lock is released, so `close()` waits for neither the writer nor the
+        cycle: the writer adds the rows and releases the scope, and a held view shows them, once the
+        caller releases the lock. There the closers join no thread either (`WsConnections.close`):
+        while they would wait no live table updates, and the threads, daemons that never need the
+        lock, end on their own. Results stay tracked, so garbage collection and `release()` still
+        free them. Logs "MassiveSession #1 closed; N live tables failed, streams [...]", with the
+        stream ids of the failed tables (`bounded_list`): a WARNING when N > 0, INFO otherwise. On
+        an update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even when
+        the session is already closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
@@ -1599,16 +1608,18 @@ class SessionCore:
                 closer()
             except Exception:
                 logger.exception("%s: a transport failed to close. %s", self.label, LIBRARY_BUG)
-        # The writer's `InputTable.add` waits for an update cycle, which cannot run while this
-        # thread holds the update graph's lock: waiting for the writer there would never end.
+        # The writer releases the diagnostics scope under the update graph's shared lock, which
+        # it cannot take while this thread holds the lock: waiting for it there would never end.
         self.diagnostics.release(wait=not locked)
-        # The final rows are in the diagnostics tables, but a view of them (a held
-        # `m.streams()`) updates later in the update cycle that applied them: wait for that
-        # cycle to end, so a view read right after close() shows them. A thread that holds the
-        # lock already takes it again at once: no cycle is running, and none has applied the
-        # rows yet.
-        with shared_lock(self.exec_ctx.update_graph):
-            pass
+        if not locked:
+            with self.registry_lock:
+                views = self._views
+            # The final rows are added, but they reach the tables, and a held view of them,
+            # only on the next update cycle: wait for it, so a view read right after close()
+            # shows them. With no view held nothing could show them, and the release destroyed
+            # the tables.
+            if views:
+                wait_for_update_cycle(self.exec_ctx, CLOSE_SHOWN_TIMEOUT)
         level = logging.WARNING if failed else logging.INFO
         logger.log(
             level,

@@ -886,7 +886,7 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     def error() -> str | None:
         ws_session.flush()  # a refused topic fails its streams at the next flush
-        assert m._core.diagnostics.barrier().wait(15.0)
+        assert m._core.diagnostics.wait_until_shown(15.0)
         streams = rows(m.streams())
         failed = [s["Error"] for s in streams if s["State"] == "FAILED"]
         return failed[0] if failed else None

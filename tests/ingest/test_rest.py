@@ -2572,7 +2572,7 @@ def snapshots(
 
 
 def connection_rows(m: dm.MassiveSession, dh_to_pylist: ToPylist) -> list[dict[str, Any]]:
-    assert m._core.diagnostics.barrier().wait(30)
+    assert m._core.diagnostics.wait_until_shown(30)
     return list(dh_to_pylist(m.connections()))
 
 
@@ -3429,7 +3429,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
             assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
         assert rest_clock.waits == [61.0]
         assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
-        assert m._core.diagnostics.barrier().wait(30)
+        assert m._core.diagnostics.wait_until_shown(30)
         stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
         assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
         assert (stocks["Attempts"], stocks["Refusals"]) == (2, 1)
@@ -3626,7 +3626,7 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
         assert left.wait(TIMEOUT)
         assert fake_rest.requests == []
         # The cancelled wait also reached the session's rows.
-        assert m._core.diagnostics.barrier().wait(TIMEOUT)
+        assert m._core.diagnostics.wait_until_shown(TIMEOUT)
         limits = dh_arrow.to_arrow(m.rate_limits()).to_pylist()
         stocks = next(r for r in limits if r["Bucket"] == "stocks")
         assert stocks["Waiting"] == 0

@@ -1,10 +1,22 @@
 """The publisher of every blink table the library feeds, with a failure delivered exactly once.
 
 A live table is fed by Deephaven's `TablePublisher`: it adds rows to a blink table and can fail
-the table, which fails every table derived from it too. The library's WebSocket streams
-(`_tables/stream.py`) and `poll()` tables (`_tables/poll.py`) create theirs with
-`blink_publisher`, which returns the blink table and a `BlinkPublisher`, never with Deephaven's
-`table_publisher` directly.
+the table, which fails every table derived from it too. Every blink table the library writes is
+created with `blink_publisher`, which returns the blink table and a `BlinkPublisher`, never with
+Deephaven's `table_publisher` directly: a WebSocket stream's (`_tables/stream.py`), a `poll()`
+table's (`_tables/poll.py`), a background read's (`_tables/background_read.py`), and each
+diagnostics table's (`_tables/diagnostics.py`).
+
+**Created under the update graph's lock.** `blink_publisher` creates the table while it holds
+the update graph's shared lock, so no update cycle runs meanwhile. Deephaven stamps a new table
+with the step of the current cycle, and the creation stamp counts as the table's notification
+for that step: a table registered with the update graph while a cycle runs can be refreshed in
+that same cycle, and a first change delivered in the same step is fatal (Deephaven's
+fatal-error handler ends the process). Keyed input tables were seen to fail this way; a
+publisher's blink table is registered with the update graph the same way, so it is created
+under the lock too, as a precaution. A cycle holds the exclusive lock from its start until its
+sources are listed, so a table created under the shared lock is never one of a running cycle's
+sources.
 
 **Why the wrapper exists.** `TablePublisher.publish_failure` only queues the failure: on its next
 update cycle, Deephaven's `StreamToBlinkTableAdapter` fails the blink table and then closes
@@ -44,6 +56,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Final
 
+from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import table_publisher
 
 from deephaven_massive._tables.liveness import new_scope
@@ -241,7 +254,11 @@ def blink_publisher(
     """Create a blink table and its `BlinkPublisher`, as `table_publisher` does.
 
     Run it on the caller thread, inside the scope that is to manage the blink table and inside
-    the session's execution context. The table lives as long as a liveness scope or a derived
+    the session's execution context, but under no library lock that a holder of the update
+    graph's lock may wait for. The table is created under the update graph's shared lock (see
+    the module), so the call waits for a running update cycle to end; a thread that already
+    holds either lock, as a console command does, takes it again at once. The table lives as
+    long as a liveness scope or a derived
     table refers to it. When it shuts down (it was destroyed, or its failure was delivered), the
     shutdown callback first hands a failure's pin to `release_later`, then runs `on_shutdown`,
     on whichever thread shut it down.
@@ -260,11 +277,19 @@ def blink_publisher(
         The blink table and its publisher.
     """
     pin = _FailurePin(name)
-    table, publisher = table_publisher(
-        name,
-        columns,
-        on_shutdown_callback=functools.partial(_shut_down, pin, on_shutdown, release_later),
-    )
+    # No update cycle runs under the lock, so none can refresh the table in the step that
+    # stamped it (see the module). The Java lock itself: `deephaven.update_graph.shared_lock`
+    # would wrap a failed creation's own error in a second `DHError`.
+    lock = get_exec_ctx().update_graph.j_update_graph.sharedLock()
+    lock.lock()
+    try:
+        table, publisher = table_publisher(
+            name,
+            columns,
+            on_shutdown_callback=functools.partial(_shut_down, pin, on_shutdown, release_later),
+        )
+    finally:
+        lock.unlock()
     return table, BlinkPublisher(table, publisher, pin=pin, release_later=release_later)
 
 

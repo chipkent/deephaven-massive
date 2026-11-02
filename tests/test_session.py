@@ -22,7 +22,6 @@ from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _namespaces, _session
@@ -45,17 +44,18 @@ from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Query, StreamQuery
 from deephaven_massive._tables import session_core as _core
+from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.session_core import CLOSE_SHOWN_TIMEOUT
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
     from collections.abc import Callable
-    from contextlib import AbstractContextManager
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
-    from deephaven.update_graph import UpdateGraph
 
     from deephaven_massive._tables.diagnostics import Diagnostics
     from deephaven_massive._tables.session_core import SessionCore
@@ -462,35 +462,103 @@ def test_close_marks_streams_closed_and_warns_once(
     massive_session.release(live)  # release() keeps working after close()
 
 
-def test_a_held_view_reads_the_final_rows_as_close_returns(
-    massive_session: dm.MassiveSession,
-    fake_streams: FakeStreamTransport,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The final rows reach the diagnostics table in an update cycle, and a view of it updates
-    # later in that cycle: close() waits for that cycle to end, after it released the
-    # diagnostics, so the view reads CLOSED the moment close() returns, with no polling.
-    core = massive_session._core
-    result = stream_query(massive_session).append_only()
-    view = massive_session.streams()
+def _record_close_steps(monkeypatch: pytest.MonkeyPatch, core: SessionCore) -> list[str]:
+    # Records the diagnostics release and each wait for an update cycle that close() makes.
     steps: list[str] = []
     diagnostics = type(core.diagnostics)
     release = diagnostics.release
+    wait = wait_for_update_cycle
 
     def released(self: Diagnostics, *, wait: bool = True) -> None:
         release(self, wait=wait)
         steps.append(f"released, waiting: {wait}")
 
-    def waited(update_graph: UpdateGraph) -> AbstractContextManager[None]:
-        steps.append("waited for the cycle")
-        return cast("AbstractContextManager[None]", shared_lock(update_graph))
+    def waited(exec_ctx: ExecutionContext, timeout: float) -> bool:
+        steps.append(f"waited for a cycle, at most {timeout} s")
+        return wait(exec_ctx, timeout)
 
     monkeypatch.setattr(diagnostics, "release", released)
-    monkeypatch.setattr(_core, "shared_lock", waited)
+    monkeypatch.setattr(_core, "wait_for_update_cycle", waited)
+    return steps
+
+
+def test_a_held_view_reads_the_final_rows_as_close_returns(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The writer adds the final rows, and they reach the diagnostics table, and a view of it,
+    # in the next update cycle: close() waits for that cycle after the writer ended, so the
+    # view reads CLOSED the moment close() returns, with no polling.
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    steps = _record_close_steps(monkeypatch, core)
     massive_session.close()
     (row,) = dh_arrow.to_arrow(view).to_pylist()
     assert row["State"] == "CLOSED"
-    assert steps == ["released, waiting: True", "waited for the cycle"]
+    assert steps == [
+        "released, waiting: True",
+        f"waited for a cycle, at most {CLOSE_SHOWN_TIMEOUT} s",
+    ]
+    del result, view
+
+
+def test_close_with_no_view_held_waits_for_no_cycle(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    drain: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nothing could show the final rows: the release destroyed the tables.
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    massive_session.release(view)
+    drain()
+    assert massive_session._core._views == 0
+    steps = _record_close_steps(monkeypatch, massive_session._core)
+    massive_session.close()
+    assert steps == ["released, waiting: True"]
+    del result
+
+
+def test_a_table_derived_from_a_released_view_shows_the_final_rows(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    drain: Callable[[], None],
+    next_update_cycle: Callable[[], None],
+) -> None:
+    # The view is released before the close, but a table derived from it keeps the
+    # diagnostics table alive: the final rows still reach it, on the cycle after the close.
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    derived = view.head(10)  # no formula, which would hand this frame's locals to the JVM
+    massive_session.release(view)
+    drain()
+    assert massive_session._core._views == 0
+    massive_session.close()
+    next_update_cycle()
+    (row,) = dh_arrow.to_arrow(derived).to_pylist()
+    assert row["State"] == "CLOSED"
+    del result, derived
+
+
+def test_close_returns_after_a_warning_when_no_cycle_shows_the_rows_in_time(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No time to wait: close() returns anyway, and says the view may not show the rows yet.
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    monkeypatch.setattr(_core, "CLOSE_SHOWN_TIMEOUT", 0.0)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.execution_context"):
+        massive_session.close()
+    assert "no update cycle ended within 0.0 s" in caplog.text
     del result, view
 
 
@@ -872,7 +940,7 @@ def test_every_per_class_description_is_shown_by_a_dataset_of_its_class() -> Non
 def test_rate_limits_show_one_ready_row_per_subscription_and_other(
     massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
-    assert massive_session._core.diagnostics.barrier().wait(30)
+    assert massive_session._core.diagnostics.wait_until_shown(30)
     rows = dh_to_pylist(massive_session.rate_limits())
     assert sorted((r["Bucket"], r["State"], r["RequestsPerMinute"]) for r in rows) == [
         ("currencies", "READY", None),

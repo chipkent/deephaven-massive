@@ -191,7 +191,7 @@ def streams_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     settle(ws_session)
-    assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     return sorted(dh_to_pylist(ws_session.session.streams()), key=lambda r: r["StreamId"])
 
 
@@ -199,7 +199,7 @@ def connections_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     settle(ws_session)
-    assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     rows = dh_to_pylist(ws_session.session.connections())
     return [r for r in rows if r["Transport"] == "WebSocket"]
 
