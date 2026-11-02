@@ -787,3 +787,27 @@ def test_never_shows_a_seeded_symbol_until_it_leaves(
     assert counts(dh_to_pylist(result)) == {"AAPL": 3}
     assert script.calls == []
     massive_session.release(result)
+
+
+def test_the_shutdown_callback_stops_following_and_tells_the_session(
+    massive_session: dm.MassiveSession, drain: Callable[[], None]
+) -> None:
+    # Deephaven runs it on whichever thread shut the table down; here, on the test thread.
+    class Read:
+        def __init__(self) -> None:
+            self.shut_down_event = threading.Event()
+            self.watch_stopped = threading.Event()
+
+        def stop_watch(self) -> None:
+            self.watch_stopped.set()
+
+    read = Read()
+    stop = threading.Event()
+    core = massive_session._core
+    followed_read._shut_down(
+        weakref.ref(core), weakref.ref(cast("Any", read)), call=12_345, stop=stop
+    )
+    assert stop.is_set()
+    assert read.shut_down_event.is_set()
+    drain()  # the watch's stop ran on the reaper
+    assert read.watch_stopped.is_set()

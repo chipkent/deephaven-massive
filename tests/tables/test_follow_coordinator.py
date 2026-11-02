@@ -753,7 +753,8 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     until(lambda: stream(massive_session, drain, dh_to_pylist)["RowsPublished"] == 4)
     summary = stream(massive_session, drain, dh_to_pylist)
     view = massive_session.symbol_reads()
-    until(lambda: sum(r["Rows"] for r in dh_to_pylist(view)) == 4)
+    final = {"AAPL": "DONE", "MSFT": "DONE", "NVDA": "FAILED", "TSLA": "LOADING"}
+    until(lambda: {r["Symbol"]: r["State"] for r in dh_to_pylist(view)} == final)
     symbols = dh_to_pylist(view)
     massive_session.release(view)
     assert summary["SymbolCount"] == len(symbols)

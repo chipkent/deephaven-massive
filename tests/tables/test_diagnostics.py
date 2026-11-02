@@ -1227,3 +1227,7 @@ def _until(condition: Callable[[], bool]) -> None:
             return
         pause.wait(0.01)
     assert condition()
+
+
+def test_the_symbol_reads_shutdown_callback_does_nothing() -> None:
+    diagnostics._nothing()  # it must not raise: Deephaven calls it as the table shuts down
