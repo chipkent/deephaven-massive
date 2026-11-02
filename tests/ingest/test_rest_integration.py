@@ -50,7 +50,7 @@ def _attempts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("66")
+@pytest.mark.verifies("66")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_a_reference_lookup_and_the_market_status_count_in_the_other_row(

@@ -22,10 +22,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.wire_symbols import wire_spellings
+from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -56,6 +56,9 @@ _NEW_YORK = ZoneInfo("America/New_York")
 _TOLERANCE = 1e-6
 """The relative error within which a high, low, or volume read from text equals a JSON number."""
 
+_MIDWEEK = frozenset({1, 2, 3, 4})
+"""The weekdays (Tuesday to Friday) whose forex trading day, from 17:00 New York time the day
+before, is a whole day of trading."""
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits, in all, for its first frames; forex is closed at weekends."""
 
@@ -88,6 +91,20 @@ def _errors(left: Sequence[Any], right: Sequence[Any]) -> list[float | None]:
         None if a is None or b is None else abs(a - b) / max(abs(a), abs(b), 1e-12)
         for a, b in zip(left, right, strict=True)
     ]
+
+
+def _at_day_edge(stamp_ms: int, day: date) -> bool:
+    """Tell whether a stamp is the first or the last millisecond of a UTC day.
+
+    Args:
+        stamp_ms: The stamp, in milliseconds since the epoch.
+        day: The UTC day.
+
+    Returns:
+        True for 00:00:00.000 or 23:59:59.999 UTC of `day`.
+    """
+    first = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+    return stamp_ms in {first, first + 86_400_000 - 1}
 
 
 def _same(left: Sequence[Any], right: Sequence[Any]) -> bool:
@@ -144,7 +161,7 @@ def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict
 
 
 @pytest.mark.needs("currencies:basic")
-@pytest.mark.settles("37")
+@pytest.mark.verifies("37")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_of_every_rest_source_and_their_stamps(
@@ -159,12 +176,14 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     """Where `/prev`, the aggregates range, and grouped daily stamp a forex day bar.
 
     Records the raw `C:EURUSD` day bar of `/prev`, the range bars around that day, and the
-    grouped-daily row, each stamp, and which agree, beside the library's answers. Reading it
-    together with the hour-bar rebuild: a source that stamps the bar of day D before 00:00 UTC
-    of D (such as 21:00 or 22:00 UTC of D-1, the 17:00 New York open of D's trading day) is
-    labelled D-1 by the library, a bug to fix by mapping that source's stamp to the day it
-    closes. With Currencies on Basic, which allows 5 requests a minute, it leaves out the
-    library's `previous_day_bar`, which reads the same `/prev` as the raw request.
+    grouped-daily row, each stamp, and which agree, beside the library's answers. Passes when
+    all three sources send the same bar (open and close equal, the rest within 1e-6) for one UTC
+    day, each stamped at its first or last millisecond, which the library labels with that day.
+    A source that stamps the bar of day D before 00:00 UTC of D (such as 21:00 or 22:00 UTC of
+    D-1, the 17:00 New York open of D's trading day) fails it: the library would label that bar
+    D-1, a bug to fix by mapping that source's stamp to the day it closes. With Currencies on
+    Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`,
+    which reads the same `/prev` as the raw request.
     """
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -202,8 +221,14 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
     )
-    assert ranged
-    assert grouped
+    assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
+    same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
+    assert len(same_day) == 1, f"range bars of {day}: {same_day}"
+    assert _at_day_edge(int(same_day[0]["t"]), day), f"range bar stamped {same_day[0]['t']}"
+    assert _same(_ohlcv(same_day[0]), _ohlcv(prev)), "the range bar is not /prev's bar"
+    assert len(grouped) == 1, f"grouped rows of {_PAIR} on {day}: {grouped}"
+    assert _at_day_edge(int(grouped[0]["t"]), day), f"grouped bar stamped {grouped[0]['t']}"
+    assert _same(_ohlcv(grouped[0]), _ohlcv(prev)), "the grouped bar is not /prev's bar"
 
 
 @pytest.mark.needs("currencies:basic")
@@ -218,17 +243,31 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
 ) -> None:
     """Which day the REST forex day bar covers: the UTC day or the trading day ending 17:00 NY.
 
-    Rebuilds `/prev`'s day D of `C:EURUSD` from hour bars twice, over the UTC day and over the
-    trading day from 17:00 New York time on D-1 to 17:00 on D, and records both beside `/prev`
-    and the range bars. Reading it: `/prev` equal to the UTC rebuild confirms the library's UTC
-    day, whatever the stamp; equal to the trading-day rebuild means forex day bars are trading
-    days, and the library's labelling and week windows need that cut; equal to neither means
-    another cut.
+    Takes the latest Tuesday to Friday on or before `/prev`'s day: on a Sunday or a Monday the
+    trading day from 17:00 New York time the day before holds no trading, or only Sunday
+    evening's, so it cannot be told from the UTC day. Rebuilds that day D of `C:EURUSD` from
+    hour bars twice, over the UTC day and over the trading day from 17:00 New York time on D-1
+    to 17:00 on D, and records both beside D's range bar. Reading it: the range bar equal to the
+    UTC rebuild confirms the library's UTC day, whatever the stamp; equal to the trading-day
+    rebuild means forex day bars are trading days, and the library's labelling and week windows
+    need that cut; equal to neither means another cut.
     """
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
-    (prev,) = prevs
-    day = _utc_day(int(prev["t"]))
+    day = _utc_day(int(prevs[0]["t"]))
+    while day.weekday() not in _MIDWEEK:
+        day -= timedelta(days=1)
+    bars = [
+        bar
+        for bar in rest_rows(
+            _RANGE,
+            {"forexTicker": _PAIR, "multiplier": 1, "timespan": "day", "from": day, "to": day},
+            {},
+        )
+        if _utc_day(int(bar["t"])) == day
+    ]
+    assert len(bars) == 1, f"range day bars of {_PAIR} on {day}: {bars}"
+    (day_bar,) = bars
     utc_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     before = day - timedelta(days=1)
     trading_start = datetime(before.year, before.month, before.day, 17, tzinfo=_NEW_YORK)
@@ -247,14 +286,16 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
     assert hours, f"no hour bars of {_PAIR} around {day}"
     by_utc = _rebuilt(hours, utc_start, utc_start + timedelta(days=1))
     by_trading = _rebuilt(hours, trading_start, trading_end)
-    evidence(f"/prev t={instant_text(prev['t'] * _MS)} ohlcv={_ohlcv(prev)}")
+    evidence(
+        f"range bar of {day:%A} {day}: t={instant_text(day_bar['t'] * _MS)} ohlcv={_ohlcv(day_bar)}"
+    )
     evidence(f"rebuilt over the UTC day {day}: {by_utc}")
     evidence(f"rebuilt over {trading_start} to {trading_end}: {by_trading}")
     evidence(
-        f"/prev equals the UTC rebuild: {_same(by_utc, _ohlcv(prev))} "
-        f"(errors {_errors(by_utc, _ohlcv(prev)) if by_utc else None}); "
-        f"equals the trading-day rebuild: {_same(by_trading, _ohlcv(prev))} "
-        f"(errors {_errors(by_trading, _ohlcv(prev)) if by_trading else None})"
+        f"the range bar equals the UTC rebuild: {_same(by_utc, _ohlcv(day_bar))} "
+        f"(errors {_errors(by_utc, _ohlcv(day_bar)) if by_utc else None}); "
+        f"equals the trading-day rebuild: {_same(by_trading, _ohlcv(day_bar))} "
+        f"(errors {_errors(by_trading, _ohlcv(day_bar)) if by_trading else None})"
     )
 
 
@@ -321,8 +362,21 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     assert rows
 
 
+def _canonical(raw: Iterable[str]) -> set[str]:
+    """Read forex pairs as Massive spelled them into the canonical form, for a comparison.
+
+    Args:
+        raw: The pairs as one source wrote them, such as `C:EUR-USD`.
+
+    Returns:
+        Each pair's canonical form, such as `C:EURUSD`; a spelling the library cannot read is
+        kept as written.
+    """
+    return {canonical_from_wire(dm.AssetClass.FOREX, text) or text for text in raw}
+
+
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("39")
+@pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     *,
@@ -333,23 +387,26 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
 ) -> None:
     """Whether grouped daily and `global_forex/day_aggs_v1` list the same pairs on a day.
 
-    Records the pairs only one of them holds on the most recent published Monday. Reading it: equal
-    sets mean `dm.ALL` forex day bars hold the same pairs from either source; otherwise the
-    difference belongs in the documentation of `dm.ALL` day bars.
+    The two sources spell a pair differently (grouped daily `X:BTCUSD` or `C:EURUSD`, the file
+    `X:BTC-USD` or `C:EUR-USD`), so both are compared in the canonical form the library reads
+    them into; a spelling the library cannot read is kept as written, and so shows up as a
+    difference. Records the pairs only one of them holds on the most recent published Monday.
+    Passes when the two sets are equal, so `dm.ALL` forex day bars hold the same pairs from either
+    source; a failure means the difference belongs in the documentation of `dm.ALL` day bars.
     """
-    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {})}
+    grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {}))
     read = flat_file_tickers(_DAY_FILE, recent_monday, None)
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
-    filed = {str(row["ticker"]) for row in read[0]}
+    filed = _canonical(str(row["ticker"]) for row in read[0])
     evidence(f"{recent_monday}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
-    assert filed
+    assert grouped == filed, "grouped daily and the day file hold different pairs"
 
 
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("64")
+@pytest.mark.verifies("64")
 @pytest.mark.timeout(100)
 def test_forex_flat_files_of_a_weekend(
     *,
@@ -361,14 +418,19 @@ def test_forex_flat_files_of_a_weekend(
 
     Reads `global_forex/day_aggs_v1` for the Saturday and Sunday before the most recent
     published Monday and records, for each, whether the file exists and how many pairs it
-    holds. Reading it: the library takes a forex Saturday for a day without trading, so a
-    missing Saturday file is skipped silently and a Sunday's is reported as a possible holiday;
-    a Saturday file with rows, or no Sunday file at all, means that rule must change.
+    holds. The library takes a forex Saturday for a day without trading, so a missing Saturday
+    file is skipped silently and a Sunday's is reported as a possible holiday. Passes when the
+    Saturday has no file, or an empty one, and the Sunday has a file with rows; otherwise that
+    rule must change.
     """
+    pairs: dict[str, int | None] = {}
     for day in (recent_monday - timedelta(days=2), recent_monday - timedelta(days=1)):
         read = flat_file_tickers(_DAY_FILE, day, None)
-        pairs = None if read is None else len(read[0])
-        evidence(f"{_DAY_FILE} {day} ({day:%A}): {'no file' if read is None else f'{pairs} rows'}")
+        pairs[f"{day:%A}"] = None if read is None else len(read[0])
+        shown = "no file" if read is None else f"{pairs[f'{day:%A}']} rows"
+        evidence(f"{_DAY_FILE} {day} ({day:%A}): {shown}")
+    assert not pairs["Saturday"], f"a Saturday file with {pairs['Saturday']} rows"
+    assert pairs["Sunday"], "no Sunday file, or an empty one"
 
 
 @pytest.mark.needs("currencies:basic")
@@ -409,7 +471,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("27")
+@pytest.mark.verifies("27")
 @pytest.mark.timeout(160)
 def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     live_session: dm.MassiveSession,
@@ -426,9 +488,8 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     Massive acknowledged both, whatever the hour. When `/v1/marketstatus/now` says the forex
     market is open it also waits up to 60 s for quotes and asserts they arrived with `Symbol`
     `C:EURUSD`; when it says closed the test skips after the acknowledgement. The session's
-    diagnostics are recorded before the release. Reading it: acknowledged topics and rows
-    confirm the dash spelling; a refusal in the stream's error means topics must use another
-    spelling.
+    diagnostics are recorded before the release. Passing confirms the dash spelling; a refusal
+    in the stream's error means topics must use another spelling.
     """
     quotes = live_session.forex.quotes(_PAIR).append_only()
     bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE).append_only()
