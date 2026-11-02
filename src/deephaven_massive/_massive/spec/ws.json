@@ -221,7 +221,6 @@
   },
   {
    "key": "forex/C",
-   "ignored_keys": ["i"],
    "fields": [
     {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "b"},
     {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "a"},
@@ -294,7 +293,6 @@
   },
   {
    "key": "crypto/XQ",
-   "ignored_keys": ["lp", "ls"],
    "fields": [
     {"column": "Bid", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bp"},
     {"column": "BidSize", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bs"},

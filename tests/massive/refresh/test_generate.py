@@ -238,7 +238,7 @@ def test_each_source_carries_the_keys_its_ignored_key_entries_name(
     for entry in exclusions.IGNORED_KEYS:
         expected.setdefault(entry.source, set()).add(entry.wire_key)
     assert ignored == expected
-    assert ignored["crypto/XQ"] == {"lp", "ls"}
+    assert ignored["/stocks/financials/v1/balance-sheets"] == {"max_ticker", "min_ticker"}
 
 
 def test_memberships_follow_kinds_and_projections(real: generate.Generated) -> None:

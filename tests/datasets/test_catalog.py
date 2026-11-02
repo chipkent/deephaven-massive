@@ -1503,6 +1503,11 @@ def test_a_sort_part_may_name_a_field_the_path_filters_on() -> None:
     CATALOG.check_sort(snapshots, "ticker.desc,product_code", ordered=False)
     with pytest.raises(ValueError, match=r"sort part 'limit' names no field of"):
         CATALOG.check_sort(snapshots, "limit", ordered=False)
+    # A filter that names no field of the rows is refused at the call, not by Massive.
+    news = next(s for s in CATALOG.by_name.values() if "/benzinga/v2/news" in s.rest_paths)
+    CATALOG.check_sort(news, "tickers", ordered=False)
+    with pytest.raises(ValueError, match=r"sort part 'stocks' names no field of"):
+        CATALOG.check_sort(news, "stocks", ordered=False)
 
 
 def test_no_vendor_field_keeps_a_library_time_column_s_name() -> None:

@@ -199,6 +199,31 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
     assert convert_field(_with(conversion), value) == expected
 
 
+# Values `decimal-text-number` refuses, one at a time and in a column alike.
+_DECIMAL_REFUSED: tuple[object, ...] = (
+    # Text Python's `float` reads but that is no plain decimal.
+    "1e5",
+    "NaN",
+    "inf",
+    " 1.5",
+    "+1.5",
+    "1_000",
+    ".5",
+    "5.",
+    "\u0667",  # an Arabic-Indic digit seven
+    "",
+    "9" * 400,  # beyond a finite double
+    # A newline inside one text, which the column reading joins its texts with.
+    "1\n2",
+    "1\n",
+    "\n1",
+    "1.5\n\n2",
+    10**400,
+    True,
+    [1.5],
+)
+
+
 @pytest.mark.parametrize(
     ("conversion", "value"),
     [
@@ -211,21 +236,7 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.QUOTED_INTEGER, True),
         (Conversion.INTEGER_AS_NUMBER, "1.5"),
         (Conversion.INTEGER_AS_NUMBER, True),
-        # Text Python's `float` reads but that is no plain decimal.
-        (Conversion.DECIMAL_TEXT_NUMBER, "1e5"),
-        (Conversion.DECIMAL_TEXT_NUMBER, "NaN"),
-        (Conversion.DECIMAL_TEXT_NUMBER, "inf"),
-        (Conversion.DECIMAL_TEXT_NUMBER, " 1.5"),
-        (Conversion.DECIMAL_TEXT_NUMBER, "+1.5"),
-        (Conversion.DECIMAL_TEXT_NUMBER, "1_000"),
-        (Conversion.DECIMAL_TEXT_NUMBER, ".5"),
-        (Conversion.DECIMAL_TEXT_NUMBER, "5."),
-        (Conversion.DECIMAL_TEXT_NUMBER, "\u0667"),  # an Arabic-Indic digit seven
-        (Conversion.DECIMAL_TEXT_NUMBER, ""),
-        (Conversion.DECIMAL_TEXT_NUMBER, "9" * 400),  # beyond a finite double
-        (Conversion.DECIMAL_TEXT_NUMBER, 10**400),
-        (Conversion.DECIMAL_TEXT_NUMBER, True),
-        (Conversion.DECIMAL_TEXT_NUMBER, [1.5]),
+        *((Conversion.DECIMAL_TEXT_NUMBER, value) for value in _DECIMAL_REFUSED),
         (Conversion.QUOTED_INTEGER, str(2**63)),
         (Conversion.TEXT_OR_INTEGER_ID, 7.5),
         (Conversion.TEXT_OR_INTEGER_ID, True),
@@ -479,3 +490,18 @@ def test_a_decimal_text_column_left_to_arrow_keeps_its_numbers() -> None:
     assert column_converter(price, arrow_checks_numbers=True)(mixed) is mixed
     # Text still becomes floats here: Arrow would not read it as a double.
     assert column_converter(price, arrow_checks_numbers=True)(["7676.5"]) == [7676.5]
+
+
+@pytest.mark.parametrize("value", _DECIMAL_REFUSED, ids=repr)
+def test_a_decimal_text_column_refuses_what_one_value_refuses(value: object) -> None:
+    # Alone, beside good texts, and beside nulls: the column reading never accepts a value the
+    # converter refuses, and never raises, so the decoder reads the rows one by one.
+    price = _field(WireType.DOUBLE, Conversion.DECIMAL_TEXT_NUMBER)
+    with pytest.raises(UnconvertibleError):
+        convert_field(price, value)
+    # A caller that leaves numbers to Arrow gets a number too large back for Arrow to refuse;
+    # text it never leaves to Arrow.
+    for arrow in (False, True) if isinstance(value, str) else (False,):
+        read = column_converter(price, arrow_checks_numbers=arrow)
+        for column in ([value], ["7676.5", value], [None, value, "7679"], [value, value]):
+            assert read(list(column)) is None, column

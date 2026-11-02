@@ -827,6 +827,7 @@ _OBJECTS: tuple[dict[str, object], ...] = (
     {"ev": "F", "sym": "ESZ6", "p": "7676.5", "lp": 0},
     {"ev": "F", "sym": "ESZ6", "p": 7679},
     {"ev": "F", "sym": "ESZ6", "p": "1e5"},
+    {"ev": "F", "sym": "ESZ6", "p": "1\n2"},  # a newline, which the column reading joins on
     {"ev": "F", "sym": "ESZ6", "p": None, "zz": 1},
 )
 

@@ -647,9 +647,9 @@ _TEXTS: Final = frozenset({str, NoneType})
 def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | None:
     """Return a column of decimal texts and nulls as floats, as `decimal-text-number` gives.
 
-    The whole column is checked by one pattern test over its texts joined by newlines, which no
-    text that passes the per-value test can contain, and converted with the builtin `float`, so
-    a frame of text prices costs no Python call per value.
+    The whole column is checked by one pattern test over its texts joined by newlines, after a
+    count of the newlines proves no text holds one of its own, and converted with the builtin
+    `float`, so a frame of text prices costs no Python call per value.
 
     Args:
         values: Texts, and `None`s when `has_null`.
@@ -660,7 +660,10 @@ def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | No
         spells a number too large for a finite double, which the converter refuses.
     """
     texts = cast("list[str]", [v for v in values if v is not None] if has_null else values)
-    if not _DECIMAL_TEXTS.fullmatch("\n".join(texts)):
+    joined = "\n".join(texts)
+    # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
+    # the column passes only when the joining newlines are the only ones.
+    if joined.count("\n") != len(texts) - 1 or not _DECIMAL_TEXTS.fullmatch(joined):
         return None
     numbers = list(map(float, texts))
     if math.inf in numbers or -math.inf in numbers:

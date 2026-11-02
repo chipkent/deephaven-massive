@@ -259,7 +259,8 @@ class IgnoredKey:
 _FINANCIALS_TICKERS = (
     "The live run of 2026-11-02 received `max_ticker` and `min_ticker` on the rows of a "
     'request for AAPL, both "AAPL". The financials pages document neither, and the row\'s '
-    "own `tickers` column already names its company's tickers."
+    "own `tickers` column already lists every ticker of the company, each share class "
+    "included, so the two keys add nothing it lacks."
 )
 
 IGNORED_KEYS: tuple[IgnoredKey, ...] = (
@@ -270,21 +271,6 @@ IGNORED_KEYS: tuple[IgnoredKey, ...] = (
             "/stocks/financials/v1/cash-flow-statements",
         )
         for key in ("max_ticker", "min_ticker")
-    ),
-    IgnoredKey(
-        source="forex/C",
-        wire_key="i",
-        reason="The live run of 2026-11-02 received `i` 0 on the EUR/USD quotes; the forex "
-        "quote documents no `i`, and a constant zero carries nothing.",
-    ),
-    *(
-        IgnoredKey(
-            source="crypto/XQ",
-            wire_key=key,
-            reason="The live run of 2026-11-02 received `lp` and `ls`, both 0, on the BTC-USD "
-            "quotes; the crypto quote documents neither, and a constant zero carries nothing.",
-        )
-        for key in ("lp", "ls")
     ),
 )
 """Every undeclared key the decoders drop without reporting drift."""
