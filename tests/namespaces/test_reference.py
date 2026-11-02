@@ -699,8 +699,7 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
-    # An article without an id is still the same article: MSFT's copy equals AAPL's in every
-    # column, so it goes too.
+    # An article without an id cannot be told from another, so neither copy is dropped.
     unnamed = {
         k: v for k, v in _article("", "2024-06-24T15:00:00Z", "AAPL", "MSFT").items() if k != "id"
     }
@@ -717,12 +716,12 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
         _news_target("AAPL", limit=3),
         _news_target("MSFT", limit=3),
     ]
-    # Ticker by ticker, in ticker order; each shared article once, where AAPL's request had
-    # it, and `limit` caps each ticker's articles, not the table.
-    assert [row["Id"] for row in out] == ["both", "a1", None, "m1"]
+    # Ticker by ticker, in ticker order; the shared article once, where AAPL's request had it,
+    # and `limit` caps each ticker's articles, not the table.
+    assert [row["Id"] for row in out] == ["both", "a1", None, "m1", None]
     assert (
-        "reference.news: kept 4 of 6 rows from 2 requests, dropping the rows an earlier request "
-        "returned whole; limit=3 per request" in caplog.messages
+        "reference.news: kept 5 of 6 rows from 2 requests, each row once by Id; limit=3 per "
+        "request" in caplog.messages
     )
 
 
