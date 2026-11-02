@@ -1162,3 +1162,21 @@ def test_results_opened_and_released_on_many_threads_share_one_coordinator(
     assert len(idents) == 1
     assert len([t for t in threading.enumerate() if t.name == prefix]) == 1
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_an_outcome_after_the_stop_token_is_dropped(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The token is set (a failure or the shutdown) before the result's stop is handled.
+    script = Script(massive_session)
+    gate = script.gates["AAPL"] = threading.Event()
+    result = follow(massive_session, watchlist("AAPL"), script)
+    until(lambda: script.calls == [("AAPL",)])
+    (worker,) = massive_session._core._workers.values()
+    handle = cast("Any", worker.fail).__self__
+    handle.stop_token.set()
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        gate.set()
+        until(lambda: "a read ended after the stop; dropped" in caplog.text)
+    assert state(massive_session, "AAPL") is SymbolReadState.LOADING  # nothing recorded
+    massive_session.release(result)
