@@ -1,0 +1,28 @@
+{
+  "request_id": "b2f1c4a0e7d94a3c9d1e5f60a7b8c9d0",
+  "results": [
+    {
+      "cfi": "OCEICS",
+      "contract_type": "call",
+      "exercise_style": "european",
+      "expiration_date": "2026-11-20",
+      "primary_exchange": "CBOE",
+      "shares_per_contract": 100,
+      "strike_price": 400,
+      "ticker": "O:SPX261120C00400000",
+      "underlying_ticker": "SPX"
+    },
+    {
+      "cfi": "OCEICS",
+      "contract_type": "call",
+      "exercise_style": "european",
+      "expiration_date": "2026-11-20",
+      "primary_exchange": "CBOE",
+      "shares_per_contract": 100,
+      "strike_price": 600,
+      "ticker": "O:SPX261120C00600000",
+      "underlying_ticker": "SPX"
+    }
+  ],
+  "status": "OK"
+}

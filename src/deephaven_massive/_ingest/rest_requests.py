@@ -32,6 +32,7 @@ from deephaven_massive._datasets.dates import day_class, instant_bound, is_tradi
 from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
 from deephaven_massive._datasets.history_source import session_date_param
 from deephaven_massive._datasets.symbols import forex_codes, symbol_class
+from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._types import _All
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath
 
 __all__ = [
+    "BARE_INDEX_PARAM",
     "Call",
     "CryptoSplit",
     "axis_query",
@@ -75,6 +77,11 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 _ONE_DAY: Final = timedelta(days=1)
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
+
+BARE_INDEX_PARAM: Final = "underlying_ticker"
+"""The query parameter that takes an index without its `I:`: the options contracts list's
+`underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
+the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
 
 CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
 """Splits a crypto ticker into its base and quote currencies (`RestReader.crypto_pair`)."""
@@ -364,7 +371,8 @@ def _caller_params(
     """Return the path and query parameters the caller set: typed parameters and filters.
 
     Typed parameters go wherever the path takes them: a path segment (`{date}`,
-    `{direction}`) or a query parameter. `order` on a path without an `order` parameter folds
+    `{direction}`) or a query parameter. An index given to `BARE_INDEX_PARAM` goes without its
+    `I:` (`I:SPX` as `SPX`). `order` on a path without an `order` parameter folds
     into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one it is
     sent as is. A filter goes out under the wire name whose `filters` key it is.
 
@@ -389,8 +397,10 @@ def _caller_params(
     folded = "order" in typed and "order" not in params
     unknown = [name for name in typed if name not in params and not (folded and name == "order")]
     for name, value in typed.items():
+        bare = name == BARE_INDEX_PARAM and isinstance(value, str)
         if name in params:
-            (path if params[name].in_path else query)[name] = value
+            sent = contracts_underlying(cast("str", value)) if bare else value
+            (path if params[name].in_path else query)[name] = sent
     if folded and "sort" in query:
         query["sort"] = f"{typed['sort']}.{typed['order']}"
     elif folded:

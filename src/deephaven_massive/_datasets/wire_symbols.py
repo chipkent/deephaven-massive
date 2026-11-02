@@ -16,6 +16,11 @@ This module holds both directions of that mapping, which every transport applies
   filter, and `ws_symbol` writes the WebSocket topic form. A joined crypto ticker is never
   split by guessing where its quote starts: the transports take every split from Massive's
   crypto ticker list and pass it in.
+- **Option underlyings.** Massive's options contracts list writes an index underlying
+  without its `I:` (`SPX`) and finds no contract for `I:SPX`, while the option chain takes
+  and writes `I:SPX`. `contracts_underlying` writes the spelling the contracts list takes, and
+  `index_underlyings` reads its rows' underlyings back into the canonical form, by the CFI
+  code each row carries.
 
 The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
 function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
@@ -51,6 +56,8 @@ __all__ = [
     "ReadSymbols",
     "WireSymbols",
     "canonical_from_wire",
+    "contracts_underlying",
+    "index_underlyings",
     "unreadable_symbol_message",
     "wire_spellings",
     "ws_symbol",
@@ -174,6 +181,53 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
         base, quote = pairs[symbol]
         return f"{base}-{quote}"
     return symbol
+
+
+_INDEX_PREFIX: Final = "I:"
+"""The prefix of a canonical index ticker."""
+
+_OPTION_ON_AN_INDEX: Final = r"^O..I"
+"""The CFI codes (ISO 10962) of an option whose underlying is an index: an `O` (an option),
+then its type and exercise style, then `I`, the underlying's kind (`OCEICS` for an SPX call;
+`OCASPS`, with `S` for a stock, for an AAPL call)."""
+
+
+def contracts_underlying(symbol: str) -> str:
+    """Return an underlying as Massive's options contracts list takes it: an index bare.
+
+    The list's `underlying_ticker` finds no contract for `I:SPX` and every contract of `SPX`,
+    and the list writes `SPX`; any other underlying is sent canonical (`AAPL`, `BRK.B`).
+
+    Args:
+        symbol: A canonical stock or index ticker.
+
+    Returns:
+        The ticker without its `I:` prefix for an index, otherwise unchanged.
+    """
+    return symbol.removeprefix(_INDEX_PREFIX)
+
+
+def index_underlyings(underlyings: pa.Array, cfi: pa.Array) -> pa.Array:
+    """Read the underlyings of options rows into the canonical form, by each row's CFI code.
+
+    Massive's options contracts list writes an index underlying bare (`SPX`), while the option
+    chain writes it `I:SPX`; the row's CFI code says which underlyings are indices. A row
+    whose CFI code marks an option on an index (`_OPTION_ON_AN_INDEX`) gets `I:` unless it has
+    it; every other row, a null code included, is unchanged.
+
+    Args:
+        underlyings: The rows' underlyings, as text.
+        cfi: The rows' CFI codes, as text.
+
+    Returns:
+        The underlyings, every index one with its `I:` prefix.
+    """
+    on_index = pc.and_(
+        pc.fill_null(pc.match_substring_regex(cfi, _OPTION_ON_AN_INDEX), fill_value=False),
+        pc.invert(pc.starts_with(underlyings, _INDEX_PREFIX)),
+    )
+    prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, underlyings, "")
+    return pc.if_else(on_index, prefixed, underlyings)
 
 
 _UNREADABLE_LIMIT: Final = 100

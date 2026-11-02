@@ -258,8 +258,8 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
         c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
     )
     assert underlying.description == (
-        "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
-        "the linked instrument, not what the contract delivers. From "
+        "The instrument Massive links the row to, in the library's canonical symbol form; for "
+        "an option, the linked instrument, not what the contract delivers. From "
         f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
     )
 
