@@ -1071,7 +1071,21 @@ dm.disable_debug_logging()
 
 To capture a problem from the moment the server starts, set `DEEPHAVEN_MASSIVE_LOG=DEBUG`, or
 `DEEPHAVEN_MASSIVE_LOG_FILE=/path/to/massive.log` to write the debug log to a file. The log never
-holds your API key or S3 secret. To report a bug, open an
+holds your API key or S3 secret.
+
+The debug log grows with the number of requests, not with the amount of market data. The
+library logs nothing per WebSocket message or row, so a live table costs about 1 KB a minute
+for each connection (about 60 KB an hour), however busy the market, plus one line of about
+150 bytes per symbol each time a connection subscribes. Every REST request adds about 0.5 KB
+and every flat file read 0.5 to 1 KB, so a `fetch()` or `history()` adds that much per page
+or file it reads, and a `poll()` adds 0.5 KB per request and 0.2 KB per cycle: `poll(60)` of
+one request is about 40 KB an hour, while a `poll(5)` that sends 100 requests a cycle is about
+35 MB an hour. The log has no size limit and is never rotated, and a log file is appended to,
+not replaced, each time the log is turned on. To keep it small, turn it on just before the
+failing code and off after it, use `DEEPHAVEN_MASSIVE_LOG=INFO` for a long run (it drops the
+per-request lines), and delete the file between runs.
+
+To report a bug, open an
 [issue](https://github.com/chipkent/deephaven-massive/issues), attach the log file (GitHub cuts
 an issue's text at 65,536 characters; zip a larger file), and add the output of `m.streams()`,
 `m.connections()`, and `m.rate_limits()`, printed after the failure with

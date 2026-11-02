@@ -174,8 +174,10 @@ class MassiveConfig:
             cfg = dm.MassiveConfig()  # MASSIVE_API_KEY from the environment
             # Real-time stocks; options from Massive's delayed feed.
             mixed = dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})
+            # Stocks streams always from Massive's real-time host, socket.massive.com; at
+            # most 4 REST requests or flat-file reads at once.
             pinned = dm.MassiveConfig(
-                ws_hosts={dm.AssetClass.STOCKS: "fullmarket-business.massive.com"},
+                ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"},
                 max_concurrency=4,
             )
             m = dm.MassiveSession(pinned)
@@ -210,8 +212,8 @@ class MassiveConfig:
             `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
             Defaults to an empty set: every subscription is unpaced until a refusal.
         ws_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
-            for example `{dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}`, instead of
-            letting the library decide from REST evidence. A pin must agree with
+            for example `{dm.AssetClass.STOCKS: "socket.massive.com"}` (Massive's real-time
+            feed), instead of letting the library decide from REST evidence. A pin must agree with
             `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
             FMV family is never pinned; it is always `business.massive.com`. Defaults to
             an empty mapping: the library decides every host.
