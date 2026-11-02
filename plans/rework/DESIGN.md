@@ -203,7 +203,7 @@ dm.AssetClass
 dm.Timespan
 dm.PollMode
 dm.HistorySource
-dm.Reread                  # AUTO, ALWAYS, NEVER: whether history() of a followed symbol table
+dm.Reread                  # ALWAYS, NEVER: whether history() of a followed symbol table
                            # downloads a returning symbol again (section 7.8)
 dm.FuturesVenue
 dm.Direction
@@ -1285,7 +1285,7 @@ class StreamQuery:                         # WebSocket datasets
 class HistoryQuery:                        # datasets with a historical retrieval path
     def history(self, start: DateLike, end: DateLike | None = None, *,
                 source: HistorySource = HistorySource.AUTO,
-                reread: Reread = Reread.AUTO,
+                reread: Reread = Reread.ALWAYS,
                 wait: bool = True) -> Table: ...   # static, or read in the background;
                                            # follows a refreshing symbol table (section 7.8)
 
@@ -1909,19 +1909,37 @@ read (a snapshot of a symbol added at 14:00 is the 14:00 snapshot).
 - **Remove:** its rows leave in the same update cycle as its row leaves the user's table.
 - **Re-add:** `history()` follows `reread` (below); `fetch()` always reads again.
 
-**`reread`** (`history()` only; `dm.Reread`, default `AUTO`) says whether a symbol that
+**`reread`** (`history()` only; `dm.Reread`, default `ALWAYS`) says whether a symbol that
 returns to the table after a removal is downloaded again or gets its latest completed download
-back with no request. It has no effect when `symbols` is not followed.
+back with no request. It has no effect when `symbols` is not followed, and `fetch()` has no
+such option: it always reads again.
 
 | Member | A returning symbol |
 |---|---|
-| `AUTO` | **PLACEHOLDER: the exact reuse condition is pending the owner's final rule.** Reuses its latest completed download only when that condition holds; otherwise it is downloaded again, as a first add: no rows until the download lands. |
-| `ALWAYS` | Is always downloaded again; a removal drops its rows at once. |
-| `NEVER` | Always reuses its latest completed download, kept for the life of the result. |
+| `ALWAYS` (default) | Is downloaded again and shows Massive's current answer. A removal drops its rows in the same cycle; a re-added symbol has no rows until its new download lands. |
+| `NEVER` (opt-in) | Gets its earlier download back with no request; the download is kept for the life of the result. |
 
-A symbol whose read `FAILED` is downloaded again on every re-add, under every member.
-**PLACEHOLDER: what `AUTO`'s condition cannot catch, pending the final rule.** Each symbol's
-rows are Massive's answer as of its `ReadAt` in `m.symbol_reads()`. `ALWAYS` re-reads whenever freshness matters more than requests.
+A symbol whose read `FAILED` is downloaded again on every re-add, under both members. Each
+symbol's rows are Massive's answer as of its `ReadAt` in `m.symbol_reads()`.
+
+**Costs.** Under `ALWAYS`, a table whose symbols churn re-reads a symbol every time it returns.
+Under `NEVER`, the result keeps the rows of every symbol it has ever held, in memory, and a
+returning symbol shows data as old as its first download.
+
+**Why there is no automatic choice.** No date or time rule can tell that Massive's data for a
+range is final, so the library never guesses that a reuse is safe (research of 2026-11-02):
+
+- Cancellations reach REST days after the session (Massive's knowledge base, "How much does
+  Massive's feeds handle canceled trades").
+- Published flat files are rewritten (knowledge base, "What time are Massive's flat files ready
+  each day").
+- Massive backfills history (changelog entries of 2025-11-03, 2026-07-31, and 2026-10-16).
+- Splits are applied overnight, at a time Massive does not publish
+  (`vendor/massive/rest/stocks/corporate-actions/splits.md`, `execution_date`).
+- FINRA allows trades to be reported late, with no limit.
+
+A reuse that is provably safe, for a flat-file download whose every file still shows the same
+ETag or Last-Modified in a fresh listing, is a separate follow-up (issue #454).
 
 **The source under `AUTO`.** For a followed table, `HistorySource.AUTO` reads REST whenever
 REST can serve the request, and flat files otherwise ([section 16](#16-historysourceauto)).
@@ -2815,7 +2833,7 @@ has the same value set as that parameter.
 | `Timespan` | SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR, SESSION | `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`, `session` | `bars`, `indicators`; selects channel, REST path or resolution, flat-file prefix, and overload |
 | `PollMode` | AUTO, REPLACE, UPSERT, APPEND | `auto`, `replace`, `upsert`, `append` | `poll()`; `AUTO`, the default, is the dataset's own mode |
 | `HistorySource` | AUTO, REST, FLAT_FILES | `auto`, `rest`, `flat_files` | `history()` |
-| `Reread` | AUTO, ALWAYS, NEVER | `auto`, `always`, `never` (no wire value) | `history()` (`reread`): whether a symbol that returns to a followed symbol table is downloaded again ([section 7.8](#78-following-a-live-symbol-table)) |
+| `Reread` | ALWAYS, NEVER | `always`, `never` (no wire value) | `history()` (`reread`): whether a symbol that returns to a followed symbol table is downloaded again ([section 7.8](#78-following-a-live-symbol-table)) |
 | `FuturesVenue` | CME, CBOT, NYMEX, COMEX | `cme`, `cbot`, `nymex`, `comex` | futures factory methods (`venues`, a set); flat-file prefix only |
 | `Direction` | GAINERS, LOSERS | `gainers`, `losers` | `movers()` |
 | `ContractType` | CALL, PUT | `call`, `put` | `options.chain`, `options.contracts` |
@@ -7601,9 +7619,12 @@ The owner decisions of 2026-11-02 follow.
     single-value inputs `underlying=` and `product_code=` follow tables too. Within it:
     - **`limit` caps each symbol's rows** in a followed read, on every dataset, extending
       decision 74 there.
-    - **`reread=dm.Reread.AUTO`** on `history()`: `AUTO` reuses a returning symbol's latest
-      completed download only under a condition still pending (**PLACEHOLDER**); `ALWAYS`
-      always downloads again and `NEVER` always reuses. `fetch()` always reads again.
+    - **`reread=dm.Reread.ALWAYS`** on `history()` (owner decision D-1, 2026-11-02: `ALWAYS`
+      the default, `NEVER` opt-in): `ALWAYS` downloads a returning symbol again, and `NEVER`
+      reuses its earlier download for the life of the table. There is no automatic member,
+      because no date or time rule can tell that Massive's data is final
+      ([section 7.8](#78-following-a-live-symbol-table) cites the evidence). `fetch()` always
+      reads again.
     - **`m.symbol_reads()`** shows each symbol's read: its state, source, row count, attempts,
       and error, kept for the session.
     The alternatives were a table that fails when its symbols change, which reads the table

@@ -927,8 +927,8 @@ symbol never stops the table: Massive's "no data" gives that symbol no rows, a p
 that symbol failed in `m.symbol_reads()`; delete and re-add its row to read it again. Only a
 rejected API key, a closed session, a failed watchlist, or a library bug fails the whole table.
 With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
-and raises only if every one of them failed. A symbol that comes back after you deleted it
-reuses its earlier download when that data cannot have changed since (`reread`, in
+and raises only if every one of them failed. A symbol that comes back after you deleted it is
+downloaded again, unless you choose otherwise (`reread`, in
 [verb arguments](#verb-arguments)). `limit` then caps each symbol's rows. The same holds for
 `underlying=` of `m.options.chain` and `m.options.contracts`, which take a table with a
 `Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode` column.
@@ -1078,14 +1078,17 @@ The members are `CME`, `CBOT`, `NYMEX`, and `COMEX`. Streams and REST reads igno
   as in [table shapes](#table-shapes).
 - `ring(capacity)`: the number of rows to keep.
 - `last_by(by="Symbol")`: the key column or columns.
-- `history(start, end=None, *, source=dm.HistorySource.AUTO, reread=dm.Reread.AUTO,
+- `history(start, end=None, *, source=dm.HistorySource.AUTO, reread=dm.Reread.ALWAYS,
   wait=True)`: the range as in [`start` and `end`](#start-and-end); `source` as in
   [history sources](#history-sources); `wait=False` reads in the background, as in
   [live tables](#live-tables). `reread` matters only when `symbols` is a live table: it says
-  whether a symbol that returns after you deleted it is downloaded again. `dm.Reread.AUTO`
-  reuses the earlier download only when that data cannot have changed since; `ALWAYS` always
-  downloads again; `NEVER` always reuses. A symbol that failed is always read again. Each
-  symbol's rows are as of its `ReadAt` in `m.symbol_reads()`.
+  whether a symbol that returns after you deleted it is downloaded again. `dm.Reread.ALWAYS`,
+  the default, downloads it again and shows Massive's current answer; it has no rows until the
+  download lands. `dm.Reread.NEVER` gives back the earlier download with no request, at the
+  cost of keeping every symbol the table ever held in memory. A symbol that failed is always
+  read again. Massive corrects past data (late cancellations, backfills, splits), so no rule can
+  tell when an earlier download is still right: choose `NEVER` only when stale rows are
+  acceptable. Each symbol's rows are as of its `ReadAt` in `m.symbol_reads()`.
 - `fetch(*, wait=True)`: `wait` as for `history()`. A `fetch()` that follows a live symbol
   table reads a returning symbol again, as Massive answers at that moment.
 
