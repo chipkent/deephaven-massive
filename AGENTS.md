@@ -46,11 +46,14 @@ uv build                                 # sdist and wheel
    rerun the full check before the push.
 6. **Answer every review comment**, from people and bots: name the commit that fixes it and say
    how, or say why nothing changes. Never resolve a thread without a reply.
-7. **PR descriptions follow `docs/dev/pull-requests.md`; read it before writing one**
-   (`gh pr create --body-file` never shows the template). Sections, in order: Summary (the big
-   picture for a reader with no context; no file names or internal names), Why, What changes,
-   Decisions, How it works, Verification, Follow-ups, then `Closes #<issue>` (or `Refs #<issue>`)
-   on its own line. No review labels; rewrite it to the final state on every push.
+7. **PR descriptions read as if an O'Reilly technical editor wrote them**, and a reader
+   skimming the headings and bullets gets every fact that matters: no slop, no narration, no
+   padding, never a fact cut for length, and the context a reviewer new to the PR needs to
+   follow it, no more. Write them with the `writing-a-pr-description` skill
+   (`gh pr create --body-file` never shows the template); the sections, banned patterns, and
+   self-edit checklist of `docs/dev/pull-requests.md` all apply. Rewrite the description to the
+   final state on every push, and end it with `Closes #<issue>` on its own line. Issue bodies
+   and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
 9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
    `DESIGN.md` first: an owner decision.
