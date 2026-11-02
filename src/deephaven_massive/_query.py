@@ -1449,9 +1449,11 @@ class HistoryQuery(QueryBase):
         """Run a `history()` call that reads the flat files, now or in the background.
 
         A blocking read's description names the source that served it, REST included, after
-        the read (`FlatFileTransport.read_history`). A background read's is written when the
-        read starts, so under `AUTO`, when REST can serve the request, it says a day the flat
-        files cannot serve is read from REST, and the read's WARNING names the days.
+        the read (`FlatFileTransport.read_history`), and what the files may lack: the days
+        taken for holidays, and the futures sessions that may be incomplete. A background
+        read's is written when the read starts, so under `AUTO`, when REST can serve the
+        request, it says a day the flat files cannot serve is read from REST, and the read's
+        WARNING names the days; the log names the days taken for holidays too.
 
         Args:
             call: The call id.
@@ -1477,10 +1479,11 @@ class HistoryQuery(QueryBase):
                 run=lambda _stop: self._empty_rows(),
             )
         if wait:
-            table, served = files.read_history(
+            table, served, lacks = files.read_history(
                 spec, request, window, dates=dates, call=call, forced=forced
             )
-            return self._described(table, note=note if served is None else served)
+            source = note if served is None else served
+            return self._described(table, note=source if lacks is None else f"{source} {lacks}")
         if not forced and rest_history_problem(spec, request) is None:
             # The description is written before the read: it can only say what may happen.
             note = f"{note} A day the flat files cannot serve is read from REST; the log names it."

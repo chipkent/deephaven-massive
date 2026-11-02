@@ -453,8 +453,10 @@ class MassiveSession:
             the topic counts `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`,
             `BufferedRows` (a WARNING past 1,000,000), `Reconnects`, `LastMessageAt`,
             `NextReconnectAt`, `UpdatedAt`, `LastError`, and `SchemaDrift` (fields frames had
-            beyond the documented schema, `channel:field+`, lacked, `channel:field-`, or held
-            with a value that does not fit, read as null, `channel:field?`). Each column's
+            beyond the documented schema, `channel:field+`, lacked, `channel:field-`, held
+            with a value that does not fit, read as null, `channel:field?`, or held as a whole
+            number beyond 2**53, read rounded, `channel:field~`; and the rows dropped because
+            their symbol or time could not be read, `channel:<n> rows dropped`). Each column's
             tooltip says what it holds.
 
         Raises:
@@ -474,9 +476,13 @@ class MassiveSession:
         acknowledgement from Massive for ...`, re-sent until it does); a connection that is down
         (`connection down since <time>; no data`; an outage longer than
         `MassiveConfig.max_outage` fails the stream), or one gone quiet during market hours; a
-        `poll()` cycle's error with the last good cycle's time; and a `poll()` cycle still running
-        past its interval (`cycle running since <time>`). Each call returns a new live view; after
-        `close()` it keeps its final rows. How to read it: README.md#diagnostics.
+        `poll()` cycle's error with the last good cycle's time; a `poll()` cycle still running
+        past its interval (`cycle running since <time>`); and the symbols a `poll()` cycle left
+        out (`no rows this cycle for ...`: Massive answered HTTP 404, or the symbol's path does
+        not take a parameter the poll sends). `Gaps` keeps each span over which a live table's
+        rows may be missing (a recovered outage, a run of failed cycles) once the note is gone.
+        Each call returns a new live view; after `close()` it keeps its final rows. How to read
+        it: README.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that
@@ -487,9 +493,10 @@ class MassiveSession:
             `UNKNOWN`, which is never real-time; null for data of no single subscription and
             for a background read), `RowsPublished`,
             `RequestsPerCycle`, `State` (`RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
-            `CLOSED`), `Error`, `CreatedAt`, and `SchemaDrift`
-            (`transport:field+`, `transport:field-`, or `transport:field?`, as in
-            `connections()`). Each column's tooltip says what it holds.
+            `CLOSED`), `Error`, `Gaps` (`<start> to <end>` in UTC, the latest five), `CreatedAt`,
+            and `SchemaDrift` (`transport:field+`, `transport:field-`, `transport:field?`,
+            `transport:field~`, and `transport:<n> rows dropped`, as in `connections()`). Each
+            column's tooltip says what it holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
