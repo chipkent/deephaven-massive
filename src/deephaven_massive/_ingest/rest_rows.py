@@ -11,9 +11,7 @@ batches of the dataset's merged schema, one page at a time:
   that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
   symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
   dataset through a projection.
-- `stamped` applies the stamp rule of bars of a day or longer (`row_times.stamp_rule`), which
-  serves every bar and warns on a stamp Massive is not known to use; `keep_window` and
-  `whole_bars` keep the rows a `history()` window holds.
+- `keep_window` and `whole_bars` keep the rows a `history()` window holds.
 
 An odd value never costs a page its other rows: a value that does not fit, outside the key
 columns, is null and reported as drift, and a row whose key cannot be read is dropped and
@@ -35,7 +33,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
-from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, within
+from deephaven_massive._datasets.row_times import DATE, time_column, within
 from deephaven_massive._datasets.source_columns import (
     KEY_COLUMNS,
     RoundedFields,
@@ -68,7 +66,6 @@ __all__ = [
     "RowConverter",
     "is_error_row",
     "keep_window",
-    "stamped",
     "whole_bars",
 ]
 
@@ -357,30 +354,6 @@ def keep_window(
     if not masks:
         return batch
     return batch.filter(functools.reduce(pc.and_, masks))
-
-
-def stamped(
-    spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
-) -> pa.RecordBatch:
-    """Apply a stamp rule to a batch of bars (`row_times.stamp_rule`), keeping every bar.
-
-    Args:
-        spec: The dataset, for the WARNING.
-        source: The REST path template the bars came from, for the WARNING.
-        batch: Rows in the dataset's schema.
-        rule: The day zone, the stamps Massive is known to use besides 00:00, and the
-            session's warnings.
-
-    Returns:
-        The batch, with its `TimestampStart` at 00:00 of each bar's day in the class day zone.
-
-    A stamp at another time or on another day is moved the same way and logs the WARNING of
-    `row_times.StampRule.stamp`, once per dataset and timespan per session.
-    """
-    name = time_column(spec.times)
-    index = batch.schema.get_field_index(name)
-    moved = rule.stamp(spec.name, batch.column(index), source=source)
-    return batch.set_column(index, name, moved)
 
 
 def is_error_row(row: Mapping[str, object]) -> bool:

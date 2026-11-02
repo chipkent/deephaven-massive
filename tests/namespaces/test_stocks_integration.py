@@ -706,8 +706,8 @@ def test_daily_indicator_stamps(
     `TimestampStart` and `Date`, or the `MassiveError` the read raised. The library expects a
     daily value where its class's range bars are stamped, 00:00 New York time for a stock and
     00:00 UTC for crypto. Reading it: raw stamps there mean the labels are right; stamps
-    elsewhere are still served, labelled by the day they fall on, with a WARNING in the log,
-    and say which day each value really belongs to.
+    elsewhere are still served at those stamps, with no `Date` and a WARNING in the log, and
+    say which day each value really belongs to.
     """
     # The wire client encodes a date parameter from a `date`, never from text. The raw request
     # takes an exclusive bound, the day after the week; the library's `end` is inclusive.

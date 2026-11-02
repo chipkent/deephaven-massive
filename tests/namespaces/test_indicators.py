@@ -344,23 +344,20 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 @pytest.mark.parametrize(
     ("timespan", "moment", "window"),
     [
-        # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day. The
-        # value is labelled by the New York day its stamp falls on.
+        # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day, so
+        # which day the value covers is not known. It keeps its stamp, ends a day later, and
+        # has no Date.
         (
             dm.Timespan.DAY,
             datetime(2025, 1, 2, 3, tzinfo=UTC),
-            (
-                "2025-01-01",
-                datetime(2025, 1, 1, 5, tzinfo=UTC),
-                datetime(2025, 1, 2, 5, tzinfo=UTC),
-            ),
+            (None, datetime(2025, 1, 2, 3, tzinfo=UTC), datetime(2025, 1, 3, 3, tzinfo=UTC)),
         ),
-        # Massive stamps a week value on its week's Sunday; a Wednesday is labelled by the
-        # week it falls in, a stock week's Monday to Friday.
+        # Massive stamps a week value on its week's Sunday; one on a Wednesday keeps its stamp
+        # and ends a week later.
         (
             dm.Timespan.WEEK,
             datetime(2025, 1, 8, 5, tzinfo=UTC),
-            (None, datetime(2025, 1, 6, 5, tzinfo=UTC), datetime(2025, 1, 11, 5, tzinfo=UTC)),
+            (None, datetime(2025, 1, 8, 5, tzinfo=UTC), datetime(2025, 1, 15, 5, tzinfo=UTC)),
         ),
     ],
     ids=["day", "week"],
@@ -385,7 +382,8 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warn
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "indicators.sma: an indicator value from /v1/indicators/sma/{stockTicker} is stamped "
+        "indicators.sma: an indicator value of AAPL from /v1/indicators/sma/{stockTicker} is "
+        "stamped "
         f"{moment.isoformat()}"
     )
 

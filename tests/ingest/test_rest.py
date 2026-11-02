@@ -3101,8 +3101,10 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     )
     assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
     assert not unexpected_stamps(caplog)
-    # A stamp at midnight New York time may be another day cut: the bar is still served,
-    # labelled by the UTC day it falls on, and one WARNING names the stamp.
+    # A stamp at midnight New York time may be another day cut: the bar keeps it, with no
+    # Date, and ends a day later, so a range of 03-03 alone does not hold its whole window;
+    # one WARNING names the symbol and the stamp, since bars are stamped before the window
+    # keeps them.
     with caplog.at_level(logging.WARNING):
         odd = history(
             session,
@@ -3113,14 +3115,13 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
             timespan=Timespan.DAY,
             adjusted=True,
         )
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in odd] == [
-        ("2025-03-03", march_3 * 10**6, march_4 * 10**6, 3.0)
-    ]
+    assert odd == []
     [warning] = unexpected_stamps(caplog)
     assert warning.startswith(
-        "forex.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/{date} is stamped "
-        "2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for such a bar "
-        "(00:00:00.000, 23:59:59.999 in UTC). The bar is served"
+        "forex.bars: a 1-day bar of C:EURUSD from /v2/aggs/grouped/locale/global/market/fx/{date} "
+        "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for "
+        "such a bar (00:00:00.000, 23:59:59.999 in UTC). The library cannot tell which day it "
+        "covers, so the row is served as sent"
     )
 
 
@@ -3156,20 +3157,22 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
 ) -> None:
     caplog.set_level(logging.WARNING)
     # A two-day bar stamped at midnight New York time may hold hours of the next day: it is
-    # served, labelled by the UTC day it falls on, with one WARNING.
+    # served at its stamp, ends two days later, and logs one WARNING.
     start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
     out = crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
-    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (start * 10**6, utc_ms(date(2025, 3, 5)) * 10**6, 1.0)
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (None, new_york * 10**6, (new_york + 2 * 86_400_000) * 10**6, 1.0)
     ]
     [warning] = unexpected_stamps(caplog)
     assert warning.startswith(
-        "crypto.bars: a bar from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/"
-        "{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known "
-        "to use for such a bar (00:00:00.000 in UTC). The bar is served"
+        "crypto.bars: a bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/"
+        "{timespan}/{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp "
+        "Massive is known to use for such a bar (00:00:00.000 in UTC). The library cannot tell "
+        "which day it covers, so the row is served as sent: TimestampStart is Massive's stamp, "
+        "TimestampEnd that stamp plus 2 days"
     )
     caplog.clear()
     # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
@@ -3187,12 +3190,10 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (sunday * 10**6, after * 10**6, 2.0)
     ]
     assert not unexpected_stamps(caplog)
-    # A week bar stamped on another day may cover another week: it is served in the week its
-    # stamp falls in, with one WARNING.
+    # A week bar stamped on another day may cover another week: it keeps its stamp and ends
+    # a week later, after the range, so this range does not hold it; its form warns.
     out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
-    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (sunday * 10**6, after * 10**6, 2.0)
-    ]
+    assert out == []
     [warning] = unexpected_stamps(caplog)
     assert (
         "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
@@ -3215,10 +3216,9 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (first * 10**6, april * 10**6, 3.0)
     ]
     assert not unexpected_stamps(caplog)
+    # A month bar stamped on the 2nd ends on April 2, after the range.
     out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
-    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (first * 10**6, april * 10**6, 3.0)
-    ]
+    assert out == []
     [warning] = unexpected_stamps(caplog)
     assert "is stamped 2025-03-02T00:00:00+00:00" in warning
     assert "on the 1st of a month)" in warning

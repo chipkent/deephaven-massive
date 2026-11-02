@@ -399,7 +399,7 @@ class _Forex(Namespace):
 
         One row per pair, from one REST request per pair: the 1-day bar of the previous completed
         UTC day. Massive stamps it at 23:59:59.999 UTC, which is moved to the day's start; another
-        stamp is served on the UTC day it falls on, with a WARNING (README.md#bars). An explicit
+        stamp is kept, with a day-later end, no `Date`, and a WARNING (README.md#bars). An explicit
         `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404) is left
         out, with a WARNING.
 

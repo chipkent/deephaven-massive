@@ -710,34 +710,33 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
 ) -> None:
     caplog.set_level(logging.WARNING)
     # The documented sample sits at midnight New York time, 05:00 UTC: maybe another day cut.
-    # The bar is served, labelled by the UTC day its stamp falls on.
+    # The bar is served as sent: its stamp, a day later its end, and no Date.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
     out = rows(rest_session.crypto.previous_day_bar("X:BTCUSD").fetch())
+    new_york = NOV_15 + 5 * 3_600_000
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
-        ("2020-11-15", NOV_15 * MS, (NOV_15 + DAY_MS) * MS)
+        (None, new_york * MS, (new_york + DAY_MS) * MS)
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "crypto.previous_day_bar: a 1-day bar from /v2/aggs/ticker/{cryptoTicker}/prev is "
-        "stamped 2020-11-15T05:00:00+00:00, which is not a stamp Massive is known to use"
+        "crypto.previous_day_bar: a 1-day bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/prev "
+        "is stamped 2020-11-15T05:00:00+00:00, which is not a stamp Massive is known to use"
     )
     caplog.clear()
-    # The grouped-daily samples sit at no day boundary at all; both bars are served.
+    # The grouped-daily samples sit at no day boundary at all: each bar ends a day after its
+    # stamp, after the range's one day, so the range holds neither; each time of day warns.
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
-    day = int(datetime(2020, 2, 2, tzinfo=UTC).timestamp()) * 1000
     every = rows(
         rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY).history(
             "2020-02-02", "2020-02-02", source=dm.HistorySource.REST
         )
     )
-    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in every] == [
-        ("X:ARDRUSD", "2020-02-02", day * MS),
-        ("X:NGCUSD", "2020-02-02", day * MS),
-    ]
-    [warning] = stamp_warnings(caplog)
+    assert every == []
+    warnings = stamp_warnings(caplog)
+    assert len(warnings) == 2
     assert "/v2/aggs/grouped/locale/global/market/crypto/{date} is stamped 2020-02-02T20:48" in (
-        warning
+        "".join(warnings)
     )
 
 
@@ -856,8 +855,9 @@ def test_a_day_summary_not_in_utc_is_served_with_one_warning(
     load_fixture: Fixture,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Massive cut its day elsewhere than UTC midnight: the row is served with the UTC day's
-    # window, and the session warns once that its dates may not line up with other tables.
+    # Massive cut its day elsewhere than UTC midnight and does not say where: the row keeps
+    # its date, gets the widest window that date has in any time zone, and the session warns
+    # once.
     caplog.set_level(logging.WARNING)
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     body = json.loads(load_fixture(OWNER, "open_close.json"))
@@ -868,12 +868,16 @@ def test_a_day_summary_not_in_utc_is_served_with_one_warning(
     assert (row["Date"], row["IsUtc"]) == ("2020-10-09", False)
     rows(q.fetch())  # a second read logs nothing more
     day = int(datetime(2020, 10, 9, tzinfo=UTC).timestamp()) * NS
-    assert (row["TimestampStart"], row["TimestampEnd"]) == (day, day + 86_400 * NS)
+    hour = 3_600 * NS
+    assert (row["TimestampStart"], row["TimestampEnd"]) == (
+        day - 14 * hour,
+        day + 86_400 * NS + 12 * hour,
+    )
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     [warning] = [w for w in warnings if "isUTC false" in w]
     assert warning.startswith(
-        "crypto.daily_open_close: Massive sent a day summary with isUTC false, so its day "
-        "boundary is not the UTC midnight the other crypto tables use"
+        "crypto.daily_open_close: Massive sent the day summary of X:BTCUSD for 2020-10-09 with "
+        "isUTC false, so its day is not the UTC day the other crypto tables use"
     )
 
 
@@ -1051,16 +1055,18 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_served_with_a_warning
         f"X:BTCUSD,1,1.0,1.0,1.0,1.0,{stamp},1\n"
     )
     fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(csv_text))
+    empty = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-29.csv.gz", make_csv_gz(empty))
     q = s3_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
-    out = rows(q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES))
-    day = int(datetime(2023, 3, 28, tzinfo=UTC).timestamp()) * 10**9
-    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
-        ("X:BTCUSD", "2023-03-28", day)
+    out = rows(q.history("2023-03-28", "2023-03-29", source=dm.HistorySource.FLAT_FILES))
+    # The bar keeps its stamp, ends a day later, and has no Date; the range holds that window.
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        ("X:BTCUSD", None, stamp, stamp + 86_400 * 10**9)
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "crypto.bars: a 1-day bar from the flat files global_crypto/day_aggs_v1 is stamped "
-        "2023-03-28T04:00:00+00:00, which is not a stamp Massive is known to use"
+        "crypto.bars: a 1-day bar of X:BTCUSD from the flat files global_crypto/day_aggs_v1 is "
+        "stamped 2023-03-28T04:00:00+00:00, which is not a stamp Massive is known to use"
     )
 
 
