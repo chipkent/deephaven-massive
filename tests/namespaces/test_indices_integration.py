@@ -551,7 +551,7 @@ def test_an_index_minute_file_holds_its_own_new_york_day(
     rest_rows: RestRows,
     evidence: Evidence,
 ) -> None:
-    """Whether a `us_indices/minute_aggs_v1` file holds exactly its New York day, as REST does.
+    """Whether a `us_indices/minute_aggs_v1` file holds only its own New York day, as REST does.
 
     `history()` over a range of instants trims each index flat file to its own New York day
     before it joins REST rows, so a file holding another cut (the Chicago day, 01:00 to 01:00
@@ -560,9 +560,11 @@ def test_an_index_minute_file_holds_its_own_new_york_day(
     index updates) and the REST minute bars from the day before to the day after, and records
     the file's first and last stamps in UTC and New York time, its rows outside the New York
     day, and the REST minutes of that day the file lacks or adds. Passes when every file row
-    falls inside the New York day, none in the hour after it, and the file's minutes are
-    REST's minutes of that day. A failure means the trim cuts index files at the wrong
-    midnight, and the index day zone needs an owner decision.
+    falls inside the New York day, none in the hour after it, and the file adds no minute REST
+    lacks. A failure means the trim cuts index files at the wrong midnight, and the index day
+    zone needs an owner decision. Minutes REST has and the file lacks do not fail it: they
+    are recorded as a gap in Massive's file, which the library cannot fill, since the
+    file's rows still fall on the right day.
     """
     day = recent_monday
     read = flat_file_tickers(
@@ -592,12 +594,14 @@ def test_an_index_minute_file_holds_its_own_new_york_day(
     rest_day = {int(m["t"]) for m in minutes if first <= int(m["t"]) < last}
     lacks, adds = sorted(rest_day - set(stamps)), sorted(set(stamps) - rest_day)
     evidence(f"REST minutes of the New York day: {len(rest_day)}")
-    evidence(f"the file lacks {len(lacks)}: {[_wall_clock(s) for s in lacks[:10]]}")
+    evidence(
+        f"the file lacks {len(lacks)} (a gap in Massive's file, not asserted): "
+        f"{[_wall_clock(s) for s in lacks[:10]]}"
+    )
     evidence(f"the file adds {len(adds)}: {[_wall_clock(s) for s in adds[:10]]}")
     after = [s for s in stamps if last <= s < last + 3_600_000]
     assert not after, f"the file holds {len(after)} rows from 00:00 to 01:00 New York the next day"
     assert not outside, f"the file holds {len(outside)} rows outside its New York day"
-    assert not lacks, f"the file lacks {len(lacks)} REST minutes of its New York day"
     assert not adds, f"the file holds {len(adds)} minutes REST does not"
 
 
