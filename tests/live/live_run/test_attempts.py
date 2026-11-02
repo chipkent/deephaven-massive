@@ -261,9 +261,22 @@ def test_a_child_running_past_its_stop_is_stopped_and_its_tests_stay_due(harness
 
 
 def test_a_child_that_ignores_the_interrupt_is_killed(harness: Harness) -> None:
+    # The clock reaches the stop only once the child has said it ignores SIGINT, so the
+    # interrupt never arrives before the child set it aside, however slow the machine; with no
+    # grace the kill follows at once.
+    until = NOW + timedelta(milliseconds=10)
+    ignoring = threading.Event()
+
+    def echo(line: str) -> None:
+        if line.endswith("hanging"):
+            ignoring.set()
+
+    harness.ctx.echo = echo
+    harness.ctx.now = lambda: until if ignoring.is_set() else NOW
+    harness.ctx.stop_grace = 0.0
     harness.script(collection={A: {"items": [], "requests": 1}}, hang=True, ignore_interrupt=True)
-    _run(harness, until=NOW + timedelta(seconds=1))
-    assert harness.state.attempts[-1].exit_code == -9
+    _run(harness, until=until)
+    assert harness.state.attempts[-1].exit_code == -signal.SIGKILL
 
 
 def test_control_c_stops_the_child_and_records_the_attempt_interrupted(
@@ -396,7 +409,9 @@ def test_a_stream_night_is_dated_by_its_evening_and_restarts_in_its_folder(
     assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto real-time"])
 
 
-def test_a_night_reconciliation_reads_the_latest_night(harness: Harness) -> None:
+def test_a_unit_no_night_reports_passed_is_reconciled_with_the_latest_night(
+    harness: Harness,
+) -> None:
     harness.state.stream_days = ["2026-11-02"]
     harness.state.stream_nights = ["2026-11-03"]
     harness.state.attempts = [
@@ -423,6 +438,43 @@ def test_a_night_reconciliation_reads_the_latest_night(harness: Harness) -> None
     assert request["stream_folder"] == str(harness.ctx.out / "stream-night/2026-11-03-1")
     assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto real-time"])
     assert harness.check("stream-night-reconcile", "crypto real-time").status == "passed"
+
+
+def test_a_late_night_reconciliation_compares_each_unit_with_its_own_night(
+    harness: Harness,
+) -> None:
+    # Night one passed crypto and night two futures; the reconciliation runs only after both.
+    harness.state.stream_nights = ["2026-11-02", "2026-11-03"]
+    for night, unit in (("2026-11-02", "crypto real-time"), ("2026-11-03", "futures delayed")):
+        night_folder = f"stream-night/{night}-1"
+        (harness.ctx.out / night_folder).mkdir(parents=True)
+        lines = [
+            {"name": unit, "status": "passed", "reason": ""},
+            {"name": "options delayed", "status": "failed", "reason": "gaps 31"},
+        ]
+        (harness.ctx.out / night_folder / "results.jsonl").write_text(
+            "".join(json.dumps(line) + "\n" for line in lines)
+        )
+        harness.state.attempts.append(
+            Attempt("stream-night", night_folder, night, "", status="finished")
+        )
+        check = harness.check("stream-night", unit)
+        record(harness.state, check, status="passed", reason="", day=night)
+    harness.script(results=[{"name": "crypto real-time", "status": "passed", "reason": ""}])
+    attempts.run_built_in_group(
+        harness.ctx,
+        harness.state,
+        harness.memory,
+        group="stream-night-reconcile",
+        until=NOW + timedelta(hours=1),
+    )
+    folder = harness.ctx.out / "stream-night-reconcile" / "2026-11-04-1"
+    request = json.loads((folder / "request.json").read_text())
+    assert request["stream_folder"] == str(harness.ctx.out / "stream-night/2026-11-02-1")
+    assert (request["stream_day"], request["due"]) == ("2026-11-02", ["crypto real-time"])
+    assert harness.check("stream-night-reconcile", "crypto real-time").status == "passed"
+    # The second night's unit stays due, for an attempt that compares the second night.
+    assert harness.check("stream-night-reconcile", "futures delayed").status == "not run"
 
 
 def test_attempts_are_numbered_per_group_and_day(harness: Harness) -> None:
@@ -479,15 +531,27 @@ def test_a_resume_kills_a_child_the_last_run_left_running(harness: Harness) -> N
 @pytest.mark.parametrize(
     ("group", "unit"), [("stream-day", "stocks delayed"), ("stream-night", "crypto real-time")]
 )
-def test_a_stream_day_or_night_waits_for_free_disk(harness: Harness, group: str, unit: str) -> None:
+def test_a_stream_day_or_night_short_of_disk_waits_and_spends_no_start(
+    harness: Harness, group: str, unit: str
+) -> None:
     tiers = BASIC | {"stocks": "starter", "currencies": "starter"}
     harness.state.current = entitlement_id(harness.state, tiers, [])
     harness.state.stream_night = "2026-11-04"
     harness.ctx.free_disk = lambda _folder: 3 << 30
-    attempts.run_built_in_group(harness.ctx, harness.state, harness.memory, group=group, until=NOW)
-    assert not (harness.ctx.out / group / "2026-11-04-1" / "request.json").exists()
-    assert harness.state.attempts[-1].status == "finished"
-    assert any(f"{group}: only 3 GB free" in line for line in harness.lines)
+    harness.ctx.now = lambda: NOW
+    sleeps: list[datetime] = []
+    harness.ctx.sleep_until = sleeps.append
+    for stop in (NOW + timedelta(hours=1), NOW + timedelta(minutes=1)):
+        attempts.run_built_in_group(
+            harness.ctx, harness.state, harness.memory, group=group, until=stop
+        )
+    assert sleeps == [NOW + attempts.DISK_RETRY, NOW + timedelta(minutes=1)]  # never past the stop
+    assert harness.state.attempts == []  # so the shortage uses none of the five starts
+    assert not (harness.ctx.out / group).exists()
+    assert any(
+        f"{group}: only 3 GB free" in line and "the disk is checked again in 5 minutes" in line
+        for line in harness.lines
+    )
     assert harness.check(group, unit).status == "not run"
 
 

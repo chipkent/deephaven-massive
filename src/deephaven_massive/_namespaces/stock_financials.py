@@ -67,9 +67,6 @@ def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
         fetch_path=path,
         time_axis=("period_end.gte", "period_end.lte"),
         symbol_param="tickers.any_of",
-        # A statement lists every ticker of its company (GOOG and GOOGL), so under a `limit`,
-        # which sends each named ticker its own request, two tickers' requests can return it.
-        symbols_overlap=True,
         poll_keys=_STATEMENT_KEYS,
         # Below the documented 50,000: a statement row holds some fifty line items, over a
         # kilobyte of JSON, so a full page would pass 60 MB; 10,000 keeps it near 15 MB.
@@ -133,8 +130,7 @@ def _statement_query(
         end: The last period end date, or None.
         sort: The field to sort by, or None.
         order: The sort direction, or None.
-        limit: The cap on each named ticker's rows, or on the total rows without tickers, or
-            None.
+        limit: The cap on the total number of rows, or None.
         filters: The `filters` mapping, or None.
 
     Returns:
@@ -219,8 +215,7 @@ class _StockFinancials(Namespace):
             end: The last period end date. See README.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
                 README.md#filters.
 
@@ -289,8 +284,7 @@ class _StockFinancials(Namespace):
             end: The last period end date. See README.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
                 README.md#filters.
 
@@ -353,8 +347,7 @@ class _StockFinancials(Namespace):
             end: The last period end date. See README.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
                 README.md#filters.
 
@@ -406,8 +399,7 @@ class _StockFinancials(Namespace):
             symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
             sort: The field to sort by, such as `"market_cap"`. See README.md#sort-order-limit.
             order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`. See
                 README.md#filters.
 

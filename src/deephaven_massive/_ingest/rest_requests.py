@@ -10,8 +10,7 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
   bar `multiplier` and `timespan` (`shared_params`); the validated `filters`; the time axis,
   whole days on a calendar-date axis and the instants that start the bounds' days on an
   instant axis, in the day zone of the request's own symbols (`axis_query`); the symbol
-  parameter, at most `DatasetSpec.symbols_per_request` symbols a request, or one when the call
-  has a `limit`, which caps each named symbol's rows; `adjusted`, the
+  parameter, at most `DatasetSpec.symbols_per_request` symbols a request; `adjusted`, the
   futures `resolution`, the page size (`page_size`), and for `history()` the ascending
   direction;
 - `history_calls` plans a `history()` call on the history path: futures sessions one session
@@ -297,7 +296,6 @@ def _symbol_parts(
     *,
     slot: str | None,
     pair: bool = False,
-    each_symbol_capped: bool = False,
     split: CryptoSplit,
 ) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
     """Return how a request's symbols spread over requests of one path.
@@ -309,10 +307,8 @@ def _symbol_parts(
     carry their own symbol), a `per_symbol` dataset, and a symbol parameter that takes one
     value (`ticker`) get one request per symbol. A list parameter
     (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
-    request (all of them when the dataset sets no limit), or one symbol a request when the
-    call has a `limit` (`each_symbol_capped`), so the cap applies to each symbol's rows rather
-    than to the rows of several symbols together. `dm.ALL`, no symbols, and a path that takes
-    neither get one request without symbols.
+    request (all of them when the dataset sets no limit). `dm.ALL`, no
+    symbols, and a path that takes neither get one request without symbols.
 
     Args:
         spec: The dataset.
@@ -321,8 +317,6 @@ def _symbol_parts(
         slot: The path's one placeholder that no parameter, key, or window fills, or None.
         pair: True when the path's `{from}` and `{to}` placeholders are filled by nothing
             else, so each symbol's currency pair (`_pair`) fills them.
-        each_symbol_capped: True when the call has a `limit`, which caps each named symbol's
-            rows, so a list parameter carries one symbol a request.
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
@@ -351,7 +345,7 @@ def _symbol_parts(
     if not per_symbol:
         if param is None:
             return [(None, {}, {})]
-        size = 1 if each_symbol_capped else spec.symbols_per_request or len(explicit)
+        size = spec.symbols_per_request or len(explicit)
         return [(None, {}, {param: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     parts: list[tuple[str | None, dict[str, object], dict[str, object]]] = []
@@ -563,9 +557,7 @@ def plan_calls(
             path.
 
     Returns:
-        The calls, in result order: per symbol, or per chunk of symbols, or one; per symbol on
-        a list symbol parameter when `request.limit` is set, so each named symbol gets its own
-        cap (`_symbol_parts`). Each call's
+        The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
         dates (its time axis and its date filters on instant parameters) follow the day rules
         `dates.day_class` picks: the dataset's class, or for a dataset with a path per symbol
         class (the indicators) the class of the call's own symbols, so a crypto indicator gets
@@ -589,15 +581,7 @@ def plan_calls(
     empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
     slot = empty[0] if len(empty) == 1 else None
     calls = []
-    parts = _symbol_parts(
-        spec,
-        rest_path,
-        symbols,
-        slot=slot,
-        pair=pair,
-        each_symbol_capped=request.limit is not None,
-        split=split,
-    )
+    parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
     for symbol, own_path, own_query in parts:
         zone_class = day_class(spec, map(symbol_class, own_symbols(spec, symbol, own_query)))
         axis = axis_query(spec, rest_path, dates=dates, asset_class=zone_class)

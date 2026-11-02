@@ -343,12 +343,13 @@ class DatasetSpec:
             out to one request per symbol.
         symbols_overlap: True when one row can answer several symbols' requests, such as a
             news article that mentions two tickers of a watchlist, so a fan-out over several
-            symbols can return it more than once. A `fetch()` or `poll()` cycle of several
-            requests drops a row of a later request that an earlier request returned equal in
-            every column but its arrival time; rows of one request are never merged. A
-            `limit` caps each named symbol's rows, as on every dataset. Every dataset whose
-            symbol parameter filters a field listing several tickers sets it (the
-            `overlapping symbols` gate). False by default.
+            symbols can return it more than once. It has two effects: a `fetch()` or `poll()`
+            cycle keeps the first copy of each row whose `poll_keys` (and only those columns)
+            are all set, and `limit` caps each request's rows rather than the total, so one
+            symbol's rows never crowd out another's. Such a dataset needs `poll_keys` of scalar
+            columns, since rows are grouped by their values, and no `nullable_poll_keys`.
+            `fetch()` keeps every row whose key is null; a `poll()` table fails on one. False
+            by default.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
             one asset class, where it differs from `fetch_path`, such as
             `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`; the symbols of every
@@ -749,6 +750,16 @@ class DatasetSpec:
             )
         if not self.poll_keys and self.poll_mode is PollMode.APPEND:
             raise ValueError(f"{self.name}: an APPEND dataset needs poll_keys")
+        if self.symbols_overlap and not self.poll_keys:
+            raise ValueError(
+                f"{self.name}: a dataset whose symbols overlap needs poll_keys, which find the "
+                "rows several symbols return"
+            )
+        if self.symbols_overlap and self.nullable_poll_keys:
+            raise ValueError(
+                f"{self.name}: a dataset whose symbols overlap cannot have nullable_poll_keys: "
+                "a null key cannot tell two rows apart"
+            )
         if not (*self.poll_keys, *self.revision_keys):
             raise ValueError(
                 f"{self.name}: an explicit APPEND poll() needs a row identity: declare "
@@ -1162,9 +1173,6 @@ class Catalog:
           `nullable_poll_keys`, so no row is identified by nulls alone.
         - **poll keys:** every `poll_keys` and `revision_keys` column is a column of the
           dataset's schema.
-        - **overlapping symbols:** a dataset whose symbol parameter filters a field listing
-          several tickers (no instrument dataset, `takes_symbols`) sets `symbols_overlap`, so
-          the requests of several named tickers never return one row twice.
 
         Returns:
             The failures, in dataset order and then gate order, each once; empty when every
@@ -1199,16 +1207,6 @@ class Catalog:
                 found.append(
                     f"nullable keys: {spec.name}: every poll key may be null; at least one "
                     "must not be"
-                )
-            if (
-                spec.symbol_param is not None
-                and not spec.symbols_overlap
-                and not self.takes_symbols(spec)
-            ):
-                found.append(
-                    f"overlapping symbols: {spec.name}: {spec.symbol_param} filters a field "
-                    "listing several tickers, so one row can answer two tickers' requests; set "
-                    "symbols_overlap"
                 )
             if keys:
                 continue  # the merge would only repeat them
