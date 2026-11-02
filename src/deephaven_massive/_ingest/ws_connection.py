@@ -329,6 +329,9 @@ class _Episodes:
             `max_outage`, by id.
         published_at_open: Each down stream's `StreamSink.rows_published` when the current
             socket opened (or when it joined), so rows since then show its data flows again.
+        gap_since: When each down stream's rows may have started to go missing (seconds since
+            the epoch): the outage's start, or the stream's open when it opened during the
+            outage. Its recovery records the gap from then to now in its `Gaps`.
         data_since_open: Whether a data frame arrived since the current socket opened.
         down_note: The `Error` of a down stream during the outage under way, or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
@@ -345,6 +348,7 @@ class _Episodes:
     down_since: float | None = None
     down: dict[int, asyncio.TimerHandle] = field(default_factory=dict)
     published_at_open: dict[int, int] = field(default_factory=dict)
+    gap_since: dict[int, float] = field(default_factory=dict)
     data_since_open: bool = False
     down_note: str | None = None
     last_frame_at: int = 0
@@ -631,7 +635,7 @@ class Connection:
         """
         self._streams[stream.stream_id] = stream
         if self._episodes.down_since is not None:  # it opens during an outage: held down
-            self._hold_down(stream.stream_id, self._group.max_outage)
+            self._hold_down(stream.stream_id, self._group.max_outage, since=time.time())
         if self._episodes.down_since is not None or self._episodes.quiet_note is not None:
             self._show_outage_notes([stream.stream_id])
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
@@ -1205,7 +1209,7 @@ class Connection:
         left = max(start + self._group.max_outage - now, 0.0)
         newly = [s for s in self._streams if s not in episodes.down and s not in episodes.expired]
         for stream_id in newly:
-            self._hold_down(stream_id, left)
+            self._hold_down(stream_id, left, since=episodes.down_since)
         logger.debug(
             "%s: outage since %s (the last frame); streams %s held down, failing in %.0f s "
             "unless they recover (max_outage %g s)",
@@ -1239,14 +1243,17 @@ class Connection:
         earliest = min(timer.when() for timer in timers)
         return earliest - self._client.loop.time() - self._group.ack_timeout
 
-    def _hold_down(self, stream_id: int, left: float) -> None:
+    def _hold_down(self, stream_id: int, left: float, *, since: float) -> None:
         """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
 
         Args:
             stream_id: The stream, one of the connection's.
             left: Seconds until its `max_outage` runs out.
+            since: When its rows may have started to go missing, seconds since the epoch: the
+                start of its gap, should it recover.
         """
         episodes = self._episodes
+        episodes.gap_since[stream_id] = since
         episodes.down[stream_id] = self._client.loop.call_later(
             left, self._stream_expired, stream_id
         )
@@ -1262,6 +1269,7 @@ class Connection:
         if timer is not None:
             timer.cancel()
         self._episodes.published_at_open.pop(stream_id, None)
+        self._episodes.gap_since.pop(stream_id, None)
 
     def _stream_expired(self, stream_id: int) -> None:
         """Fail a stream the outage has held down for `max_outage`.
@@ -1277,6 +1285,7 @@ class Connection:
         episodes = self._episodes
         del episodes.down[stream_id]
         episodes.published_at_open.pop(stream_id, None)
+        episodes.gap_since.pop(stream_id, None)
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
         if episodes.failure is None:
@@ -1333,16 +1342,20 @@ class Connection:
         if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
             return
         recovered = [s for s in episodes.down if self._recovered(self._streams[s])]
+        now = time.time_ns()
+        gaps = {s: (int(episodes.gap_since[s] * 1e9), now) for s in recovered}
         for stream_id in recovered:
             self._release_down(stream_id)
         if recovered:
             logger.debug(
                 "%s: streams %s recovered: data again, their topics acknowledged, or, for a "
-                "stream that never received a row, each topic acknowledged or in NO_ACK",
+                "stream that never received a row, each topic acknowledged or in NO_ACK; each "
+                "records the gap since its rows may have gone missing in Gaps: %s",
                 self.url,
                 bounded_list(recovered),
+                bounded_list(f"{s} from {utc_text(start / 1e9)}" for s, (start, _) in gaps.items()),
             )
-            self._show_outage_notes(recovered)
+            self._show_outage_notes(recovered, gaps=gaps)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
         logger.log(
@@ -1365,24 +1378,32 @@ class Connection:
         for stream_id in list(self._episodes.down):
             self._release_down(stream_id)
 
-    def _show_outage_notes(self, stream_ids: Iterable[int]) -> None:
+    def _show_outage_notes(
+        self, stream_ids: Iterable[int], *, gaps: Mapping[int, tuple[int, int]] | None = None
+    ) -> None:
         """Write each stream's outage and silence parts of its `Error`, or clear them.
 
         Only these two parts change (`NotePart.OUTAGE`, `NotePart.QUIET`): a down stream shows
         the outage's note, every stream the silence's while it lasts, and the other parts (the
-        options cap, a stale symbol) stay as their sources left them.
+        options cap, a stale symbol) stay as their sources left them. A recovered stream's
+        outage note goes, and its gap is recorded in its `Gaps` in the same update, so the
+        record of the missing rows outlasts the note.
 
         Args:
             stream_ids: The streams whose notes may have changed.
+            gaps: The gap each recovered stream records, `(start, end)` in epoch nanoseconds,
+                by stream id; None for none.
         """
         episodes = self._episodes
+        ended = gaps or {}
         self._update_streams(
             {
                 stream_id: StreamUpdate(
                     notes={
                         NotePart.OUTAGE: episodes.down_note if stream_id in episodes.down else None,
                         NotePart.QUIET: episodes.quiet_note,
-                    }
+                    },
+                    gap=ended.get(stream_id),
                 )
                 for stream_id in stream_ids
             }

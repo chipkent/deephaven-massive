@@ -36,7 +36,12 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, within
-from deephaven_massive._datasets.source_columns import KEY_COLUMNS, rename, required_fields, widen
+from deephaven_massive._datasets.source_columns import (
+    KEY_COLUMNS,
+    RoundedFields,
+    rename,
+    required_fields,
+)
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import first_failure, masked_instants, mismatch_message
 from deephaven_massive._datasets.wire_symbols import (
@@ -211,8 +216,10 @@ class RowConverter:
             The batch in the dataset's schema, with the derived columns (`OptionRoot`,
             `RawSymbol`) computed from the symbols and an index `Underlying` given its `I:`
             prefix by the row's CFI code (`_canonical_underlyings`); and the drift of its
-            timestamps: the rows dropped for their time column, and the wire keys of the other
-            epoch fields that held a value out of bounds, each with its first such value.
+            timestamps and widening: the rows dropped for their time column, the wire keys of
+            the other epoch fields that held a value out of bounds, and those of the `long`
+            fields whose cast to a `double` column rounded a value (`RoundedFields`), each with
+            its first such value.
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
@@ -225,16 +232,16 @@ class RowConverter:
         dropped: pa.Array | None = None
         reason = ""
         odd: dict[str, DriftSample] = {}
+        rounded = RoundedFields()
         for column_type, name, source in self.columns:
-            target = column_type.arrow_type
             if name == OPTION_ROOT:
                 values = option_roots(arrays["Symbol"])
             elif name == RAW_SYMBOL:
                 values = raw
             elif source is None:
-                values = pa.nulls(rows, target)
+                values = pa.nulls(rows, column_type.arrow_type)
             elif source.field is None:
-                values = pa.array([symbol] * rows, target)
+                values = pa.array([symbol] * rows, column_type.arrow_type)
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
@@ -256,10 +263,12 @@ class RowConverter:
                         reason = mismatch_message(f"{self.dataset}.{name}", source.unit, first)
                     elif first is not None:
                         odd[source.field.wire_key] = DriftSample(None, str(first))
-            arrays[name] = widen(values, target)
+            arrays[name] = rounded.widen(
+                values, column_type.arrow_type, wire_key=None if source is None else source.wire_key
+            )
         self._canonical_underlyings(arrays)
         converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
+        drift = DriftReport(unconvertible=frozenset(odd), samples=odd).merge(rounded.drift())
         if dropped is not None:
             converted = converted.filter(pc.invert(dropped))
             count = rows - converted.num_rows

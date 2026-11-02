@@ -27,8 +27,9 @@ to keep.
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`source_columns.rename`), and
   the columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files do
   not carry is null and a column a kind widens (an integer size in a `double` column) is widened
-  (`source_columns.widen`). A file's surviving rows become one static Deephaven table per
-  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at the end.
+  (`source_columns.widen`; a whole number the widening rounds is reported as drift). A file's
+  surviving rows become one static Deephaven table per `_TABLE_BLOCKS` blocks of data (usually
+  one table per file), and the tables are merged at the end.
   No block is ever converted to Python objects. A reader decompresses its file on its own thread
   and parses it in chunks of `CHUNK_BLOCKS` blocks on `PARSE_THREADS` threads of its own, so it
   holds about `PARSE_THREADS + 1` chunks of decompressed text and their rows, plus at most
@@ -143,7 +144,7 @@ from deephaven_massive._datasets.row_times import (
     time_rule,
     within,
 )
-from deephaven_massive._datasets.source_columns import rename, required_fields, widen
+from deephaven_massive._datasets.source_columns import RoundedFields, rename, required_fields
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import (
     first_failure,
@@ -614,9 +615,10 @@ class _Transform:
             key: The file the block came from.
 
         Returns:
-            The block in the dataset's schema; and the drift of its timestamps: the headers of
-            the epoch columns other than the time column that held a value the routine cannot
-            place (null), each with its first such value.
+            The block in the dataset's schema; and the drift of its timestamps and widening:
+            the headers of the epoch columns other than the time column that held a value the
+            routine cannot place (null), and those of the integer columns whose widening to a
+            `double` rounded a value (`RoundedFields`), each with its first such value.
 
         A 1-day bar stamped at a time of day Massive is not known to use is served and logs
         the WARNING of `row_times.StampRule.stamp`.
@@ -632,6 +634,7 @@ class _Transform:
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(batch.num_rows, pa.string())
         odd: dict[str, DriftSample] = {}
+        rounded = RoundedFields()
         for column in self.columns:
             column_type, name, _ = column
             if name == OPTION_ROOT:
@@ -647,12 +650,14 @@ class _Transform:
                     )
                 values, raw = read.symbols, read.raw
             else:
-                values = self._column(batch, column, odd=odd)
-            arrays[name] = widen(values, column_type.arrow_type)
+                values = self._column(batch, column, odd=odd, rounded=rounded)
+            # A field's column is widened already (`_column`); this casts the others.
+            arrays[name] = rounded.widen(values, column_type.arrow_type, wire_key=None)
         rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         filled = self.times.fill(rows, received=received)
         kept = filled if self.bars is None else within(filled, self.bars)
-        return kept, DriftReport(unconvertible=frozenset(odd), samples=odd)
+        drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
+        return kept, drift.merge(rounded.drift())
 
     def _own_sessions(self, batch: pa.RecordBatch, key: _Key) -> pa.RecordBatch:
         """Keep a futures block's rows of the requested sessions; warn of a file's other sessions.
@@ -695,6 +700,7 @@ class _Transform:
         column: tuple[ColumnType, str, SourceColumn | None],
         *,
         odd: dict[str, DriftSample],
+        rounded: RoundedFields,
     ) -> pa.Array:
         """Convert one column's values to its type, or make the column of nulls it lacks.
 
@@ -703,6 +709,8 @@ class _Transform:
             column: The column's type, its name, and the source column that fills it, or None.
             odd: Updated with the header of an epoch column whose value the timestamp routine
                 cannot place, and its first such value.
+            rounded: Notes the header of an integer column whose widening to a `double`
+                rounded a value.
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
@@ -724,7 +732,7 @@ class _Transform:
             first = first_failure(sent, failed)
             if first is not None:
                 odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
-        values = widen(values, column_type.arrow_type)
+        values = rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
         if name == self.time_name and self.stamps is not None:
             values = self.stamps.stamp(
                 self.dataset,
@@ -876,7 +884,7 @@ class FlatFileHistory:
         call: int,
         forced: bool,
         stop: threading.Event | None = None,
-    ) -> tuple[Table, str | None]:
+    ) -> tuple[Table, str | None, str | None]:
         """Return a `history()` call's rows from the flat files, and from REST what they lack.
 
         The flat-file read of a call `history()` sent to the flat files
@@ -893,8 +901,10 @@ class FlatFileHistory:
             stop: A background read's stop token; None for a blocking read.
 
         Returns:
-            The static table, and the description's source sentence when REST served any of
-            it or a session may be incomplete; None when only the flat files did, in full.
+            The static table; the description's source sentence when REST served any of it,
+            which replaces the sentence of the source choice (None when only the flat files
+            did); and the sentences the description adds on what the files may lack: the days
+            taken for holidays and the sessions that may be incomplete (None for neither).
 
         Errors are those of `history_reads.read_history`.
         """
@@ -959,8 +969,8 @@ class FlatFileHistory:
                 pool has drained. None for none.
 
         Returns:
-            The read: each kept file's tables with its day, the empty table in the schema, and
-            the unread days.
+            The read: each kept file's tables with its day, the empty table in the schema, the
+            unread days, and the days skipped as days without trading.
 
         Raises:
             MassiveError: If `stop` was set: the read was cancelled.
@@ -1043,7 +1053,12 @@ class FlatFileHistory:
             # Merging onto an empty table in the schema keeps every column when no row matched.
             empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
         return FlatFileRead(
-            tuple(kept), empty, unread, transform.seen.uncertain(transform.sessions), absent
+            tuple(kept),
+            empty,
+            unread,
+            transform.seen.uncertain(transform.sessions),
+            absent,
+            tuple(holidays),
         )
 
     def _after_missing(
