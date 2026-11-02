@@ -15,13 +15,16 @@ live-run program (`live_run`) sets it for each child, so its logs stay in the at
 The library's own rules keep the secrets out of every log line (`deephaven_massive._debug_log`).
 At the end of the run `summary_lines` checks that anyway: it scans the folder for the API key
 and the S3 pair (`secret_scrub.scan`), and the terminal summary names the log's absolute path,
-or warns not to send a log in which a secret was found.
+or warns not to send a log in which a secret was found. A run that opened no session, such as
+one whose live tests all skipped without a key, wrote no log: its empty folder is removed then.
 
-Every function is pure but `turn_on`, which creates the folder and sets the variable.
+`turn_on` creates the folder and sets the variable, and `summary_lines` removes the folder when
+it stayed empty; nothing else here changes anything.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import UTC
 from typing import TYPE_CHECKING, Final
@@ -72,9 +75,12 @@ def summary_lines(path: Path, environ: Mapping[str, str]) -> list[str]:
 
     Returns:
         The log's absolute path and what to do with it; when a secret was found, a warning
-        not to send it, and each place it was found.
+        not to send it, and each place it was found. When no log was written, a line saying
+        so; the log's folder is then removed if it holds nothing else.
     """
     if not path.exists():
+        with contextlib.suppress(OSError):  # missing, or holding another file: it stays
+            path.parent.rmdir()
         return [f"debug log: none was written at {path} (no session was opened)"]
     finds = scan(path.parent, SecretFilter.from_environment(environ))
     if finds:

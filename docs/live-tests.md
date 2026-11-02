@@ -353,7 +353,8 @@ can be diagnosed afterwards without another live run. Once the run's tests are c
 before any of them opens a session, it creates a new folder for the run,
 `live-debug-logs/<UTC time>-<process id>/`, and logs to `debug.log` inside it; git ignores the
 folder. The last lines of the run, under "live debug log", give the log's full path: send that
-file with a report of any failure. A run of unit tests only writes no log.
+file with a report of any failure. A run of unit tests only writes no log, and a run whose live
+tests opened no session (each skipped, say, for want of a key) removes its empty folder.
 
 The log never holds a secret: the library keeps the API key and the S3 pair out of every line,
 and the run checks anyway, scanning the folder for each secret set in its environment. If one
@@ -412,8 +413,11 @@ Monday to Thursday evening that is itself a full trading day. Holidays and early
 from the exchanges' fixed rules and from the closures Massive's market status lists as
 upcoming, which each probe reads. A night never shares a day with a stream day. That evening
 no other group starts from 16:15, and one still running is stopped then; a child that dies is
-started again, up to five times, until 09:00. The night writes what a stream day writes (rows
-by hour, per-minute counts, latency, samples, gaps), and at its end:
+started again, up to five times, until 09:00. No other group starts from 16:30 until 09:00 the
+next morning, even when the night's child has stopped for good. A night whose child has used
+its five starts is over: the next probe, even the morning's before 09:30, plans the next
+night. The night writes what a stream day writes (rows by hour, per-minute counts, latency,
+samples, gaps), and at its end:
 
 - `hours.csv`, the rows of each stream per UTC hour;
 - `boundaries.csv`, the rows within 90 minutes before and after the 16:00 Chicago close
@@ -427,8 +431,11 @@ market was open went without a row (futures pause from 16:00 to 17:00 Chicago ti
 never closes), or a row near a boundary carries the wrong `Date`. The next day,
 `stream-night-reconcile` compares the night's minute bars with REST history of both dates,
 kept to the night's hours, over the whole night and within 90 minutes on each side of each
-boundary; a bar whose `Date` differs from history's fails its unit. `status` shows the next
-stream night, and `REPORT.md` in each zip has a section per night.
+boundary. A futures bar whose `Date` differs from history's fails its unit, and so does a crypto
+bar, on either side, whose `Date` is not the UTC date of its start. Each unit is compared with
+the night it passed in, so a reconciliation that runs late, after the next night, still reads
+the right night: one night per run, the oldest first. `status` shows the next stream night, and
+`REPORT.md` in each zip has a section per night.
 
 Each group runs in a child process, with the probed plans in `MASSIVE_LIVE_PLANS`, the
 library's debug log in the attempt's folder (`<group>/<date>-<n>/debug.log`), and a pytest

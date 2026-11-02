@@ -12,10 +12,12 @@ completed.
 `stream-night-reconcile` does the same for a stream night (`run_night_reconcile`): the crypto
 and futures minute bars streamed from 16:30 New York time on the night's evening to 09:30 the
 next morning, against REST history of the evening's and the morning's dates, both sides kept to
-the night's hours. It also compares each bar's `Date`, which the stream takes from the futures
-schedules or the UTC date and REST from Massive's own field, and repeats the comparison within
+the night's hours. It also checks each bar's `Date` (`misdated`): a futures bar's, which the
+stream takes from the futures schedules and REST from Massive's own field, against the other
+side's; a crypto bar's, which the library computes the same way on both sides, against the UTC
+date of its start, computed here. It repeats the comparison within
 `stream_night.BOUNDARY_WINDOW` on each side of each boundary the night crosses
-(`stream_night.boundaries`). A bar on both sides with another `Date` fails its unit.
+(`stream_night.boundaries`). A bar with a wrong `Date` fails its unit.
 
 Runs in a child process with an embedded Deephaven server and an open session.
 """
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import deephaven_massive as dm
@@ -245,14 +247,15 @@ def run_night_reconcile(
         night: The night's evening.
         folder: This attempt's folder.
         report: Receives each unit's name, status, and reason: passed when its bars were
-            compared and every bar on both sides has the same `Date`; failed when the night
-            left none, or a `Date` differs.
+            compared and every `Date` is right (`misdated`); failed when the night left none,
+            or a `Date` is wrong.
     """
     start, end = timetable.night_start(night), timetable.night_end(night)
     unreadable: list[str] = []
     summary: dict[str, Any] = {"night": night.isoformat(), "streams": {}, "unreadable": unreadable}
     for unit in units:
         stream = NIGHT_STREAMS[unit.split()[0]]
+        utc_dated = stream == NIGHT_STREAMS["crypto"]
         bars = streamed_bars(stream_folder, stream, unreadable=unreadable, fields=DATED)
         streamed = _within(bars, start, end)
         symbols = sorted({symbol for symbol, _ in streamed})
@@ -271,6 +274,7 @@ def run_night_reconcile(
                 window=name,
                 streamed=_within(streamed, *span),
                 fetched=_within(fetched, *span),
+                utc_dated=utc_dated,
             )
             for name, span in night_windows(unit, night).items()
         }
@@ -279,7 +283,8 @@ def run_night_reconcile(
         if not symbols:
             report(unit, "failed", "no streamed bars to compare")
         elif mismatches:
-            report(unit, "failed", f"{mismatches} bars dated other than in history")
+            expected = "their UTC date" if utc_dated else "in history"
+            report(unit, "failed", f"{mismatches} bars dated other than {expected}")
         else:
             report(unit, "passed", "")
     (folder / "summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
@@ -311,6 +316,7 @@ def _compare_window(
     window: str,
     streamed: dict[tuple[str, int], tuple[Any, ...]],
     fetched: dict[tuple[str, int], tuple[Any, ...]],
+    utc_dated: bool,
 ) -> dict[str, Any]:
     """Compare a night's streamed and fetched bars of one span, and append its rows.
 
@@ -320,13 +326,14 @@ def _compare_window(
         window: The span's name: `"night"`, or a boundary and a side.
         streamed: The streamed bars in the span, read with `DATED`.
         fetched: The REST bars in the span, read with `DATED`.
+        utc_dated: Whether each bar's `Date` must be the UTC date of its start (`misdated`).
 
     Returns:
-        The span's totals: symbols, bars on both sides, their match share, and how many of
-        them have another `Date` on each side.
+        The span's totals: symbols, bars on both sides, their match share, and how many bars
+        have a wrong `Date` (`misdated`).
     """
     rows = compare(_values(streamed), _values(fetched))
-    dated = [k for k in streamed.keys() & fetched.keys() if streamed[k][-1] != fetched[k][-1]]
+    dated = misdated(streamed, fetched, utc_dated=utc_dated)
     for row in rows:
         row["date_mismatches"] = sum(symbol == row["symbol"] for symbol, _ in dated)
     append_csv(
@@ -340,6 +347,45 @@ def _compare_window(
         "match_share": round(matched / both, 4) if both else None,
         "date_mismatches": len(dated),
     }
+
+
+def misdated(
+    streamed: dict[tuple[str, int], tuple[Any, ...]],
+    fetched: dict[tuple[str, int], tuple[Any, ...]],
+    *,
+    utc_dated: bool,
+) -> list[tuple[str, int]]:
+    """Return the bars whose `Date` is wrong.
+
+    A futures bar's `Date` is its session, which the stream takes from Massive's futures
+    schedules and REST from Massive's own field, so a bar on both sides is wrong when the two
+    differ. A crypto bar's `Date` is the UTC date of its start, which the library computes the
+    same way on both sides, so comparing the sides could never fail: each side's bar is held
+    to the UTC date of its start instead, computed here.
+
+    Args:
+        streamed: The streamed bars, read with `DATED`.
+        fetched: The REST bars, read with `DATED`.
+        utc_dated: Whether each bar's `Date` must be the UTC date of its start (crypto).
+
+    Returns:
+        The `(Symbol, start)` of each wrong bar; for crypto, once for each side it is wrong on.
+    """
+    if not utc_dated:
+        return [k for k in streamed.keys() & fetched.keys() if streamed[k][-1] != fetched[k][-1]]
+    return [k for side in (streamed, fetched) for k, v in side.items() if v[-1] != utc_date(k[1])]
+
+
+def utc_date(start: int) -> str:
+    """Return the UTC date of a bar's start, the `Date` a crypto bar carries.
+
+    Args:
+        start: The bar's start, in epoch nanoseconds.
+
+    Returns:
+        The date, ISO.
+    """
+    return datetime.fromtimestamp(start // 1_000_000_000, UTC).date().isoformat()
 
 
 def _within(
