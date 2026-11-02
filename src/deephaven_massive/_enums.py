@@ -72,9 +72,7 @@ class AssetClass(StrEnum):
 
             import deephaven_massive as dm
 
-            cfg = dm.MassiveConfig(
-                ws_hosts={dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}
-            )
+            cfg = dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
     """
 
     STOCKS = "stocks"

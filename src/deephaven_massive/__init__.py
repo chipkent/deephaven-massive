@@ -29,17 +29,19 @@ Example:
 
         m = dm.MassiveSession()
 
-        # A live table: each symbol's latest trade, updated as trades arrive. On a Stocks
-        # Starter or Developer plan, which streams delayed data, create the session with
-        # dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})).
-        latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
-
-        # A history table: Apple's daily bars for one week, read once.
+        # A history table: Apple's daily bars for one week, read once. Works on every plan,
+        # the free one included.
         bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
-        week = bars.history("2024-06-03", "2024-06-07")
+        week = bars.history("2025-06-02", "2025-06-06")
 
         # What each column of those bars means.
         columns = bars.columns()
+
+        # A live table: the latest minute bar of each symbol, updated as each minute closes.
+        # Needs a paid Stocks plan. On a delayed one, such as Stocks Starter, create the
+        # session with
+        # dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})).
+        latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 Status:
     Every dataset is implemented over all three transports and tested against simulated Massive
