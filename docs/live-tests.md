@@ -305,9 +305,10 @@ evidence:
   1,000-contract cap per connection counts contracts or topics. The library counts topics.
 - **The index minute file's day** (`test_an_index_minute_file_holds_its_own_new_york_day`, in
   the main run; it needs Indices Starter and `s3`): whether `us_indices/minute_aggs_v1` holds
-  exactly its New York day. `history()` trims each index file to that day before joining REST
-  rows, so a failure means index ranges lose or repeat an hour at each midnight. To run it
-  alone:
+  only its own New York day. `history()` trims each index file to that day before joining REST
+  rows, so a failure means index ranges lose or repeat an hour at each midnight. Minutes REST
+  has and the file lacks are recorded, not failed: they are a gap in Massive's file, not a
+  wrong day. To run it alone:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
