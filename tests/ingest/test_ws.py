@@ -2184,6 +2184,15 @@ def test_an_unlisted_pair_in_a_list_raises_whatever_the_setting(
         ws_session.query(CRYPTO, ["X:BTCUSD", "X:ETHTUSD"]).append_only()
 
 
+def test_an_unlisted_pair_of_an_ended_stream_fails_nothing_under_raise(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
+    ws_session.connections._change_pairs(999, frozenset({"X:ETHTUSD"}), frozenset())
+    assert [symbol for symbol, _ in lookups(ws_session)] == ["X:ETHTUSD"]
+    assert ws_session.urls == []  # no stream, so nothing to fail
+
+
 def test_an_unlisted_pair_added_later_fails_the_stream_under_raise(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],

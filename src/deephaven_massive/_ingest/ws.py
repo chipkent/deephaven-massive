@@ -952,7 +952,7 @@ class WsConnections:
 
         Called on the verb's thread, before a stream starts: for a static symbol table by the
         query (`StreamTransport.tradable_pairs`), and for a reactive one by `open_stream`. A
-        dataset of another class keeps every symbol. A crypto pair that Massive's crypto ticker
+        crypto pair that Massive's crypto ticker
         list does not hold, or that a failed read of the list cannot split, follows
         `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE` it is left out and logged
         once (`_note_skipped`); under `RAISE` it raises. No read is retried here, since a
@@ -961,7 +961,7 @@ class WsConnections:
         in the stream's `Error` then. May block for one read of the list, with no lock held.
 
         Args:
-            spec: The dataset.
+            spec: A crypto dataset.
             symbols: The table's canonical symbols, sorted.
 
         Returns:
@@ -974,8 +974,6 @@ class WsConnections:
             MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
                 if no pair can, so the result would follow nothing.
         """
-        if spec.asset_class is not AssetClass.CRYPTO:
-            return symbols
         if self._unlisted is OnError.RAISE:
             self.resolve_pairs(symbols)
             return symbols

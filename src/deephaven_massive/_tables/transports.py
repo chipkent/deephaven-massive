@@ -347,16 +347,16 @@ class StreamTransport(Protocol):
         ...
 
     def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
-        """Return the symbols of a static symbol table, read at the call, a stream can subscribe.
+        """Return the pairs of a static symbol table, read at the call, a stream can subscribe.
 
-        A crypto pair that Massive's crypto ticker list does not hold, or that a failed read of
-        the list cannot split, follows `MassiveConfig.unlisted_symbols`: left out (and logged
-        once) under `LOG` and `IGNORE`, raised under `RAISE`. A dataset of another class keeps
-        every symbol. Runs on the verb's thread, before the stream starts; may block for one
-        read of the list.
+        Called only for a crypto dataset. A pair that Massive's crypto ticker list does not
+        hold, or that a failed read of the list cannot split, follows
+        `MassiveConfig.unlisted_symbols`: left out (and logged once) under `LOG` and `IGNORE`,
+        raised under `RAISE`. Runs on the verb's thread, before the stream starts; may block for
+        one read of the list.
 
         Args:
-            spec: The dataset.
+            spec: A crypto dataset.
             symbols: The table's canonical symbols, sorted.
 
         Returns:
