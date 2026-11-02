@@ -728,6 +728,10 @@ max_concurrency: 4
 # A row of a symbol table that is not Massive's exact ticker: raise, log, or ignore.
 noncanonical_symbols: raise
 
+# A crypto pair of a symbol table that Massive's crypto ticker list does not hold, in a live
+# stream: raise, log, or ignore.
+unlisted_symbols: log
+
 # Pin the WebSocket host of an asset class; the library chooses when you leave this out.
 ws_hosts:
   options: delayed.massive.com
@@ -882,10 +886,13 @@ leaves. `append_only()` and `ring()` keep the rows a removed symbol already prod
 watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
 stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
 bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
-A crypto pair added later that Massive's list of crypto tickers does not hold is skipped and
-listed the same way, and the stream keeps its other pairs. A futures contract a watchlist holds
-subscribes once its trading schedule has loaded (up to 15 seconds), so its first rows carry a
-`Date`.
+A crypto pair that Massive's list of crypto tickers does not hold, in the watchlist at the call
+or added later, is skipped and listed the same way, and the stream keeps its other pairs; a
+skipped pair stays skipped until its row is deleted and added again. If the list cannot be
+read when a pair is added, it is tried twice more over about ten seconds first, and the `Error`
+says so. To fail instead, set `dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE)`. A
+futures contract a watchlist holds subscribes once its trading schedule has loaded (up to 15
+seconds), so its first rows carry a `Date`.
 
 The options connection carries at most 1,000 topics, counted across every session that shares
 it, and each stream of a contract is one (its trades and its quotes are two). A list or static

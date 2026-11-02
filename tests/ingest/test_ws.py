@@ -36,6 +36,7 @@ from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
@@ -1887,6 +1888,13 @@ UNLISTED_ERROR = (
 )
 
 
+@pytest.fixture
+def fresh_pair_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The skipped-pair logs remember each pair for the process: start each test with none seen.
+    for name, level in (("_logged_pairs", logging.WARNING), ("_ignored_pairs", logging.DEBUG)):
+        monkeypatch.setattr(ws, name, BoundedLog(ws.logger, limit=100, level=level))
+
+
 def stream_error(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> str | None:
@@ -1895,6 +1903,7 @@ def stream_error(
     return cast("str | None", row["Error"])
 
 
+@pytest.mark.usefixtures("fresh_pair_logs")
 def test_a_watchlist_pair_massive_does_not_list_is_skipped_and_shown(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -1910,9 +1919,9 @@ def test_a_watchlist_pair_massive_does_not_list_is_skipped_and_shown(
         ws_session.subscribed("XT.ETH-USD")
         wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
     skipped = (
-        "crypto stream 1: skipped the pairs 1 [X:ETHTUSD] its symbol table added: cannot stream "
-        "'X:ETHTUSD': 'X:ETHTUSD' cannot be split into its two currencies: Massive's reference "
-        "data does not list it; the stream keeps its other pairs"
+        "crypto stream 1: cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot be split into its two "
+        "currencies: Massive's reference data does not list it; the pair is skipped until its "
+        "row is deleted and added again"
     )
     assert [r.getMessage() for r in caplog.records] == [skipped]
     # One lookup: a pair the list does not hold is never tried again on its own.
@@ -1970,11 +1979,8 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_a
     ws_session.session.release(result)
 
 
-def test_a_retry_tries_only_the_pairs_not_yet_split(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_retry_tries_only_the_pairs_not_yet_split(ws_session: WsSession) -> None:
     # The first pair splits and the list read fails at the second: the retry starts there.
-    monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (0.0,))
     lookup = ws_session.connections._crypto_pair
     failures = [dm.MassiveError("the list read timed out")]
 
@@ -1985,7 +1991,9 @@ def test_a_retry_tries_only_the_pairs_not_yet_split(
 
     ws_session.connections._crypto_pair = flaky
     ws_session.pair_answers.update({"X:ADAUSD": ("ADA", "USD"), "X:DOTUSD": ("DOT", "USD")})
-    skipped = ws_session.connections._split_pairs(1, frozenset({"X:ADAUSD", "X:DOTUSD"}))
+    skipped = ws_session.connections._split_pairs(
+        {"X:ADAUSD", "X:DOTUSD"}, reader="crypto stream 1", delays=(0.0,)
+    )
     assert skipped == {}
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:ADAUSD", "X:DOTUSD"]
 
@@ -2019,11 +2027,14 @@ def test_a_retried_read_of_the_pair_list_that_then_succeeds_subscribes(
     ids=["authentication", "entitlement"],
 )
 def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, error: dm.MassiveError
+    ws_session: WsSession, error: dm.MassiveError
 ) -> None:
-    monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (3600.0,))  # a retry would hang the test
     ws_session.pair_answers["X:DOTUSD"] = error
-    skipped = ws_session.connections._split_pairs(1, frozenset({"X:DOTUSD", "X:SOLUSD"}))
+    skipped = ws_session.connections._split_pairs(
+        {"X:DOTUSD", "X:SOLUSD"},
+        reader="crypto stream 1",
+        delays=(3600.0,),  # would hang
+    )
     # One read: the pairs after the first are skipped with it, never read on their own.
     why = f"cannot stream 'X:DOTUSD': {error}"
     assert skipped == {"X:DOTUSD": (ws._SkipReason.LIST_UNREAD, why)} | {
@@ -2032,13 +2043,15 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
-def test_a_close_stops_the_wait_to_retry_a_pair(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (3600.0,))  # only a close ends the wait
+def test_a_close_stops_the_wait_to_retry_a_pair(ws_session: WsSession) -> None:
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
     ws_session.connections.close()
-    assert ws_session.connections._split_pairs(1, frozenset({"X:DOTUSD"})) == {
+    skipped = ws_session.connections._split_pairs(
+        {"X:DOTUSD"},
+        reader="crypto stream 1",
+        delays=(3600.0,),  # only a close ends it
+    )
+    assert skipped == {
         "X:DOTUSD": (
             ws._SkipReason.LIST_UNREAD,
             "cannot stream 'X:DOTUSD': the list read timed out",
@@ -2095,13 +2108,119 @@ def test_closing_the_transport_stops_the_lookup_worker(ws_session: WsSession) ->
         ws_session.connections._changes.submit(print)
 
 
-def test_a_watchlist_whose_first_row_massive_does_not_list_is_refused(
-    ws_session: WsSession,
+def crypto_watchlist(symbols: list[str], *, reactive: bool) -> Table:
+    # A crypto symbol table: an input table a test may edit, or a static table read once.
+    if not reactive:
+        return new_table([string_col("Symbol", symbols)])
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", symbols)]))
+    return watchlist
+
+
+@pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_an_unlisted_pair_at_the_call_is_skipped(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+    *,
+    setting: dm.OnError,
+    reactive: bool,
 ) -> None:
-    watchlist = new_table([string_col("Symbol", ["X:ETHTUSD"])])
+    # A pair the list does not hold, present at the call, is skipped like a misspelled row:
+    # the stream follows the other pairs, logged at WARNING under LOG and DEBUG under IGNORE.
+    ws_session = make_ws_session(unlisted_symbols=setting)
+    watchlist = crypto_watchlist(["X:BTCUSD", "X:ETHTUSD"], reactive=reactive)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+        result = ws_session.query(CRYPTO, watchlist).append_only()
+        ws_session.subscribed("XT.BTC-USD")
+        if reactive:  # the stream's worker looks it up again, and lists it in its Error
+            wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
+        else:  # a static table is read once, at the call
+            assert stream_error(ws_session, dh_to_pylist) is None
+    skipped = [r for r in caplog.records if "the pair is skipped until its row" in r.getMessage()]
+    assert [(r.levelno, r.getMessage().split(":")[0]) for r in skipped] == [
+        (logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG, "test.crypto call")
+    ]
+    sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
+    assert not any("ETHT" in topic for topic in sent)
+    ws_session.session.release(result)
+
+
+@pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_a_symbol_table_whose_pairs_are_all_unlisted_is_refused(
+    make_ws_session: Callable[..., WsSession], *, setting: dm.OnError, reactive: bool
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=setting)
+    watchlist = crypto_watchlist(["X:ETHTUSD"], reactive=reactive)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^test\.crypto: no crypto pair of the symbol table can be streamed, so the result "
+        r"would follow nothing: crypto pairs 1 \[X:ETHTUSD\], which Massive's crypto ticker list "
+        r"does not hold$",
+    ):
+        ws_session.query(CRYPTO, watchlist).append_only()
+    assert ws_session.urls == []  # no connection opened
+
+
+@pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
+def test_an_unlisted_pair_at_the_call_raises_under_raise(
+    make_ws_session: Callable[..., WsSession], *, reactive: bool
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
+    watchlist = crypto_watchlist(["X:BTCUSD", "X:ETHTUSD"], reactive=reactive)
     with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot"):
         ws_session.query(CRYPTO, watchlist).append_only()
     assert ws_session.urls == []  # no connection opened
+
+
+def test_an_unlisted_pair_in_a_list_raises_whatever_the_setting(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.IGNORE)
+    with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot"):
+        ws_session.query(CRYPTO, ["X:BTCUSD", "X:ETHTUSD"]).append_only()
+
+
+def test_an_unlisted_pair_added_later_fails_the_stream_under_raise(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
+    watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True)
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"] == (
+        "cannot stream the symbol table's crypto pairs 1 [X:ETHTUSD], which Massive's crypto "
+        "ticker list does not hold; set dm.MassiveConfig(unlisted_symbols=dm.OnError.LOG) to "
+        "skip such a pair instead"
+    )
+    sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
+    assert not any("ETHT" in topic for topic in sent)
+
+
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_an_unlisted_pair_added_later_is_skipped_quietly_under_ignore(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.IGNORE)
+    watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True)
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+        cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
+        wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("the pair is skipped until its row" in r.getMessage() for r in caplog.records)
+    ws_session.session.release(result)
 
 
 def test_an_unexpected_lookup_failure_fails_the_stream(

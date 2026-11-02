@@ -985,7 +985,9 @@ class StreamQuery(QueryBase):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair of
+        the table that Massive's crypto ticker list does not hold follows
+        `unlisted_symbols` (`StreamTransport.tradable_pairs`).
 
         Returns:
             The request.
@@ -993,10 +995,10 @@ class StreamQuery(QueryBase):
         request = self._request
         symbols = request.symbols
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
-            return replace(
-                request,
-                symbols=_read_symbol_table(self._core, self._spec, symbols, query=repr(self)),
-            )
+            read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
+            if self._spec.asset_class is AssetClass.CRYPTO:
+                read = self._core.stream_transport().tradable_pairs(self._spec, read)
+            return replace(request, symbols=read)
         return request
 
     def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
@@ -1008,8 +1010,10 @@ class StreamQuery(QueryBase):
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
         crypto ticker list when the stream starts (read once per session); a failed read, or a
-        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A
-        pair a reactive table adds later is skipped instead, and listed in `m.streams()`.
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A pair
+        of a symbol table, at the call or added later, follows `MassiveConfig.unlisted_symbols`
+        instead: skipped (and, for a reactive table, listed in `m.streams()`) under `LOG` and
+        `IGNORE`.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -1050,6 +1054,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
     )
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
@@ -1077,7 +1082,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
@@ -1089,6 +1095,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
     )
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
@@ -1115,7 +1122,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
@@ -1127,6 +1135,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
         require_positive_int,
     )
     def ring(self, capacity: int) -> Table:
@@ -1157,7 +1166,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -1207,6 +1217,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
         _last_by_keys,
     )
     def last_by(self, by: str | Sequence[str] = "Symbol") -> Table:
@@ -1249,7 +1260,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()

@@ -346,6 +346,31 @@ class StreamTransport(Protocol):
         """
         ...
 
+    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the symbols of a static symbol table, read at the call, a stream can subscribe.
+
+        A crypto pair that Massive's crypto ticker list does not hold, or that a failed read of
+        the list cannot split, follows `MassiveConfig.unlisted_symbols`: left out (and logged
+        once) under `LOG` and `IGNORE`, raised under `RAISE`. A dataset of another class keeps
+        every symbol. Runs on the verb's thread, before the stream starts; may block for one
+        read of the list.
+
+        Args:
+            spec: The dataset.
+            symbols: The table's canonical symbols, sorted.
+
+        Returns:
+            The symbols a stream can subscribe, in order.
+
+        Raises:
+            AuthenticationError: Under `RAISE`, if Massive rejects the key on the read of the
+                list.
+            EntitlementError: Under `RAISE`, if the plan does not include reference data.
+            MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
+                if no pair can, so the result would follow nothing.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class FlatFileRead:

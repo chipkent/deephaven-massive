@@ -315,6 +315,7 @@ ENUM_PARAMETERS = {
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
     "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.unlisted_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,

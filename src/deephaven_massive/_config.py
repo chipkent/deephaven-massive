@@ -266,6 +266,21 @@ class MassiveConfig:
             `ValueError` for a bad row present at the call and fails the result when one is
             added later. A `str` or a list passed as `symbols` always raises, whatever this
             says. Defaults to `LOG`.
+        unlisted_symbols: What a crypto pair of a symbol table does in a live stream
+            (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker
+            list does not hold it, so it cannot be split into the topic Massive streams it on,
+            whether the row is there at the call or added later. A pair added later whose
+            lookup cannot read the list is retried twice, after 2 and 8 seconds, and then
+            treated the same way. `OnError.LOG`, the default, skips the pair and logs each
+            distinct value once at WARNING (at most 100 values per process); `OnError.IGNORE`
+            skips it with nothing logged above DEBUG. Under both, the stream keeps its other
+            pairs, a reactive table's skipped pairs are listed in the stream's `m.streams()`
+            `Error` until their rows are deleted (a skipped pair stays skipped until its row
+            is deleted and added again), and a table whose pairs are all skipped raises
+            `MassiveError` at the call. `OnError.RAISE` raises `MassiveError` for such a pair
+            present at the call and fails the stream when one is added later. A `str` or a
+            list passed as `symbols` always raises, whatever this says; `fetch()` and `poll()`
+            refuse such a pair whatever this says. Defaults to `LOG`.
         unreadable_symbols: What a symbol Massive sends in a spelling the library cannot read
             does. Such a spelling is a gap in the library, not in the caller's code.
             `OnError.LOG`, the default, keeps the row with a null `Symbol` and the text in the
@@ -293,12 +308,14 @@ class MassiveConfig:
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
     noncanonical_symbols: OnError = OnError.LOG
+    unlisted_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `ws_hosts` and the two subscription sets into copies.
 
-        A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
+        A `noncanonical_symbols`, `unlisted_symbols`, or `unreadable_symbols` that is not a
+        `dm.OnError`, a
         `ws_hosts` key that is not a `dm.AssetClass`, a host, URL, or bucket that is not a
         `str`, a `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
@@ -356,6 +373,7 @@ class MassiveConfig:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
+        _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _check_url("rest_base_url", self.rest_base_url)
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
@@ -1198,6 +1216,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "s3_endpoint_url": _text,
     "s3_bucket": _text,
     "noncanonical_symbols": _on_error,
+    "unlisted_symbols": _on_error,
     "unreadable_symbols": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the

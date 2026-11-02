@@ -91,9 +91,9 @@ Public API:
       wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
       `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
       `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError` (what a bad symbol
-      does, in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols` and
-      `unreadable_symbols`); and `Subscription`, Massive's five subscriptions.
-      Parameters take only enum members; convert text with, for example,
+      does, in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols`,
+      `unlisted_symbols`, and `unreadable_symbols`); and `Subscription`, Massive's five
+      subscriptions. Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
     - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
       DEBUG and up, to stderr (which Deephaven shows in its log panel) or to a file; the
