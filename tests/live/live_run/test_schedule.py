@@ -323,8 +323,29 @@ def test_any_time_groups_wait_through_the_nights_hours() -> None:
         state.attempts.append(Attempt("stream-night", "n", WEDNESDAY.isoformat(), ""))
     state.any_time = ["evidence"]
     now = _at(THURSDAY, 1)
-    assert next_step(state, _probed(now), now) == Step("sleep", "luld", _at(THURSDAY, 9, 28))
+    assert next_step(state, _probed(now), now) == Step(
+        "sleep", "the stream night's latest restart", _at(THURSDAY, 9)
+    )
     assert state.any_time == ["evidence"]
+    late = _at(THURSDAY, 9)  # the night's child may start no more: the morning goes on
+    assert next_step(state, _probed(late), late) == Step(
+        "run", "evidence", _at(date(2026, 11, 6), 3)
+    )
+
+
+def test_no_slot_starts_during_a_night_whose_child_gave_up() -> None:
+    state = _night_state()
+    state.known = {group: [] for group in state.known}
+    state.known["limits-ws"] = ["tests/x.py::test_wide"]
+    for example in schedule.known_names(state, "responses", WEDNESDAY) or []:
+        record(state, check_of(state, "responses", example), status="passed", reason="", day="")
+    for _ in range(schedule.MAX_STREAM_STARTS):
+        state.attempts.append(Attempt("stream-night", "n", WEDNESDAY.isoformat(), ""))
+    evening = _at(WEDNESDAY, 18)  # limits-ws is open until 21:00, but the night holds the key
+    assert next_step(state, _probed(evening), evening) == Step(
+        "sleep", "the next probe", _at(THURSDAY, 8)
+    )
+    assert not schedule.night_may_start(state, evening)
 
 
 def test_the_evenings_groups_stop_before_the_night_and_none_starts_late() -> None:
