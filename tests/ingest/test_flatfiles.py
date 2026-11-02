@@ -502,7 +502,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
     times = TimeRange(midnight, midnight + timedelta(days=1))
     day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
     bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
-    window = HistoryWindow(day, times, None, times, bars)
+    window = HistoryWindow(day, times, None, times, bars, now=midnight + timedelta(days=2))
     transform = flatfiles._Transform.build(
         CATALOG,
         STOCK_BARS,

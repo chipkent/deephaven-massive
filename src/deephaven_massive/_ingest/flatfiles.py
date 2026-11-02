@@ -162,7 +162,7 @@ from deephaven_massive._errors import (
     MassiveError,
     from_wire,
 )
-from deephaven_massive._ingest.history_reads import read_history
+from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -197,6 +197,7 @@ if TYPE_CHECKING:
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Field, FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 
@@ -900,6 +901,52 @@ class FlatFileHistory:
             window,
             core=self._core,
             files=self,
+            dates=dates,
+            call=call,
+            stop=stop,
+            forced=forced,
+        )
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read `history()` from the flat files for each symbol, each with its own outcome.
+
+        See `FlatFileTransport.history_by_symbol` and `history_reads.read_history_by_symbol`:
+        the files are scanned once for every symbol and split by `Symbol`, and the days they
+        lack under `AUTO` are read from REST symbol by symbol.
+
+        Args:
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with the parsed bounds; its symbols are ignored.
+            window: The call's window.
+            symbols: The canonical symbols to read.
+            dates: The partition dates of the files the window needs.
+            call: The call's id.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
+            stop: A read's stop token; None for a read only the session's close stops.
+
+        Returns:
+            Each symbol, in the order given, with its outcome.
+
+        Errors are those of `history_reads.read_history_by_symbol`.
+        """
+        return read_history_by_symbol(
+            spec,
+            request,
+            window,
+            core=self._core,
+            files=self,
+            symbols=symbols,
             dates=dates,
             call=call,
             stop=stop,

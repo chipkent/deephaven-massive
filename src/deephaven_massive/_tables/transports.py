@@ -13,6 +13,11 @@ never imports the code that does the I/O:
 - `StreamHandle`: a live stream as `StreamTransport.open_stream` hands it to the core.
 - `HostDecision`: which WebSocket host serves an (asset class, channel family), and why, as
   `RestTransport.resolve_host` decides it.
+- `SymbolRows`, `SymbolFailure`, and `FailureKind`: what a read by symbol
+  (`RestTransport.fetch_by_symbol`, `RestTransport.history_by_symbol`,
+  `FlatFileTransport.history_by_symbol`) returns for each symbol: its rows, or the failure that
+  ended its read and whether a later read may succeed. A table that follows a live symbol
+  table reads each symbol this way, so one symbol's failure never fails the others.
 
 Everything here is a protocol or an immutable value: no I/O, no threads, and no Deephaven call.
 """
@@ -20,11 +25,12 @@ Everything here is a protocol or an immutable value: no I/O, no threads, and no 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from enum import StrEnum
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from datetime import date, timedelta
 
     from deephaven.liveness_scope import LivenessScope
@@ -37,6 +43,7 @@ if TYPE_CHECKING:
     from deephaven_massive._errors import MassiveError
 
 __all__ = [
+    "FailureKind",
     "FlatFileRead",
     "FlatFileTransport",
     "HostDecision",
@@ -44,6 +51,9 @@ __all__ = [
     "RestTransport",
     "StreamHandle",
     "StreamTransport",
+    "SymbolFailure",
+    "SymbolOutcome",
+    "SymbolRows",
 ]
 
 
@@ -107,6 +117,64 @@ class StreamHandle:
     fail: Callable[[MassiveError], bool]
     stop_watch: Callable[[], None] | None = None
     recency: Recency = field(kw_only=True)
+
+
+class FailureKind(StrEnum):
+    """Whether a symbol's failed read may succeed if the same read is made again later.
+
+    Part of a `SymbolFailure`; the transport decides it from the error
+    (`_ingest/symbol_reads.py`), and the caller decides what to do with it, such as reading a
+    transient failure again after a pause.
+    """
+
+    TRANSIENT = "transient"
+    """The cause may pass: a rate limit that outlasted the read's patience (HTTP 429), a
+    server error that outlasted the client's retries (HTTP 5xx), a network failure, or a
+    symbol's later page that answered HTTP 404, so its data was cut short."""
+
+    PERMANENT = "permanent"
+    """The same read would fail again for this session's entitlements: the plan does not
+    include the data (`EntitlementError`; an upgrade of the plan lifts it, so a later read may
+    then succeed), Massive's rows break the dataset's schema (`RowDataError`), a crypto pair
+    Massive's ticker list does not hold, a parameter the symbol's path does not take, a table
+    without the dataset's columns (a defect of the library), or any other refusal, such as
+    the HTTP 404 of a path Massive retired."""
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolRows:
+    """One symbol's complete rows from a read by symbol.
+
+    Immutable; the table is static, so any thread may hold it.
+
+    Attributes:
+        table: The symbol's rows, a static table with exactly the dataset's columns
+            (`SessionCore.dataset_schema`), in the order the transport returned them; empty
+            when Massive has no data for the symbol (HTTP 404 on its first request, or no row
+            in the range).
+    """
+
+    table: Table
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolFailure:
+    """Why one symbol's read from a read by symbol failed, and whether it may succeed later.
+
+    Immutable. Every symbol of a batched read (one request that names several symbols, or one
+    flat-file scan) that failed holds the same error object.
+
+    Attributes:
+        error: The failure, as a static `fetch()` or `history()` of the symbol would raise it.
+        kind: Whether a later read may succeed (`FailureKind`).
+    """
+
+    error: MassiveError
+    kind: FailureKind
+
+
+SymbolOutcome: TypeAlias = SymbolRows | SymbolFailure
+"""What a read by symbol returns for one symbol: its rows, or its failure."""
 
 
 class RestTransport(Protocol):
@@ -214,6 +282,50 @@ class RestTransport(Protocol):
         """
         ...
 
+    def fetch_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Mapping[str, SymbolOutcome]:
+        """Read `fetch` for each symbol: each one's rows, or the failure that ended its read.
+
+        The read of a table that follows a live symbol table: a failure confined to some
+        symbols is returned, never raised, and leaves the others' rows intact. Each symbol is
+        read with the requests `fetch` would make for it: a path that takes one symbol a
+        request reads it alone, and a dataset that names several symbols in one request
+        (`ticker.any_of`) reads them up to `DatasetSpec.symbols_per_request` at a time and
+        splits the rows by their `Symbol`, so every symbol of such a request shares its
+        failure. A dataset whose rows carry no
+        `Symbol` column, or whose rows several symbols' requests may return
+        (`DatasetSpec.symbols_overlap`), reads each symbol in a request of its own. Each
+        request is capped at `Request.limit`; the rows of all symbols together are not.
+        Requests run on up to `max_concurrency` threads, and one read's requests take one
+        turn in the rate governor.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments; its symbols are ignored.
+            symbols: The canonical symbols to read; a repeated one is read once.
+            call: The id of the verb call the read serves, which its log lines and thread
+                names carry.
+            stop: A read's stop token (`IngestPorts.read_stop`): once set, the requests stop
+                waiting for the rate governor and the symbols not yet read fail as
+                `TRANSIENT`; the caller ignores the outcomes. None for a read only the
+                session's close stops.
+
+        Returns:
+            Each symbol, in the order given, with its `SymbolRows` or `SymbolFailure`.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key: every symbol would fail.
+            MassiveError: If the session closed during the read.
+        """
+        ...
+
     def poll(
         self,
         spec: DatasetSpec,
@@ -301,6 +413,42 @@ class RestTransport(Protocol):
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
+        """
+        ...
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Mapping[str, SymbolOutcome]:
+        """Read REST `history` for each symbol over `window` and return each one's outcome.
+
+        The REST read of a `history()` table that follows a live symbol table. Each symbol
+        is read with the requests `history` would make for it (its own requests on the
+        history path), over the call's own window, so a symbol read later keeps exactly the
+        rows it would have kept at the call. A failure confined to some symbols fails only
+        them; see `fetch_by_symbol` for the threads and the stop token.
+
+        Args:
+            spec: The dataset; REST can serve the request with explicit symbols.
+            request: The normalized arguments, with the parsed `start` and `end` bounds; its
+                symbols are ignored.
+            window: The call's window (`history_window`, built for the call's instant).
+            symbols: The canonical symbols to read; a repeated one is read once.
+            call: The verb call's id, as `fetch_by_symbol` takes it.
+            stop: A read's stop token, as `fetch_by_symbol` takes it.
+
+        Returns:
+            Each symbol, in the order given, with its `SymbolRows` or `SymbolFailure`.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key.
+            MassiveError: If the session closed during the read.
         """
         ...
 
@@ -500,6 +648,48 @@ class FlatFileTransport(Protocol):
             MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is
                 returned and logs a WARNING; it raises nothing.
+        """
+        ...
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> Mapping[str, SymbolOutcome]:
+        """Read flat-file `history()` for each symbol, each with its own outcome.
+
+        The flat-file read of a `history()` table that follows a live symbol table. A file
+        holds every symbol of its day, so the symbols are read together, in one scan of the
+        files by the rules of `read_history`, and the rows are split by their `Symbol`. A
+        failure of the scan is the failure of every symbol: each holds the same
+        `SymbolFailure`. Under `AUTO`, the days the files lack are read from REST symbol by
+        symbol (`RestTransport.history_by_symbol`, over windows built for the call's
+        instant), so a symbol whose REST read fails fails alone.
+
+        Args:
+            spec: The dataset, with a flat-file prefix for the request.
+            request: The normalized arguments, with the parsed bounds; its symbols are ignored.
+            window: The call's window (`history_window`, built for the call's instant).
+            symbols: The canonical symbols to read; a repeated one is read once.
+            dates: The partition dates to read (`partition_dates`).
+            call: The verb call's id.
+            forced: True for `source=FLAT_FILES`, which never reads REST.
+            stop: A read's stop token, as `RestTransport.fetch_by_symbol` takes it.
+
+        Returns:
+            Each symbol, in the order given, with its `SymbolRows` or `SymbolFailure`.
+
+        Raises:
+            AuthenticationError: If S3 rejects the credentials and REST may not serve the
+                read, or REST rejects the API key.
+            MassiveError: If the session closed during the read.
         """
         ...
 

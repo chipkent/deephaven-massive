@@ -25,7 +25,7 @@ def epoch_ns(moment: datetime) -> int:
 
 def window_of(*, times: TimeRange | None = None, sessions: DaySpan | None = None) -> HistoryWindow:
     span: TimeRange | DaySpan = times or sessions or DaySpan(date(2025, 1, 1), date(2025, 1, 1))
-    return HistoryWindow(span, times, sessions, times)
+    return HistoryWindow(span, times, sessions, times, now=datetime(2025, 1, 2, tzinfo=UTC))
 
 
 def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:

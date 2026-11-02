@@ -207,7 +207,7 @@ def test_ticks_keep_the_range_and_request_it() -> None:
     days = window(STOCK_TRADES, "2025-03-03", "2025-03-04")
     instants = DaySpan(date(2025, 3, 3), date(2025, 3, 4)).instants(NEW_YORK)
     assert days == HistoryWindow(
-        DaySpan(date(2025, 3, 3), date(2025, 3, 4)), instants, None, instants
+        DaySpan(date(2025, 3, 3), date(2025, 3, 4)), instants, None, instants, now=NOW
     )
     start = datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK)
     exact = window(STOCK_TRADES, start, None)
@@ -290,7 +290,7 @@ def test_an_index_month_covers_its_weekend_days_for_its_start_too() -> None:
 def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> None:
     sessions = window(FUTURES_TRADES, "2025-03-03", "2025-03-05")
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
-    assert sessions == HistoryWindow(span, None, span, None)
+    assert sessions == HistoryWindow(span, None, span, None, now=NOW)
     assert partition_dates(FUTURES_TRADES, sessions) == span.days()
 
 
@@ -349,7 +349,7 @@ def test_partition_dates_cover_the_range_in_the_class_day_zone() -> None:
 
 def instants(start: datetime, end: datetime) -> HistoryWindow:
     span = TimeRange(start.astimezone(UTC), end.astimezone(UTC))
-    return HistoryWindow(span, span, None, span)
+    return HistoryWindow(span, span, None, span, now=NOW)
 
 
 def test_partition_dates_of_forex_are_utc_dates() -> None:
