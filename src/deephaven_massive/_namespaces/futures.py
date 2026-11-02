@@ -462,8 +462,7 @@ class _Futures(Namespace):
                 for every product.
             sort: Such as `"ticker"`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"ticker_gte": "ES"}`. See README.md#filters.
 
         Returns:
@@ -521,8 +520,7 @@ class _Futures(Namespace):
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
                 README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows per named symbol, or in total without symbols. See
-                README.md#sort-order-limit.
+            limit: The most rows to return, in total. See README.md#sort-order-limit.
             filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. See
                 README.md#filters.
 
