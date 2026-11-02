@@ -285,8 +285,9 @@ uv venv --seed --python 3.12 ~/massive-test/dh-venv
 ```
 
 This downloads about 400 MB and takes a few minutes. It should end with a line that starts
-`Successfully installed` and names `deephaven-server-42` and `deephaven-massive-0.1.0rc1`.
-**Record** how long it took and every line that says `ERROR` or `WARNING`.
+`Successfully installed` and names `deephaven-server-42` and `deephaven-massive-0.1.0rc1`: the
+library takes its version from the tag, so it is the version you typed without its leading
+`v`. **Record** how long it took and every line that says `ERROR` or `WARNING`.
 
 **If it fails:** if it asks for a username or says `Repository not found`, repeat step 2 of
 1.2 and run the commands again. Report any other error (part 4).

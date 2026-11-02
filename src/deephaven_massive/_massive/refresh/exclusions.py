@@ -37,6 +37,13 @@ exactly that value of that field; a `TYPE_FIXES` entry would instead loosen the 
 accept the wrong form. It also excuses a key a WebSocket example sends that the message
 schema does not declare (the futures trade's `z`). An entry whose sample the snapshot no
 longer shows, or no longer refuses, fails the refresh as stale.
+
+`IGNORED_KEYS` lists the keys Massive sends on a source that the library deliberately does
+not read: undocumented keys that carry nothing a user needs (a constant, or a value another
+column already holds). The refresh writes them onto the source (`Source.ignored_keys`), and
+the decoders drop them without reporting drift, so the drift report keeps showing only what
+needs a decision. An entry for a key the source declares, or for a source the snapshot does not
+generate, fails the refresh as stale.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ from deephaven_massive._massive.spec.types import Transport
 if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import Json
 
-__all__ = ["EXCLUSIONS", "SAMPLE_ERRORS", "Exclusion", "SampleError"]
+__all__ = ["EXCLUSIONS", "IGNORED_KEYS", "SAMPLE_ERRORS", "Exclusion", "IgnoredKey", "SampleError"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -231,3 +238,39 @@ SAMPLE_ERRORS: tuple[SampleError, ...] = (
     ),
 )
 """Every documented example value the `example-type` gate skips."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class IgnoredKey:
+    """One undeclared key a source sends that the library deliberately does not read.
+
+    Attributes:
+        source: The source key: a REST path template exactly as the specification spells it,
+            or a WebSocket `"<cluster>/<channel>"`.
+        wire_key: The key as Massive sends it, at the top of the row or message.
+        reason: The live evidence, and why the key carries nothing a user needs.
+    """
+
+    source: str
+    wire_key: str
+    reason: str
+
+
+_FINANCIALS_TICKERS = (
+    "The live run of 2026-11-02 received `max_ticker` and `min_ticker` on the rows of a "
+    'request for AAPL, both "AAPL". The financials pages document neither, and the row\'s '
+    "own `tickers` column already lists every ticker of the company, each share class "
+    "included, so the two keys add nothing it lacks."
+)
+
+IGNORED_KEYS: tuple[IgnoredKey, ...] = (
+    *(
+        IgnoredKey(source=path, wire_key=key, reason=_FINANCIALS_TICKERS)
+        for path in (
+            "/stocks/financials/v1/balance-sheets",
+            "/stocks/financials/v1/cash-flow-statements",
+        )
+        for key in ("max_ticker", "min_ticker")
+    ),
+)
+"""Every undeclared key the decoders drop without reporting drift."""

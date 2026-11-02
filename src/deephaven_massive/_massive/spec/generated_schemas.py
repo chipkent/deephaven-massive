@@ -87,8 +87,8 @@ def parse(
     Args:
         transport: The transport the file describes.
         text: The file's JSON text: `{"sources": [{"key", "result_key", "params", "fields",
-            "memberships"}, ...]}`, as the refresh writes it. `result_key` and `params` are
-            read for REST only.
+            "memberships"}, ...]}`, as the refresh writes it, with `"ignored_keys"` on a source
+            that ignores some key. `result_key` and `params` are read for REST only.
         descriptions: For each source key, each described wire key mapped to its description
             (the transport's part of `DescriptionsFile.texts`). A field it does not name gets
             `""`; by default nothing is described.
@@ -326,12 +326,21 @@ def _source(
     by_class = class_descriptions.get(key, {})
     fields = tuple(_field(item, described, by_class) for item in _list(_member(entry, "fields")))
     memberships = tuple(_membership(item) for item in _list(_member(entry, "memberships")))
+    # Written only for a source that ignores some key.
+    ignored = frozenset(_string_list(entry.get("ignored_keys", []), f"ignored keys of {key!r}"))
     if transport is not Transport.REST:
-        return Source(key=key, transport=transport, fields=fields, memberships=memberships)
+        return Source(
+            key=key,
+            transport=transport,
+            fields=fields,
+            memberships=memberships,
+            ignored_keys=ignored,
+        )
     return RestPath(
         key=key,
         fields=fields,
         memberships=memberships,
+        ignored_keys=ignored,
         result_key=_optional(entry, "result_key"),
         params=tuple(_param(item) for item in _list(_member(entry, "params"))),
     )

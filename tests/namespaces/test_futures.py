@@ -717,7 +717,7 @@ def test_snapshots_over_rest(
     assert len(out) == 1
     row = out[0]
     assert row["Symbol"] == "CBN5"
-    assert row["ProductCode"] == "CB"
+    assert row["DetailsProductCode"] == "CB"
     assert row["DetailsSettlementDate"] == "2025-07-30"  # midnight in Chicago, as a date
     assert row["LastMinuteLastUpdated"] == 1746045300000 * 10**6  # sent in milliseconds
     assert row["LastTradeLastUpdated"] == 1746045242858242600  # sent in nanoseconds

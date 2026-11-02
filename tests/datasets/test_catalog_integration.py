@@ -48,7 +48,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._enums import ClassFromPrefix
-from deephaven_massive._massive import RestClient, Transport, source
+from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
 from tests._live import streams
 
@@ -202,9 +202,9 @@ def _params() -> list[Any]:
     stream (Basic has no WebSocket access), and its Business plan for a fair-market-value (FMV)
     stream, which only Business serves; the `needs` marker skips it before any call when
     the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
-    left on Basic, whose five requests a minute pace it. A stream case gets 160 s: its
-    acknowledgement, the wait for its rows (up to 75 s for a minute bar), and the gap between
-    two stream cases.
+    left on Basic, whose five requests a minute pace it. A stream case gets 240 s: its
+    acknowledgement, the wait for its rows (up to 75 s for a minute bar), a second such wait
+    when another client took the connection's slot, and the gap between two stream cases.
 
     Returns:
         One `pytest.param` per pair, with its id `<dataset>-<verb>`.
@@ -215,7 +215,7 @@ def _params() -> list[Any]:
         subscription = _subscription(spec)
         marks = [pytest.mark.requests(_REQUESTS[verb])]
         if verb == "stream":
-            marks.append(pytest.mark.timeout(160))
+            marks.append(pytest.mark.timeout(240))
         if subscription is not None:
             plan = "starter" if verb == "stream" else "basic"
             if name.endswith(".fmv") and verb == "stream":
@@ -244,13 +244,16 @@ def _plan(name: str, spec: DatasetSpec, verb: str, *, flat_files: bool = False) 
         flat_files: Whether the refusal came from the S3 flat files rather than REST.
 
     Returns:
-        Such as `"a Stocks plan with WebSocket access"`, or `"a Stocks plan with flat-file
-        access"` for a `history()` the flat files refused.
+        Such as `"a Stocks plan with WebSocket access"`, `"a Stocks plan with flat-file
+        access"` for a `history()` the flat files refused, or `"the Imbalances Expansion
+        add-on"` for the imbalances stream, which no Stocks plan includes without it.
     """
     if name.startswith("partners."):
         return f"the {name.split('.')[1]} partner add-on"
     if name.endswith(".fmv"):
         return "a Business plan (FMV)"
+    if name == "stocks.imbalances":
+        return "the Imbalances Expansion add-on"
     subscription = _subscription(spec)
     plan = "a plan" if subscription is None else _PLAN_NAMES[subscription]
     if verb == "stream":
@@ -259,15 +262,16 @@ def _plan(name: str, spec: DatasetSpec, verb: str, *, flat_files: bool = False) 
 
 
 def _option(client: RestClient) -> str:
-    """Return the AAPL call nearest the money a month or more out, looked up once per run.
+    """Return the busiest AAPL option near the money at the front expiration, looked up once.
 
-    Reads AAPL's previous close (its `previous_day_bar`), then the listed calls expiring 30
-    days or more from now with a strike within 10% of that close, and takes, at the nearest of
-    those expirations, the strike nearest the close: the contract most likely to trade while
-    a stream case listens.
+    Reads AAPL's previous close (its `previous_day_bar`), then the chain snapshot of the
+    contracts expiring after today with a strike within 5% of that close, and takes, at the
+    nearest of those expirations, the contract with the most volume today: the one most
+    likely to trade while a stream case listens. A key whose Options plan has no snapshot
+    (Basic) gets the listed call at that expiration with the strike nearest the close instead.
 
     Returns:
-        Its OCC symbol, such as `"O:AAPL261218C00200000"`.
+        Its OCC symbol, such as `"O:AAPL261106C00270000"`.
     """
     if "options" not in _FOUND:
         bars = client.get(
@@ -278,29 +282,47 @@ def _option(client: RestClient) -> str:
         ).rows
         assert bars, "no previous AAPL bar"
         close = float(str(bars[0]["c"]))
-        later = datetime.now(UTC).date() + timedelta(days=30)
-        rows = client.get(
-            source(Transport.REST, "/v3/reference/options/contracts"),
-            {},
-            {
-                "underlying_ticker": "AAPL",
-                "contract_type": "call",
-                "expiration_date.gte": later,
-                "strike_price.gte": round(close * 0.9, 2),
-                "strike_price.lte": round(close * 1.1, 2),
-                "sort": "expiration_date",
-                "order": "asc",
-                "limit": 250,
-            },
-            bucket="options",
-        ).rows
-        assert rows, f"no listed AAPL call near {close}"
-        expiry = min(str(r["expiration_date"]) for r in rows)
-        nearest = min(
-            (r for r in rows if str(r["expiration_date"]) == expiry),
-            key=lambda r: abs(float(str(r["strike_price"])) - close),
-        )
-        _FOUND["options"] = str(nearest["ticker"])
+        window = {
+            "expiration_date.gt": datetime.now(UTC).date(),
+            "strike_price.gte": round(close * 0.95, 2),
+            "strike_price.lte": round(close * 1.05, 2),
+            "sort": "expiration_date",
+            "order": "asc",
+            "limit": 250,
+        }
+        try:
+            chain = client.get(
+                source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}"),
+                {"underlyingAsset": "AAPL"},
+                window,
+                bucket="options",
+            ).rows
+        except WireEntitlementError:
+            listed = client.get(
+                source(Transport.REST, "/v3/reference/options/contracts"),
+                {},
+                {**window, "underlying_ticker": "AAPL", "contract_type": "call"},
+                bucket="options",
+            ).rows
+            assert listed, f"no listed AAPL call near {close}"
+            expiry = min(str(r["expiration_date"]) for r in listed)
+            nearest = min(
+                (r for r in listed if str(r["expiration_date"]) == expiry),
+                key=lambda r: abs(float(str(r["strike_price"])) - close),
+            )
+            _FOUND["options"] = str(nearest["ticker"])
+        else:
+            assert chain, f"no AAPL option near {close} in the chain snapshot"
+            contracts = [
+                (cast("dict[str, Any]", r["details"]), cast("dict[str, Any]", r.get("day") or {}))
+                for r in chain
+            ]
+            expiry = min(str(details["expiration_date"]) for details, _ in contracts)
+            busiest, _ = max(
+                (c for c in contracts if str(c[0]["expiration_date"]) == expiry),
+                key=lambda c: float(c[1].get("volume") or 0),
+            )
+            _FOUND["options"] = str(busiest["ticker"])
     return _FOUND["options"]
 
 
@@ -517,6 +539,80 @@ def _poll_case(case: _Case, query: QueryBase) -> tuple[list[str], list[str]]:
     return columns, drift
 
 
+_SLOT_TAKEN = "another client on this key took the connection (max_connections)"
+"""Why a stream case fails when its connection lost its slot and no row came after the retry."""
+
+
+def _socket_rows(case: _Case) -> list[dict[str, Any]]:
+    """Return the case class's WebSocket rows of `m.connections()`.
+
+    Returns:
+        The rows whose `Transport` is `WebSocket` and whose `AssetClass` is the case's class.
+    """
+    asset_class = str(case.spec.asset_class)
+    return [
+        r
+        for r in case.table_rows(case.session.connections())
+        if r["Transport"] == "WebSocket" and r["AssetClass"] == asset_class
+    ]
+
+
+def _reconnects(rows: list[dict[str, Any]]) -> int:
+    """Return how often the connections of some `m.connections()` rows have reconnected.
+
+    Returns:
+        The sum of their `Reconnects`.
+    """
+    return sum(int(r["Reconnects"] or 0) for r in rows)
+
+
+def _row_wait(family: str) -> float:
+    """Return how many seconds a stream case waits for its first row from now.
+
+    Returns:
+        Until just past the next minute boundary for a minute bar stream
+        (`streams.minute_bar_deadline`), `_TICK_WAIT` for any other.
+    """
+    if family != "bars":
+        return _TICK_WAIT
+    now = datetime.now(UTC)
+    return (streams.minute_bar_deadline(now) - now).total_seconds()
+
+
+def _slot_taken(case: _Case, before: int) -> bool:
+    """Tell whether the case class's connection lost its slot since `before` was read.
+
+    Records the class's WebSocket rows of `m.connections()` when it did.
+
+    Args:
+        case: The stream case.
+        before: The rows' `Reconnects` total before the stream opened (`_reconnects`).
+
+    Returns:
+        True when a row is `WAITING_SLOT` or the connections reconnected since.
+    """
+    rows = _socket_rows(case)
+    taken = any(r["State"] == "WAITING_SLOT" for r in rows) or _reconnects(rows) > before
+    if taken:
+        case.evidence(f"{case.name} stream: the connection lost its slot: {rows}")
+    return taken
+
+
+def _record_bar_lag(case: _Case, row: dict[str, Any]) -> None:
+    """Record when a stream's first minute bar ended and when it reached the table.
+
+    Args:
+        case: The minute bar stream case.
+        row: The first row of its table.
+    """
+    end, inserted = row.get("TimestampEnd"), row.get("TimestampInsert")
+    lag = None if end is None or inserted is None else (int(inserted) - int(end)) / 1e9
+    case.evidence(
+        f"{case.name} first bar: TimestampEnd {end}, TimestampInsert {inserted}, "
+        f"arrived {lag} s after its minute ended (allowance {streams.MINUTE_BAR_LAG})"
+    )
+
+
 def _stream_case(
     case: _Case,
     query: QueryBase,
@@ -532,31 +628,45 @@ def _stream_case(
     minute bar stream waits until just past the next minute boundary, any other for
     `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement.
 
+    Another client on the key can take the class's connection slot during the wait: the
+    connection then waits for the slot (`WAITING_SLOT`) or reconnects. When no row came and
+    the class's WebSocket row of `m.connections()` shows either, the case waits once more,
+    as long again from then (past the next minute boundary for minute bars), and fails with
+    `_SLOT_TAKEN` rather than "no row arrived" if still nothing comes. For a minute bar
+    stream, the first row's `TimestampEnd` and `TimestampInsert` are recorded, so the
+    evidence shows how long after its minute Massive's bar arrived (`streams.MINUTE_BAR_LAG`
+    is the allowance).
+
     Returns:
         The table's columns and what the case saw drift.
     """
     table = cast("Any", query).append_only()
+    before = _reconnects(_socket_rows(case))
     acked = wait_acked(case.session, 1, time.monotonic() + _STREAM_WAIT)
     family = case.name.rpartition(".")[2]
     status, due = rows_due(_MARKETS[cast("dm.AssetClass", case.spec.asset_class)], family)
     due = due and case.name not in _RARE
-    wait = _TICK_WAIT
-    if family == "bars":
-        now = datetime.now(UTC)
-        wait = (streams.minute_bar_deadline(now) - now).total_seconds()
+    wait = _row_wait(family)
     rows = wait_rows(case.session, table, time.monotonic() + wait) if due else []
+    taken = due and not rows and _slot_taken(case, before)
+    if taken:
+        wait = _row_wait(family)
+        rows = wait_rows(case.session, table, time.monotonic() + wait)
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     _STREAM_CLOSED[0] = time.monotonic()
     case.evidence(
         f"{case.name} stream: acknowledged {acked}; {status}; due {due}; {len(rows)} rows"
     )
+    if family == "bars" and rows:
+        _record_bar_lag(case, rows[0])
     case.skip_if_not_entitled(case.session, case.plan)
     assert failure is None, f"{case.name} stream failed: {failure}"
     assert acked >= 1, f"{case.name}: Massive acknowledged no topic"
     if not due:
         why = _RARE.get(case.name, f"market {status}, or within the feed delay")
         pytest.skip(f"not exercised: {why} (acknowledged)")
+    assert rows or not taken, f"{case.name}: {_SLOT_TAKEN}"
     assert rows, f"{case.name}: no row arrived in {wait:.0f} s, though rows were due"
     return columns, drift
 

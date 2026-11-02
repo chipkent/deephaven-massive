@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import wire_spellings
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -534,6 +535,70 @@ def test_index_day_bar_stamps_of_the_day_file(
         evidence(f"library {index} history(FLAT_FILES): {outcome}")
     missing = [(i, d) for i in _STAMP_INDICES for d in days if not files[i].get(d)]
     assert not missing, f"the day files lack {missing}"
+
+
+_MINUTE_FILE = "us_indices/minute_aggs_v1"
+_ROUND_THE_CLOCK = "I:AAVE100"
+"""An index that updates around the clock, so its minute file has rows near every midnight."""
+
+
+@pytest.mark.needs("indices:starter", "s3")
+@pytest.mark.timeout(160)
+def test_an_index_minute_file_holds_its_own_new_york_day(
+    *,
+    recent_monday: date,
+    flat_file_tickers: FlatFileTickers,
+    rest_rows: RestRows,
+    evidence: Evidence,
+) -> None:
+    """Whether a `us_indices/minute_aggs_v1` file holds exactly its New York day, as REST does.
+
+    `history()` over a range of instants trims each index flat file to its own New York day
+    before it joins REST rows, so a file holding another cut (the Chicago day, 01:00 to 01:00
+    New York time) would lose or double an hour at each seam. Reads the `I:AAVE100` rows of the
+    most recent published Monday's minute file (Monday follows a weekend, when only such an
+    index updates) and the REST minute bars from the day before to the day after, and records
+    the file's first and last stamps in UTC and New York time, its rows outside the New York
+    day, and the REST minutes of that day the file lacks or adds. Passes when every file row
+    falls inside the New York day, none in the hour after it, and the file's minutes are
+    REST's minutes of that day. A failure means the trim cuts index files at the wrong
+    midnight, and the index day zone needs an owner decision.
+    """
+    day = recent_monday
+    read = flat_file_tickers(
+        _MINUTE_FILE, day, wire_spellings(dm.AssetClass.INDICES, _ROUND_THE_CLOCK)
+    )
+    assert read is not None, f"{_MINUTE_FILE} has no file for {day}"
+    stamps = sorted(int(str(row["window_start"])) // 1_000_000 for row in read[0])
+    assert stamps, f"{_MINUTE_FILE} {day} holds no {_ROUND_THE_CLOCK} row"
+    start = datetime(day.year, day.month, day.day, tzinfo=_NEW_YORK)
+    end = start + timedelta(days=1)
+    first, last = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+    evidence(f"{_MINUTE_FILE} {day} {_ROUND_THE_CLOCK}: {len(stamps)} rows")
+    evidence(f"first {_wall_clock(stamps[0])}; last {_wall_clock(stamps[-1])}")
+    outside = [s for s in stamps if not first <= s < last]
+    evidence(f"rows outside the New York day: {[_wall_clock(s) for s in outside[:10]]}")
+    minutes = rest_rows(
+        "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+        {
+            "indicesTicker": _ROUND_THE_CLOCK,
+            "multiplier": 1,
+            "timespan": "minute",
+            "from": day - timedelta(days=1),
+            "to": day + timedelta(days=1),
+        },
+        {"sort": "asc", "limit": 50000},
+    )
+    rest_day = {int(m["t"]) for m in minutes if first <= int(m["t"]) < last}
+    lacks, adds = sorted(rest_day - set(stamps)), sorted(set(stamps) - rest_day)
+    evidence(f"REST minutes of the New York day: {len(rest_day)}")
+    evidence(f"the file lacks {len(lacks)}: {[_wall_clock(s) for s in lacks[:10]]}")
+    evidence(f"the file adds {len(adds)}: {[_wall_clock(s) for s in adds[:10]]}")
+    after = [s for s in stamps if last <= s < last + 3_600_000]
+    assert not after, f"the file holds {len(after)} rows from 00:00 to 01:00 New York the next day"
+    assert not outside, f"the file holds {len(outside)} rows outside its New York day"
+    assert not lacks, f"the file lacks {len(lacks)} REST minutes of its New York day"
+    assert not adds, f"the file holds {len(adds)} minutes REST does not"
 
 
 def _wall_clock(stamp_ms: int) -> str:

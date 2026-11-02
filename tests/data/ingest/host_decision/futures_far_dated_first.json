@@ -1,0 +1,46 @@
+{
+  "status": "OK",
+  "request_id": "0b7c3c0e9a3f4b1d8e2f6a5c4d3b2a19",
+  "results": [
+    {
+      "details": {
+        "product_code": "ES",
+        "ticker": "ESH0"
+      },
+      "session": {
+        "previous_settlement": 7702.25
+      }
+    },
+    {
+      "details": {
+        "product_code": "ES",
+        "ticker": "ESH1"
+      },
+      "session": {
+        "previous_settlement": 7741.5
+      }
+    },
+    {
+      "details": {
+        "product_code": "ES",
+        "ticker": "ESH7"
+      },
+      "last_minute": {
+        "close": 7765.5,
+        "timeframe": "REAL-TIME"
+      },
+      "last_quote": {
+        "ask": 7766.0,
+        "bid": 7765.25,
+        "timeframe": "REAL-TIME"
+      },
+      "last_trade": {
+        "price": 7765.5,
+        "timeframe": "REAL-TIME"
+      },
+      "session": {
+        "close": 7765.5
+      }
+    }
+  ]
+}

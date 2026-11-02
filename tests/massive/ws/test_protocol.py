@@ -97,6 +97,21 @@ CONVERTED = Source(
         ),
     ),
 )
+# A price Massive sends as text, as the futures stream does, beside a key the library ignores.
+TEXT_PRICES = Source(
+    key="stocks/F",
+    transport=Transport.WS,
+    fields=(
+        Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
+        Field(
+            wire_key="p",
+            column="Price",
+            wire_type=WireType.DOUBLE,
+            conversion=Conversion.DECIMAL_TEXT_NUMBER,
+        ),
+    ),
+    ignored_keys=frozenset({"lp"}),
+)
 FOREX = Source(
     key="forex/CA",
     transport=Transport.WS,
@@ -116,7 +131,7 @@ def _frame(*items: object) -> str:
     return json.dumps(list(items))
 
 
-_SOURCES = {s.key.partition("/")[2]: s for s in (TRADES, EVERYTHING, CONVERTED, FOREX)}
+_SOURCES = {s.key.partition("/")[2]: s for s in (TRADES, EVERYTHING, CONVERTED, FOREX, TEXT_PRICES)}
 
 
 def _dicts(data: Data) -> list[dict[str, object]]:
@@ -809,6 +824,11 @@ _OBJECTS: tuple[dict[str, object], ...] = (
     {"ev": "C", "x": 49, "i": "ab"},
     {"ev": "C", "x": "4.8", "i": 1.5},
     {"ev": "C", "x": None, "i": None, "y": 1},
+    {"ev": "F", "sym": "ESZ6", "p": "7676.5", "lp": 0},
+    {"ev": "F", "sym": "ESZ6", "p": 7679},
+    {"ev": "F", "sym": "ESZ6", "p": "1e5"},
+    {"ev": "F", "sym": "ESZ6", "p": "1\n2"},  # a newline, which the column reading joins on
+    {"ev": "F", "sym": "ESZ6", "p": None, "zz": 1},
 )
 
 
@@ -829,7 +849,7 @@ def _events(decoder: FrameDecoder, frame: str) -> list[object]:
 def _decoder() -> FrameDecoder:
     # Only the ticker is required, so a missing `t`, which the vendor marks required, is drift
     # that the column reading reports itself.
-    decoder = FrameDecoder([TRADES, EVERYTHING, CONVERTED], host=HOST, path=PATH)
+    decoder = FrameDecoder([TRADES, EVERYTHING, CONVERTED, TEXT_PRICES], host=HOST, path=PATH)
     decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
     return decoder
 
@@ -866,6 +886,29 @@ def test_a_frame_of_enough_clean_objects_is_read_by_column(
     assert isinstance(data, Data)
     assert data.rows == [("AAPL", 1.0, 1, 1, [1])] * protocol.COLUMN_MIN_OBJECTS
     assert type(data.rows[0][1]) is float  # as the converter makes it
+
+
+def test_a_frame_of_text_prices_is_read_by_column_and_its_ignored_key_is_no_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The futures trade as Massive sent it on 2026-11-02: the price as text.
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an object was read on its own")
+
+    monkeypatch.setattr(FrameDecoder, "_row", refuse)
+    decoder = FrameDecoder([TEXT_PRICES], host=HOST, path=PATH)
+    items = [{"ev": "F", "sym": "ESZ6", "p": "7676.5", "lp": 0}, {"ev": "F", "sym": "ESZ6"}]
+    [data] = decoder.decode(_frame(*items * protocol.COLUMN_MIN_OBJECTS))
+    assert isinstance(data, Data)
+    assert data.rows == [("ESZ6", 7676.5), ("ESZ6", None)] * protocol.COLUMN_MIN_OBJECTS
+    assert data.drift == DriftReport()
+
+
+def test_a_price_text_that_is_no_plain_decimal_is_odd() -> None:
+    decoder = FrameDecoder([TEXT_PRICES], host=HOST, path=PATH)
+    data = _decode_one(decoder, {"ev": "F", "sym": "ESZ6", "p": "NaN"})
+    assert _dicts(data) == [{"Ticker": "ESZ6", "Price": None}]
+    assert data.drift.unconvertible == {"p"}
 
 
 def test_a_frame_of_few_objects_is_read_one_by_one(

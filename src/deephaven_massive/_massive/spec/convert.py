@@ -39,12 +39,13 @@ converters above are never loosened:
 | `midnight-utc-date` | `YYYY-MM-DD`, or ISO-8601 midnight at offset `Z` or `+00:00` | `date` |
 | `chicago-midnight-date` | `YYYY-MM-DD`, or epoch nanoseconds of a midnight in Chicago | `date` |
 | `integer-as-number` | any number, as `double` accepts it | `float` |
+| `decimal-text-number` | any number, or a finite decimal in text (`"7676.5"`) | `float` |
 
 `text-or-integer-id` serves a field the specification declares either an integer or text
 (`Conversion.declarations`). A value the conversion cannot read (`"4.8"` for `quoted-integer`,
-`"12;37"` for `code-list-text`, a non-zero clock or another offset for `midnight-utc-date`, an
-instant other than a Chicago midnight for `chicago-midnight-date`)
-raises `UnconvertibleError` like any other bad value.
+`"12;37"` for `code-list-text`, `"1e5"`, `"NaN"`, or `" 1.5"` for `decimal-text-number`, a
+non-zero clock or another offset for `midnight-utc-date`, an instant other than a Chicago
+midnight for `chicago-midnight-date`) raises `UnconvertibleError` like any other bad value.
 
 An `iso-instant` is computed as exact integer nanoseconds since the Unix epoch (UTC) from its
 date, time, up to nine fractional digits, and offset, with integer arithmetic only, so no
@@ -69,7 +70,9 @@ the WebSocket channel, symbol, and host):
 pages and WebSocket frames are read: a column of plain values that already have the type the
 converter would return (an `int` in range for a `long`, a `float` for a `double`) is returned as
 it is, its types checked for the whole list in a few calls with no Python call per value, and
-any other column goes through the field's converter value by value. It never judges a column it
+any other column goes through the field's converter value by value. A `decimal-text-number`
+column is read whole too: numbers as a `double` column is, and text by one pattern test over
+the whole column and the builtin `float`. It never judges a column it
 cannot vouch for: when any value would be refused, it returns `None`, and the decoder reads the
 rows one by one with `convert_field`, which judges each value on its own. Either way the values
 are the same: a column it returns holds exactly what the converter gives for each value,
@@ -116,6 +119,13 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _DECIMAL_INTEGER = re.compile(r"\d+", re.ASCII)
 # Codes written as decimal integers separated by single commas, such as `12,37`.
 _CODE_LIST = re.compile(r"\d+(?:,\d+)*", re.ASCII)
+# A decimal number written as text: an optional minus sign, digits, and an optional fraction
+# with at least one digit on each side of the point. No sign `+`, exponent, spaces, digit
+# separators, or words such as `NaN` or `inf`, all of which Python's `float` would accept.
+_DECIMAL = r"-?\d+(?:\.\d+)?"
+_DECIMAL_TEXT = re.compile(_DECIMAL, re.ASCII)
+# A column of such texts joined by newlines, tested in one call.
+_DECIMAL_TEXTS = re.compile(rf"{_DECIMAL}(?:\n{_DECIMAL})*", re.ASCII)
 # Hours 00-23, minutes and seconds 00-59 (no leap second), in the time and in the offset.
 _INSTANT = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})T(?P<h>[01]\d|2[0-3]):(?P<m>[0-5]\d):(?P<s>[0-5]\d)"
@@ -484,6 +494,36 @@ def _code_list(value: object) -> list[int]:
     return [_long(value)]
 
 
+def _decimal_text_number(value: object) -> float:
+    """Return a number sent as a JSON number or as a finite decimal written as text.
+
+    Massive's futures stream sends its prices as text (`"7676.5"`) where its specification
+    declares numbers. Only plain decimal text is read: an optional minus sign, digits, and an
+    optional fraction with digits on both sides of the point. Python's `float` would also
+    accept `"1e5"`, `"NaN"`, `"inf"`, `"1_000"`, and surrounding spaces; none of them is a
+    price Massive writes, so each is refused and reported as drift rather than read.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        The number as a `float`: a number as `double` reads it, or the double nearest the
+        decimal the text spells.
+
+    Raises:
+        UnconvertibleError: If `value` is text that is not such a decimal, or one too large
+            for a finite double, or is neither text nor a number `double` accepts.
+    """
+    if not isinstance(value, str):
+        return _double(value)
+    if not _DECIMAL_TEXT.fullmatch(value):
+        raise UnconvertibleError
+    number = float(value)
+    if math.isinf(number):
+        raise UnconvertibleError
+    return number
+
+
 # The converter of each named conversion.
 _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
     {
@@ -496,6 +536,7 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
         Conversion.MIDNIGHT_UTC_DATE: _midnight_date,
         Conversion.CHICAGO_MIDNIGHT_DATE: _chicago_midnight_date,
         Conversion.INTEGER_AS_NUMBER: _double,
+        Conversion.DECIMAL_TEXT_NUMBER: _decimal_text_number,
     }
 )
 
@@ -599,6 +640,70 @@ def _as_floats(values: list[object], *, has_null: bool) -> list[object] | None:
         return None
 
 
+_TEXTS: Final = frozenset({str, NoneType})
+"""The JSON value types of a `decimal-text-number` column read as text in one pass."""
+
+
+def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | None:
+    """Return a column of decimal texts and nulls as floats, as `decimal-text-number` gives.
+
+    The whole column is checked by one pattern test over its texts joined by newlines, after a
+    count of the newlines proves no text holds one of its own, and converted with the builtin
+    `float`, so a frame of text prices costs no Python call per value.
+
+    Args:
+        values: Texts, and `None`s when `has_null`.
+        has_null: Whether `values` holds a `None`, which then stays `None`.
+
+    Returns:
+        A new list of floats (and `None`s); or None when some text is not a plain decimal, or
+        spells a number too large for a finite double, which the converter refuses.
+    """
+    texts = cast("list[str]", [v for v in values if v is not None] if has_null else values)
+    joined = "\n".join(texts)
+    # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
+    # the column passes only when the joining newlines are the only ones.
+    if joined.count("\n") != len(texts) - 1 or not _DECIMAL_TEXTS.fullmatch(joined):
+        return None
+    numbers = list(map(float, texts))
+    if math.inf in numbers or -math.inf in numbers:
+        return None
+    if not has_null:
+        return cast("list[object]", numbers)
+    found = iter(numbers)
+    return [None if v is None else next(found) for v in values]
+
+
+def _decimal_column(
+    converted: Callable[[list[object]], list[object] | None], *, arrow_checks_numbers: bool
+) -> Callable[[list[object]], list[object] | None]:
+    """Return the column reader of a `decimal-text-number` field.
+
+    A column of numbers is read as a `double` column is; one of texts by `_decimal_texts`; and a
+    column that mixes the two, or holds anything else, value by value.
+
+    Args:
+        converted: The reader that calls the field's converter once per value.
+        arrow_checks_numbers: As `column_converter` takes it.
+
+    Returns:
+        The reader.
+    """
+
+    def decimal(values: list[object]) -> list[object] | None:
+        types = set(map(type, values))
+        has_null = NoneType in types
+        if types <= _NUMBERS:
+            if arrow_checks_numbers or types <= _AS_SENT[WireType.DOUBLE]:
+                return values
+            return _as_floats(values, has_null=has_null)
+        if types <= _TEXTS:
+            return _decimal_texts(values, has_null=has_null)
+        return converted(values)
+
+    return decimal
+
+
 def column_converter(
     field: Field, *, arrow_checks_numbers: bool = False
 ) -> Callable[[list[object]], list[object] | None]:
@@ -608,8 +713,9 @@ def column_converter(
     calls it once per column. A column of a plain wire type (no named conversion) whose values
     the converter would return unchanged (`_AS_SENT`) is returned as it is, at the cost of a
     few calls over the whole list; a `double` column that mixes integers in is converted with
-    the builtin `float` in one pass; any other column calls the field's converter
-    (`field_converter`) once per value.
+    the builtin `float` in one pass; a `decimal-text-number` column of numbers is read as a
+    `double` column, and one of texts by one pattern test and the builtin `float`; any other
+    column calls the field's converter (`field_converter`) once per value.
 
     A caller that turns the column straight into an Arrow array of the field's type can leave
     the numbers to Arrow (`arrow_checks_numbers`), which checks them in one native pass: Arrow
@@ -657,6 +763,8 @@ def column_converter(
         except UnconvertibleError:
             return None
 
+    if field.conversion is Conversion.DECIMAL_TEXT_NUMBER:
+        return _decimal_column(converted, arrow_checks_numbers=arrow_checks_numbers)
     if as_sent is None:
         return converted
 

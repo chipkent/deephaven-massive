@@ -48,9 +48,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # A pull request's checkout is GitHub's merge of it into its base; the merge's first
-          # parent, the base, must be present for the diff below.
-          fetch-depth: 2
+          # The whole history and the tags: the package's version comes from git, and installing
+          # the project reads it. A pull request's checkout is GitHub's merge of it into its
+          # base, and the diff below also needs the merge's first parent, the base.
+          fetch-depth: 0
       - name: List the files the pull request changes
         if: github.event_name == 'pull_request'
         # The diff from the base to the merge is exactly what merging would change. Without
@@ -76,9 +77,10 @@ jobs:
           # scripts/spec-drift-issue.sh.
           test='^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
           # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
-          # README.md and LICENSE; hatchling leaves out what .gitignore lists; and the wheel
-          # check compares the installed wheel with docs/datasets/.
-          build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
+          # README.md and LICENSE; hatchling leaves out what .gitignore lists; the version of an
+          # export without .git comes from .git_archival.txt; and the wheel check compares the
+          # installed wheel with docs/datasets/.
+          build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
           # Files no job reads: the plans, the developer and live-test guides, the agent
           # instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
@@ -178,6 +180,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The package's version comes from the git history and tags.
+          fetch-depth: 0
       - name: Set up JDK 17 (required by the embedded Deephaven server)
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -234,6 +238,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The package's version comes from the git history and tags.
+          fetch-depth: 0
       - name: Set up JDK 17 (required by the embedded Deephaven server)
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -285,6 +291,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The package's version comes from the git history and tags.
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
@@ -337,6 +345,31 @@ jobs:
           uv venv --python 3.11 "$RUNNER_TEMP/smoke"
           uv pip install --python "$RUNNER_TEMP/smoke/bin/python" dist/*.whl deephaven-server
           "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_wheel.py docs/datasets
+      - name: Check that a build of a tagged commit carries exactly the tag's version
+        # The package's version comes from the git tag, so a release's files must carry its
+        # tag's version. This tags the checkout with a version no release uses, locally only
+        # (the checkout keeps no credentials, so nothing can be pushed), builds again, and runs
+        # the wheel check twice: with the tag's version, which must pass, and with another,
+        # which must fail on the version.
+        run: |
+          set -euo pipefail
+          git tag v99.0.0rc1
+          uv build --python 3.11 --out-dir "$RUNNER_TEMP/tagged"
+          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" --reinstall --no-deps "$RUNNER_TEMP"/tagged/*.whl
+          if ! "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_wheel.py docs/datasets \
+              --version 99.0.0rc1 --sdist "$RUNNER_TEMP/tagged/deephaven_massive-99.0.0rc1.tar.gz"; then
+            echo "::error::a build of the commit tagged v99.0.0rc1 does not carry version 99.0.0rc1 in its wheel or sdist (output above): the version no longer comes from the git tag"
+            exit 1
+          fi
+          status=0
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_wheel.py docs/datasets \
+            --version 99.0.0rc2 > "$RUNNER_TEMP/wrong-version.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/wrong-version.txt"
+          if [ "$status" -eq 0 ] || ! grep -q 'is version 99.0.0rc1, not 99.0.0rc2' "$RUNNER_TEMP/wrong-version.txt"; then
+            echo "::error::the wheel check did not refuse a wheel of version 99.0.0rc1 when told to expect 99.0.0rc2: a release could ship files of the wrong version"
+            exit 1
+          fi
+          echo "the wheel check refused the wrong version, as it must"
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

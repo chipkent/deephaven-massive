@@ -14,6 +14,10 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   type does not fit (a wrong type, or a second form the vendor sends), each with the sample;
 - `KEY_FIXES`: the wire key of each field whose declared key every documented sample
   contradicts, each with the samples;
+- `UNDECLARED_FIELDS`: each field Massive sends that its specification does not declare,
+  with the schema it is generated from and the live response that sent it;
+- `OPTIONAL_FIELDS`: each field the specification marks required that Massive omits, with the
+  live response that omitted it;
 - `DESCRIPTION_FIXES`: the corrected description of each field whose vendor description is
   clearly wrong for its source (another asset class's or event's text copied onto it, or a
   statement Massive's own documentation of the field contradicts) or missing where a sibling
@@ -68,12 +72,14 @@ __all__ = [
     "KEY_FIXES",
     "KINDS",
     "NAMES",
+    "OPTIONAL_FIELDS",
     "PARAM_UNITS",
     "PROJECTIONS",
     "RESULT_KEYS",
     "TAG_CONFLICTS",
     "TRANSPORT_ONLY",
     "TYPE_FIXES",
+    "UNDECLARED_FIELDS",
     "UNITS",
     "VENUES",
     "DescriptionFix",
@@ -82,6 +88,7 @@ __all__ = [
     "Projection",
     "ResultKey",
     "TypeFix",
+    "UndeclaredField",
     "Unit",
 ]
 
@@ -134,11 +141,15 @@ class TypeFix:
         conversion: The conversion the decoder applies to every value of the field; a value it
             cannot read fails loudly.
         reason: The evidence: the path, the field, and the documented sample the declared type
-            does not fit.
+            does not fit, or the live response that showed the form.
+        observed_live: True when the evidence is what Massive sent in a live response, with no
+            documented sample in that form. The stale check reads only documented samples, so
+            it never retires such an entry; the reason gives the date and the values seen.
     """
 
     conversion: Conversion
     reason: str
+    observed_live: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -157,6 +168,32 @@ class KeyFix:
     """
 
     wire_key: str
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class UndeclaredField:
+    """A field Massive sends that its specification does not declare.
+
+    The field would be dropped and reported as drift on every response. The entry declares it
+    as the specification would: the generator reads it like any declared field of the source,
+    names it by the lexicon of the object it sits in, types it by the representation rules
+    (a timestamp-like integer needs a `UNITS` entry too), and gives it the description here,
+    after the notes of its enclosing objects. It is never vendor-required. It goes after the
+    last field the specification declares directly in its object (in the row itself, for a key
+    with no dot). The entry is stale once the specification declares the key, or when that
+    object holds no declared field of its own to place it by.
+
+    Attributes:
+        json_type: The JSON schema type of its values: `"string"`, `"number"`, `"integer"`,
+            or `"boolean"`.
+        description: What the field holds, in the words Massive uses for the same field of a
+            sibling source wherever one has it.
+        reason: The evidence: the live response that sent it, with its date and a value.
+    """
+
+    json_type: str
+    description: str
     reason: str
 
 
@@ -460,10 +497,14 @@ _UPDATED_NS = Unit(
     reason="Described only as 'The last updated timestamp.'; the documentation samples have 19 "
     "digits.",
 )
-_UPDATED_MS = Unit(
-    unit=WireUnit.MS,
+_UPDATED_MS_OR_NS = Unit(
+    unit=WireUnit.MS_OR_NS,
     reason="Described only as 'The last updated timestamp.'; the documentation samples have 13 "
-    "digits (one value, 1605330008999, repeated on the crypto pages).",
+    "digits, milliseconds (one value, 1605330008999, repeated on the crypto pages), but the "
+    "live run of 2026-11-02 received 19 digits, nanoseconds, on all four forex and crypto "
+    "snapshot and movers paths (1793633526000000000 on the forex full-market snapshot, "
+    "1793633580000000000 on the crypto one). Each value is read by its magnitude, so either "
+    "unit reads.",
 )
 _MS_BARS = Unit(
     unit=WireUnit.MS,
@@ -536,10 +577,10 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
         **_for(STOCKS_SNAPSHOTS, ("updated",), _UPDATED_NS),
         **_for(STOCKS_SNAPSHOTS, ("min.t",), _MS_BARS),
         **_for(FOREX_SNAPSHOTS, ("lastQuote.t",), _MS_SNAPSHOT),
-        **_for(FOREX_SNAPSHOTS, ("updated",), _UPDATED_MS),
+        **_for(FOREX_SNAPSHOTS, ("updated",), _UPDATED_MS_OR_NS),
         **_for(FOREX_SNAPSHOTS, ("min.t",), _MS_BARS),
         **_for(CRYPTO_SNAPSHOTS, ("lastTrade.t",), _MS_SNAPSHOT),
-        **_for(CRYPTO_SNAPSHOTS, ("updated",), _UPDATED_MS),
+        **_for(CRYPTO_SNAPSHOTS, ("updated",), _UPDATED_MS_OR_NS),
         **_for(CRYPTO_SNAPSHOTS, ("min.t",), _MS_BARS),
         **_for(
             ("/v1/last/crypto/{from}/{to}", "/v1/last_quote/currencies/{from}/{to}"),
@@ -610,6 +651,16 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
                 "underlying_asset.last_updated",
             ),
             _NS_TICKS,
+        ),
+        **_for(
+            ("/v3/snapshot",),
+            ("session.last_updated", "last_minute.last_updated"),
+            Unit(
+                unit=WireUnit.NS,
+                reason="Undeclared fields (`UNDECLARED_FIELDS`) that the live run of 2026-11-02 "
+                "received with 19 digits, 1793633547860533354 and 1793633535088572302, like "
+                "the snapshot's documented nanosecond `last_updated` times.",
+            ),
         ),
         **_for(("/v3/snapshot/indices",), ("last_updated",), _NS_TICKS),
         **_for(
@@ -721,6 +772,19 @@ _CODE_LIST = TypeFix(
     "REST and the WebSocket.",
 )
 
+# The futures stream's prices, one decision for every channel that sends them.
+_FUTURES_TEXT_PRICE = TypeFix(
+    conversion=Conversion.DECIMAL_TEXT_NUMBER,
+    reason="The specification types each futures price as a number and its examples send "
+    "numbers, but the live run of 2026-11-02 received every price as text, on the real-time "
+    'and the delayed host alike, for ESZ6: `"p": "7676.5"` on `T`, `"bp": "7676.25"` and '
+    '`"ap": "7676.5"` on `Q`, and `"o": "7679"`, `"h": "7679.25"`, `"l": "7677.25"`, and '
+    '`"c": "7678.5"` on `AM`. Either form is read as the number, and text that is not a plain '
+    "finite decimal is refused. The per-second bar `A` sends the same message as `AM` and "
+    "takes the same reading; that run did not subscribe it.",
+    observed_live=True,
+)
+
 TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
     {
         ("/benzinga/v1/analysts", "last_updated"): _iso('"2025-05-19T04:31:12Z"'),
@@ -786,13 +850,18 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
                 "typed.",
             ),
         ),
+        ("futures/T", "p"): _FUTURES_TEXT_PRICE,
+        **_for(("futures/Q",), ("bp", "ap"), _FUTURES_TEXT_PRICE),
+        **_for(("futures/AM", "futures/A"), ("o", "h", "l", "c"), _FUTURES_TEXT_PRICE),
         **_for(
             ("futures/AM", "futures/A"),
             ("dv",),
             TypeFix(
-                conversion=Conversion.INTEGER_AS_NUMBER,
+                conversion=Conversion.DECIMAL_TEXT_NUMBER,
                 reason="The dollar volume is typed as an integer, but the example sends 1353.1: "
-                "a dollar value is fractional, as the futures flat files type it.",
+                "a dollar value is fractional, as the futures flat files type it. The live run "
+                'of 2026-11-02 received it as text, `"dv": "23449609.75"` on `AM` for ESZ6, '
+                "like the futures prices, so either form is read as the number.",
             ),
         ),
         # The flat files.
@@ -821,25 +890,86 @@ KEY_FIXES: Mapping[tuple[str, str], KeyFix] = MappingProxyType(
             "client builds each event from exactly the keys `type`, `date`, and "
             "`ticker_change`, and would refuse an `event_type` key.",
         ),
-        ("/futures/v1/snapshot", "details.ticker"): KeyFix(
-            wire_key="ticker",
-            reason="The specification's response schema nests the contract's ticker under "
-            '`details`, but its response example and the documentation sample send `"ticker": '
-            '"CBN5"` at the top level of the result, with `details` holding only '
-            "`settlement_date`. The path's own filter `ticker.any_of` and its default sort "
-            "`ticker` name a top-level field too.",
-        ),
-        ("/futures/v1/snapshot", "details.product_code"): KeyFix(
-            wire_key="product_code",
-            reason="The specification's response schema nests the contract's product code under "
-            '`details`, but its response example and the documentation sample send `"product_'
-            'code": "CB"` at the top level of the result, with `details` holding only '
-            "`settlement_date`. The path's own filter `product_code` names a top-level field "
-            "too.",
-        ),
     }
 )
 """`(source, declared key)` to the wire key of a field every documented sample sends under it."""
+
+_LIVE_RUN = "The live run of 2026-11-02 received it"
+_DECIMAL_SIZE = (
+    "The size of the trade including the fractional component. This is represented as a "
+    "decimal string."
+)
+_VWAP_TEXT = "The volume weighted average price."
+_ISSUER_SYMBOL = "The issuer's trading symbol, as the filing reports it."
+
+UNDECLARED_FIELDS: Mapping[tuple[str, str], UndeclaredField] = MappingProxyType(
+    {
+        ("/v3/trades/{optionsTicker}", "decimal_size"): UndeclaredField(
+            json_type="string",
+            description=_DECIMAL_SIZE,
+            reason=f'{_LIVE_RUN} on the options trades, `"decimal_size": "2.0"` for '
+            "O:AAPL261204C00345000, as the stocks trades path declares it; the text is that "
+            "path's.",
+        ),
+        ("/v2/last/trade/{optionsTicker}", "ds"): UndeclaredField(
+            json_type="string",
+            description=_DECIMAL_SIZE,
+            reason=f'{_LIVE_RUN} on the options last trade, `"ds": "3.0"` for '
+            "O:AAPL261204C00345000, as the stocks last trade declares it; the text is that "
+            "path's.",
+        ),
+        **_for(
+            FOREX_SNAPSHOTS,
+            ("day.vw", "min.vw"),
+            UndeclaredField(
+                json_type="number",
+                description=_VWAP_TEXT,
+                reason=f"{_LIVE_RUN} on the forex full-market and movers snapshots, `day.vw` "
+                "1.1199 and `min.vw` 1.1203 on the full-market one, as the stocks and crypto "
+                "snapshots declare it; the text is theirs.",
+            ),
+        ),
+        ("/v3/snapshot", "session.vwap"): UndeclaredField(
+            json_type="number",
+            description="The trading volume weighted average price for the session.",
+            reason=f"{_LIVE_RUN} on the unified snapshot, `session.vwap` 341.4434 for a stock; "
+            "the text follows the snapshot's own `last_minute.vwap`.",
+        ),
+        ("/v3/snapshot", "session.last_updated"): UndeclaredField(
+            json_type="integer",
+            description="The nanosecond timestamp of when this information was updated.",
+            reason=f"{_LIVE_RUN} on the unified snapshot, `session.last_updated` "
+            "1793633547860533354; the text is the snapshot's own `last_quote.last_updated`.",
+        ),
+        ("/v3/snapshot", "last_minute.last_updated"): UndeclaredField(
+            json_type="integer",
+            description="The nanosecond timestamp of when this information was updated.",
+            reason=f"{_LIVE_RUN} on the unified snapshot, `last_minute.last_updated` "
+            "1793633535088572302; the text is the snapshot's own `last_quote.last_updated`.",
+        ),
+        **_for(
+            ("/stocks/filings/vX/form-3", "/stocks/filings/vX/form-4"),
+            ("issuer_trading_symbol",),
+            UndeclaredField(
+                json_type="string",
+                description=_ISSUER_SYMBOL,
+                reason=f'{_LIVE_RUN} on the Form 3 and Form 4 filings, `"issuer_trading_symbol": '
+                '"AAPL"` for Apple, the issuer\'s trading symbol of the SEC form.',
+            ),
+        ),
+    }
+)
+"""`(source, wire key)` to a field Massive sends that its specification does not declare."""
+
+OPTIONAL_FIELDS: Mapping[tuple[str, str], str] = MappingProxyType(
+    {
+        ("/v2/last/trade/{optionsTicker}", "y"): "The specification marks the participant "
+        "timestamp required, but the live run of 2026-11-02 received an options last trade "
+        "without it (O:AAPL261204C00345000). It is kept as an optional column, so its absence "
+        "is not reported as drift.",
+    }
+)
+"""`(source, wire key)` to why a field the specification marks required is optional."""
 
 # Massive's stock trade price, copied onto the crypto and options trade pages.
 _SHARE_PRICE = (
@@ -1107,7 +1237,7 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             _FUTURES_PRICE,
         ),
         ("/futures/v1/snapshot", "last_trade.price"): _FUTURES_PRICE,
-        ("/futures/v1/snapshot", "product_code"): DescriptionFix(
+        ("/futures/v1/snapshot", "details.product_code"): DescriptionFix(
             vendor="",
             text="The identifier for the contract's product.",
             reason="Massive gives the snapshot's product code no description, which leaves the "
@@ -1494,6 +1624,7 @@ TRANSPORT_ONLY: Mapping[tuple[str, str, str], str] = MappingProxyType(
             "source's time key, which the key rename makes `Timestamp`.",
             "crypto",
         ),
+        **_only("trades", "DecimalSize", _LAST_TRADE, "options"),
         **_only("trades", "Id", _LAST_TRADE, "options"),
         **_only("trades", "ParticipantTimestamp", _LAST_TRADE, "options"),
         **_only("trades", "Tape", _LAST_TRADE_ONLY, "options"),

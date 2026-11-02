@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
 __all__ = [
+    "FUTURES_PROBE_CONTRACTS",
     "SNAPSHOT_PROBES",
     "SnapshotAnswer",
     "SnapshotProbe",
@@ -99,6 +100,10 @@ class SnapshotAnswer:
     rows: Sequence[Mapping[str, object]]
 
 
+FUTURES_PROBE_CONTRACTS: Final = 100
+"""How many E-mini S&P contracts the futures host check reads: enough to reach the traded
+contracts past the far-dated ones the snapshot lists first, in one request."""
+
 SNAPSHOT_PROBES: Final[Mapping[AssetClass, SnapshotProbe]] = {
     AssetClass.STOCKS: SnapshotProbe("/v3/snapshot", {}, {"ticker.any_of": ("SPY", "AAPL")}),
     AssetClass.OPTIONS: SnapshotProbe(
@@ -106,11 +111,17 @@ SNAPSHOT_PROBES: Final[Mapping[AssetClass, SnapshotProbe]] = {
     ),
     AssetClass.INDICES: SnapshotProbe("/v3/snapshot/indices", {}, {"ticker.any_of": ("I:SPX",)}),
     AssetClass.FUTURES: SnapshotProbe(
-        "/futures/v1/snapshot", {}, {"product_code": "ES", "limit": 1}
+        "/futures/v1/snapshot", {}, {"product_code": "ES", "limit": FUTURES_PROBE_CONTRACTS}
     ),
 }
 """The snapshot each class's TICK host is checked against: the unified snapshot of two liquid
-stocks, one contract of the SPY option chain, the S&P 500 index, and one E-mini S&P contract."""
+stocks, one contract of the SPY option chain, the S&P 500 index, and the E-mini S&P contracts.
+
+The futures snapshot lists a product's contracts by ticker, so far-dated contracts that do not
+trade yet come first (`ESH0`, `ESH1`, ...), and only a contract that trades carries a
+`timeframe`: on 2026-11-02 the first two rows carried none and the third did. So the probe
+reads up to `FUTURES_PROBE_CONTRACTS` rows in one request, and `recency_labels.read_labels`
+takes the labels of every row that has them."""
 
 
 _NO_TIMEFRAME: Final = "no timeframe in the {} snapshot"

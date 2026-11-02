@@ -60,6 +60,9 @@ NO_HAND = HandInput(
     projections={},
     transport_only={},
     venues={},
+    undeclared_fields={},
+    optional_fields={},
+    ignored_keys=(),
 )
 """Hand input with every table empty, so a synthetic snapshot needs none."""
 

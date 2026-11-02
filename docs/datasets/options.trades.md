@@ -46,6 +46,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Id` | String | The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string. | REST |
 | `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. | REST |
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be consecutive (e.g. 1, 2, 6, 9, 10, 11). | REST, WebSocket |
+| `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |
 
 <details><summary>Massive fields</summary>
@@ -67,6 +68,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `Id` | `id` |  |  |
 | `ParticipantTimestamp` | `participant_timestamp` |  |  |
 | `SequenceNumber` | `sequence_number` |  | `q` |
+| `DecimalSize` | `decimal_size` |  |  |
 | `TimestampInsert` |  |  |  |
 
 </details>

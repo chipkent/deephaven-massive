@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from deephaven_massive._massive.refresh import overrides
-from deephaven_massive._massive.refresh.exclusions import Exclusion, SampleError
+from deephaven_massive._massive.refresh.exclusions import Exclusion, IgnoredKey, SampleError
 from deephaven_massive._massive.refresh.gates import (
     Gate,
     PathUse,
@@ -57,6 +57,9 @@ _EMPTY = HandInput(
     projections={},
     transport_only={},
     venues={},
+    undeclared_fields={},
+    optional_fields={},
+    ignored_keys=(),
 )
 
 
@@ -338,6 +341,37 @@ def test_a_type_fix_that_only_retypes_is_never_unneeded(conversion: Conversion) 
     hand = dataclasses.replace(_EMPTY, type_fixes={("/a", "x"): fix})
     use = PathUse(converted=frozenset({"x"}))
     assert list(unneeded_type_fixes(hand, {"/a": use})) == []
+
+
+def test_a_type_fix_seen_only_live_is_never_unneeded() -> None:
+    # No documented sample shows the form a live response did, so none can retire the fix.
+    fix = overrides.TypeFix(
+        conversion=Conversion.DECIMAL_TEXT_NUMBER, reason="test", observed_live=True
+    )
+    hand = dataclasses.replace(_EMPTY, type_fixes={("futures/T", "p"): fix})
+    use = PathUse(converted=frozenset({"p"}))
+    assert list(unneeded_type_fixes(hand, {"futures/T": use})) == []
+
+
+def test_ignored_keys_are_stale_once_declared_or_their_source_is_gone() -> None:
+    hand = dataclasses.replace(
+        _EMPTY,
+        ignored_keys=(
+            IgnoredKey(source="forex/C", wire_key="i", reason="test"),
+            IgnoredKey(source="forex/C", wire_key="x", reason="test"),
+            IgnoredKey(source="forex/GONE", wire_key="i", reason="test"),
+        ),
+    )
+    uses = {"forex/C": PathUse(wire_keys=frozenset({"x"}))}
+    problems = list(stale_entries(hand, uses))
+    assert _found(problems) == [
+        ("stale-entry", "forex/C", "x"),
+        ("stale-entry", "forex/GONE", "i"),
+    ]
+    assert sorted(p.message for p in problems) == [
+        "IGNORED_KEYS entry for a declared key",
+        "IGNORED_KEYS entry for a source the snapshot does not generate",
+    ]
 
 
 def test_fixes_written_separately_are_separate_decisions_however_alike() -> None:

@@ -39,9 +39,7 @@ FEED_DELAYS: Final[Mapping[tuple[str, str], timedelta]] = {
     ("futures", "starter"): timedelta(minutes=10),
     ("futures", "developer"): timedelta(minutes=10),
 }
-"""How far each plan's stream lags the market; a plan not listed is real-time. A key the probe
-reads as Futures Developer may hold Advanced, which is real-time: the longer wait is the safe
-reading."""
+"""How far each plan's stream lags the market; a plan not listed is real-time."""
 
 INDEX_OPEN: Final = time(9, 30)
 """When the regular session opens each trading day, in New York time: the S&P indices start

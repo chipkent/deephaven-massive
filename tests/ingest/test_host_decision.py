@@ -11,6 +11,7 @@ from deephaven_massive import _log_limits
 from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
 from deephaven_massive._ingest.host_decision import (
+    FUTURES_PROBE_CONTRACTS,
     SNAPSHOT_PROBES,
     SnapshotAnswer,
     SnapshotProbe,
@@ -265,6 +266,20 @@ def test_futures_without_a_timeframe_stream_real_time(
     decision = run(AssetClass.FUTURES, snapshot("futures_no_timeframe.json"))
     assert decision == HostDecision(
         REALTIME_HOST, Recency.REALTIME, "no timeframe in the futures snapshot"
+    )
+
+
+def test_the_futures_probe_reads_past_the_contracts_without_a_timeframe(
+    snapshot: Callable[[str], Snapshot],
+) -> None:
+    # On 2026-11-02 the snapshot listed far-dated ES contracts first, without a timeframe; the
+    # third row, a traded contract, carried one.
+    probe = SNAPSHOT_PROBES[AssetClass.FUTURES]
+    assert probe.query == {"product_code": "ES", "limit": FUTURES_PROBE_CONTRACTS}
+    assert FUTURES_PROBE_CONTRACTS > 3
+    decision = run(AssetClass.FUTURES, snapshot("futures_far_dated_first.json"))
+    assert decision == HostDecision(
+        REALTIME_HOST, Recency.REALTIME, "last_trade.timeframe=REAL-TIME"
     )
 
 

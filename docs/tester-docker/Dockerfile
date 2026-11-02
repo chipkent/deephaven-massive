@@ -7,6 +7,8 @@
 FROM ghcr.io/deephaven/server:42.7
 ARG TESTER_COMMIT=unknown
 LABEL deephaven-massive.commit=$TESTER_COMMIT
-COPY pyproject.toml README.md LICENSE /tmp/deephaven-massive/
+# The library's version comes from git. The image's build context is a `git archive` export,
+# which has no .git, so the version comes from .git_archival.txt, which the export fills in.
+COPY pyproject.toml README.md LICENSE .git_archival.txt /tmp/deephaven-massive/
 COPY src /tmp/deephaven-massive/src
 RUN pip install --no-cache-dir /tmp/deephaven-massive && rm -rf /tmp/deephaven-massive

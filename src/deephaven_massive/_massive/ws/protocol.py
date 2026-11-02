@@ -18,7 +18,8 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   a column at a time, as a REST page is (`spec.convert.column_converter`), and read again one by
   one only when a column holds a value that reading cannot vouch for; either way the rows,
   rejects, and drift are the same. Drift is reported as REST reports it: `extra` holds the
-  keys a channel does not declare, which are dropped, `missing` only the fields the vendor
+  keys a channel does not declare, which are dropped (a key the source lists as ignored,
+  `Source.ignored_keys`, is dropped without being reported), `missing` only the fields the vendor
   marks required (`Field.required`) that some object lacked or held as null, and
   `unconvertible` the fields that held a value that does not fit, which reads as null. A row
   whose required key (`FrameDecoder.set_required`) is absent, null, or does not fit cannot be
@@ -352,9 +353,9 @@ class _Channel:
 
     Attributes:
         source: The channel's generated source.
-        shape: The keys of an object that carries exactly the source's fields and `ev`; an
-            object of that shape has no extra key, which one set comparison decides, and any
-            other key of an object is an extra key.
+        shape: The keys of an object that carries exactly the source's fields, its ignored
+            keys, and `ev`; an object of that shape has no extra key, which one set comparison
+            decides, and any other key of an object is an extra key.
         vendor_required: The wire keys of the fields the vendor marks required, whose absence
             or null is reported as drift.
         steps: One `_Step` per field, in the source's order.
@@ -394,7 +395,7 @@ class _Channel:
         )
         return cls(
             source=source,
-            shape=frozenset(f.wire_key for f in source.fields) | {"ev"},
+            shape=frozenset(f.wire_key for f in source.fields) | source.ignored_keys | {"ev"},
             vendor_required=frozenset(f.wire_key for f in source.fields if f.required),
             steps=steps,
             symbol=symbol,

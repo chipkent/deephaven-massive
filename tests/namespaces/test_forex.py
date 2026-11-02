@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -720,6 +721,24 @@ def test_snapshots_send_the_pairs_as_tickers(
     assert pick(table, *columns) == [
         ("C:HKDCHF", 0.11778221, 0.11780678, 0.11797258, 1_605_280_919_000 * MS)
     ]
+
+
+def test_snapshots_read_the_update_time_in_nanoseconds_and_the_vwaps(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # As Massive sent the snapshot on 2026-11-02: `updated` in nanoseconds, where the documented
+    # samples have milliseconds, and the undocumented `day.vw` and `min.vw`.
+    body = fixture_body(load_fixture, "snapshots_nanosecond_update.json")
+    fake_rest.reply(SNAPSHOTS_PATH, Reply(body))
+    with caplog.at_level(logging.WARNING):
+        table = rest_session.forex.snapshots(["C:EURUSD"]).fetch()
+    columns = ("Symbol", "Updated", "DayVwap", "LastMinuteVwap")
+    assert pick(table, *columns) == [("C:EURUSD", 1_793_633_526_000_000_000, 1.1199, 1.1203)]
+    assert "schema drift" not in caplog.text
 
 
 def test_snapshots_of_every_pair_send_no_tickers(

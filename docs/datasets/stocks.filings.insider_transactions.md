@@ -75,6 +75,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `TransactionValue` | double | Total value of the transaction in USD (transaction_shares x transaction_price_per_share). Null when shares or price is not reported. | REST |
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative transactions. | REST |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative transactions. | REST |
+| `IssuerTradingSymbol` | String | The issuer's trading symbol, as the filing reports it. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
 
 <details><summary>Massive fields</summary>
@@ -123,6 +124,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `TransactionValue` | `transaction_value` |
 | `UnderlyingSecurityShares` | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | `underlying_security_title` |
+| `IssuerTradingSymbol` | `issuer_trading_symbol` |
 | `TimestampInsert` |  |
 
 </details>
