@@ -108,6 +108,20 @@ uv build                                 # sdist and wheel
     corrects, filters out, re-stamps, or replaces values to make wrong or missing vendor data
     look right. When Massive's data is wrong, record the evidence and draft a report to Massive
     for the owner to review, instead of adding a workaround.
+24. **One bad symbol or row never fails the table.** A problem confined to one symbol or one
+    row (a symbol that is not Massive's exact ticker, one Massive does not list, one a path cannot
+    serve, a value the library cannot read) affects only that symbol or row. By default it is
+    skipped or kept with a null, logged once per distinct value (at WARNING, or at ERROR for a
+    Massive spelling the library cannot read, a library gap), and the table keeps running; a live
+    table also lists the symbols it skips in its `m.streams()` `Error`. Each cause has its own
+    `dm.OnError` setting in `MassiveConfig`, named for the cause, as `noncanonical_symbols` and
+    `unreadable_symbols` are: `LOG` (the default), `IGNORE` (logged only at DEBUG), or `RAISE`
+    (fail). A new cause gets a new setting, never a hard-coded failure or a silent skip. Short of
+    `RAISE`, only a problem that affects every row fails the whole table: authentication, a
+    closed session, a plan that lacks the dataset, a library defect; a symbol table whose every
+    row is bad is refused at the call. A `str` or list passed as `symbols` is the caller's code,
+    not data: a value in it that is not Massive's exact ticker raises `ValueError` at the call,
+    whatever the setting.
 
 ## Documentation standard
 
