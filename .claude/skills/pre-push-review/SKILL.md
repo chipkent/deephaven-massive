@@ -75,6 +75,10 @@ property. For each changed file ask:
   `None` means only a value that is genuinely absent.
 - **Generated data.** No hand-written schema, no edit to `spec/*.json`, `docs/datasets/`, or
   `vendor/massive/`; hand input only in the refresh hand-input files, each entry with a reason.
+- **Vendor data.** Does the change fill, correct, filter out, re-stamp, replace, or otherwise
+  second-guess Massive's data beyond faithful conversion of units, types, column names, and
+  symbols (`AGENTS.md` rule 23)? That is a blocker unless the owner approved it. When Massive's
+  data is wrong, record the evidence and draft a report to Massive for the owner instead.
 - **Secrets.** No key, secret or proxy password can reach a message, `repr` or log record.
 
 ## 2. Prove the tests would catch a regression
