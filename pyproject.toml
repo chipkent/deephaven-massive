@@ -1,10 +1,14 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+# hatch-vcs gives hatchling the version from the git tags (see [tool.hatch.version]). 0.5.0,
+# its newest release, is the first to declare support for Python 3.13 and requires
+# setuptools-scm 8.2 or later, which does the reading.
+requires = ["hatchling>=1.27", "hatch-vcs>=0.5.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "deephaven-massive"
-version = "0.1.0"
+# The version comes from git (see [tool.hatch.version]); no file holds it.
+dynamic = ["version"]
 description = "Live and static Deephaven tables for Massive.com (formerly Polygon.io) market data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -108,6 +112,21 @@ dev = [
     "pre-commit>=4.7",
     "deephaven-server>=42.0",
 ]
+
+[tool.hatch.version]
+# The git tag is the one source of the version: a build of a commit tagged v0.1.0rc1 is version
+# 0.1.0rc1, and a build of any other commit gets a development version past the latest tag,
+# such as 0.1.0rc2.dev5+g1a2b3c4 for the fifth commit after v0.1.0rc1, or 0.1.dev215+g1a2b3c4
+# before the first tag. hatch-vcs reads it through setuptools-scm, which needs the history and
+# the tags (a CI checkout with fetch-depth: 0), or the .git_archival.txt that `git archive`
+# fills in. The sdist records the version, so a build from the sdist needs no git.
+source = "vcs"
+
+[tool.uv]
+# uv rebuilds the project's own install in .venv when one of these changes. With the version
+# taken from git, that includes a new commit or tag, so deephaven_massive.__version__ in .venv
+# stays current.
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [tool.hatch.build.targets.sdist]
 # The sdist carries the package and its tests; hatchling adds README.md, LICENSE, and
