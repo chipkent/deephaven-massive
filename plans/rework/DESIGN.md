@@ -6455,6 +6455,12 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   version; the rehearsal method is chosen at the go-ahead.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`.
+- **Version from the git tag.** No file holds the version: `dynamic = ["version"]` with
+  hatch-vcs (`[tool.hatch.version] source = "vcs"`) takes it from the tag `v<version>` at build
+  time, and `deephaven_massive.__version__` reads the installed metadata. An untagged commit
+  builds a development version past the latest tag (`0.1.0rc2.dev5+g1a2b3c4`). CI checks out the
+  whole history, and `.git_archival.txt` (`export-subst`) gives a `git archive` export its
+  version. CI's build job proves a tagged build carries exactly the tag's version.
 
 ## 21. Examples
 
