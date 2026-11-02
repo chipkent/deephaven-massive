@@ -94,7 +94,13 @@ _MINUTE_BAR_WAIT = 60.0 + streams.MINUTE_BAR_LAG.total_seconds()
 """The most seconds a minute bar stream case waits for its first row: just past the next minute."""
 
 _CASE_TIMEOUT = 100.0
-"""Seconds a fetch, history, or poll case may take, before any growth for paced requests."""
+"""Seconds a fetch or poll case may take, before any growth for paced requests."""
+
+_HISTORY_TIMEOUT = 200.0
+"""Seconds a history case may take, before any growth for paced requests. A history read from
+flat files downloads the whole day's file, however short its window: the `indices.values` case
+took about 94 s to read one index from a day's `us_indices/values_v1` file. This is about
+twice that."""
 
 _STREAM_SETUP = 60.0
 """Seconds a stream case may spend outside its designed waits: building its query (a REST
@@ -104,6 +110,9 @@ _STREAM_TIMEOUT = _STREAM_GAP + _STREAM_WAIT + 2 * max(_TICK_WAIT, _MINUTE_BAR_W
 """Seconds a stream case may take: the gap after the previous stream, the acknowledgement, the
 wait for rows and its one retry when another client took the connection's slot, and its setup.
 A slot lost during the case then ends in the slot message or a pass, never in a timeout."""
+
+_TIMEOUTS = {"history": _HISTORY_TIMEOUT, "stream": _STREAM_TIMEOUT}
+"""The verbs whose cases may take longer than `_CASE_TIMEOUT`, and their limits."""
 
 _LIMIT = 5
 
@@ -217,10 +226,11 @@ def _params() -> list[Any]:
     stream (Basic has no WebSocket access), and its Business plan for a fair-market-value (FMV)
     stream, which only Business serves; the `needs` marker skips it before any call when
     the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
-    left on Basic, whose five requests a minute pace it. A fetch, history, or poll case gets
-    `_CASE_TIMEOUT` before that growth, and a stream case `_STREAM_TIMEOUT`, which covers its
-    designed waits. The timeout is set here alone: a `timeout` mark on the test function would
-    win over these, since pytest finds the function's marks before a parameter's.
+    left on Basic, whose five requests a minute pace it. A fetch or poll case gets
+    `_CASE_TIMEOUT` before that growth, a history case `_HISTORY_TIMEOUT`, and a stream case
+    `_STREAM_TIMEOUT`, which covers its designed waits. The timeout is set here alone: a
+    `timeout` mark on the test function would win over these, since pytest finds the
+    function's marks before a parameter's.
 
     Returns:
         One `pytest.param` per pair, with its id `<dataset>-<verb>`.
@@ -229,7 +239,7 @@ def _params() -> list[Any]:
     for name, verb in _cases():
         spec = CATALOG.by_name[name]
         subscription = _subscription(spec)
-        timeout = _STREAM_TIMEOUT if verb == "stream" else _CASE_TIMEOUT
+        timeout = _TIMEOUTS.get(verb, _CASE_TIMEOUT)
         marks = [pytest.mark.requests(_REQUESTS[verb]), pytest.mark.timeout(timeout)]
         if subscription is not None:
             plan = "starter" if verb == "stream" else "basic"
