@@ -22,6 +22,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws, ws_connection
+from deephaven_massive._ingest.rest import UnlistedPairError
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables.transports import HostDecision
@@ -238,13 +239,13 @@ class WsSession:
             The ticker's `(base, quote)` from `pair_answers`.
 
         Raises:
-            MassiveError: If `pair_answers` does not hold the ticker.
+            UnlistedPairError: If `pair_answers` does not hold the ticker.
         """
         with self.cond:
             self._journal.append(("crypto_pair", symbol, threading.current_thread().name))
             answer = self.pair_answers.get(symbol)
         if answer is None:
-            raise dm.MassiveError(
+            raise UnlistedPairError(
                 f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
                 "does not list it"
             )
