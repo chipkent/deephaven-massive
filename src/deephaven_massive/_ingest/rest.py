@@ -301,41 +301,21 @@ def _cut(text: str) -> str:
     return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
 
 
-def _inside_sent_bounds(
-    batches: Sequence[pa.RecordBatch], bounds: Sequence[SentBound], *, where: str
-) -> list[pa.RecordBatch]:
-    """Keep a page's rows inside the time-axis bounds its request sent (`keep_sent_bounds`).
-
-    Logs one DEBUG line for a page that had rows outside them: the count, the bounds, and the
-    page's first and last value of the bounded column, so a table that lacks a day, or holds
-    one too many, can be traced here.
+def _first_rows(batches: Sequence[pa.RecordBatch], count: int) -> list[pa.RecordBatch]:
+    """Return the first `count` rows of a list of batches, cutting the batch that crosses it.
 
     Args:
-        batches: The page's converted rows, before their stamps are moved.
-        bounds: The bounds the request sent (`RowConverter.sent_bounds`); both bounds of an
-            axis test the same column.
-        where: The dataset, page, path, and symbol, for the line.
+        batches: Batches in order.
+        count: The rows to keep; at most the batches' total.
 
     Returns:
-        The rows inside every bound.
+        The batches that hold the first `count` rows.
     """
-    kept = [keep_sent_bounds(batch, bounds) for batch in batches]
-    total = sum(batch.num_rows for batch in batches)
-    inside = sum(batch.num_rows for batch in kept)
-    if inside < total:
-        column = bounds[0].column
-        span = pc.min_max(pa.chunked_array([batch.column(column) for batch in batches]))
-        logger.debug(
-            "%s: dropped %d of %d rows outside the bounds sent (%s), which Massive did not "
-            "apply; the page's %s ran from %s to %s",
-            where,
-            total - inside,
-            total,
-            ", ".join(f"{bound.name}={bound.value}" for bound in bounds),
-            column,
-            span["min"],
-            span["max"],
-        )
+    kept = []
+    left = count
+    for batch in batches:
+        kept.append(batch.slice(0, left))
+        left = max(left - batch.num_rows, 0)
     return kept
 
 
@@ -942,7 +922,9 @@ class RestReader:
                 bucket=bucket,
                 cancel=stop,
                 patience=patience,
-                limit=limit,
+                # Rows outside the bounds sent do not count toward the cap: the call stops
+                # once it keeps `limit` rows inside them.
+                limit=None if bounds else limit,
             ):
                 received = time.time_ns()
                 requests += 1
@@ -967,7 +949,8 @@ class RestReader:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if bounds:
-                    batches = _inside_sent_bounds(
+                    batches = self._inside_sent_bounds(
+                        spec,
                         batches,
                         bounds,
                         where=f"{spec.name}: page {requests} of {template} for "
@@ -988,6 +971,9 @@ class RestReader:
                         read=len(page.rows),
                     )
                 )
+                if bounds and limit is not None and sum(b.num_rows for b in kept) >= limit:
+                    kept = _first_rows(kept, limit)
+                    break
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 # A 404 that arrives after the session closed is no answer about the symbol,
@@ -1029,6 +1015,65 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _inside_sent_bounds(
+        self,
+        spec: DatasetSpec,
+        batches: Sequence[pa.RecordBatch],
+        bounds: Sequence[SentBound],
+        *,
+        where: str,
+    ) -> list[pa.RecordBatch]:
+        """Keep a page's rows inside the time-axis bounds its request sent (`keep_sent_bounds`).
+
+        Logs one DEBUG line for a page that had rows outside them: the count, the bounds, and
+        the page's first and last value of the bounded column, so a table that lacks a day, or
+        holds one too many, can be traced here. A page that loses every row also logs one
+        WARNING per dataset and session, since an empty table would otherwise say nothing.
+
+        Args:
+            spec: The dataset, for the WARNING.
+            batches: The page's converted rows, before their stamps are moved.
+            bounds: The bounds the request sent (`RowConverter.sent_bounds`); both bounds of
+                an axis test the same column.
+            where: The dataset, page, path, and symbol, for the lines.
+
+        Returns:
+            The rows inside every bound.
+        """
+        kept = [keep_sent_bounds(batch, bounds) for batch in batches]
+        total = sum(batch.num_rows for batch in batches)
+        inside = sum(batch.num_rows for batch in kept)
+        if inside == total:
+            return kept
+        column = bounds[0].column
+        span = pc.min_max(pa.chunked_array([batch.column(column) for batch in batches]))
+        sent = ", ".join(f"{bound.name}={bound.value}" for bound in bounds)
+        logger.debug(
+            "%s: dropped %d of %d rows outside the bounds sent (%s), which Massive did not "
+            "apply; the page's %s ran from %s to %s",
+            where,
+            total - inside,
+            total,
+            sent,
+            column,
+            span["min"],
+            span["max"],
+        )
+        if not inside and self.state.first("emptied-by-bounds", spec.name):
+            logger.warning(
+                "%s: every one of the %d rows Massive returned lay outside the range asked "
+                "for (%s; %s ran from %s to %s), so they were dropped; later pages of %s "
+                "emptied this way are logged at DEBUG",
+                where,
+                total,
+                sent,
+                column,
+                span["min"],
+                span["max"],
+                spec.name,
+            )
+        return kept
 
     def _check_recency(
         self,

@@ -246,7 +246,9 @@ def test_each_symbol_class_is_served_by_its_own_path(
         "series_type": ["open"],
         "order": ["asc"],
         "expand_underlying": ["false"],
-        "limit": ["10"],  # the page size, capped by the total-row limit
+        # The page size stays the path maximum: with a range sent, the cap counts the rows kept
+        # inside it, not the rows Massive returns.
+        "limit": ["5000"],
         "timestamp.gte": ["1577923200000"],
         "timestamp.lt": ["1578009600000"],
     }
@@ -580,3 +582,45 @@ def test_the_bounds_test_the_stamp_massive_sent_before_it_is_moved(
     query = rest_session.indicators.sma("AAPL", 20, start=start, end=start + timedelta(days=1))
     out = dh_to_pylist(query.fetch())
     assert [r["TimestampStart"] for r in out] == [datetime(2025, 1, 1, 5, tzinfo=UTC)]
+
+
+def test_a_limit_counts_the_values_inside_the_range(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # Massive sends the values newest first and ignores the end: the ten newest it sends lie
+    # past the range, so a cap on the rows Massive sent would leave nothing.
+    days = [datetime(2026, 1, 5, 5, tzinfo=UTC) + timedelta(days=n) for n in range(40)]
+    fake_rest.reply("/v1/indicators/sma/AAPL", indicator_values(*days))
+    query = rest_session.indicators.sma(
+        "AAPL", 20, start=date(2026, 1, 5), end=date(2026, 1, 30), limit=10
+    )
+    out = dh_to_pylist(query.fetch())
+    assert sorted(r["Date"] for r in out) == [f"2026-01-{day}" for day in range(21, 31)]
+
+
+def test_a_page_emptied_by_the_range_warns_once_per_dataset(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    caplog.set_level(logging.WARNING, logger="deephaven_massive._ingest.rest")
+    fake_rest.reply("/v1/indicators/sma/AAPL", indicator_values(STOCK_TODAY))
+    query = rest_session.indicators.sma(
+        "AAPL", 5, start=date(2026, 10, 26), end=date(2026, 10, 30), timespan=dm.Timespan.DAY
+    )
+    assert dh_to_pylist(query.fetch()) == []
+    assert dh_to_pylist(query.fetch()) == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    expected = (
+        "indicators.sma: page 1 of /v1/indicators/sma/{stockTicker} for AAPL: every one of "
+        "the 1 rows Massive returned lay outside the range asked for (timestamp.gte="
+        "2026-10-26 04:00:00+00:00, timestamp.lt=2026-10-31 04:00:00+00:00; TimestampStart "
+        "ran from 2026-11-02 05:00:00+00:00 to 2026-11-02 05:00:00+00:00), so they were "
+        "dropped; later pages of indicators.sma emptied this way are logged at DEBUG"
+    )
+    assert warnings == [expected]
