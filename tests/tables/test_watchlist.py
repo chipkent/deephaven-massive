@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table, time_table, update_graph
+from deephaven import dtypes, empty_table, input_table, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
@@ -638,10 +638,22 @@ def parallel_updates() -> Iterator[None]:
     # Make every `select` and `update` run on Deephaven's parallel threads, then restore the
     # setting: a formula that read the cycle number without an execution context there would
     # see a clock frozen at its first step.
-    # The class jpy already loaded: `Class.forName` from a test thread may use another loader.
-    query_table = _JPY.get_type("io.deephaven.engine.table.impl.QueryTable").jclass
-    field = query_table.getDeclaredField("FORCE_PARALLEL_SELECT_AND_UPDATE")
-    field.setAccessible(True)
+    # The setting is package-private, so it is opened by reflection. Reflection checks its
+    # caller, and a call straight from Python has no Java caller (Java 17 on Linux then raises
+    # `NullPointerException`), so a formula, compiled Java, finds and opens the field.
+    opened = empty_table(1).update(
+        [
+            (
+                "Field = java.lang.Class.forName(`io.deephaven.engine.table.impl.QueryTable`)"
+                ".getDeclaredField(`FORCE_PARALLEL_SELECT_AND_UPDATE`)"
+            ),
+            "Opened = Field.trySetAccessible()",
+        ]
+    )
+    assert opened.j_table.getColumnSource("Opened").getBoolean(0)
+    field = _JPY.cast(
+        opened.j_table.getColumnSource("Field").get(0), _JPY.get_type("java.lang.reflect.Field")
+    )
     before = field.getBoolean(None)
     field.set(None, _JAVA_BOOLEAN.TRUE)
     try:
