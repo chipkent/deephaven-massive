@@ -668,6 +668,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
+| `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
 Not configurable:
 
@@ -2642,7 +2643,7 @@ has the same value set as that parameter.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 | `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
-| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols` and `unreadable_symbols`, and their `DEEPHAVEN_MASSIVE_*` variables |
+| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unreadable_symbols`, and `unavailable_symbols`, and their `DEEPHAVEN_MASSIVE_*` variables |
 | `ErrorCause` | EXPECTED, USER_DEFECT, LIBRARY_DEFECT | `expected`, `user_defect`, `library_defect` (no wire value; defined in `_errors.py`, beside the exception it describes) | `MassiveError.cause`, read only; it sets the level a failure is logged at |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
@@ -3709,11 +3710,13 @@ sees:
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
   a data failure of [section 19.5](#195-runtime-drift) (a page whose every row was dropped,
   or a null or NaN `poll_keys` value, in every mode), fails the table through
-  `publish_failure`. One symbol never fails the whole table: a reactive symbol table's symbol
-  routed to a path that lacks a parameter the caller set (`adjusted=False` on a crypto
-  indicator) is left out of each cycle, with one WARNING per session naming the path and the
-  parameter, and a symbol Massive answers with HTTP 404 has no rows (a `REPLACE` table drops
-  its rows). Each good cycle lists both kinds in the stream's `Error` ("no rows this cycle for
+  `publish_failure`. By default one symbol never fails the whole table
+  (`MassiveConfig.unavailable_symbols`, `LOG`): a reactive symbol table's symbol routed to a
+  path that lacks a parameter the caller set (`adjusted=False` on a crypto indicator) is left
+  out of each cycle, with one WARNING per session naming the path and the parameter, and a
+  symbol Massive answers with HTTP 404 has no rows (a `REPLACE` table drops its rows); under
+  `IGNORE` they log only at DEBUG, and under `RAISE` either fails the table. Each good cycle
+  lists both kinds in the stream's `Error` ("no rows this cycle for
   <n> symbols: X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted']); MSFT
   (HTTP 404: no data)", the first ten and a count), and clears the list once none is left out,
   so a table never loses rows without saying why.
@@ -7189,7 +7192,10 @@ document already reflects them.
     both `LOG` by default (the owner's decision, which replaces the earlier "fails by
     default"): `noncanonical_symbols`, for a row of a symbol table that is not Massive's exact
     ticker, and `unreadable_symbols` (renamed from `unknown_symbols`), for a symbol Massive
-    sends in a spelling the library cannot read. They have no environment variables: code or
+    sends in a spelling the library cannot read. A third, `unavailable_symbols` (owner
+    standard, 2026-11-02: log and continue with an `OnError` option), governs a symbol a
+    `poll()` cycle cannot read from Massive (HTTP 404, or a path that lacks a parameter the
+    poll sends). They have no environment variables: code or
     the settings file sets them (decision 80). A `str` or a list in code
     always raises, whatever the setting, and `canonicalize_symbols(on_error=OnError.RAISE)`
     keeps its own argument, since it is a standalone function. No per-dataset parameter: it

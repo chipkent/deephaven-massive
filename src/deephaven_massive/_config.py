@@ -274,6 +274,17 @@ class MassiveConfig:
             above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under
             both. `OnError.RAISE` fails the request or stream that received the row, naming the
             spelling, and the dataset has no `RawSymbol`. Defaults to `LOG`.
+        unavailable_symbols: What a `poll()` table does with a symbol it cannot read from
+            Massive: one Massive answers with HTTP 404 (no data), or one whose endpoint does
+            not take an argument the poll sends (such as a crypto pair added to an indicator
+            poll with `adjusted=False`). `OnError.LOG`, the default, leaves the symbol out of
+            each cycle, logs it once at WARNING per session, and lists it in the table's
+            `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or
+            removed, while the other symbols keep polling; a `REPLACE` table drops its rows.
+            `OnError.IGNORE` does the same with nothing logged above DEBUG; `Error` still
+            lists it. `OnError.RAISE` fails the table, naming the symbol and the reason.
+            `fetch()` and `history()` always leave a symbol with no data out, with a WARNING.
+            Defaults to `LOG`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -294,11 +305,13 @@ class MassiveConfig:
     s3_bucket: str = "flatfiles"
     noncanonical_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
+    unavailable_symbols: OnError = OnError.LOG
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `ws_hosts` and the two subscription sets into copies.
 
-        A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
+        A `noncanonical_symbols`, `unreadable_symbols`, or `unavailable_symbols` that is not a
+        `dm.OnError`, a
         `ws_hosts` key that is not a `dm.AssetClass`, a host, URL, or bucket that is not a
         `str`, a `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
@@ -357,6 +370,7 @@ class MassiveConfig:
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
+        _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
         _check_url("rest_base_url", self.rest_base_url)
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
         _check_bucket(self.s3_bucket)
@@ -1199,6 +1213,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "s3_bucket": _text,
     "noncanonical_symbols": _on_error,
     "unreadable_symbols": _on_error,
+    "unavailable_symbols": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""

@@ -255,6 +255,16 @@ def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | s
     )
 
 
+class UnavailableSymbolError(PermanentError):
+    """A symbol a `poll()` cycle cannot read, under `MassiveConfig.unavailable_symbols=RAISE`.
+
+    Massive answered HTTP 404 for it (`ErrorCause.EXPECTED`), or its path does not take a
+    parameter the poll sends (`ErrorCause.USER_DEFECT`). Under `LOG` and `IGNORE` the cycle
+    leaves the symbol out instead and the table's `Error` lists it. A `poll()` table fails
+    with it.
+    """
+
+
 class UnlistedPairError(PermanentError):
     """A crypto ticker whose two currencies Massive's reference data does not give.
 
@@ -472,6 +482,8 @@ class RestReader:
         max_concurrency: The most requests of one fan-out at a time.
         unreadable_symbols: The session's setting for a symbol spelling the library cannot
             read (`MassiveConfig.unreadable_symbols`).
+        unavailable_symbols: The session's setting for a symbol a `poll()` cycle cannot read
+            from Massive (`MassiveConfig.unavailable_symbols`).
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -488,6 +500,7 @@ class RestReader:
     drift: DriftRegistry
     max_concurrency: int
     unreadable_symbols: OnError
+    unavailable_symbols: OnError
     delayed_subscriptions: AbstractSet[Subscription]
     threads: str
     exec_ctx: ExecutionContext
@@ -716,7 +729,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
         patience: Patience,
-        on_missing: Callable[[Sequence[str]], None] | None = None,
+        on_missing: Callable[[str, Sequence[str]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -754,9 +767,11 @@ class RestReader:
             patience: The patience of the whole read (`patience()`, taken once when the read
                 began, on its own thread): the most time its requests wait out pauses, shared
                 by every path of a read that spans several.
-            on_missing: Given the symbols of the read that Massive answered with HTTP 404 (no
-                data), in call order, when there are any, for a `poll()` table's `Error`;
-                None to only log them.
+            on_missing: Given the path's template and the symbols of the read that Massive
+                answered with HTTP 404 (no data), in call order, when there are any; the
+                caller then logs them (a `poll()` cycle, under
+                `MassiveConfig.unavailable_symbols`). None to log them here: one WARNING per
+                read naming each symbol once per session.
 
         Returns:
             The rows, in call order and then page order, and the number of requests made.
@@ -789,20 +804,36 @@ class RestReader:
             else:
                 outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
         missing = [o.missing for o in outcomes if o.missing is not None]
-        # One WARNING per read, naming each symbol once per session, however many there are.
-        new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
-        if new:
-            logger.warning(
-                "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",
-                spec.name,
-                bounded_list(new),
-                rest_path.template,
-            )
         if missing and on_missing is not None:
-            on_missing(missing)
+            on_missing(rest_path.template, missing)
+        elif missing:
+            self._warn_missing(spec, rest_path.template, missing, level=logging.WARNING)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
+
+    def _warn_missing(
+        self, spec: DatasetSpec, template: str, missing: Sequence[str], *, level: int
+    ) -> None:
+        """Log the symbols Massive answered with HTTP 404: at `level` for those new this session.
+
+        One line per read names each symbol once per session at `level`, however many there
+        are; the others, and every symbol under a `level` of DEBUG, log at DEBUG.
+
+        Args:
+            spec: The dataset.
+            template: The path's template.
+            missing: The symbols (a futures session's with its session), in call order.
+            level: The level of the symbols not yet named this session.
+        """
+        new = [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
+        logger.log(
+            level if new else logging.DEBUG,
+            "%s: no data for %s: Massive answered HTTP 404 from %s, so they are left out",
+            spec.name,
+            bounded_list(new or missing),
+            template,
+        )
 
     def _fan_out(
         self,
@@ -1425,11 +1456,12 @@ class RestReader:
     ) -> poll.CycleRows:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
-        One symbol never fails the table. A reactive symbol table can route a new symbol to a
-        path that lacks a parameter the caller set (`adjusted=False` on the crypto
-        indicators): the symbols of that path are left out of the cycle, with one WARNING per
-        session for each (`_plan_cycle`). A symbol Massive answers with HTTP 404 has no rows
-        (`read`). Both are named in the cycle's `left_out`, which the table's `Error` lists.
+        By default one symbol never fails the table. A reactive symbol table can route a new
+        symbol to a path that lacks a parameter the caller set (`adjusted=False` on the crypto
+        indicators), and Massive can answer HTTP 404 for a symbol (no data).
+        `MassiveConfig.unavailable_symbols` decides (`_unavailable`): under `LOG` and `IGNORE`
+        such symbols are left out of the cycle and named in its `left_out`, which the table's
+        `Error` lists; under `RAISE` the table fails.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
 
@@ -1448,12 +1480,17 @@ class RestReader:
             rate-limit pauses its reads wait out (`patience()`, taken on the poller's thread
             before any fan-out), and the symbols it left out, each with why.
 
-        Errors are those of `read_fetch`, but for a parameter a path does not take.
+        Raises:
+            UnavailableSymbolError: Under `MassiveConfig.unavailable_symbols=RAISE`, for a
+                symbol Massive answered with HTTP 404 or whose path does not take a parameter
+                the poll sends (`_unavailable`).
+
+        Any other error is that of `read_fetch`, but for a parameter a path does not take.
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
         patience = self.patience()  # once for every path, on this thread, before any fan-out
-        missing: list[str] = []
+        missing: list[tuple[str, Sequence[str]]] = []
         table, requests = self._read_planned(
             spec,
             request,
@@ -1464,10 +1501,63 @@ class RestReader:
             executor=executor,
             cancel=cancel,
             patience=patience,
-            on_missing=missing.extend,
+            on_missing=lambda template, found: missing.append((template, found)),
         )
-        left_out.extend(f"{symbol} (HTTP 404: no data)" for symbol in missing)
+        for template, absent in missing:
+            reason = f"HTTP 404 from {template}: no data"
+            self._unavailable(spec, template, absent, reason=reason, missing=True)
+            left_out.extend(f"{symbol} (HTTP 404: no data)" for symbol in absent)
         return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
+
+    def _unavailable(
+        self,
+        spec: DatasetSpec,
+        template: str,
+        symbols: Sequence[str],
+        *,
+        reason: str,
+        missing: bool,
+    ) -> None:
+        """Apply `MassiveConfig.unavailable_symbols` to symbols a `poll()` cycle cannot read.
+
+        Under `LOG` each symbol logs one WARNING per session (then DEBUG), under `IGNORE` only
+        DEBUG, and the cycle leaves them out; under `RAISE` the table fails.
+
+        Args:
+            spec: The dataset.
+            template: The path that cannot serve them.
+            symbols: The symbols.
+            reason: Why, for the log and the error, such as `"/v1/indicators/sma/{cryptoTicker}
+                does not take ['adjusted']"`.
+            missing: True when Massive answered HTTP 404, False when the path does not take a
+                parameter the poll sends.
+
+        Raises:
+            UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
+                and the setting.
+        """
+        setting = self.unavailable_symbols
+        if setting is OnError.RAISE:
+            raise UnavailableSymbolError(
+                f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
+                "the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
+                "it out and keep polling the others",
+                cause=ErrorCause.EXPECTED if missing else ErrorCause.USER_DEFECT,
+            )
+        if missing:
+            level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
+            self._warn_missing(spec, template, symbols, level=level)
+            return
+        new = [name for name in symbols if self.state.first("refused", spec.name, template, name)]
+        logger.log(
+            logging.WARNING if new and setting is OnError.LOG else logging.DEBUG,
+            "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error and "
+            "polls the other symbols",
+            spec.name,
+            bounded_list(symbols),
+            reason,
+            "it" if len(symbols) == 1 else "them",
+        )
 
     def _plan_cycle(
         self,
@@ -1480,9 +1570,9 @@ class RestReader:
         """Plan a `poll()` cycle path by path, leaving out each path that refuses a parameter.
 
         A path that does not take a parameter the caller set (`shared_params` raises
-        `ValueError`) is left out with its symbols, and the cycle reads every other path. Each
-        symbol left out this way logs one WARNING per session, naming the path and the
-        parameter, and DEBUG on later cycles.
+        `ValueError`) is left out with its symbols, and the cycle reads every other path, as
+        `MassiveConfig.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
+        one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1495,7 +1585,8 @@ class RestReader:
             with why, such as `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take
             ['adjusted'])"`.
 
-        A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair`.
+        A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair`, and a
+        refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.
         """
         if symbols == ():
             return [], []
@@ -1503,29 +1594,19 @@ class RestReader:
         left_out: list[str] = []
         for template, own in fetch_paths(spec, symbols):
             try:
-                planned.append(
-                    self._plan_path(
-                        spec, request, template=template, own=own, split=None, cancel=cancel
-                    )
+                path = self._plan_path(
+                    spec, request, template=template, own=own, split=None, cancel=cancel
                 )
             except ValueError as error:
                 reason = str(error).removeprefix(f"{spec.name}: ")
-                # Only a reactive table's symbols can meet a refusing path here: static
-                # symbols were planned when the table was made, so `own` is a tuple.
-                names = cast("tuple[str, ...]", own)
-                left_out.extend(f"{name} ({reason})" for name in names)
-                new = [
-                    name for name in names if self.state.first("refused", spec.name, template, name)
-                ]
-                logger.log(
-                    logging.WARNING if new else logging.DEBUG,
-                    "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error "
-                    "and polls the other symbols",
-                    spec.name,
-                    bounded_list(names),
-                    reason,
-                    "it" if len(names) == 1 else "them",
-                )
+            else:
+                planned.append(path)
+                continue
+            # Only a reactive table's symbols can meet a refusing path here: static symbols
+            # were planned when the table was made, so `own` is a tuple.
+            names = cast("tuple[str, ...]", own)
+            self._unavailable(spec, template, names, reason=reason, missing=False)
+            left_out.extend(f"{name} ({reason})" for name in names)
         return planned, left_out
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
@@ -1719,7 +1800,7 @@ class RestReader:
         cancel: Cancel | None,
         patience: Patience,
         on_recency: Callable[[Recency], None] | None = None,
-        on_missing: Callable[[Sequence[str]], None] | None = None,
+        on_missing: Callable[[str, Sequence[str]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
@@ -1743,8 +1824,8 @@ class RestReader:
             cancel: Ends the reads' waits when set, or None.
             patience: The patience of the whole read, shared by every path's requests.
             on_recency: Receives each page's recency evidence (`read`), or None.
-            on_missing: Receives each path's symbols Massive answered with HTTP 404 (`read`),
-                or None.
+            on_missing: Receives each path's template and its symbols Massive answered with
+                HTTP 404 (`read`), or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
@@ -1843,6 +1924,7 @@ class RestEndpoints:
             core.drift,
             core.config.max_concurrency,
             core.config.unreadable_symbols,
+            core.config.unavailable_symbols,
             core.config.delayed_subscriptions,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,

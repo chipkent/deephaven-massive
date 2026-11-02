@@ -729,6 +729,10 @@ max_concurrency: 4
 # A row of a symbol table that is not Massive's exact ticker: raise, log, or ignore.
 noncanonical_symbols: raise
 
+# A symbol a poll cannot read from Massive (no data, or an argument its endpoint does not
+# take): log (leave it out and keep polling), ignore (the same, quietly), or raise (stop).
+unavailable_symbols: log
+
 # Pin the WebSocket host of an asset class; the library chooses when you leave this out.
 ws_hosts:
   options: delayed.massive.com
@@ -1060,7 +1064,7 @@ this section) and look at what the library did.
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
 | `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows, and `Gaps` keeps the span whose rows may be missing. |
-| `no rows this cycle for ...` in `m.streams()` | A poll left those symbols out: Massive answered that it has no data for them (`HTTP 404`), or their endpoint does not take an argument you passed (such as `adjusted=False` for a crypto pair). The other symbols keep polling; fix or remove the symbols named. |
+| `no rows this cycle for ...` in `m.streams()` | A poll left those symbols out: Massive answered that it has no data for them (`HTTP 404`), or their endpoint does not take an argument you passed (such as `adjusted=False` for a crypto pair). The other symbols keep polling; fix or remove the symbols named. `dm.MassiveConfig(unavailable_symbols=dm.OnError.RAISE)` stops the table instead, and `IGNORE` leaves them out without a WARNING. |
 | `... longer than MassiveConfig.max_outage`, from a stream or from `... poll(): ...` | The outage, or the failing or silent poll cycles, outlasted `max_outage`, so the table stopped rather than show stale data. Fix any error it names, then call the verb again; raise `max_outage` to wait longer. See [live table lifetime](#live-tables). |
 | `no acknowledgement from Massive for ...` in `m.streams()` | Massive has not confirmed the subscription; the library re-sends it until it does. If the note stays, the rows of those symbols may be missing: report it. |
 | `over capacity: <n>/1000; <k> deferred` in `m.streams()` | The options connection is full; the extra contracts subscribe when others leave. Watch fewer contracts. See [`symbols`](#symbols). |

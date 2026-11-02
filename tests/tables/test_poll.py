@@ -1799,6 +1799,107 @@ def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
     assert row["Error"] is None
 
 
+@pytest.fixture
+def ignoring_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> Iterator[dm.MassiveSession]:
+    # A routed session whose polls leave out an unavailable symbol quietly.
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.IGNORE
+    )
+    m = dm.MassiveSession(config)
+    yield m
+    m.close()
+
+
+@pytest.fixture
+def raising_session(
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
+) -> Iterator[dm.MassiveSession]:
+    # A routed session whose polls fail on an unavailable symbol.
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+    )
+    m = dm.MassiveSession(config)
+    yield m
+    m.close()
+
+
+def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
+    *,
+    ignoring_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The crypto pair's path refuses `adjusted`, and Massive has no data for MSFT: both are
+    # left out and listed, and nothing is logged above DEBUG.
+    fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
+    watch = new_table([string_col("Symbol", ["AAPL", "MSFT", "X:BTCUSD"])])
+    q = build_query(ignoring_session._core, SMA, symbols=watch, adjusted=False)
+    assert isinstance(q, Query)
+    with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
+        table = q.poll(60, mode=PollMode.REPLACE)
+        until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
+        clock.wait_for_sleepers(1)
+    (row,) = streams_of(ignoring_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == (
+        "RUNNING",
+        f"no rows this cycle for 2 symbols: {CRYPTO_REFUSED}; MSFT (HTTP 404: no data)",
+    )
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
+    assert any("no data for 1 [MSFT]" in r.getMessage() for r in caplog.records)
+
+
+def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
+    *,
+    raising_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
+    q = build_query(raising_session._core, SMA, symbols=watch, adjusted=False)
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    until(lambda: bool(table.j_table.isFailed()))
+    until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
+    (row,) = streams_of(raising_session, dh_to_pylist)
+    assert row["Error"] == (
+        "indicators.sma poll(): X:BTCUSD cannot be polled: /v1/indicators/sma/{cryptoTicker} "
+        "does not take ['adjusted']. Remove the symbol, or set MassiveConfig("
+        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+    )
+    assert fake_rest.requests == []
+
+
+def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
+    *,
+    raising_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
+    q = build_query(raising_session._core, SMA, symbols=["AAPL", "MSFT"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: bool(table.j_table.isFailed()))
+    until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
+    (row,) = streams_of(raising_session, dh_to_pylist)
+    assert row["Error"] == (
+        "indicators.sma poll(): MSFT cannot be polled: HTTP 404 from "
+        "/v1/indicators/sma/{stockTicker}: no data. Remove the symbol, or set MassiveConfig("
+        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+    )
+
+
 def test_a_long_list_of_left_out_symbols_is_counted(
     *,
     massive_session: dm.MassiveSession,
