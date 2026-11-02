@@ -147,6 +147,21 @@ def test_rendered_sources_load_back_as_they_were() -> None:
     )
 
 
+def test_ignored_keys_are_written_only_for_a_source_that_has_some() -> None:
+    ignoring = dataclasses.replace(_CHANNEL, key="crypto/XQ", ignored_keys=frozenset({"lp", "ls"}))
+    text = render.render_sources([ignoring, _CHANNEL])
+    first, second = json.loads(text)["sources"]
+    assert first["ignored_keys"] == ["lp", "ls"]
+    assert "ignored_keys" not in second
+    loaded = parse(Transport.WS, text)
+    assert loaded["crypto/XQ"].ignored_keys == frozenset({"lp", "ls"})
+    assert loaded["stocks/T"].ignored_keys == frozenset()
+    # A REST path writes them as a channel does, and they load back.
+    path = dataclasses.replace(_PATH, ignored_keys=frozenset({"max_ticker"}))
+    rest = parse(Transport.REST, render.render_rest([path]))[_PATH.key]
+    assert rest.ignored_keys == frozenset({"max_ticker"})
+
+
 def test_the_files_are_the_spec_package_data() -> None:
     assert render.SPEC_DIRECTORY.name == "spec"
     assert render.REST_FILE == render.SPEC_DIRECTORY / "rest.json"

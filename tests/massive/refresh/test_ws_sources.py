@@ -114,8 +114,8 @@ def test_each_kind_lists_its_channels_in_the_specification_s_order() -> None:
 def test_the_websocket_type_fixes_follow_their_samples(
     real: tuple[tuple[Source, ...], WsCoverage],
 ) -> None:
-    # Each WebSocket TYPE_FIXES entry cites the specification's example value, and the value
-    # decodes through the generated field.
+    # Each WebSocket TYPE_FIXES entry cites the specification's example value, or the live run
+    # whose values showed the form, and the example value decodes through the generated field.
     channels = {c.key: c for c in real[0]}
     websocket = json.loads((DIRECTORY / "websocket.json").read_text(encoding="utf-8"))
     examples = {
@@ -123,12 +123,13 @@ def test_the_websocket_type_fixes_follow_their_samples(
         for path, item in websocket["paths"].items()
     }
     fixed = [(k, fix) for k, fix in overrides.TYPE_FIXES.items() if k[0] in channels]
-    assert len(fixed) == 6
+    assert len(fixed) == 17
     for (key, wire_key), fix in fixed:
         typed = next(f for f in channels[key].fields if f.wire_key == wire_key)
         assert typed.conversion is fix.conversion
         sample = examples[key][wire_key]
-        assert json.dumps(sample) in fix.reason, (key, wire_key)
+        cited = "live run of 2026-11-02" if fix.observed_live else json.dumps(sample)
+        assert cited in fix.reason, (key, wire_key)
         assert convert_field(typed, sample) is not None
 
 
@@ -210,6 +211,9 @@ _EMPTY = HandInput(
     projections={},
     transport_only={},
     venues={},
+    undeclared_fields={},
+    optional_fields={},
+    ignored_keys=(),
 )
 
 

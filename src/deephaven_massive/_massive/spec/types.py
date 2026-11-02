@@ -256,6 +256,10 @@ class Conversion(StrEnum):
     INTEGER_AS_NUMBER = "integer-as-number"
     """A quantity declared an integer whose values carry a fraction, such as a crypto volume
     `951.6112` (`long` to `double`); any number is accepted."""
+    DECIMAL_TEXT_NUMBER = "decimal-text-number"
+    """A number sent as a JSON number or as a finite decimal written as text, such as a futures
+    price `"7676.5"` (`double` or `long` to `double`); text with anything but an optional minus
+    sign, digits, and one decimal point between digits is refused."""
 
     @property
     def declarations(self) -> frozenset[WireType]:
@@ -298,6 +302,11 @@ _CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool
             Conversion.MIDNIGHT_UTC_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
             Conversion.CHICAGO_MIDNIGHT_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
             Conversion.INTEGER_AS_NUMBER: (frozenset({WireType.LONG}), WireType.DOUBLE, True),
+            Conversion.DECIMAL_TEXT_NUMBER: (
+                frozenset({WireType.DOUBLE, WireType.LONG}),
+                WireType.DOUBLE,
+                True,
+            ),
         }
     )
 )
@@ -507,6 +516,9 @@ class Source:
         memberships: The dataset kinds the source belongs to; empty for a source in no kind.
             At most one per (kind, group). A projection names only wire keys of `fields` and
             maps no two of them to one column.
+        ignored_keys: Keys Massive sends at the top of a row or message that the source does
+            not declare and the library deliberately does not read; a decoder drops them
+            without reporting drift. None of them is a field's wire key.
 
     Example:
         ::
@@ -525,17 +537,20 @@ class Source:
     transport: Transport
     fields: tuple[Field, ...]
     memberships: tuple[Membership, ...] = ()
+    ignored_keys: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        """Check the invariants of the fields and the memberships.
+        """Check the invariants of the fields, the memberships, and the ignored keys.
 
         Raises:
             ValueError: If two fields share a wire key or a column, two memberships share a
-                kind and group, or a projection names a wire key the source lacks or maps two
-                keys to one column. The message names the source and the offending names.
+                kind and group, a projection names a wire key the source lacks or maps two
+                keys to one column, or an ignored key is a field's wire key. The message names
+                the source and the offending names.
         """
         wire_keys = [f.wire_key for f in self.fields]
         checks = [
+            ("ignored keys that are fields", sorted(self.ignored_keys.intersection(wire_keys))),
             ("repeated wire keys", _duplicates(wire_keys)),
             ("repeated columns", _duplicates(f.column for f in self.fields)),
             ("repeated memberships", _duplicates(f"{m.kind}/{m.group}" for m in self.memberships)),

@@ -52,3 +52,12 @@ def test_every_sample_error_names_one_field_with_a_reason() -> None:
         ("/vX/reference/ipos", "us_code", 37833100),
         ("/futures/v1/products", "last_updated", "2025-02-22"),
     ]
+
+
+def test_every_ignored_key_is_named_once_with_live_evidence() -> None:
+    keys = [(entry.source, entry.wire_key) for entry in exclusions.IGNORED_KEYS]
+    assert len(keys) == len(set(keys))
+    # The stream keys seen only as zeros stay drift, so a real value is never hidden.
+    assert not [key for key in keys if key[0] in {"forex/C", "crypto/XQ"}]
+    for entry in exclusions.IGNORED_KEYS:
+        assert "2026-11-02" in entry.reason, entry

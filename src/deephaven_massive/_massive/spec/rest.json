@@ -1398,9 +1398,9 @@
     {"default": "ticker.asc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "ProductCode", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "product_code"},
+    {"column": "DetailsProductCode", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "details.product_code"},
     {"column": "DetailsSettlementDate", "conversion": "chicago-midnight-date", "required": false, "type": "date", "unit": null, "wire_key": "details.settlement_date"},
-    {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
+    {"column": "DetailsTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "details.ticker"},
     {"column": "LastMinuteOpen", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.open"},
     {"column": "LastMinuteHigh", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.high"},
     {"column": "LastMinuteLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.low"},
@@ -1662,7 +1662,8 @@
     {"column": "SharesOwned", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "shares_owned"},
     {"column": "Tickers", "conversion": null, "required": false, "type": "string-array", "unit": null, "wire_key": "tickers"},
     {"column": "UnderlyingSecurityShares", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "underlying_security_shares"},
-    {"column": "UnderlyingSecurityTitle", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_security_title"}
+    {"column": "UnderlyingSecurityTitle", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_security_title"},
+    {"column": "IssuerTradingSymbol", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_trading_symbol"}
    ],
    "memberships": []
   },
@@ -1727,7 +1728,8 @@
     {"column": "TransactionTimeliness", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "transaction_timeliness"},
     {"column": "TransactionValue", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "transaction_value"},
     {"column": "UnderlyingSecurityShares", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "underlying_security_shares"},
-    {"column": "UnderlyingSecurityTitle", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_security_title"}
+    {"column": "UnderlyingSecurityTitle", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_security_title"},
+    {"column": "IssuerTradingSymbol", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_trading_symbol"}
    ],
    "memberships": []
   },
@@ -1850,6 +1852,7 @@
     {"default": 100, "in_path": false, "kind": "integer", "maximum": 50000, "name": "limit", "unit": null, "values": []},
     {"default": "period_end.asc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
    ],
+   "ignored_keys": ["max_ticker", "min_ticker"],
    "fields": [
     {"column": "AccountsPayable", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "accounts_payable"},
     {"column": "AccruedAndOtherCurrentLiabilities", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "accrued_and_other_current_liabilities"},
@@ -1934,6 +1937,7 @@
     {"default": 100, "in_path": false, "kind": "integer", "maximum": 50000, "name": "limit", "unit": null, "values": []},
     {"default": "period_end.asc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
    ],
+   "ignored_keys": ["max_ticker", "min_ticker"],
    "fields": [
     {"column": "CashFromOperatingActivitiesContinuingOperations", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "cash_from_operating_activities_continuing_operations"},
     {"column": "ChangeInCashAndEquivalents", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "change_in_cash_and_equivalents"},
@@ -3339,7 +3343,8 @@
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "t"},
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "q"},
     {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "i"},
-    {"column": "ParticipantTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "y"},
+    {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "y"},
+    {"column": "DecimalSize", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ds"},
     {"column": "TrfTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "f"},
     {"column": "TrfId", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "r"},
     {"column": "Tape", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "z"}
@@ -3448,7 +3453,7 @@
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
     {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
-    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "updated"}
+    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
   },
@@ -3489,7 +3494,7 @@
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
     {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
-    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "updated"}
+    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
   },
@@ -3505,6 +3510,7 @@
     {"column": "DayLow", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.l"},
     {"column": "DayClose", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.c"},
     {"column": "DayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.v"},
+    {"column": "DayVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.vw"},
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "LastQuoteBidPrice", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
     {"column": "LastQuoteAskPrice", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
@@ -3515,6 +3521,7 @@
     {"column": "LastMinuteLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.l"},
     {"column": "LastMinuteClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "LastMinuteVolume", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.v"},
+    {"column": "LastMinuteVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.vw"},
     {"column": "LastMinuteTransactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "min.n"},
     {"column": "LastMinuteWindowStart", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "min.t"},
     {"column": "PrevDayOpen", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.o"},
@@ -3526,7 +3533,7 @@
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
     {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
-    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "updated"}
+    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
   },
@@ -3542,6 +3549,7 @@
     {"column": "DayLow", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.l"},
     {"column": "DayClose", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.c"},
     {"column": "DayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "day.v"},
+    {"column": "DayVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.vw"},
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},
     {"column": "LastQuoteBidPrice", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.b"},
     {"column": "LastQuoteAskPrice", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "lastQuote.a"},
@@ -3552,6 +3560,7 @@
     {"column": "LastMinuteLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.l"},
     {"column": "LastMinuteClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.c"},
     {"column": "LastMinuteVolume", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.v"},
+    {"column": "LastMinuteVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "min.vw"},
     {"column": "LastMinuteTransactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "min.n"},
     {"column": "LastMinuteWindowStart", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "min.t"},
     {"column": "PrevDayOpen", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.o"},
@@ -3563,7 +3572,7 @@
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
     {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
-    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms", "wire_key": "updated"}
+    {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
   },
@@ -4019,6 +4028,7 @@
     {"column": "LastMinuteVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.vwap"},
     {"column": "LastMinuteDecimalVolume", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "last_minute.decimal_volume"},
     {"column": "LastMinuteTransactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "last_minute.transactions"},
+    {"column": "LastMinuteLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "last_minute.last_updated"},
     {"column": "LastQuoteBid", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_quote.bid"},
     {"column": "LastQuoteBidSize", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_quote.bid_size"},
     {"column": "LastQuoteAsk", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_quote.ask"},
@@ -4049,6 +4059,7 @@
     {"column": "SessionLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.low"},
     {"column": "SessionClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.close"},
     {"column": "SessionVolume", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.volume"},
+    {"column": "SessionVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.vwap"},
     {"column": "SessionChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.change"},
     {"column": "SessionChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.change_percent"},
     {"column": "SessionDecimalVolume", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "session.decimal_volume"},
@@ -4059,6 +4070,7 @@
     {"column": "SessionPreviousClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.previous_close"},
     {"column": "SessionRegularTradingChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.regular_trading_change"},
     {"column": "SessionRegularTradingChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.regular_trading_change_percent"},
+    {"column": "SessionLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "session.last_updated"},
     {"column": "OpenInterest", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "open_interest"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "Timeframe", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "timeframe"},
@@ -4226,7 +4238,8 @@
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "sip_timestamp"},
     {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
-    {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"}
+    {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
+    {"column": "DecimalSize", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "decimal_size"}
    ],
    "memberships": [
     {"group": "options", "kind": "trades", "position": 0, "projection": null}

@@ -228,6 +228,19 @@ def test_the_quote_prices_are_generated_names(real: generate.Generated) -> None:
         assert {"BidPrice", "AskPrice"} <= columns, source.key
 
 
+def test_each_source_carries_the_keys_its_ignored_key_entries_name(
+    real: generate.Generated,
+) -> None:
+    ignored = {
+        s.key: s.ignored_keys for s in (*real.rest, *real.ws, *real.flat_files) if s.ignored_keys
+    }
+    expected: dict[str, set[str]] = {}
+    for entry in exclusions.IGNORED_KEYS:
+        expected.setdefault(entry.source, set()).add(entry.wire_key)
+    assert ignored == expected
+    assert ignored["/stocks/financials/v1/balance-sheets"] == {"max_ticker", "min_ticker"}
+
+
 def test_memberships_follow_kinds_and_projections(real: generate.Generated) -> None:
     rest = {p.key: p for p in real.rest}
     (quotes,) = rest["/v1/last_quote/currencies/{from}/{to}"].memberships
@@ -415,6 +428,9 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         projections={},
         transport_only={},
         venues={},
+        undeclared_fields={},
+        optional_fields={},
+        ignored_keys=(),
     )
     with pytest.raises(RefreshError) as caught:
         generate.generate(snapshot, empty)

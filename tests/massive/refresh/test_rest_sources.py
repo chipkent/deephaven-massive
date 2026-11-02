@@ -428,6 +428,8 @@ def _hand(
     exclusions: Sequence[exclusions_module.Exclusion] = (),
     kinds: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
     sample_errors: Sequence[exclusions_module.SampleError] = (),
+    undeclared_fields: Mapping[tuple[str, str], overrides.UndeclaredField] | None = None,
+    optional_fields: Mapping[tuple[str, str], str] | None = None,
 ) -> HandInput:
     """Return hand input with every table empty except those given."""
     return HandInput(
@@ -448,6 +450,9 @@ def _hand(
         projections={},
         transport_only={},
         venues={},
+        undeclared_fields=undeclared_fields or {},
+        optional_fields=optional_fields or {},
+        ignored_keys=(),
     )
 
 
@@ -534,6 +539,61 @@ def test_representation_rules() -> None:
         "either": (WireType.JSON_TEXT, None),
         "anything": (WireType.JSON_TEXT, None),
     }
+
+
+# Fields Massive sends that the specification does not declare, or marks required but omits.
+
+_VWAP = overrides.UndeclaredField(
+    json_type="number", description="The volume weighted average price.", reason="test"
+)
+_DAY = {
+    "type": "object",
+    "description": "The most recent daily bar.",
+    "properties": {"c": {"type": "number"}, "o": {"type": "number"}},
+}
+
+
+def test_an_undeclared_field_joins_its_object_after_its_last_field() -> None:
+    hand = _hand(
+        identity={"day": "", "min": "", "c": "", "o": "", "vw": ""},
+        undeclared_fields={(_PATH, "day.vw"): _VWAP, (_PATH, "label"): _VWAP},
+    )
+    path = _one(_row(day=_DAY, name={"type": "string"}), hand)
+    assert [f.wire_key for f in path.fields] == ["day.c", "day.o", "day.vw", "name", "label"]
+    vwap = path.fields[2]
+    assert (vwap.column, vwap.wire_type, vwap.required) == ("DayVw", WireType.DOUBLE, False)
+    # It carries its object's note, as a declared field there does.
+    assert vwap.description == (
+        "The volume weighted average price. From the `day` object: The most recent daily bar."
+    )
+
+
+def test_an_undeclared_field_the_specification_declares_or_cannot_hold_is_stale() -> None:
+    hand = _hand(
+        identity={"day": "", "min": "", "c": "", "o": "", "vw": ""},
+        undeclared_fields={(_PATH, "day.c"): _VWAP, (_PATH, "min.vw"): _VWAP},
+    )
+    assert _problems(_snapshot({_PATH: _item(_row(day=_DAY))}), hand) == [
+        ("stale-entry", _PATH, "day.c"),
+        ("stale-entry", _PATH, "min.vw"),
+    ]
+
+
+def test_an_undeclared_field_of_a_path_the_snapshot_lacks_is_stale() -> None:
+    hand = _hand(undeclared_fields={("/v1/gone", "x"): _VWAP})
+    assert _problems(_snapshot({_PATH: _item(_row(name={"type": "string"}))}), hand) == [
+        ("stale-entry", "/v1/gone", "x")
+    ]
+
+
+def test_an_optional_field_entry_drops_the_vendor_requirement() -> None:
+    row = {**_row(price={"type": "number"}, size={"type": "number"}), "required": ["price"]}
+    hand = _hand(optional_fields={(_PATH, "price"): "test"})
+    path = _one(row, hand)
+    assert [f.required for f in path.fields] == [False, False]
+    # An entry for a field the specification does not mark required is stale.
+    stale = _hand(optional_fields={(_PATH, "size"): "test"})
+    assert _problems(_snapshot({_PATH: _item(row)}), stale) == [("stale-entry", _PATH, "size")]
 
 
 def test_a_utc_name_with_another_format_follows_the_format() -> None:

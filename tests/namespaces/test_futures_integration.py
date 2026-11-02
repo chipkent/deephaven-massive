@@ -129,11 +129,11 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     """Where the futures snapshot carries a contract's ticker.
 
     The schema nests the ticker and product code as `details.ticker` and
-    `details.product_code`, while both documented samples send them at the top level, which
-    the library reads (`Symbol` and `ProductCode`). Records the top-level `ticker` and
-    `product_code` and the nested pair of three ES rows, and the library's `Symbol`. Reading
-    it: top-level keys only, with `Symbol` filled, confirm the samples; nested keys alone mean
-    the library must read those instead.
+    `details.product_code`, while both documented samples send them at the top level. The
+    live run of 2026-11-02 found them nested, which the library now reads (`Symbol` and
+    `DetailsProductCode`). Records the top-level `ticker` and `product_code` and the nested
+    pair of three ES rows, and the library's `Symbol`. Reading it: nested keys, with `Symbol`
+    filled, confirm the schema; top-level keys alone mean the library must read those again.
     """
     rows = _page(live_rest, _SNAPSHOT, query={"product_code": "ES", "limit": 3})
     for row in rows:

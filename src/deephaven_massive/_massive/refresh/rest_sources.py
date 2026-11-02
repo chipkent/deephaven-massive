@@ -295,7 +295,44 @@ class _PathGenerator(SourceFields):
         out: list[RawField] = []
         skip = ENVELOPE_KEYS if result_key is None and single_object else frozenset()
         self.flatten(node, "", is_required=True, out=out, skip=skip)
+        self.undeclared(out)
         return result_key, out
+
+    def undeclared(self, out: list[RawField]) -> None:
+        """Add the path's `UNDECLARED_FIELDS` entries to its flattened fields.
+
+        Each goes after the last declared field of its object (the row's, for a key with no
+        dot), with that field's notes, so it reads as if the specification declared it there.
+        An entry for a key the specification now declares, or inside an object where it
+        declares no field, is a `stale-entry` problem instead.
+
+        Args:
+            out: The path's flattened fields, in the specification's order; changed in place.
+        """
+        for (path, wire_key), entry in self.hand.undeclared_fields.items():
+            if path != self.path:
+                continue
+            if wire_key in self.wire_keys:
+                self.problem(
+                    Gate.STALE_ENTRY,
+                    wire_key,
+                    "UNDECLARED_FIELDS entry for a key the specification now declares",
+                )
+                continue
+            prefix = wire_key.rpartition(".")[0]
+            siblings = [i for i, raw in enumerate(out) if raw.wire_key.rpartition(".")[0] == prefix]
+            if not siblings:
+                self.problem(
+                    Gate.STALE_ENTRY,
+                    wire_key,
+                    f"UNDECLARED_FIELDS entry inside {prefix!r}, where the specification "
+                    "declares no field",
+                )
+                continue
+            at = siblings[-1] + 1
+            notes = out[siblings[-1]].notes
+            schema = {"type": entry.json_type, "description": entry.description}
+            out.insert(at, RawField(wire_key, schema, required=False, notes=notes))
 
     def flatten(
         self,

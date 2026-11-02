@@ -400,7 +400,7 @@
   {
    "key": "futures/T",
    "fields": [
-    {"column": "Price", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "p"},
+    {"column": "Price", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "p"},
     {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "t"},
     {"column": "Size", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "s"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
@@ -413,10 +413,10 @@
   {
    "key": "futures/Q",
    "fields": [
-    {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bp"},
+    {"column": "BidPrice", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "bp"},
     {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "t"},
     {"column": "BidSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "bs"},
-    {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ap"},
+    {"column": "AskPrice", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "ap"},
     {"column": "AskSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "as"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
     {"column": "BidTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "bt"},
@@ -429,14 +429,14 @@
   {
    "key": "futures/A",
    "fields": [
-    {"column": "Open", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "o"},
-    {"column": "High", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "h"},
-    {"column": "Low", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Close", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "c"},
+    {"column": "Open", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "o"},
+    {"column": "High", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "h"},
+    {"column": "Low", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "l"},
+    {"column": "Close", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "Volume", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "v"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
     {"column": "WindowStart", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "s"},
-    {"column": "DollarVolume", "conversion": "integer-as-number", "required": false, "type": "double", "unit": null, "wire_key": "dv"},
+    {"column": "DollarVolume", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "dv"},
     {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "EndTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "e"}
    ],
@@ -447,14 +447,14 @@
   {
    "key": "futures/AM",
    "fields": [
-    {"column": "Open", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "o"},
-    {"column": "High", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "h"},
-    {"column": "Low", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "l"},
-    {"column": "Close", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "c"},
+    {"column": "Open", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "o"},
+    {"column": "High", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "h"},
+    {"column": "Low", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "l"},
+    {"column": "Close", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "c"},
     {"column": "Volume", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "v"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "sym"},
     {"column": "WindowStart", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "s"},
-    {"column": "DollarVolume", "conversion": "integer-as-number", "required": false, "type": "double", "unit": null, "wire_key": "dv"},
+    {"column": "DollarVolume", "conversion": "decimal-text-number", "required": false, "type": "double", "unit": null, "wire_key": "dv"},
     {"column": "Transactions", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "n"},
     {"column": "EndTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "e"}
    ],
