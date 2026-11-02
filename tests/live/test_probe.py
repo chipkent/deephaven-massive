@@ -6,7 +6,7 @@ The probe runs against `FakeRestServer` and `FakeS3`, scripted as each plan answ
 from __future__ import annotations
 
 import json
-from datetime import date, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -241,7 +241,7 @@ def test_a_digest_hides_the_credential() -> None:
     assert "key" not in found
 
 
-_DAY = date(2026, 10, 29)
+_PROBED = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
 
 
 _OWNER = {"api_key": probe.digest("key"), "s3": None}
@@ -256,9 +256,9 @@ def _probed() -> plans.LivePlans:
 
 def test_the_cache_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    probe.store_plans(path, _probed(), owner=_OWNER, day=_DAY)
+    probe.store_plans(path, _probed(), owner=_OWNER)
     assert "key" not in json.loads(path.read_text())["owner"]["api_key"]
-    back = probe.cached_plans(path, owner=_OWNER, day=_DAY)
+    back = probe.cached_plans(path, owner=_OWNER, now=_PROBED)
     assert back == plans.LivePlans(
         tiers=_probed().tiers,
         s3=True,
@@ -271,7 +271,8 @@ def test_the_cache_round_trip(tmp_path: Path) -> None:
     "change",
     [
         {"version": 1},
-        {"day": "2026-10-28"},
+        {"probed": "2026-10-29T12:00:00"},
+        {"probed": "noon"},
         {"owner": {"api_key": "other", "s3": None}},
         {"tiers": dict.fromkeys(plans.TIERS, "gold")},
         {"tiers": {}},
@@ -280,16 +281,30 @@ def test_the_cache_round_trip(tmp_path: Path) -> None:
 )
 def test_a_cache_that_does_not_fit_is_ignored(change: dict[str, object], tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    probe.store_plans(path, _probed(), owner=_OWNER, day=_DAY)
+    probe.store_plans(path, _probed(), owner=_OWNER)
     path.write_text(json.dumps(json.loads(path.read_text()) | change))
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
+
+
+@pytest.mark.parametrize(
+    ("after", "kept"),
+    [
+        (timedelta(minutes=59, seconds=59), True),
+        (timedelta(hours=1), False),
+        (timedelta(seconds=-1), False),
+    ],
+)
+def test_the_cache_lasts_an_hour(after: timedelta, *, kept: bool, tmp_path: Path) -> None:
+    path = tmp_path / "plans.json"
+    probe.store_plans(path, _probed(), owner=_OWNER)
+    assert (probe.cached_plans(path, owner=_OWNER, now=_PROBED + after) is not None) is kept
 
 
 def test_a_missing_or_broken_cache_is_ignored(tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
     path.write_text("{")
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
 
 
 @pytest.mark.parametrize("name", ["stocks", "options"])

@@ -46,9 +46,10 @@ per-second bars, so a test that needs Advanced skips on it; declare `business_ex
 those tests on a key with the expansion. Indices Business leaves no mark a request can see and reads
 as Advanced. Futures Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Advanced; a
 test of a venue the plan lacks is refused. The answer is kept in `.live-plans.json` in the
-repository root (git-ignored; it names the key and the S3 access key id only by a digest) until the
-New York day ends, so later runs that day do not probe again. Delete the file to probe again at
-once, after an upgrade. The plans head the evidence (under "live plans") and the summary at the end
+repository root (git-ignored; it names the key and the S3 access key id only by a digest) for an
+hour, so runs within the hour do not probe again; a run that reuses it prints a `live plans:` line
+saying so and when the plans were probed. Delete the file to probe again at once, after an
+upgrade. The plans head the evidence (under "live plans") and the summary at the end
 of the run. The live sessions list every class on a delayed plan (Stocks, Options, and Futures
 Starter and Developer; Indices Starter) in `MassiveConfig.delayed_subscriptions`, since the library
 refuses delayed data for any other: their streams use Massive's delayed feed, and their REST reads

@@ -202,9 +202,9 @@ def _params() -> list[Any]:
     stream (Basic has no WebSocket access), and its Business plan for a fair-market-value (FMV)
     stream, which only Business serves; the `needs` marker skips it before any call when
     the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
-    left on Basic, whose five requests a minute pace it. A stream case gets 160 s: its
-    acknowledgement, the wait for its rows (up to 75 s for a minute bar), and the gap between
-    two stream cases.
+    left on Basic, whose five requests a minute pace it. A stream case gets 240 s: its
+    acknowledgement, the wait for its rows (up to 75 s for a minute bar), a second such wait
+    when another client took the connection's slot, and the gap between two stream cases.
 
     Returns:
         One `pytest.param` per pair, with its id `<dataset>-<verb>`.
@@ -215,7 +215,7 @@ def _params() -> list[Any]:
         subscription = _subscription(spec)
         marks = [pytest.mark.requests(_REQUESTS[verb])]
         if verb == "stream":
-            marks.append(pytest.mark.timeout(160))
+            marks.append(pytest.mark.timeout(240))
         if subscription is not None:
             plan = "starter" if verb == "stream" else "basic"
             if name.endswith(".fmv") and verb == "stream":
@@ -539,6 +539,80 @@ def _poll_case(case: _Case, query: QueryBase) -> tuple[list[str], list[str]]:
     return columns, drift
 
 
+_SLOT_TAKEN = "another client on this key took the connection (max_connections)"
+"""Why a stream case fails when its connection lost its slot and no row came after the retry."""
+
+
+def _socket_rows(case: _Case) -> list[dict[str, Any]]:
+    """Return the case class's WebSocket rows of `m.connections()`.
+
+    Returns:
+        The rows whose `Transport` is `WebSocket` and whose `AssetClass` is the case's class.
+    """
+    asset_class = str(case.spec.asset_class)
+    return [
+        r
+        for r in case.table_rows(case.session.connections())
+        if r["Transport"] == "WebSocket" and r["AssetClass"] == asset_class
+    ]
+
+
+def _reconnects(rows: list[dict[str, Any]]) -> int:
+    """Return how often the connections of some `m.connections()` rows have reconnected.
+
+    Returns:
+        The sum of their `Reconnects`.
+    """
+    return sum(int(r["Reconnects"] or 0) for r in rows)
+
+
+def _row_wait(family: str) -> float:
+    """Return how many seconds a stream case waits for its first row from now.
+
+    Returns:
+        Until just past the next minute boundary for a minute bar stream
+        (`streams.minute_bar_deadline`), `_TICK_WAIT` for any other.
+    """
+    if family != "bars":
+        return _TICK_WAIT
+    now = datetime.now(UTC)
+    return (streams.minute_bar_deadline(now) - now).total_seconds()
+
+
+def _slot_taken(case: _Case, before: int) -> bool:
+    """Tell whether the case class's connection lost its slot since `before` was read.
+
+    Records the class's WebSocket rows of `m.connections()` when it did.
+
+    Args:
+        case: The stream case.
+        before: The rows' `Reconnects` total before the stream opened (`_reconnects`).
+
+    Returns:
+        True when a row is `WAITING_SLOT` or the connections reconnected since.
+    """
+    rows = _socket_rows(case)
+    taken = any(r["State"] == "WAITING_SLOT" for r in rows) or _reconnects(rows) > before
+    if taken:
+        case.evidence(f"{case.name} stream: the connection lost its slot: {rows}")
+    return taken
+
+
+def _record_bar_lag(case: _Case, row: dict[str, Any]) -> None:
+    """Record when a stream's first minute bar ended and when it reached the table.
+
+    Args:
+        case: The minute bar stream case.
+        row: The first row of its table.
+    """
+    end, inserted = row.get("TimestampEnd"), row.get("TimestampInsert")
+    lag = None if end is None or inserted is None else (int(inserted) - int(end)) / 1e9
+    case.evidence(
+        f"{case.name} first bar: TimestampEnd {end}, TimestampInsert {inserted}, "
+        f"arrived {lag} s after its minute ended (allowance {streams.MINUTE_BAR_LAG})"
+    )
+
+
 def _stream_case(
     case: _Case,
     query: QueryBase,
@@ -554,31 +628,45 @@ def _stream_case(
     minute bar stream waits until just past the next minute boundary, any other for
     `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement.
 
+    Another client on the key can take the class's connection slot during the wait: the
+    connection then waits for the slot (`WAITING_SLOT`) or reconnects. When no row came and
+    the class's WebSocket row of `m.connections()` shows either, the case waits once more,
+    as long again from then (past the next minute boundary for minute bars), and fails with
+    `_SLOT_TAKEN` rather than "no row arrived" if still nothing comes. For a minute bar
+    stream, the first row's `TimestampEnd` and `TimestampInsert` are recorded, so the
+    evidence shows how long after its minute Massive's bar arrived (`streams.MINUTE_BAR_LAG`
+    is the allowance).
+
     Returns:
         The table's columns and what the case saw drift.
     """
     table = cast("Any", query).append_only()
+    before = _reconnects(_socket_rows(case))
     acked = wait_acked(case.session, 1, time.monotonic() + _STREAM_WAIT)
     family = case.name.rpartition(".")[2]
     status, due = rows_due(_MARKETS[cast("dm.AssetClass", case.spec.asset_class)], family)
     due = due and case.name not in _RARE
-    wait = _TICK_WAIT
-    if family == "bars":
-        now = datetime.now(UTC)
-        wait = (streams.minute_bar_deadline(now) - now).total_seconds()
+    wait = _row_wait(family)
     rows = wait_rows(case.session, table, time.monotonic() + wait) if due else []
+    taken = due and not rows and _slot_taken(case, before)
+    if taken:
+        wait = _row_wait(family)
+        rows = wait_rows(case.session, table, time.monotonic() + wait)
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     _STREAM_CLOSED[0] = time.monotonic()
     case.evidence(
         f"{case.name} stream: acknowledged {acked}; {status}; due {due}; {len(rows)} rows"
     )
+    if family == "bars" and rows:
+        _record_bar_lag(case, rows[0])
     case.skip_if_not_entitled(case.session, case.plan)
     assert failure is None, f"{case.name} stream failed: {failure}"
     assert acked >= 1, f"{case.name}: Massive acknowledged no topic"
     if not due:
         why = _RARE.get(case.name, f"market {status}, or within the feed delay")
         pytest.skip(f"not exercised: {why} (acknowledged)")
+    assert rows or not taken, f"{case.name}: {_SLOT_TAKEN}"
     assert rows, f"{case.name}: no row arrived in {wait:.0f} s, though rows were due"
     return columns, drift
 
