@@ -2379,3 +2379,13 @@ def test_a_followed_read_s_patience_starts_when_its_read_does(
         _until(lambda: events.count("patience") == 2 and len(events) == 4)
         m.release(result)
     assert events == ["patience", "AAPL", "patience", "MSFT"]
+
+
+def test_a_followed_range_no_row_can_lie_in_checks_nothing(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    result = trades(massive_session, live("AAPL")).history(moment, moment)  # an empty range
+    assert rest.checks == []  # nothing can be asked: no request, no parameter to check
+    massive_session.release(result)
+    follows(massive_session)
