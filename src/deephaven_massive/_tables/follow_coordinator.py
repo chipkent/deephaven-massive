@@ -660,16 +660,16 @@ class FollowCoordinator:
             symbol.rows = 0
 
     def _enqueue(self, result: _Result, name: str) -> None:
-        """Put a symbol in its result's queue of symbols waiting for a read, once.
+        """Put a symbol at the end of its result's queue of symbols waiting for a read.
+
+        Only a symbol that was not waiting comes here: a new add, or a retry come due.
 
         Args:
             result: The result's state.
             name: The symbol.
         """
-        symbol = result.symbols[name]
-        if not symbol.waiting:
-            symbol.waiting = True
-            result.queue.append(name)
+        result.symbols[name].waiting = True
+        result.queue.append(name)
 
     def _landed(self, result: _Result, message: _Outcome) -> None:
         """Apply a read's outcome: each symbol whose generation still matches takes it.

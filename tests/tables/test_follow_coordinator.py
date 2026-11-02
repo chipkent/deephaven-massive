@@ -89,6 +89,8 @@ class Script:
         self.m = m
         self.calls: list[tuple[str, ...]] = []
         self.gates: dict[str, threading.Event] = {}
+        # Gates of single reads: each read of a symbol takes the next one, if any.
+        self.holds: dict[str, list[threading.Event]] = {}
         self.answers: dict[str, list[Answer]] = {}
         self._lock = threading.Lock()
 
@@ -98,8 +100,12 @@ class Script:
             self.calls.append(names)
         for name in names:
             gate = self.gates.get(name)
-            if gate is not None:
-                assert gate.wait(TIMEOUT)
+            with self._lock:
+                held = self.holds.get(name, [])
+                hold = held.pop(0) if held else None
+            for event in (gate, hold):
+                if event is not None:
+                    assert event.wait(TIMEOUT)
         outcomes: dict[str, SymbolOutcome] = {}
         for name in names:
             with self._lock:
@@ -174,6 +180,16 @@ def row(m: dm.MassiveSession, symbol: str) -> SymbolReadRow:
 def state(m: dm.MassiveSession, symbol: str) -> SymbolReadState | None:
     found = [r.state for (_, name), r in reads(m).items() if name == symbol]
     return found[0] if found else None
+
+
+def generation(m: dm.MassiveSession, symbol: str) -> int:
+    # The symbol's generation in the coordinator's own state: one per add and removal seen.
+    found = [
+        result.symbols[symbol].generation
+        for result in list(m._core.follows._results.values())
+        if symbol in result.symbols
+    ]
+    return found[0] if found else 0
 
 
 def wait_state(m: dm.MassiveSession, symbol: str, expected: SymbolReadState) -> SymbolReadRow:
@@ -386,7 +402,8 @@ def test_a_re_add_during_a_read_waits_for_it_and_reads_again(
     massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
-    gate = script.gates["AAPL"] = threading.Event()
+    first, second = threading.Event(), threading.Event()
+    script.holds["AAPL"] = [first, second]
     script.answers["AAPL"] = [
         SymbolRows(rows_of(massive_session, "AAPL", 1)),
         SymbolRows(rows_of(massive_session, "AAPL", 5)),
@@ -398,9 +415,13 @@ def test_a_re_add_during_a_read_waits_for_it_and_reads_again(
     add(wl, "AAPL")
     wait_state(massive_session, "AAPL", SymbolReadState.QUEUED)
     assert script.reads_of("AAPL") == 1  # never two reads of one symbol at once
-    gate.set()
-    until(lambda: len(dh_to_pylist(result)) == 5)  # only the second read's rows land
-    assert script.reads_of("AAPL") == 2
+    first.set()  # the overtaken read ends: its rows are dropped, and the second read starts
+    until(lambda: script.reads_of("AAPL") == 2)
+    loading = wait_state(massive_session, "AAPL", SymbolReadState.LOADING)
+    assert (loading.rows, loading.read_at) == (0, None)
+    assert dh_to_pylist(result) == []
+    second.set()
+    until(lambda: len(dh_to_pylist(result)) == 5)
     massive_session.release(result)
 
 
@@ -415,6 +436,8 @@ def test_five_add_remove_cycles_before_the_first_read_land_one_read(
     for _ in range(5):
         delete(wl, "AAPL")
         add(wl, "AAPL")
+    # The table's changes reach the coordinator after the edits return: wait for all ten.
+    until(lambda: generation(massive_session, "AAPL") == 11)
     gate.set()
     done = wait_state(massive_session, "AAPL", SymbolReadState.DONE)
     assert script.reads_of("AAPL") == 2  # the first, dropped, and one final read

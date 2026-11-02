@@ -66,8 +66,8 @@ The exceptions, the enums, `enable_debug_logging`, `disable_debug_logging`, `Log
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
-      `connections()`, `streams()`, `rate_limits()`, `release(table)`, `close()`, and use as
-      a context manager.
+      `connections()`, `streams()`, `rate_limits()`, `symbol_reads()`, `release(table)`,
+      `close()`, and use as a context manager.
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
     - `datasets()`: a static table of every dataset, with its summary, verbs, transports, and
       the link to its columns; it needs no session and no API key.
@@ -88,13 +88,13 @@ Public API:
       (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
       `Object` column unless cast, `(String) dm.canonical_symbol_forex(Pair)`.
     - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
-      wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
+      wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `Reread`, `FuturesVenue`,
       `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
-      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError` (what a bad symbol
-      does, in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols`,
-      `unlisted_symbols`, `unreadable_symbols`, and `unavailable_symbols`); and
-      `Subscription`, Massive's five subscriptions. Parameters take only enum members;
-      convert text with, for example, `Timespan("minute")`.
+      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError` (what a bad symbol does,
+      in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols`, `unlisted_symbols`,
+      `unreadable_symbols`, and `unavailable_symbols`); and `Subscription`, Massive's five
+      subscriptions. Parameters take only enum members; convert text with, for example,
+      `Timespan("minute")`.
     - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
       DEBUG and up, to stderr (which Deephaven shows in its log panel) or to a file; the
       environment variable `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`)
