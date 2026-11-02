@@ -3,7 +3,8 @@
 A dataset method normalizes its arguments once, when the query is created, into a `Request`:
 an immutable, hashable record, so equal calls give equal queries and share streams. The verbs
 pass it, with the dataset's `DatasetSpec`, to the transports. The module also names the types a
-request is built from (`ParamValue`) and the identity of a live stream (`StreamKey`).
+request is built from (`ParamValue`), the identity of a live stream (`StreamKey`), and a table
+passed where a dataset takes one value, such as an option chain's underlying (`ValueTable`).
 
 Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces'
 shared dataset factory builds requests (`build_query` in `_namespaces/query_building.py`), the
@@ -13,17 +14,19 @@ receive them live in `_tables/transports.py`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 if TYPE_CHECKING:
     from datetime import date, datetime
     from enum import StrEnum
 
+    from deephaven.table import Table
+
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import FuturesVenue, Timespan
 
-__all__ = ["ParamValue", "Request", "StreamKey"]
+__all__ = ["ParamValue", "Request", "StreamKey", "ValueTable"]
 
 ParamValue: TypeAlias = (
     "str | int | float | bool | date | datetime | StrEnum | tuple[str | int | float | date, ...]"
@@ -37,6 +40,43 @@ StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
 tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which compares
 by the identity of the table's wrapper and holds it strongly while the key exists. A static
 table never reaches a key: it is read first, and its symbols become the tuple."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValueTable:
+    """A table passed where a dataset takes one value: an underlying, or a futures product code.
+
+    `m.options.chain(underlying=t)` and every futures `product_code=t` take a Deephaven table
+    instead of one value. Each of its values is read as if it had been passed alone, one
+    request series per value (`Request.for_value`); a refreshing table is followed, so a value
+    added to it is read and a value deleted from it leaves the result. Built by the dataset
+    method (`value_table` in `_namespaces/query_building.py`); immutable. Like `SymbolTable`,
+    it compares and hashes by the identity of the table's Python wrapper, which it holds
+    strongly.
+
+    Attributes:
+        argument: The dataset method's argument, `"underlying"` or `"product_code"`, for
+            messages.
+        parameter: The wire parameter each value is sent as, such as `"underlyingAsset"` (the
+            chain's path segment), `"underlying_ticker"`, or `"product_code"`.
+        column: The table's column that holds the values: `"Symbol"` for underlyings,
+            `"ProductCode"` for product codes, as `m.futures.products()` rows carry them.
+        underlying: True when each value must be a stock or index ticker (an underlying);
+            False for a product code, which is kept as written.
+        table: The user's table.
+        table_id: `id(table)`, the identity for equality and hashing.
+    """
+
+    argument: str
+    parameter: str
+    column: str
+    underlying: bool
+    table: Table = field(compare=False)
+    table_id: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Record the wrapper's identity."""
+        object.__setattr__(self, "table_id", id(self.table))
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +109,9 @@ class Request:
             the page size is internal (`DatasetSpec.page_size`), and the REST transport sends
             one request per named symbol under it and stops paging once `limit` rows have
             arrived.
+        value_table: The table passed where the dataset takes one value (`ValueTable`), or
+            None. Its parameter is then absent from `params`: each verb reads the table's
+            values and sends each one through `for_value`.
     """
 
     symbols: NormalizedSymbols | None = None
@@ -81,6 +124,23 @@ class Request:
     params: tuple[tuple[str, ParamValue], ...] = ()
     filters: tuple[tuple[str, ParamValue], ...] = ()
     limit: int | None = None
+    value_table: ValueTable | None = None
+
+    def for_value(self, value: str) -> Request:
+        """Return the request that reads one value of the value table, as if passed alone.
+
+        Called only on a request with a value table.
+
+        Args:
+            value: One value of `value_table`, such as `"AAPL"` or `"ES"`, already checked.
+
+        Returns:
+            The request with no value table and `value` sent as its parameter, exactly the
+            request the dataset method builds for that one value.
+        """
+        parameter = cast("ValueTable", self.value_table).parameter
+        params = {**dict(self.params), parameter: value}
+        return replace(self, value_table=None, params=tuple(sorted(params.items())))
 
     def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.

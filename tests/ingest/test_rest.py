@@ -30,7 +30,7 @@ from deephaven_massive._datasets import history_source, wire_symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import history_window
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
@@ -50,6 +50,7 @@ from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_req
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._namespaces import futures as futures_ns
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces import stocks as stocks_ns
@@ -57,6 +58,7 @@ from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._types import override
@@ -4604,3 +4606,57 @@ def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
             "the row is delayed and serves it"
         )
     ]
+
+
+# --- poll() cycles of a table of values -----------------------------------------------------------
+
+
+def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRows:
+    # One poll() cycle of futures products over a table of product codes, read as it holds them.
+    with entered(m._core.exec_ctx):
+        table = new_table([string_col("ProductCode", list(values))])
+    boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
+    reader = cast("rest.RestEndpoints", m._core.rest_transport())._reader("poll")
+    with ThreadPoolExecutor(1) as pool:
+        return reader.read_cycle(
+            futures_ns.PRODUCTS,
+            Request(value_table=boxed),
+            symbols=None,
+            values=values,
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("futures.products poll()", 60.0),
+        )
+
+
+def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_for(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One value after another, in the order given: ES, then NQ, which Massive does not know.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    fake_rest.reply("/futures/v1/products", es, Reply({"status": "NOT_FOUND"}, status=404))
+    with caplog.at_level(logging.WARNING):
+        read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.rows.column("ProductCode").to_pylist() == ["ES"]
+    assert read.requests == 1
+    assert read.left_out == ("NQ (HTTP 404: no data)",)
+    assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["ES"], ["NQ"]]
+    assert any("NQ" in message and "no data" in message for message in caplog.messages)
+
+
+def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply("/futures/v1/products", refusal)
+    with pytest.raises(dm.EntitlementError):
+        _value_cycle(rest_session, ("ES",))
+
+
+def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
+    rest_session: dm.MassiveSession,
+) -> None:
+    read = _value_cycle(rest_session, ())
+    assert (read.rows.num_rows, read.requests, read.left_out) == (0, 0, ())

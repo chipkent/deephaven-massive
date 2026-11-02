@@ -337,6 +337,39 @@ class RestTransport(Protocol):
         """
         ...
 
+    def fetch_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Mapping[str, SymbolOutcome]:
+        """Read `fetch` for each value of a value table: each one's rows, or its failure.
+
+        The read of a table passed where a dataset takes one value (`Request.value_table`, an
+        underlying or a futures product code): each value is read with the requests `fetch`
+        makes when that value is passed alone (`Request.for_value`), one value after another,
+        and a failure confined to one value is returned, never raised. Each request is capped
+        at `Request.limit`.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked; a repeated one is read once.
+            call: The id of the verb call the read serves.
+            stop: A read's stop token, or None, as `fetch_by_symbol` takes it.
+
+        Returns:
+            Each value, in the order given, with its `SymbolRows` or `SymbolFailure`.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key: every value would fail.
+            MassiveError: If the session closed during the read.
+        """
+        ...
+
     def poll(
         self,
         spec: DatasetSpec,

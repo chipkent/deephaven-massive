@@ -14,13 +14,15 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.history_source import history_window
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -39,6 +41,7 @@ from deephaven_massive._ingest.symbol_reads import (
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces import futures
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
@@ -515,3 +518,56 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
         f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"
     )
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+
+# --- fetch by value -----------------------------------------------------------------------------
+
+
+PRODUCTS_PATH = "/futures/v1/products"
+
+
+def _by_value(
+    m: dm.MassiveSession, codes: list[str], *, adjusted: bool | None = None
+) -> Mapping[str, SymbolOutcome]:
+    # Reads futures products for each code of a table of product codes.
+    with entered(m._core.exec_ctx):
+        table = new_table([string_col("ProductCode", codes)])
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=table
+    )
+    request = Request(adjusted=adjusted, value_table=values)
+    rest = m._core.rest_transport()
+    return rest.fetch_by_value(futures.PRODUCTS, request, values=codes, call=7)
+
+
+def test_each_value_is_read_alone_and_fails_alone(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    # One value after another, in the order given: NQ, then ES.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    fake_rest.reply(PRODUCTS_PATH, refusal, es)
+    out = _by_value(rest_session, ["NQ", "ES", "NQ"])
+    assert list(out) == ["NQ", "ES"]  # as given, each once
+    assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["NQ"], ["ES"]]
+    assert [r["ProductCode"] for r in _rows(out["ES"])] == ["ES"]
+    assert isinstance(_failure(out["NQ"]).error, EntitlementError)
+
+
+def test_a_rejected_key_stops_a_read_by_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(PRODUCTS_PATH, Reply({"status": "ERROR"}, status=401))
+    with pytest.raises(dm.AuthenticationError):
+        _by_value(rest_session, ["ES", "NQ"])
+    assert len(fake_rest.get_queries()) == 1  # no value is read after the refusal
+
+
+def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    out = _by_value(rest_session, ["ES"], adjusted=False)
+    error = _failure(out["ES"]).error
+    assert isinstance(error, UnsupportedParameterError)
+    assert str(error) == "futures.products: /futures/v1/products does not take ['adjusted']"
+    assert fake_rest.get_queries() == []

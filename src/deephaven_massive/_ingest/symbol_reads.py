@@ -19,6 +19,10 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   A flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its
   rows are split by `Symbol` (`split_by_symbol`), and its failure is every symbol's; the days
   its files lack are read from REST symbol by symbol.
+- **Reads by value** (`read_rest_by_value`): a table passed where a dataset takes one value (an
+  option chain's underlying, a futures product code) is read value by value, each with the
+  requests `fetch()` makes for that value alone, so every row belongs to the value whose
+  request returned it, and one value's failure fails only that value.
 - **Classes of failure** (`failure_kind`): `TRANSIENT` when the cause may pass (a rate limit
   beyond the read's patience, a server error after the client's retries, a network failure, a
   symbol's later page that answered HTTP 404), `PERMANENT` otherwise: the same read would fail
@@ -52,6 +56,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
     AuthenticationError,
     CutShortError,
@@ -70,7 +75,7 @@ from deephaven_massive._ingest.rest_requests import (
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -95,6 +100,7 @@ __all__ = [
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
+    "read_rest_by_value",
     "split_by_symbol",
     "symbol_outcomes",
 ]
@@ -405,6 +411,78 @@ def read_rest_by_symbol(
         for symbol, rows in pieces.items()
         if symbol not in failures
     }
+    return symbol_outcomes(
+        core,
+        spec,
+        symbols=ordered,
+        tables=tables,
+        failures=failures,
+        call=call,
+        source=TRANSPORT_LABELS[Transport.REST],
+    )
+
+
+def read_rest_by_value(
+    reader: RestReader,
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    request: Request,
+    values: Sequence[str],
+    call: int,
+    cancel: Cancel | None,
+    to_table: Callable[[pa.Table], Table],
+) -> dict[str, SymbolOutcome]:
+    """Read `fetch()` for each value of a value table, one value after another.
+
+    Each value is read with the requests `fetch()` makes when that value is passed alone
+    (`Request.for_value`, `RestReader.read_fetch`), so all of a request's rows belong to its
+    value and `Request.limit` caps each value's requests as it would that call's. A value whose
+    read fails gets its own failure; a parameter its path does not take fails it with
+    `UnsupportedParameterError`. A rejected API key stops the read, since every value would
+    be refused.
+
+    Args:
+        reader: The reader of the session's paths.
+        core: The session's core: its schema, its execution context, and whether it closed.
+        spec: The dataset, with a fetch path.
+        request: The normalized arguments, with a value table and static symbols.
+        values: The values, already checked; a repeated one is read once.
+        call: The verb call's id, for the log lines.
+        cancel: The read's stop token, or None.
+        to_table: Converts a value's Arrow rows to a static Deephaven table.
+
+    Returns:
+        Each value, in the order given, with its outcome.
+
+    Errors are those of `symbol_outcomes`.
+    """
+    ordered = _ordered(values)
+    pauses = holds_update_graph_lock(core.exec_ctx)
+    tables: dict[str, Table] = {}
+    failures: dict[str, MassiveError] = {}
+    for value in ordered:
+        try:
+            rows, requests = reader.read_fetch(
+                spec,
+                request.for_value(value),
+                symbols=request.symbols,
+                cancel=cancel,
+                pauses_live_tables=pauses,
+                unlisted=OnError.RAISE,
+            )
+        except MassiveError as error:
+            failures[value] = error
+            if isinstance(error, AuthenticationError):
+                break  # every later value would be refused too
+            continue
+        except ValueError as error:
+            failures.update(_refused((value,), error))
+            continue
+        logger.debug(
+            "call %d %s by value: %s read in %d requests", call, spec.name, value, requests
+        )
+        tables[value] = to_table(rows)
     return symbol_outcomes(
         core,
         spec,

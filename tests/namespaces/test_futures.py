@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
@@ -340,6 +342,21 @@ def test_product_code_is_one_code_or_several(massive_session: dm.MassiveSession,
         _with_product_code(f, name, 5)
     with pytest.raises(TypeError, match="element 1 of the sequence is int, not str"):
         _with_product_code(f, name, ["ES", 5])
+
+
+@pytest.mark.parametrize("name", _PRODUCT_DATASETS)
+def test_product_code_takes_a_table_of_codes(massive_session: dm.MassiveSession, name: str) -> None:
+    f = massive_session.futures
+    codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
+    query = _with_product_code(f, name, codes)
+    values = query._request.value_table
+    assert values is not None
+    assert (values.parameter, values.column, values.table) == ("product_code", "ProductCode", codes)
+    assert not any(key.startswith("product_code") for key, _ in request(query).params)
+    with pytest.raises(
+        ValueError, match=r"^a table passed as product_code must have a ProductCode column"
+    ):
+        _with_product_code(f, name, new_table([string_col("Symbol", ["ES"])]))
 
 
 def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:

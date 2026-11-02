@@ -209,6 +209,7 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 | backfill history, then continue live | the recipe in [backfill, then live](#backfill-then-live) |
 | start a live board with values before the first trade | the recipe in [seed a live board](#seed-a-live-board) |
 | read an option chain with its greeks | `m.options.chain("SPY").fetch()`: see [option chain](#option-chain) |
+| follow the option chains of a watchlist | pass `m.options.chain` a table of underlyings: see [option chain](#option-chain) |
 | read a long range without freezing the console | `history(..., wait=False)`: see [live tables](#live-tables) |
 | list a company's dividends | `m.stocks.dividends("AAPL", start="2025-01-01").fetch()` |
 | follow news as it appears | `m.reference.news("AAPL", start=today).poll(300)`, with `today` as [first tables](#first-tables) sets it |
@@ -307,6 +308,22 @@ greeks = calls.fetch().view(
 Massive leaves the greeks out for some contracts, such as those deep in the money; their
 columns are null then. On Options Starter or Developer the chain is delayed (see
 [real-time or delayed](#real-time-or-delayed)).
+
+`underlying` also takes a table of underlyings in a `Symbol` column, and reads each one's chain
+as if you had passed it alone. A live table is followed, as a watchlist is (see
+[`symbols`](#symbols)): `fetch()` adds an underlying's chain once it is read and drops it when its
+row leaves, and `poll()` reads the table at every cycle. `m.options.contracts(underlying=...)`
+takes the same table:
+
+```python
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+
+underlyings = input_table({"Symbol": dht.string}, key_cols="Symbol")
+underlyings.add(new_table([string_col("Symbol", ["SPY", "QQQ"])]))
+chains = m.options.chain(underlyings, contract_type=dm.ContractType.CALL).fetch()
+```
 
 <a id="history-of-a-watchlist"></a>
 
@@ -960,9 +977,23 @@ one of them failed. A symbol that comes back after you deleted it is downloaded 
 choose otherwise (`reread`, in [verb arguments](#verb-arguments)). `limit` is sent on each request,
 as Massive's cap on its rows. News, filings, and financial statements list their tickers, so one
 article can answer two symbols: it is listed under each symbol whose request Massive returned it
-for. The same holds for `underlying=` of `m.options.chain` and `m.options.contracts`, which take a
-table with a `Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode`
-column.
+for.
+
+The arguments that take one value take a table too: `underlying=` of `m.options.chain` and
+`m.options.contracts` a table with a `Symbol` column, and every futures `product_code=` one with a
+`ProductCode` column, as `m.futures.products()` rows carry it. Each value is read as if you had
+passed it alone, and a live table is followed as a watchlist is: `fetch()` reads a value when its
+row appears and drops its rows when the row leaves, `poll()` reads the table at every cycle, and
+`m.symbol_reads()` lists each value. A static table is a fixed list, read once, and one value that
+fails fails the call. A value the dataset does not take, such as an option ticker among the
+underlyings, follows `noncanonical_symbols` as a bad watchlist row does. A `fetch()` follows one
+live table: when `symbols` is live, pass `product_code=` a list or a static table.
+
+```python
+codes = input_table({"ProductCode": dht.string}, key_cols="ProductCode")
+codes.add(new_table([string_col("ProductCode", ["ES", "NQ"])]))
+active = m.futures.contracts(product_code=codes, filters={"active": True}).fetch()
+```
 
 A large live result costs memory and time downstream: every table you derive from it updates
 when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.

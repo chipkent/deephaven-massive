@@ -20,7 +20,9 @@ module does the work they share when a dataset method is called:
   it is a total-row cap, not the endpoint's page-size parameter. `list_query` builds the query
   of a REST list dataset with them.
 - `require_bool` and `optional_text` check the plain `bool` and optional `str` arguments of
-  dataset methods.
+  dataset methods, and `value_table` boxes a table passed where a dataset takes one value (an
+  underlying, a futures product code) in a `ValueTable`, which `build_query` stores in the
+  `Request` for the verbs to read.
 - `ticker_key` declares the keys of a source whose rows name their instrument in `Ticker`.
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
@@ -59,7 +61,7 @@ from deephaven_massive._datasets.filters import (
     symbol_family,
     takes_instants,
 )
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
@@ -92,6 +94,7 @@ __all__ = [
     "require_bool",
     "shows_call",
     "ticker_key",
+    "value_table",
 ]
 
 logger = logging.getLogger(__name__)
@@ -413,6 +416,38 @@ def optional_text(name: str, value: object) -> str | None:
     return value
 
 
+def value_table(table: Table, *, argument: str, parameter: str, underlying: bool) -> ValueTable:
+    """Box a table passed where a dataset takes one value, after checking its column.
+
+    `underlying=` reads its values from a `Symbol` column, as a symbol table does, and
+    `product_code=` from a `ProductCode` column, as `m.futures.products()` rows carry them.
+    The table is read when a verb runs: a static one once, a refreshing one followed.
+
+    Args:
+        table: The table as passed.
+        argument: The method's argument, `"underlying"` or `"product_code"`.
+        parameter: The wire parameter each value is sent as, such as `"underlyingAsset"`.
+        underlying: True for a table of underlyings, read from `Symbol`; False for product
+            codes, read from `ProductCode`.
+
+    Returns:
+        The boxed table (`ValueTable`).
+
+    Raises:
+        ValueError: If the table lacks the column; the message names the columns it has.
+    """
+    column = "Symbol" if underlying else "ProductCode"
+    if column not in table.column_names:
+        columns = ", ".join(table.column_names)
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: a table without %s, columns %s", argument, column, columns)
+        raise ValueError(
+            f"a table passed as {argument} must have a {column} column; this one has: "
+            f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
+        )
+    return ValueTable(argument, parameter, column, underlying, table)
+
+
 def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
     """Return the wire parameter that carries an argument taking one value or several.
 
@@ -692,6 +727,7 @@ def build_query(
     arguments: Mapping[str, str] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
+    values: ValueTable | None = None,
 ) -> QueryBase:
     """Validate one dataset call and return its query.
 
@@ -742,6 +778,9 @@ def build_query(
             comma-separated items); the `Request` holds those parsed values.
         limit: The cap on each named symbol's rows, or on the total rows without named
             symbols (`Request.limit`), or None for every row; a positive `int`.
+        values: A table passed where the dataset takes one value (`value_table`), or None.
+            Its parameter must be None in `params`, which still reserves it from `filters`;
+            the verbs send each of the table's values as that parameter.
 
     Returns:
         An instance of the spec's query class (`query_class`, or the class `bar_query_class`
@@ -840,6 +879,7 @@ def build_query(
         ),
         filters=check_filters(core.catalog, spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
+        value_table=values,
     )
     return cls(core, spec, request, QueryCall(f"m.{spec.name}"))
 

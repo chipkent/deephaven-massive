@@ -1,6 +1,8 @@
 """Followed reads: a `history()` or `fetch()` result that follows a refreshing symbol table.
 
-When `symbols` is a refreshing table, `history()` and `fetch()` follow it: each symbol in the
+When `symbols` is a refreshing table, `history()` and `fetch()` follow it, and `fetch()` follows
+a refreshing table passed where a dataset takes one value (an option chain's underlying, a
+futures product code), keyed by each value as by a symbol: each symbol in the
 table is read (by `history()` over the call's fixed window, by `fetch()` as Massive answers at
 that read) and its rows land in the result whole, in one update cycle; each symbol removed from
 the table leaves the result in the cycle its row leaves the table. This module builds that
@@ -508,8 +510,8 @@ def _build(
         core: The session's core.
         spec: The dataset.
         read: The result's shared state.
-        symbol_table: The user's refreshing symbol table.
-        rule: The dataset's rule for the table's rows.
+        symbol_table: The user's refreshing symbol table, or table of values.
+        rule: The dataset's rule for the table's rows, which names the column read.
         router: Receives the watch's reports.
         seeded: The call-time symbols' static rows (`wait=True`), or empty.
         note: The sentences the description adds after the dataset's summary.
@@ -535,7 +537,9 @@ def _build(
         )
         seed = _seed(seeded, schema.column_names) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
-        shown = watched_rows(_cells(blink, seed), followed)
+        # A table of product codes is matched by its `ProductCode`, as the cells' `Symbol`.
+        keyed = followed if rule.column == SYMBOL else followed.view([f"{SYMBOL} = {rule.column}"])
+        shown = watched_rows(_cells(blink, seed), keyed)
         parts = PartitionedTable.from_partitioned_table(
             shown,
             key_cols=[SYMBOL],
@@ -592,8 +596,10 @@ def open_followed_read(
         spec: The dataset.
         call: The call's id (`SessionCore.next_stream_id`), the row's `StreamId`.
         query: The `repr` of the query, for the row's `Query`.
-        symbol_table: The user's refreshing table with a `Symbol` column.
-        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`).
+        symbol_table: The user's refreshing table with a `Symbol` column, or, for a table
+            passed where the dataset takes one value, with the rule's column.
+        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`, or
+            `SymbolRowRule.for_values`).
         reread: Whether a returning symbol is read again.
         plan: How the symbols are read.
         note: The sentences the table description adds after the dataset's summary.

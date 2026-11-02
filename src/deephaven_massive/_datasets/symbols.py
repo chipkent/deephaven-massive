@@ -79,6 +79,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AS_WRITTEN",
     "CANONICAL_GRAMMARS",
+    "UNDERLYING_CLASSES",
     "NormalizedSymbols",
     "SymbolTable",
     "canonical_symbol",
@@ -103,6 +104,9 @@ __all__ = [
     "read_forex_pair",
     "symbol_class",
 ]
+
+UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
+"""The classes whose tickers an option can be linked to: the ones an `underlying` takes."""
 
 _STOCK: Final = re.compile(r"^[A-Z0-9]+(?:\.[A-Z0-9]+|p[A-Z]?|[rw])*$")
 """A canonical stock ticker: an upper-case root, then the CQS suffixes Massive keeps: `.X` (a

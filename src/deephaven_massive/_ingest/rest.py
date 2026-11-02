@@ -182,6 +182,7 @@ from deephaven_massive._ingest.symbol_reads import (
     fetch_units,
     history_units,
     read_rest_by_symbol,
+    read_rest_by_value,
 )
 from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
@@ -1630,13 +1631,95 @@ class RestReader:
         request: Request,
         *,
         symbols: NormalizedSymbols | None,
+        values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: Cancel,
         pace: PaceCheck,
     ) -> poll.CycleRows:
-        """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
+        """Run one `poll()` cycle, once for each value of a value table when there is one.
+
+        Without a value table the cycle is one read (`_read_one_cycle`). With one, each of the
+        cycle's values is read as if passed alone (`Request.for_value`), one after another,
+        and the reads are joined: their rows in value order, their requests and pauses summed,
+        and what each left out. A value Massive answers with HTTP 404 follows
+        `MassiveConfig.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
+        left out of the cycle and named in its `left_out`.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            symbols: The cycle's static symbols (a reactive table already read).
+            values: The values the value table holds now (already checked), or None when the
+                request has no value table.
+            record: Records each page's drift in the table's `SchemaDrift`.
+            on_recency: Records each page's recency evidence, for the table's `Recency`.
+            executor: The poller's fan-out pool.
+            cancel: The poller's stop token, which ends the cycle's waits.
+            pace: The table's pace check.
+
+        Returns:
+            The cycle's read (`poll.CycleRows`).
+
+        Raises:
+            UnavailableSymbolError: Under `MassiveConfig.unavailable_symbols=RAISE`, for a
+                value Massive answered with HTTP 404.
+            MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
+        """
+        read = functools.partial(
+            self._read_one_cycle,
+            spec,
+            symbols=symbols,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=cancel,
+            pace=pace,
+        )
+        if values is None:
+            return read(request)
+        reads: list[poll.CycleRows] = []
+        absent: list[str] = []
+        for value in values:
+            try:
+                reads.append(read(request.for_value(value)))
+            except MassiveError as error:
+                if error.status != HTTPStatus.NOT_FOUND or self.state.closed:
+                    raise
+                self._unavailable(
+                    spec,
+                    cast("str", spec.fetch_path),
+                    (value,),
+                    reason="HTTP 404: no data",
+                    missing=True,
+                )
+                absent.append(f"{value} (HTTP 404: no data)")
+        schema = self.catalog.dataset_schema(
+            spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
+        )
+        return poll.CycleRows(
+            pa.concat_tables([one.rows for one in reads])
+            if reads
+            else schema.arrow_schema().empty_table(),
+            sum(one.requests for one in reads),
+            sum(one.patience for one in reads),
+            (*(name for one in reads for name in one.left_out), *absent),
+        )
+
+    def _read_one_cycle(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        symbols: NormalizedSymbols | None,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: Cancel,
+        pace: PaceCheck,
+    ) -> poll.CycleRows:
+        """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
 
         By default one symbol never fails the table. A reactive symbol table can route a new
         symbol to a path that lacks a parameter the caller set (`adjusted=False` on the crypto
@@ -2492,6 +2575,43 @@ class RestEndpoints:
             to_table=functools.partial(self._static, spec),
         )
 
+    def fetch_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read `fetch` for each value of a value table: each one's rows, or its failure.
+
+        See `RestTransport.fetch_by_value` for what is read and returned, and
+        `symbol_reads.read_rest_by_value` for how.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked.
+            call: The call's id, which names the read's fan-out threads.
+            stop: A read's stop token, or None.
+
+        Returns:
+            Each value, in the order given, with its outcome.
+
+        Errors are those of `symbol_reads.read_rest_by_value`.
+        """
+        return read_rest_by_value(
+            self._reader(f"call-{call}"),
+            self._core,
+            spec,
+            request=request,
+            values=values,
+            call=call,
+            cancel=_token(stop),
+            to_table=functools.partial(self._static, spec),
+        )
+
     def history(
         self,
         spec: DatasetSpec,
@@ -2677,7 +2797,7 @@ class RestEndpoints:
         one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
         """
         reader = self._reader("poll")
-        if isinstance(request.symbols, SymbolTable):
+        if isinstance(request.symbols, SymbolTable) or request.value_table is not None:
             reader.check_parameters(spec, request)
             # The table's symbols choose among every fetch path at each cycle.
             candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
