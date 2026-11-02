@@ -32,7 +32,7 @@ import secrets
 import signal
 import threading
 import traceback
-from datetime import UTC, date, timedelta
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Final, NoReturn
 
 from tests._live.calendar import NEW_YORK
@@ -42,7 +42,12 @@ from tests._live.live_run.context import RunMemory, RunRefusedError
 from tests._live.live_run.machine_checks import ready
 from tests._live.live_run.outcomes import read_outcomes
 from tests._live.live_run.run_probe import ProbeResult
-from tests._live.live_run.schedule import PYTEST_GROUPS, next_start_text, next_step
+from tests._live.live_run.schedule import (
+    PYTEST_GROUPS,
+    next_start_text,
+    next_step,
+    night_may_start,
+)
 from tests._live.live_run.secret_scrub import fingerprints
 from tests._live.live_run.state import RunState, check_of, is_due, record
 from tests._live.live_run.stream_units import night_units, stream_units
@@ -203,10 +208,12 @@ def _plan_stream_day(ctx: RunContext, state: RunState, tiers: dict[str, str]) ->
 
 
 def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) -> None:
-    """Plan a stream night when a night unit is due and no planned night is still to end.
+    """Plan a stream night when a night unit is due and the planned one may start no more.
 
-    A night already under way is never moved: a probe between two of its children's starts
-    finds its units still due.
+    A night whose child may still start is never moved: a probe between two of its children's
+    starts finds its units still due. One whose child started too often, or whose latest
+    restart has passed, is replaced by the next, even before its end (`night_may_start`), so a
+    morning probe inside a night that gave up plans the next.
 
     Args:
         ctx: The command's context.
@@ -215,8 +222,7 @@ def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) 
     """
     now = ctx.now()
     units = [u for u in night_units(tiers) if is_due(state, check_of(state, "stream-night", u))]
-    planned = state.stream_night
-    if not units or (planned and now < timetable.night_end(date.fromisoformat(planned))):
+    if not units or night_may_start(state, now):
         return
     evening = timetable.next_stream_night(
         now.astimezone(NEW_YORK).date(), stream_day=state.stream_day, closures=state.closures

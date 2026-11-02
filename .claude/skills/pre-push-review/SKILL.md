@@ -9,9 +9,9 @@ Every push to a branch with an open PR runs the review bots and every CI job its
 (the full test matrix whenever code or a test input changes), and both cost money. Find the
 problems here, where they are free, so the push that follows is the last one for that batch.
 
-Run this review **after** `./scripts/check.sh` (full) is green and **before** the push that opens
-the PR or delivers a batch of fixes. Fix every finding, rerun the full check, and then push once,
-with the review fixes, any merge of `main`, and the description edits together. A branch with no
+Run this review **before** the push that opens the PR or delivers a batch of fixes. Fix every
+finding and push once, with the review fixes, any merge of `main`, and the description edits
+together; the pre-push hook runs `./scripts/check.sh`, so do not run it first. A branch with no
 PR runs no CI, so pushing it only to keep work safe is fine; open its PR when it is ready.
 
 A green check proves only what the tests already pin. This review looks for what they do not:
@@ -138,7 +138,9 @@ the reader needs is ever cut.
 3. Grep for narration and hedges, as the checklist's banned-pattern item shows:
    `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
    Fix every hit that is narration, a hedge, or filler.
-4. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
+4. Check that the body names the PR the branch builds on ("Builds on #<n>"), if any, and the
+   `DESIGN.md` decision or verification-item number it takes, if any.
+5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
    `gh pr view <n> --json closingIssuesReferences`.
 
 ## 5. Check the conversation
@@ -161,9 +163,9 @@ posts them.
 
 ## 6. Fix, then push once
 
-Fix every finding, rerun `./scripts/check.sh` (full), and push once. Put anything you
-deliberately left alone, with its reason, in the PR description so the reviewer does not
-rediscover it.
+Fix every finding and push once; the pre-push hook runs `./scripts/check.sh` and must pass. Put
+anything you deliberately left alone, with its reason, in the PR description so the reviewer
+does not rediscover it.
 
 ## 7. After the push: post the replies and prove they landed
 

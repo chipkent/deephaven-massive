@@ -3274,7 +3274,7 @@ def front_contract() -> Callable[[str, date], str]:
     """Return a function that names a futures product's front contract on a day.
 
     Returns:
-        A function `(product, day)`, the product `"ES"`, `"ZC"`, or `"LE"` (see
+        A function `(product, day)`, the product `"ES"`, `"ZC"`, `"LE"`, or `"MBT"` (see
         `contracts.front_contract`).
     """
     return contracts.front_contract

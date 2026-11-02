@@ -66,7 +66,10 @@ RECONCILED: Final = {
     "stream-day-reconcile": "stream-day",
     "stream-night-reconcile": "stream-night",
 }
-"""The streaming group whose latest folder and day each reconciliation compares with history."""
+"""The streaming group whose folders and days each reconciliation compares with history."""
+
+DISK_RETRY: Final = timedelta(minutes=5)
+"""How long a stream day or night short of free disk waits before it checks the disk again."""
 
 BASIC_REQUESTS_PER_MINUTE: Final = 5
 
@@ -450,6 +453,62 @@ def recover_stale_attempts(ctx: RunContext, state: RunState) -> list[Attempt]:
     return stale
 
 
+def reconciled_stream(
+    out: Path, streams: list[Attempt], due: list[str]
+) -> tuple[Attempt, list[str]]:
+    """Choose the streamed day or night a reconciliation compares, and the units it covers.
+
+    Each due unit belongs to the latest attempt whose folder's `results.jsonl` reports it
+    passed, or to the latest attempt when none does. The earliest of those attempts is
+    compared, with its own units; the others stay due for a later attempt. So a reconciliation
+    that runs only after the next night or day has streamed still compares each unit with the
+    folder and date it streamed, not the newer ones.
+
+    Args:
+        out: The results folder.
+        streams: The streaming group's attempts, oldest first; at least one.
+        due: The reconciliation's due units.
+
+    Returns:
+        The attempt whose folder and day are compared, and the due units it streamed.
+    """
+    passed: dict[str, int] = {}
+    for index, attempt in enumerate(streams):
+        for line in read_outcomes(out / attempt.folder / "results.jsonl"):
+            if line["status"] == "passed":
+                passed[line["name"]] = index
+    owner = {unit: passed.get(unit, len(streams) - 1) for unit in due}
+    first = min(owner.values(), default=len(streams) - 1)
+    return streams[first], [unit for unit in due if owner[unit] == first]
+
+
+def _stream_source(
+    out: Path, state: RunState, *, group: str, due: list[str]
+) -> tuple[str, str, list[str]]:
+    """Return the streamed folder and day a built-in group's request names, and its units.
+
+    Args:
+        out: The results folder.
+        state: The run's state.
+        group: The group.
+        due: Its due units.
+
+    Returns:
+        The absolute folder of the streaming group's latest attempt, `""` before any; its latest
+        day, ISO, `""` before any; and `due`. For a reconciliation with an attempt to compare,
+        the folder and day of the streamed day or night it compares (`reconciled_stream`), and
+        only the units it covers.
+    """
+    streamed = RECONCILED.get(group, group)
+    streams = [a for a in state.attempts if a.group == streamed]
+    days = state.stream_nights if streamed == "stream-night" else state.stream_days
+    if group in RECONCILED and streams:
+        source, due = reconciled_stream(out, streams, due)
+        return str(out / source.folder), source.day, due
+    folder = str(out / streams[-1].folder) if streams else ""
+    return folder, days[-1] if days else "", due
+
+
 def run_built_in_group(
     ctx: RunContext, state: RunState, memory: RunMemory, *, group: str, until: datetime
 ) -> None:
@@ -464,37 +523,37 @@ def run_built_in_group(
             stopped `STREAM_GRACE` after.
 
     A stream day or night does not start with less free disk than
-    `machine_checks.REQUIRED_DISK`; its units stay due. A reconciliation reads the latest
-    attempt folder and day of the streaming group it compares (`RECONCILED`). Control-C stops
-    the child; what finished is recorded, and the `KeyboardInterrupt` goes on.
+    `machine_checks.REQUIRED_DISK`: it creates no attempt, so the shortage spends none of its
+    starts, and waits `DISK_RETRY` (never past its stop) before the run checks again; its
+    units stay due. A reconciliation compares one streamed day or night per attempt
+    (`reconciled_stream`). Control-C stops the child; what finished is recorded, and the
+    `KeyboardInterrupt` goes on.
     """
     today = ctx.now().astimezone(NEW_YORK).date()
     due = due_names(state, group, today, any_time=group in state.any_time) or []
-    attempt = new_attempt(ctx, state, group)
-    folder = ctx.out / attempt.folder
     if group in {"stream-day", "stream-night"} and (free := ctx.free_disk(ctx.out)) < REQUIRED_DISK:
         ctx.say(
             f"{group}: only {free >> 30} GB free under {ctx.out}; it needs "
-            f"{REQUIRED_DISK >> 30} GB: free some space, and it starts again"
+            f"{REQUIRED_DISK >> 30} GB: free some space; the disk is checked again in "
+            f"{DISK_RETRY.seconds // 60} minutes"
         )
-        attempt.status, attempt.ended = "finished", ctx.now().isoformat()
-        run_state.save(ctx.out, state)
+        ctx.sleep_until(min(ctx.now() + DISK_RETRY, until))
         return
+    attempt = new_attempt(ctx, state, group)
+    folder = ctx.out / attempt.folder
     if group == "stream-day" and today.isoformat() not in state.stream_days:
         state.stream_days.append(today.isoformat())
     if group == "stream-night" and state.stream_night not in state.stream_nights:
         state.stream_nights.append(state.stream_night)
-    streamed = RECONCILED.get(group, group)
-    streams = [a.folder for a in state.attempts if a.group == streamed]
-    days = state.stream_nights if streamed == "stream-night" else state.stream_days
+    stream_folder, stream_day, due = _stream_source(ctx.out, state, group=group, due=due)
     request = {
         "group": group,
         "due": due,
         "tiers": state.entitlements[state.current]["tiers"],
         "entitlement": state.current,
         "until": until.isoformat(),
-        "stream_folder": str(ctx.out / streams[-1]) if streams else "",
-        "stream_day": days[-1] if days else "",
+        "stream_folder": stream_folder,
+        "stream_day": stream_day,
     }
     (folder / "request.json").write_text(json.dumps(request, indent=1) + "\n", encoding="utf-8")
     ctx.say(f"{group}: {len(due)} checks")

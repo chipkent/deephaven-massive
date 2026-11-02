@@ -38,13 +38,13 @@ uv build                                 # sdist and wheel
    `git fetch`. Commits and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`,
    `test:`, `refactor:`, `ci:`, `chore:`, and their wording meets the Title section of
    `docs/dev/pull-requests.md`.
-4. **Check, review, push.** Before opening a PR and before every push to one, get
-   `./scripts/check.sh` (full) green, run the `pre-push-review` skill, and fix its findings. Every
-   CI job must pass, the required free-threaded 3.14t job too: locking must work without the GIL.
+4. **Review, then push through the check.** Before opening a PR and before every push to one,
+   run the `pre-push-review` skill and fix its findings; the push's pre-push hook then runs
+   `./scripts/check.sh`, which must pass. Every CI job must pass, the required free-threaded
+   3.14t job too: locking must work without the GIL.
 5. **Push in batches.** Each push to a PR branch runs paid CI and review bots: push once when the
    PR opens, then once per finished batch of fixes. Never push work in progress or to see
-   whether CI passes. Merge `main` into a PR branch only for a conflict or a change you need, then
-   rerun the full check before the push.
+   whether CI passes. Merge `main` into a PR branch only as "Working in parallel" says.
 6. **Answer every review comment**, from people and bots: name the commit that fixes it and say
    how, or say why nothing changes. Never resolve a thread without a reply.
 7. **PR descriptions read as if an O'Reilly technical editor wrote them**, and a reader
@@ -57,7 +57,9 @@ uv build                                 # sdist and wheel
    and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
 9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
-   `DESIGN.md` first: an owner decision.
+   `DESIGN.md` first: an owner decision when it changes what users see or the documented
+   contract. A change that keeps the documented intent and changes only how it is achieved
+   records, in its PR, the existing owner decision it follows, and proceeds.
 10. **Tests mirror the package**, one leading underscore dropped per path component:
     `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
     packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the
@@ -122,6 +124,21 @@ uv build                                 # sdist and wheel
     row is bad is refused at the call. A `str` or list passed as `symbols` is the caller's code,
     not data: a value in it that is not Massive's exact ticker raises `ValueError` at the call,
     whatever the setting.
+
+## Working in parallel
+
+Several agents work at once, and every collision costs a full check and a paid CI run.
+
+- **Before starting**, list the files, `DESIGN.md` sections, and `README.md` sections you will
+  change. If an open PR changes the same files (`gh pr list`, `gh pr diff <n> --name-only`),
+  branch from that PR's branch instead of `main`, and write "Builds on #<n>" in the PR body.
+- **Merge `main` once, and only when needed**: when the branch conflicts with it, or after the
+  PR it builds on merges. Never merge only to stay current.
+- **The pre-push hook is the check.** It runs `./scripts/check.sh` and picks the scope from the
+  files the branch changes: never run the check yourself just before a push.
+- **Take a free `DESIGN.md` number.** A new decision (§ 22) or verification item (§ 23) takes
+  the number the coordinator reserved for you, or else the next after the highest on `main` and
+  in every open PR's diff. Name the number in the PR body.
 
 ## Documentation standard
 
@@ -216,6 +233,7 @@ These prevent deadlocks and leaks.
 | Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
 | Where new code goes; the layout cleanup and its feature pause | `plans/rework/DESIGN.md` § 4.1, `plans/rework/LAYOUT.md` |
 | Design, by topic | `plans/rework/DESIGN.md`: § 3 exports, § 4 layout and layers, § 6 session and liveness, § 7 and § 11 API and enums, § 8 datasets, § 13 connections, § 14 fan-out, § 18 threads and locks, § 19 wire and schemas, § 20 tooling |
+| Splitting work across agents | The `plan-parallel-prs` skill, `.claude/skills/plan-parallel-prs/SKILL.md` |
 | PR descriptions | `docs/dev/pull-requests.md` |
 | Vendor changes and drift | `docs/dev/spec-refresh.md` |
 | Live tests | `docs/live-tests.md` |

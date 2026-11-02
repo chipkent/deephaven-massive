@@ -310,6 +310,12 @@ def test_the_summary_gathers_the_nights_findings(tmp_path: Path) -> None:
         {"stream": "stocks-trades", "hour": "2026-11-04T22", "rows": "4"},
     ]
     assert len(_csv(tmp_path / "boundaries.csv")) == 6
+    again = stream_night.summarize_night(
+        tmp_path, streams, units=["crypto real-time"], night=NIGHT, end=_utc(1, 30, day=5)
+    )
+    assert again == summary  # a summary written twice holds each row once
+    assert len(_csv(tmp_path / "hours.csv")) == 2
+    assert len(_csv(tmp_path / "boundaries.csv")) == 6
 
 
 # --- a whole night ------------------------------------------------------------------------------
