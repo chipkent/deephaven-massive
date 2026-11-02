@@ -2778,7 +2778,12 @@ def test_fetch_follows_one_refreshing_table_at_a_time(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     q = massive_session.futures.snapshots(live("ESZ6"), product_code=live_codes("ES"))
-    with pytest.raises(ValueError, match="follows one refreshing table, and both symbols and"):
+    with pytest.raises(
+        ValueError,
+        match=r"both symbols and product_code are refreshing tables\. Use poll\(interval\), "
+        r"which reads both at every cycle, or pass one of them as a static snapshot, such as "
+        r"product_code=table\.snapshot\(\)$",
+    ):
         q.fetch()
     # A static symbol table beside it is read once, and the codes are followed.
     contracts = new_table([string_col("Symbol", ["ESZ6"])])

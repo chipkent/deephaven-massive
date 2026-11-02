@@ -1152,8 +1152,9 @@ class Query(QueryBase):
             logger.debug("%r fetch() refused: two refreshing tables to follow", self)
             raise ValueError(
                 f"{self!r}.fetch() follows one refreshing table, and both symbols and "
-                f"{values.argument} are refreshing tables: pass one of them as a list or a "
-                "static table, such as its snapshot()"
+                f"{values.argument} are refreshing tables. Use poll(interval), which reads "
+                f"both at every cycle, or pass one of them as a static snapshot, such as "
+                f"{values.argument}=table.snapshot()"
             )
         call_time = _read_value_table(core, spec, values, query=repr(self), live=True)
         request = self._static_request()

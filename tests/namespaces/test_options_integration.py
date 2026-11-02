@@ -10,12 +10,18 @@ tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from deephaven import dtypes, input_table, new_table
+from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._massive import (
@@ -705,3 +711,58 @@ def test_option_bars_across_the_underlyings_split(
     days = by_basis[True]
     assert any(day < split for day in days), f"no adjusted bar before {split}: {days}"
     assert any(day >= split for day in days), f"no adjusted bar from {split}: {days}"
+
+
+_FOLLOW_WAIT = 90.0
+"""Seconds a followed read's step may take."""
+
+
+def _underlyings_until(
+    table_rows: TableRows, result: Table, done: Callable[[set[str]], bool]
+) -> set[str]:
+    """Read a result's underlyings until `done` holds, failing after `_FOLLOW_WAIT` seconds.
+
+    Returns:
+        The distinct `Underlying` values that satisfied it.
+    """
+    pause = threading.Event()  # never set; only paces the loop
+    deadline = time.monotonic() + _FOLLOW_WAIT
+    while True:
+        seen = {str(row["Underlying"]) for row in table_rows(result)}
+        if done(seen):
+            return seen
+        assert time.monotonic() < deadline, f"the followed result never got there: {seen}"
+        pause.wait(0.25)
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.timeout(300)
+def test_the_chain_follows_a_live_table_of_underlyings(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Whether `fetch()` of the option chain follows a live table of underlyings.
+
+    Follows an input table holding `SPY` with `m.options.chain(underlyings,
+    contract_type=dm.ContractType.CALL, limit=20).fetch()`, adds `QQQ` (one request), and
+    deletes it. Passes when the result holds only SPY's contracts at the call, gains QQQ's once
+    QQQ is read, and loses them once QQQ's row is deleted, while SPY's stay. Each step waits at
+    most 90 s.
+    """
+    m = live_session
+    # A stand-in for the user's table, created under the lock so no cycle refreshes it early.
+    with shared_lock(get_exec_ctx().update_graph):
+        underlyings = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    underlyings.add(new_table([string_col("Symbol", ["SPY"])]))
+    query = m.options.chain(underlyings, contract_type=dm.ContractType.CALL, limit=20)
+    result = query.fetch()
+    try:
+        first = _underlyings_until(table_rows, result, lambda seen: seen == {"SPY"})
+        evidence(f"at the call: {sorted(first)}, {result.size} rows")
+        underlyings.add(new_table([string_col("Symbol", ["QQQ"])]))
+        added = _underlyings_until(table_rows, result, lambda seen: seen == {"SPY", "QQQ"})
+        evidence(f"after adding QQQ: {sorted(added)}, {result.size} rows")
+        underlyings.delete(new_table([string_col("Symbol", ["QQQ"])]))
+        left = _underlyings_until(table_rows, result, lambda seen: seen == {"SPY"})
+        evidence(f"after deleting QQQ: {sorted(left)}, {result.size} rows")
+    finally:
+        m.release(result)
