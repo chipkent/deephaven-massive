@@ -1,0 +1,37 @@
+# git-cliff settings for the release notes the release workflow writes on each version tag
+# (.github/workflows/release.yml; docs/dev/releasing.md explains the steps).
+#
+# Every pull request is squash-merged, so each commit on main is one pull request: its subject
+# is the pull request's Conventional Commits title, and GitHub ends it with the pull request's
+# number, as in "feat: read settings from a YAML file (#397)". The notes list each subject
+# under the heading of its type, oldest first, and GitHub turns each "#397" into a link.
+
+[changelog]
+# The workflow names the release after its tag, so the notes start with the first heading. The
+# HTML comment in front of each group name orders the headings and is stripped from the text.
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+# A subject with no recognized type still appears, under Other, so nothing is left out.
+filter_unconventional = false
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Fixes" },
+  { message = "^docs", group = "<!-- 2 -->Docs" },
+  { message = "^test", group = "<!-- 3 -->Tests" },
+  { message = "^refactor", group = "<!-- 4 -->Refactors" },
+  # CI and build changes are tooling, as chores are. Dependabot titled its early pull requests
+  # "build(deps): ...".
+  { message = "^(chore|ci|build)", group = "<!-- 5 -->Chores" },
+  { message = ".*", group = "<!-- 6 -->Other" },
+]
+sort_commits = "oldest"

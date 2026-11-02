@@ -199,4 +199,5 @@ These prevent deadlocks and leaks.
 | PR descriptions | `docs/dev/pull-requests.md` |
 | Vendor changes and drift | `docs/dev/spec-refresh.md` |
 | Live tests | `docs/live-tests.md` |
+| Cutting a release | `docs/dev/releasing.md` |
 | User docs and the dataset reference | `README.md`, `docs/datasets/README.md`, `CONTRIBUTING.md` |
