@@ -6,7 +6,7 @@ The probe runs against `FakeRestServer` and `FakeS3`, scripted as each plan answ
 from __future__ import annotations
 
 import json
-from datetime import date, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -88,7 +88,8 @@ def _script(server: FakeRestServer, held: dict[str, str]) -> None:
         "/v2/snapshot/locale/global/markets/forex/tickers",
         snapshot("currencies", "tickers", {"ticker": "C:EURUSD"}),
     )
-    futures = Reply(envelope([{"details": {"ticker": "ESZ6"}}]))
+    timeframe = "REAL-TIME" if held["futures"] in {"advanced", "business"} else "DELAYED"
+    futures = Reply(envelope([{"ticker": "ESZ6", "last_trade": {"timeframe": timeframe}}]))
     server.reply("/futures/v1/snapshot", _REFUSED if held["futures"] == "basic" else futures)
     server.reply("/futures/v1/trades/ESZ6", answer("futures", 1))
 
@@ -102,8 +103,7 @@ def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
 
 
 _READ_AS = {
-    ("futures", "advanced"): "developer",
-    ("futures", "business"): "developer",
+    ("futures", "business"): "advanced",
     ("indices", "business"): "advanced",
     ("stocks", "business_expansion"): "business",
     ("options", "business_expansion"): "business",
@@ -239,7 +239,7 @@ def test_a_digest_hides_the_credential() -> None:
     assert "key" not in found
 
 
-_DAY = date(2026, 10, 29)
+_PROBED = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
 
 
 _OWNER = {"api_key": probe.digest("key"), "s3": None}
@@ -254,9 +254,9 @@ def _probed() -> plans.LivePlans:
 
 def test_the_cache_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    probe.store_plans(path, _probed(), owner=_OWNER, day=_DAY)
+    probe.store_plans(path, _probed(), owner=_OWNER)
     assert "key" not in json.loads(path.read_text())["owner"]["api_key"]
-    back = probe.cached_plans(path, owner=_OWNER, day=_DAY)
+    back = probe.cached_plans(path, owner=_OWNER, now=_PROBED)
     assert back == plans.LivePlans(
         tiers=_probed().tiers,
         s3=True,
@@ -269,7 +269,8 @@ def test_the_cache_round_trip(tmp_path: Path) -> None:
     "change",
     [
         {"version": 1},
-        {"day": "2026-10-28"},
+        {"probed": "2026-10-29T12:00:00"},
+        {"probed": "noon"},
         {"owner": {"api_key": "other", "s3": None}},
         {"tiers": dict.fromkeys(plans.TIERS, "gold")},
         {"tiers": {}},
@@ -278,16 +279,30 @@ def test_the_cache_round_trip(tmp_path: Path) -> None:
 )
 def test_a_cache_that_does_not_fit_is_ignored(change: dict[str, object], tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    probe.store_plans(path, _probed(), owner=_OWNER, day=_DAY)
+    probe.store_plans(path, _probed(), owner=_OWNER)
     path.write_text(json.dumps(json.loads(path.read_text()) | change))
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
+
+
+@pytest.mark.parametrize(
+    ("after", "kept"),
+    [
+        (timedelta(minutes=59, seconds=59), True),
+        (timedelta(hours=1), False),
+        (timedelta(seconds=-1), False),
+    ],
+)
+def test_the_cache_lasts_an_hour(after: timedelta, *, kept: bool, tmp_path: Path) -> None:
+    path = tmp_path / "plans.json"
+    probe.store_plans(path, _probed(), owner=_OWNER)
+    assert (probe.cached_plans(path, owner=_OWNER, now=_PROBED + after) is not None) is kept
 
 
 def test_a_missing_or_broken_cache_is_ignored(tmp_path: Path) -> None:
     path = tmp_path / "plans.json"
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
     path.write_text("{")
-    assert probe.cached_plans(path, owner=_OWNER, day=_DAY) is None
+    assert probe.cached_plans(path, owner=_OWNER, now=_PROBED) is None
 
 
 @pytest.mark.parametrize("name", ["stocks", "options"])
@@ -332,3 +347,37 @@ def test_the_options_probe_asks_about_the_busiest_contract(
     assert probe.probe_tiers(client, now=_NOON)["options"] == "developer"
     asked = [r.target for r in fake_rest.requests if r.target.startswith("/v3/snapshot/options")]
     assert asked == ["/v3/snapshot/options/SPY?limit=250"]
+
+
+def test_the_futures_probe_reads_the_front_contracts_trades_and_label(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "basic"))
+    snapshot = [
+        {"details": {"ticker": "ESM7"}, "session": {"volume": 2_000_000}},
+        {"details": {"ticker": "ESH7"}, "last_quote": {"timeframe": "REAL-TIME"}, "session": {}},
+        {
+            "details": {"ticker": "ESZ6"},
+            "last_trade": {},
+            "last_minute": {"timeframe": "REAL-TIME"},
+            "session": {"volume": 1_500_000},
+        },
+        {"last_trade": {"timeframe": "REAL-TIME"}, "session": {"volume": 9_000_000}},
+    ]
+    fake_rest.reply_first("/futures/v1/snapshot", Reply(envelope(snapshot)))
+    # Only the front contract has trades scripted: asking about another one would answer 404.
+    fake_rest.reply_first("/futures/v1/trades/ESZ6", _OK)
+    assert probe.probe_tiers(client, now=_NOON)["futures"] == "advanced"
+    asked = [r.target for r in fake_rest.requests if r.target.startswith("/futures/v1/snapshot")]
+    assert asked == ["/futures/v1/snapshot?product_code=ES&limit=50"]
+
+
+def test_a_futures_snapshot_without_a_recency_label_stops_the_probe(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "starter"))
+    fake_rest.reply_first(
+        "/futures/v1/snapshot", Reply(envelope([{"details": {"ticker": "ESZ6"}, "session": {}}]))
+    )
+    with pytest.raises(probe.PlanProbeError, match="no contract with a recency label"):
+        probe.probe_tiers(client, now=_NOON)

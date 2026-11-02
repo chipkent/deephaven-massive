@@ -1,12 +1,12 @@
-"""The probe that asks Massive which plans a key holds, and its day-long cache.
+"""The probe that asks Massive which plans a key holds, and its hour-long cache.
 
 A live run finds the key's plans instead of trusting a hand-written list: per asset class, a
 snapshot of one liquid ticker (Starter), its trades (Developer) and quotes (Advanced), and the
 snapshot's `fmv` (Business), then one file of every flat-file prefix. The probe never guesses:
 an answer counts only with rows, and a probe that cannot tell raises `PlanProbeError`, which
 ends the run with a request to declare the plans in `MASSIVE_LIVE_PLANS`. The answer is kept
-in `.live-plans.json` for the rest of the New York day, naming the credentials only by a
-digest. The plans themselves, what each covers, and their history windows are in `plans`.
+in `.live-plans.json` for an hour (`CACHE_LIFETIME`), naming the credentials only by a digest.
+The plans themselves, what each covers, and their history windows are in `plans`.
 
 The probes send requests through the REST and flat-file clients the caller creates, so the
 `live_plans` fixture in `tests/conftest.py` controls their pacing and their credentials; the
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Final, TypeAlias
 
 from deephaven_massive._massive import (
@@ -37,12 +37,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 PLANS_CACHE: Final = ".live-plans.json"
-"""The file, in the repository root, that keeps the probed plans until the New York day ends. It
-names the key and the S3 credentials only by a digest; deleting it makes the next run probe
-again, as an upgrade during the day needs."""
+"""The file, in the repository root, that keeps the probed plans for `CACHE_LIFETIME`. It names
+the key and the S3 credentials only by a digest; deleting it makes the next run probe again."""
 
-CACHE_VERSION: Final = 2
+CACHE_VERSION: Final = 3
 """The layout of the plans cache; a cache of another version is ignored and probed again."""
+
+CACHE_LIFETIME: Final = timedelta(hours=1)
+"""How long the probed plans are reused: short, so a plan bought or cancelled during a day of
+runs is seen within the hour; deleting the cache sees it at once."""
 
 SNAPSHOT_RESET: Final = (time(3, 30), time(4, 30))
 """New York times between which the probe does not run: Massive clears its snapshots at 03:30
@@ -75,14 +78,14 @@ def digest(secret: str | None) -> str | None:
     return None if not secret else hashlib.sha256(secret.encode()).hexdigest()[:16]
 
 
-def cached_plans(path: Path, *, owner: Mapping[str, str | None], day: date) -> LivePlans | None:
-    """Read the plans cache, if it was written that day, in this layout, for the same credentials.
+def cached_plans(path: Path, *, owner: Mapping[str, str | None], now: datetime) -> LivePlans | None:
+    """Read the plans cache, if it is fresh, in this layout, and for the same credentials.
 
     Args:
         path: The cache file.
         owner: The digests of the API key and the S3 access key id (`digest`).
-        day: The run's New York day; a cache of another day is stale, since a plan bought or
-            cancelled during the month changes what the key can do.
+        now: The present, as an aware instant; a cache probed `CACHE_LIFETIME` or longer
+            before it is stale, since a plan bought or cancelled changes what the key can do.
 
     Returns:
         The cached plans, or None when the file is missing, unreadable, of another layout
@@ -90,13 +93,13 @@ def cached_plans(path: Path, *, owner: Mapping[str, str | None], day: date) -> L
     """
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
-        if stored["version"] != CACHE_VERSION:
+        if stored["version"] != CACHE_VERSION or stored["owner"] != dict(owner):
             return None
-        if stored["owner"] != dict(owner) or stored["day"] != day.isoformat():
+        probed = str(stored["probed"])
+        if not timedelta(0) <= now - datetime.fromisoformat(probed) < CACHE_LIFETIME:
             return None
         tiers = {name: str(stored["tiers"][name]) for name in TIERS}
         flat_files = tuple(str(prefix) for prefix in stored["flat_files"])
-        probed = str(stored["probed"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if any(tiers[name] not in TIERS[name] for name in TIERS):
@@ -109,21 +112,17 @@ def cached_plans(path: Path, *, owner: Mapping[str, str | None], day: date) -> L
     )
 
 
-def store_plans(
-    path: Path, plans: LivePlans, *, owner: Mapping[str, str | None], day: date
-) -> None:
-    """Write probed plans to the cache, for the later runs of the same New York day.
+def store_plans(path: Path, plans: LivePlans, *, owner: Mapping[str, str | None]) -> None:
+    """Write probed plans to the cache, for the runs of the next `CACHE_LIFETIME`.
 
     Args:
         path: The cache file, replaced whole.
-        plans: The plans just probed.
+        plans: The plans just probed; their `source` is `probed <UTC instant>`.
         owner: The digests of the API key and the S3 access key id (`digest`).
-        day: The run's New York day.
     """
     stored = {
         "version": CACHE_VERSION,
         "owner": dict(owner),
-        "day": day.isoformat(),
         "probed": plans.source.removeprefix("probed "),
         "tiers": dict(plans.tiers),
         "flat_files": list(plans.flat_files or ()),
@@ -248,10 +247,10 @@ _CHAIN_PAGE: Final = 250
 
 
 def _contract_of(row: dict[str, Any]) -> str:
-    """Return the ticker of an option chain row, or `""` when it names none.
+    """Return the contract a snapshot row names, or `""` when it names none.
 
     Args:
-        row: A row of the chain snapshot.
+        row: A row of SPY's option chain, or of the futures snapshot (`_futures_contract`).
 
     Returns:
         Its `details.ticker`, or `""`.
@@ -344,32 +343,89 @@ def _currencies_plan(client: RestClient) -> str:
     return "business" if _has_fmv(rows) else "starter"
 
 
-def _futures_plan(client: RestClient) -> str:
-    """Probe the Futures plan: one ES contract's snapshot (Starter) and its trades (Developer).
+_FUTURES_PAGE: Final = 50
+"""How many ES contracts of the futures snapshot the probe reads to find the front one."""
 
-    Developer and Advanced both include trades and quotes, and Business per venue leaves no
-    mark a request can see, so every plan above Starter reads as Developer: the futures tests
-    need nothing above it.
+
+def _recency_labels(row: dict[str, Any]) -> set[str]:
+    """Return the recency labels a futures snapshot row carries.
+
+    Massive labels a contract's last trade, last quote, and last minute bar with the plan's
+    recency (`timeframe`: `REAL-TIME` or `DELAYED`); a contract that has not traded carries
+    none.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its labels, such as `{"DELAYED"}`; empty when it carries none.
+    """
+    parts = (row.get(key) for key in ("last_trade", "last_quote", "last_minute"))
+    return {
+        str(part["timeframe"]) for part in parts if isinstance(part, dict) and part.get("timeframe")
+    }
+
+
+def _session_volume(row: dict[str, Any]) -> float:
+    """Return the session's volume of a futures snapshot row, 0 when it has none.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its `session.volume`.
+    """
+    session = row.get("session")
+    volume = session.get("volume") if isinstance(session, dict) else None
+    return float(volume) if isinstance(volume, int | float) else 0.0
+
+
+def _futures_contract(row: dict[str, Any]) -> str:
+    """Return the contract a futures snapshot row names, or `""` when it names none.
+
+    The documentation's sample puts `ticker` on the row, while the OpenAPI specification puts
+    it under `details`, so both are read.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its `ticker`, else its `details.ticker`, else `""`.
+    """
+    return str(row.get("ticker") or "") or _contract_of(row)
+
+
+def _futures_plan(client: RestClient) -> str:
+    """Probe the Futures plan: the ES snapshot (Starter), its front contract's trades and label.
+
+    The front contract is the labelled ES contract (`_recency_labels`) with the most volume
+    this session. Its trades answer from Developer up, and its recency label tells a delayed
+    plan (Developer) from a real-time one: `REAL-TIME` reads as Advanced. Futures Business,
+    sold per venue, leaves no other mark a request can see, so it reads as Advanced too.
 
     Args:
         client: The probe's REST client.
 
     Returns:
-        `"basic"`, `"starter"`, or `"developer"`.
+        `"basic"`, `"starter"`, `"developer"`, or `"advanced"`.
 
     Raises:
-        PlanProbeError: When the snapshot's row names no contract to ask for trades.
+        PlanProbeError: When no row of the snapshot names a contract with a recency label.
     """
-    rows = entitled(client, ("/futures/v1/snapshot", {}, {"product_code": "ES", "limit": 1}))
+    rows = entitled(
+        client, ("/futures/v1/snapshot", {}, {"product_code": "ES", "limit": _FUTURES_PAGE})
+    )
     if rows is None:
         return "basic"
-    tickers = [row.get("ticker") or (row.get("details") or {}).get("ticker") for row in rows]
-    contracts = [str(ticker) for ticker in tickers if ticker]
-    if not contracts:
-        msg = f"the ES snapshot names no contract: {rows}"
+    labelled = [row for row in rows if _futures_contract(row) and _recency_labels(row)]
+    if not labelled:
+        msg = f"the ES snapshot names no contract with a recency label: {rows[:3]}"
         raise PlanProbeError(msg)
-    trades = ("/futures/v1/trades/{ticker}", {"ticker": contracts[0]}, {"limit": 1})
-    return "developer" if entitled(client, trades, rows_prove=False) is not None else "starter"
+    front = max(labelled, key=_session_volume)
+    trades = ("/futures/v1/trades/{ticker}", {"ticker": _futures_contract(front)}, {"limit": 1})
+    if entitled(client, trades, rows_prove=False) is None:
+        return "starter"
+    return "advanced" if "REAL-TIME" in _recency_labels(front) else "developer"
 
 
 PLAN_PROBES: Final[Mapping[str, Callable[[RestClient], str]]] = {

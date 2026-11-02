@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import wire_spellings
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
@@ -274,12 +275,13 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
 
     Records the file's `C:EURUSD` row of the most recent published Monday with its `window_start`,
     and, for each REST range and grouped bar around that day, whether it is the same bar (open and
-    close equal, the rest within 1e-6) and each field's error. Reading it: the file and REST bars of
-    the same day being one bar, whatever their stamps, means the library's 00:00 UTC label is right
-    if each stamp lies in that UTC day; a file row matching another day's REST bar means the sources
-    cut or label days differently.
+    close equal, the rest within 1e-6) and each field's error. The file writes the pair `C:EUR-USD`,
+    so the read keeps every spelling the library's own file filter keeps. Reading it: the file and
+    REST bars of the same day being one bar, whatever their stamps, means the library's 00:00 UTC
+    label is right if each stamp lies in that UTC day; a file row matching another day's REST bar
+    means the sources cut or label days differently.
     """
-    read = flat_file_tickers(_DAY_FILE, recent_monday, [_PAIR])
+    read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.FOREX, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     rows, extra = read
     for row in rows:

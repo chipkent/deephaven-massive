@@ -30,9 +30,9 @@ a few cheap requests per class:
 
 | What it asks | What an answer means |
 |---|---|
-| a snapshot of one liquid ticker (AAPL, SPY's option chain, `I:NDX`, `C:EURUSD`, one ES contract) | Starter or above; refused means Basic |
+| a snapshot of one liquid ticker (AAPL, SPY's option chain, `I:NDX`, `C:EURUSD`, the ES contracts) | Starter or above; refused means Basic |
 | that ticker's trades, then its quotes (stocks, and the chain's contract with the most volume that day) | Developer (trades), Advanced (quotes); an empty answer counts as access, since the plan refuses with a 403 |
-| that contract's trades (futures) | Developer or above; Developer and Advanced both include quotes, so futures never read as Advanced |
+| the front ES contract's trades, and its recency label in the snapshot (futures) | Developer or above (trades); a `REAL-TIME` label means Advanced, since Developer is delayed. The front contract is the one with the most volume that session among those carrying a label |
 | a non-null `fmv` in the snapshot (stocks, options, currencies) | Business; for stocks and options always the base Business plan, since its REST trades and quotes answer too (at end-of-day recency), so only a declaration names the trades and quotes expansion |
 | a real-time indices snapshot | Advanced |
 | one file of every flat-file prefix | which flat files the S3 credentials reach: only a file that opens counts |
@@ -44,11 +44,12 @@ clears and refills its snapshots and a Business plan's `fmv` can be missing. A s
 Business plan is not an Advanced plan: without the expansion it streams no trades, quotes, LULD, or
 per-second bars, so a test that needs Advanced skips on it; declare `business_expansion` to run
 those tests on a key with the expansion. Indices Business leaves no mark a request can see and reads
-as Advanced. Futures Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a
+as Advanced. Futures Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Advanced; a
 test of a venue the plan lacks is refused. The answer is kept in `.live-plans.json` in the
-repository root (git-ignored; it names the key and the S3 access key id only by a digest) until the
-New York day ends, so later runs that day do not probe again. Delete the file to probe again at
-once, after an upgrade. The plans head the evidence (under "live plans") and the summary at the end
+repository root (git-ignored; it names the key and the S3 access key id only by a digest) for an
+hour, so runs within the hour do not probe again; a run that reuses it prints a `live plans:` line
+saying so and when the plans were probed. Delete the file to probe again at once, after an
+upgrade. The plans head the evidence (under "live plans") and the summary at the end
 of the run. The live sessions list every class on a delayed plan (Stocks, Options, and Futures
 Starter and Developer; Indices Starter) in `MassiveConfig.delayed_subscriptions`, since the library
 refuses delayed data for any other: their streams use Massive's delayed feed, and their REST reads
@@ -89,8 +90,9 @@ consequences:
   stay within it, a test reads less on Basic than on a paid plan: fewer underlyings,
   symbols, or pages, or none of a part that repeats what another request shows (the
   underlying spellings read only the contracts of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`; the
-  split and dividend checks try only the newest event). Each such test's docstring says what
-  it leaves out, and its evidence has a line saying so. A unit test fails when a live test
+  split and cash-dividend checks try only the newest event, and the stock-dividend check at
+  most three). Each such test's docstring says what it leaves out, and its evidence has a line
+  saying so. A unit test fails when a live test
   that may read a class on Basic declares more than 5, and a live run skips such a test while
   its class is on Basic, with the reason "needs a paid <class> plan: N requests would take
   about M minutes on Basic". Each time a request waits, the run prints one line, such as
@@ -218,7 +220,7 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**), its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
-| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
+| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
@@ -293,6 +295,22 @@ refusing the newer, the two sessions can drop each other until the test ends:
 ```bash
 uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
 uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
+```
+
+Two checks answer questions the library's design leans on; make sure each ran, and read its
+evidence:
+
+- **The options cap** (`test_the_options_cap_counts_contracts_or_topics`, a limit test, so only
+  in the first `integration_limits` command above; it needs Options Advanced): whether Massive's
+  1,000-contract cap per connection counts contracts or topics. The library counts topics.
+- **The index minute file's day** (`test_an_index_minute_file_holds_its_own_new_york_day`, in
+  the main run; it needs Indices Starter and `s3`): whether `us_indices/minute_aggs_v1` holds
+  exactly its New York day. `history()` trims each index file to that day before joining REST
+  rows, so a failure means index ranges lose or repeat an hour at each midnight. To run it
+  alone:
+
+```bash
+uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
 ```
 
 ## The live-run program
