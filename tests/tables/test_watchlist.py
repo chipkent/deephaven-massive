@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from deephaven import dtypes, input_table, new_table, time_table, update_graph
-from deephaven.column import int_col, string_col
+from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
@@ -24,6 +25,7 @@ from deephaven_massive._tables.watchlist import (
     _SymbolCounter,
     invalid_row_message,
     read_symbols,
+    rows_since_added,
     skipped_rows_text,
     watched_rows,
 )
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
 
 Change = tuple[frozenset[str], frozenset[str]]
 PRICES = {"Symbol": dtypes.string, "Price": dtypes.int32}
+STAMPED = {**PRICES, "TimestampInsert": dtypes.Instant}
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
@@ -445,11 +448,56 @@ def test_watched_rows_keeps_a_blink_table_blink_and_counts_a_repeated_symbol_onc
     release_scope(dh_exec_ctx, scope)
 
 
+def stamped(symbol: str, price: int) -> Table:
+    # One row received now, as the library stamps it.
+    return new_table(
+        [
+            string_col("Symbol", [symbol]),
+            int_col("Price", [price]),
+            datetime_col("TimestampInsert", [time.time_ns()]),
+        ]
+    )
+
+
+def test_rows_since_added_hides_a_re_added_symbols_old_row(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, publisher = blink_publisher(
+            "latest", STAMPED, on_shutdown=lambda: None, release_later=pins.append
+        )
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
+        kept = rows_since_added(blink.last_by("Symbol"), watchlist)
+
+    def shown() -> list[tuple[object, object]]:
+        return [(r["Symbol"], r["Price"]) for r in dh_to_pylist(kept)]
+
+    publisher.add(stamped("A", 1))
+    publisher.add(stamped("B", 2))
+    wait_for(lambda: shown() == [("A", 1), ("B", 2)])
+    assert kept.column_names == list(STAMPED)  # the hidden time is dropped
+    watchlist.delete(new_table([string_col("Symbol", ["A"])]))
+    wait_for(lambda: shown() == [("B", 2)])
+    watchlist.add(new_table([string_col("Symbol", ["A"])]))
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        pass  # the cycle that re-added A has ended
+    assert shown() == [("B", 2)]  # A's row was received before A rejoined
+    publisher.add(stamped("A", 3))
+    wait_for(lambda: shown() == [("A", 3), ("B", 2)])
+    release_scope(dh_exec_ctx, scope)
+    for pin in pins:
+        release_scope(dh_exec_ctx, pin)
+
+
+@pytest.mark.parametrize("keep", [watched_rows, rows_since_added], ids=lambda keep: keep.__name__)
 @pytest.mark.parametrize(
     "order", ["in one cycle", "watchlist first", "table first"], ids=lambda order: order
 )
-def test_watched_rows_takes_one_failure_when_both_of_its_tables_fail(
-    dh_exec_ctx: ExecutionContext, order: str
+def test_a_watchlist_filter_takes_one_failure_when_both_of_its_tables_fail(
+    dh_exec_ctx: ExecutionContext, order: str, keep: Callable[[Table, Table], Table]
 ) -> None:
     # `where_in` would end the process in the first two orders: Deephaven 42.7 delivers a
     # failure of each of its tables to its result, and asserts on the second. Failing both
@@ -458,12 +506,12 @@ def test_watched_rows_takes_one_failure_when_both_of_its_tables_fail(
     scope = new_scope()
     with scope.open():
         blink, table_publisher = blink_publisher(
-            "prices", PRICES, on_shutdown=lambda: None, release_later=pins.append
+            "prices", STAMPED, on_shutdown=lambda: None, release_later=pins.append
         )
         watch_blink, watch_publisher = blink_publisher(
             "watch", {"Symbol": dtypes.string}, on_shutdown=lambda: None, release_later=pins.append
         )
-        kept = watched_rows(blink.last_by("Symbol"), blink_to_append_only(watch_blink))
+        kept = keep(blink.last_by("Symbol"), blink_to_append_only(watch_blink))
         downstream = kept.update_view("Twice = Price * 2")
     if order == "in one cycle":
         with update_graph.exclusive_lock(dh_exec_ctx.update_graph):

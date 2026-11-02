@@ -1394,7 +1394,9 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     assert isinstance(q, StreamQuery)
     current = q.last_by()
     schema = massive_session._core.catalog.dataset_schema(FOREX_SPEC)
-    row = schema.to_arrow([{"Symbol": "C:EURUSD", "AskPrice": 1.08}])
+    # Received now: a row received before its symbol joined the watchlist is hidden.
+    received = datetime.now(UTC)
+    row = schema.to_arrow([{"Symbol": "C:EURUSD", "AskPrice": 1.08, "TimestampInsert": received}])
     fake_streams.publishers[1].add(dh_arrow.to_table(row))
     shown = rows_when(current, lambda rows: len(rows) == 1)
     assert [r["Symbol"] for r in shown] == ["C:EURUSD"]

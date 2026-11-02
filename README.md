@@ -863,11 +863,17 @@ board = m.stocks.quotes(watchlist).last_by()
 aapl = board.where("Symbol == `AAPL`")
 ```
 
-In a live table, `last_by()` drops the row of a symbol that leaves the watchlist, while
-`append_only()` and `ring()` keep the rows it already produced. A watchlist row that is not
-Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
-`m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
-fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+In a live table, `last_by()` by `Symbol` (the default) drops the row of a symbol that leaves
+the watchlist, and shows nothing for a symbol added back until it trades again; with keys that
+span symbols, such as `last_by("Exchange")`, a group keeps its row after the symbol behind it
+leaves. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
+watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
+stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
+bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+A crypto pair added later that Massive's list of crypto tickers does not hold is skipped and
+listed the same way, and the stream keeps its other pairs. A futures contract a watchlist holds
+subscribes once its trading schedule has loaded (up to 15 seconds), so its first rows carry a
+`Date`.
 
 The options connection carries at most 1,000 topics, counted across every session that shares
 it, and each stream of a contract is one (its trades and its quotes are two). A list or static

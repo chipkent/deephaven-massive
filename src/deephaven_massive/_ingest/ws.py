@@ -25,6 +25,14 @@ everything else belongs here:
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
+- **Watchlist changes.** A change of a reactive symbol table reaches the stream's connection
+  directly, except for futures and crypto, whose changes wait for a lookup first. Those run one
+  at a time, in order, on the session's `symbol changes` worker, so a removal never overtakes
+  an earlier addition still waiting: a futures contract waits up to `SCHEDULE_WAIT` for its
+  trading schedule, so its first rows are dated, and a crypto pair is split by Massive's crypto
+  ticker list. A pair the list does not hold, or that a failing read of the list cannot split
+  after `PAIR_RETRY_DELAYS`, is skipped and listed in the stream's `Error`; the stream keeps
+  its other pairs.
 - **Sharing.** Sessions in one process with the same API key and equal connection settings
   (`CONNECTION_SETTINGS`, and the same Deephaven update graph) share one `ConnectionGroup`, so
   their streams ride the same connections: individual plans allow one connection per cluster,
@@ -61,13 +69,22 @@ from __future__ import annotations
 
 import functools
 import logging
+import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    AuthenticationError,
+    EntitlementError,
+    ErrorCause,
+    MassiveError,
+    PermanentError,
+    library_bug,
+)
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -77,6 +94,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionStream,
 )
 from deephaven_massive._log_limits import bounded_list, mark_failure_logged
+from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
@@ -95,6 +113,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "JOIN_TIMEOUT",
+    "PAIR_RETRY_DELAYS",
     "SCHEDULE_WAIT",
     "SCHEDULE_WAIT_HOLDING_LOCK",
     "WsConnections",
@@ -106,15 +125,25 @@ JOIN_TIMEOUT: Final = 5.0
 """Seconds `m.close()` waits for each connection's threads before it logs a WARNING."""
 
 SCHEDULE_WAIT: Final = 15.0
-"""Seconds a futures stream's verb waits for its contracts' products and schedules before it
-subscribes, so its first rows are dated by the schedules. A lookup still running then dates its
-rows once it ends, and they have a null `Date` meanwhile."""
+"""Seconds a futures stream waits for its contracts' products and schedules before it
+subscribes them, so their first rows are dated by the schedules: the verb waits for explicit
+contracts, and the session's `symbol changes` worker for those a symbol table holds or adds. A
+lookup still running then dates its rows once it ends, and they have a null `Date` meanwhile."""
 
 SCHEDULE_WAIT_HOLDING_LOCK: Final = 1.0
 """Seconds the wait of `SCHEDULE_WAIT` lasts instead when the verb's thread holds the update
 graph's lock (a console command): no live table updates while it waits, and its rows get a null
 `Date` until the schedules load anyway, so it waits only long enough for a lookup that is
 already answered."""
+
+PAIR_RETRY_DELAYS: Final = (2.0, 8.0)
+"""Seconds the `symbol changes` worker waits before each further try to split a crypto pair a
+symbol table adds, after reading Massive's crypto ticker list failed; after the last try fails,
+the pair is skipped like one the list does not hold. A failure no retry can fix (a rejected key,
+a plan without reference data, a pair the list does not hold) skips the pair at once."""
+
+_PERMANENT: Final = (PermanentError, AuthenticationError, EntitlementError)
+"""The failures to split a crypto pair that the same read would meet again."""
 
 
 def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
@@ -239,9 +268,14 @@ class WsConnections:
         self._mine: set[int] = set()
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
-        # One worker, started on the first crypto watchlist change: a pair is looked up off
-        # the update-graph thread, and no change of a stream overtakes another.
-        self._lookups: Final = ThreadPoolExecutor(1, f"{core.thread_prefix} crypto pairs")
+        # One worker, started on the first futures or crypto watchlist change: a contract's
+        # schedule and a pair's split are waited for off the update-graph thread, and no change
+        # of a stream overtakes another.
+        self._changes: Final = ThreadPoolExecutor(1, f"{core.thread_prefix} symbol changes")
+        # Set by close(), so a worker waiting to retry a pair stops waiting.
+        self._closing: Final = threading.Event()
+        # The crypto pairs each stream skips, with why, by stream; guarded by the group's lock.
+        self._skipped_pairs: dict[int, dict[str, str]] = {}
         self._closed = False
 
     @property
@@ -309,7 +343,8 @@ class WsConnections:
             if created:
                 connection.start()
             if asset_class is AssetClass.FUTURES and wanted:
-                self._load_schedules(wanted, stream_id=stream_id)
+                locked = holds_update_graph_lock(self._exec_ctx)
+                self._load_schedules(wanted, stream_id=stream_id, holding_lock=locked)
             opened = open_stream_tables(
                 plan,
                 core.dataset_schema(spec),
@@ -342,22 +377,26 @@ class WsConnections:
             raise
         return opened.handle
 
-    def _load_schedules(self, contracts: frozenset[str], *, stream_id: int) -> None:
-        """Load a futures stream's schedules before it subscribes, waiting a bounded time.
+    def _load_schedules(
+        self, contracts: frozenset[str], *, stream_id: int, holding_lock: bool
+    ) -> None:
+        """Load futures contracts' schedules before they subscribe, waiting a bounded time.
 
-        Runs on the verb's thread, with no library lock held. It waits only on the calendar's
-        worker, which makes no Deephaven call, so a console command holding the update graph's
-        lock may run it; such a caller waits `SCHEDULE_WAIT_HOLDING_LOCK`, since no live table
-        updates meanwhile, and any other `SCHEDULE_WAIT`. A lookup that does not end in time is
-        logged at WARNING once; its rows get a null `Date` until it ends. A failed lookup logs
-        its own WARNING.
+        Runs on the verb's thread or on the `symbol changes` worker, with no library lock
+        held. It waits only on the calendar's worker, which makes no Deephaven call, so a
+        console command holding the update graph's lock may run it; such a caller waits
+        `SCHEDULE_WAIT_HOLDING_LOCK`, since no live table updates meanwhile, and any other
+        `SCHEDULE_WAIT`. A lookup that does not end in time is logged at WARNING once; its rows
+        get a null `Date` until it ends. A failed lookup logs its own WARNING.
 
         Args:
-            contracts: The stream's canonical futures symbols; spreads are never looked up.
+            contracts: Canonical futures symbols; spreads are never looked up.
             stream_id: The stream, for the log.
+            holding_lock: Whether the calling thread holds the update graph's lock.
+
+        A closed session raises the `MassiveError` of `futures_calendar`.
         """
-        locked = holds_update_graph_lock(self._exec_ctx)
-        wait = SCHEDULE_WAIT_HOLDING_LOCK if locked else SCHEDULE_WAIT
+        wait = SCHEDULE_WAIT_HOLDING_LOCK if holding_lock else SCHEDULE_WAIT
         calendar = self.futures_calendar()
         calendar.watch(contracts)
         if not calendar.wait_loaded(contracts, wait):
@@ -367,7 +406,7 @@ class WsConnections:
                 stream_id,
                 bounded_list(sorted(contracts)),
                 wait,
-                ", the most a caller holding the update graph's lock waits" if locked else "",
+                ", the most a caller holding the update graph's lock waits" if holding_lock else "",
             )
         else:
             logger.debug(
@@ -567,6 +606,7 @@ class WsConnections:
         del group.streams[stream_id]
         del group.owners[stream_id]
         self._mine.discard(stream_id)
+        self._skipped_pairs.pop(stream_id, None)
         current.cap_pending.pop(stream_id, None)
         current.give(self)
         return current
@@ -607,10 +647,11 @@ class WsConnections:
 
         Runs on an update-graph thread (or the caller thread for the initial replay), with the
         update-graph lock held: it takes the group's lock only to find the connection, and
-        never blocks or raises. A futures change that finds the session closed, or the group
-        left by every session, after the connection was found is dropped and logged at DEBUG:
-        the close tears the stream down, so failing it from here would only blame its
-        watchlist.
+        never blocks or raises. A futures or crypto change, which waits for a lookup first, goes
+        to the `symbol changes` worker (`_change_contracts`, `_change_pairs`), which runs a
+        session's changes one at a time, in order; every other change goes to the connection's
+        loop at once. A change that finds the worker shut down by `close()` is dropped, since
+        the stream goes with the session.
 
         Args:
             stream_id: The stream.
@@ -621,9 +662,45 @@ class WsConnections:
             connection = self.group.streams.get(stream_id)
         if connection is None:
             return
-        if connection.asset_class is AssetClass.FUTURES and added:
+        asset_class = connection.asset_class
+        if asset_class is AssetClass.FUTURES:
+            change = self._change_contracts
+        elif asset_class is AssetClass.CRYPTO:
+            change = self._change_pairs
+        else:
+            connection.post(connection.change_symbols, stream_id, added, removed)
+            return
+        try:
+            self._changes.submit(change, stream_id, added, removed)
+        except RuntimeError:
+            logger.debug(
+                "stream %d: a watchlist change (%d added, %d removed) was dropped; the session "
+                "is closing",
+                stream_id,
+                len(added),
+                len(removed),
+            )
+
+    def _change_contracts(
+        self, stream_id: int, added: frozenset[str], removed: frozenset[str]
+    ) -> None:
+        """Load a futures stream's added contracts' schedules, then post the change.
+
+        Runs on the `symbol changes` worker, which holds no lock and never holds the update
+        graph's, so it waits up to `SCHEDULE_WAIT` (`_load_schedules`): the contracts a symbol
+        table holds when the stream opens, and those it adds later, subscribe once their
+        schedules load, and their first rows are dated, as explicit contracts' are. A change
+        that finds the session closed is dropped and logged at DEBUG: the close tears the
+        stream down, so failing it from here would only blame its watchlist.
+
+        Args:
+            stream_id: The stream.
+            added: Canonical symbols the table now holds.
+            removed: Canonical symbols it no longer holds.
+        """
+        if added:
             try:
-                calendar = self.futures_calendar()
+                self._load_schedules(added, stream_id=stream_id, holding_lock=False)
             except MassiveError as error:
                 logger.debug(
                     "stream %d: a watchlist change (%d added, %d removed) was dropped; the "
@@ -634,23 +711,40 @@ class WsConnections:
                     error,
                 )
                 return
-            calendar.watch(added)
-        if connection.asset_class is not AssetClass.CRYPTO:
-            connection.post(connection.change_symbols, stream_id, added, removed)
+        self._post_change(stream_id, added, removed)
+
+    def _post_change(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
+        """Post a change to the stream's connection's loop, if the stream still exists.
+
+        Args:
+            stream_id: The stream.
+            added: Canonical symbols to subscribe.
+            removed: Canonical symbols to unsubscribe.
+        """
+        with self._lock:
+            connection = self.group.streams.get(stream_id)
+        if connection is None:
+            logger.debug(
+                "stream %d: ended before its watchlist change (%d added, %d removed) was posted",
+                stream_id,
+                len(added),
+                len(removed),
+            )
             return
-        try:
-            self._lookups.submit(self._change_pairs, stream_id, added, removed)
-        except RuntimeError:
-            return  # close() shut the worker down meanwhile: the stream is gone with it
+        connection.post(connection.change_symbols, stream_id, added, removed)
 
     def _change_pairs(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
-        """Resolve a crypto stream's added pairs, then post the change; fail it if one fails.
+        """Split a crypto stream's added pairs, then post the change, skipping those that fail.
 
-        Runs on the lookup worker. Its only Deephaven call is the check, when a lookup starts or
-        joins one already under way, of whether its thread holds the update graph's lock, which
-        sets how long the lookup waits out rate-limit pauses (`rate_limits.read_patience`; the
-        worker never holds it, so 10 minutes). A failed lookup goes to the flush thread
-        (`Flusher.fail`), and the change to the connection's loop thread.
+        Runs on the `symbol changes` worker. Its only Deephaven call is the check, when a lookup
+        starts or joins one already under way, of whether its thread holds the update graph's
+        lock, which sets how long the lookup waits out rate-limit pauses
+        (`rate_limits.read_patience`; the worker never holds it, so 10 minutes). A pair that
+        cannot be split (`_split`) is skipped: never subscribed, logged at WARNING, and listed in
+        the stream's `Error` in `m.streams()` until the table no longer holds it; deleting and
+        adding the row again looks it up again. The stream keeps its other pairs. An unexpected
+        failure, a defect of the library, fails the stream (`Flusher.fail`), with its trace
+        logged at ERROR.
 
         Args:
             stream_id: The stream.
@@ -658,9 +752,7 @@ class WsConnections:
             removed: Canonical symbols it no longer holds.
         """
         try:
-            self.resolve_pairs(added)
-        except MassiveError as error:
-            failure: MassiveError | None = error
+            failed = {symbol: why for symbol in sorted(added) if (why := self._split(symbol))}
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
             failure = MassiveError(
                 library_bug(f"looking up the crypto pairs {sorted(added)} failed: {error!r}"),
@@ -669,16 +761,91 @@ class WsConnections:
             # Logged here, with the trace; the stream's failure then logs it at DEBUG only.
             mark_failure_logged(failure)
             logger.exception("%s: %s", self._label, failure)
-        else:
-            failure = None
-        with self._lock:
-            connection = self.group.streams.get(stream_id)
-        if connection is None:
+            with self._lock:
+                connection = self.group.streams.get(stream_id)
+            if connection is not None:
+                connection.flusher.fail([stream_id], failure)
             return
-        if failure is not None:
-            connection.flusher.fail([stream_id], failure)
-        else:
-            connection.post(connection.change_symbols, stream_id, added, removed)
+        if failed:
+            logger.warning(
+                "crypto stream %d: skipped the pairs %s its symbol table added: %s; the stream "
+                "keeps its other pairs",
+                stream_id,
+                bounded_list(sorted(failed)),
+                "; ".join(failed.values()),
+            )
+        self._show_skipped_pairs(stream_id, failed, removed)
+        subscribe = added - failed.keys()
+        if subscribe or removed:
+            self._post_change(stream_id, subscribe, removed)
+
+    def _split(self, symbol: str) -> str | None:
+        """Split one crypto pair a symbol table added, retrying a failed read of the list.
+
+        Runs on the `symbol changes` worker. A failure the same read would meet again (a pair
+        Massive's list does not hold, a rejected key, a plan without reference data) is final
+        at once; any other is tried again after each of `PAIR_RETRY_DELAYS`, logged at INFO,
+        and final after the last. A close interrupts the wait, and the pair is then given up.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            None once the pair is split, or why it cannot be.
+        """
+        delays = iter(PAIR_RETRY_DELAYS)
+        while True:
+            try:
+                self.resolve_pairs((symbol,))
+            except _PERMANENT as error:
+                return str(error)
+            except MassiveError as error:
+                delay = next(delays, None)
+                if delay is None:
+                    return str(error)
+                logger.info("%s: %s; trying again in %.0f s", self._label, error, delay)
+                if self._closing.wait(delay):
+                    return str(error)
+            else:
+                return None
+
+    def _show_skipped_pairs(
+        self, stream_id: int, failed: Mapping[str, str], removed: frozenset[str]
+    ) -> None:
+        """Update the pairs a crypto stream skips, and its `Error` when they change.
+
+        The pairs the table no longer holds leave the set, and those just skipped join it. The
+        set is shown as the stream's `NotePart.SKIPPED_PAIRS` warning, cleared once it is
+        empty. `SessionCore.update_streams` takes only the leaf `registry_lock`.
+
+        Args:
+            stream_id: The stream.
+            failed: The pairs just skipped, with why.
+            removed: The symbols the table no longer holds.
+        """
+        with self._lock:
+            if stream_id not in self.group.streams:
+                return
+            before = self._skipped_pairs.get(stream_id, {})
+            after = {s: why for s, why in before.items() if s not in removed} | dict(failed)
+            if after:
+                self._skipped_pairs[stream_id] = after
+            else:
+                self._skipped_pairs.pop(stream_id, None)
+        if after.keys() == before.keys():
+            return
+        core = self._core()
+        if core is None:
+            return
+        text = None
+        if after:
+            first = min(after)
+            text = (
+                f"skipped crypto pairs {bounded_list(sorted(after))}, which Massive's crypto "
+                f"ticker list does not split ({after[first]}); delete a row and add it again to "
+                "look it up again"
+            )
+        core.update_streams({stream_id: StreamUpdate(notes={NotePart.SKIPPED_PAIRS: text})})
 
     def resolve_pairs(self, symbols: Iterable[str]) -> None:
         """Look up, once per group, the base and quote of each crypto symbol.
@@ -687,7 +854,7 @@ class WsConnections:
         `DO-TUSD`), so each takes its base and quote from Massive's crypto ticker list, which
         the session reads once; a topic is never built from a guess. May block the calling thread
         for that read, with no lock held, so it runs on the caller thread before a stream
-        starts, or on the lookup worker.
+        starts, or on the `symbol changes` worker.
 
         Args:
             symbols: Canonical crypto symbols.
@@ -784,7 +951,8 @@ class WsConnections:
                 return
             self._closed = True
             mine, closing = self._leave()
-        self._lookups.shutdown(wait=False, cancel_futures=True)
+        self._closing.set()
+        self._changes.shutdown(wait=False, cancel_futures=True)
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)
             if connection not in closing:  # an ended loop holds no stream (`_on_state`)

@@ -112,6 +112,7 @@ from deephaven_massive._tables.transports import FlatFileTransport, RestTranspor
 from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
     read_symbols,
+    rows_since_added,
     skipped_rows_text,
     watched_rows,
 )
@@ -1007,7 +1008,8 @@ class StreamQuery(QueryBase):
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
         crypto ticker list when the stream starts (read once per session); a failed read, or a
-        pair the list does not hold, raises `MassiveError` before any topic is subscribed.
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A
+        pair a reactive table adds later is skipped instead, and listed in `m.streams()`.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -1211,14 +1213,15 @@ class StreamQuery(QueryBase):
         """Return the latest row per key, by default one row per `Symbol`.
 
         The underlying state keeps every key ever seen. With a reactive symbol table and
-        `Symbol` among the keys, rows of symbols removed from it are filtered out; a symbol
-        removed and re-added shows its last row until it ticks again. With keys that span
-        symbols (`by="Exchange"`), each group's row is the latest from a symbol watched when it
-        arrived. A table row that is not Massive's exact ticker is skipped and listed in
-        `m.streams()` (convert with `dm.canonicalize_symbols`). `last_by()` never seeds from
-        REST: for current state, use `snapshots(symbols).poll(n)`, which needs a plan that
-        includes snapshots (README.md#plans-and-errors). A static symbol table is read once,
-        now.
+        `Symbol` among the keys, a symbol's row shows only while the table holds the symbol and
+        only once a row has arrived since the symbol last joined it: a symbol removed and added
+        again shows no row until it ticks again. With keys that span symbols
+        (`by="Exchange"`), each group's row is the latest from a symbol watched when it arrived,
+        and removing that symbol does not remove the group's row. A table row that is not
+        Massive's exact ticker is skipped and listed in `m.streams()` (convert with
+        `dm.canonicalize_symbols`). `last_by()` never seeds from REST: for current state, use
+        `snapshots(symbols).poll(n)`, which needs a plan that includes snapshots
+        (README.md#plans-and-errors). A static symbol table is read once, now.
 
         Args:
             by: The key column or columns, positionally or by keyword as in Deephaven's
@@ -1255,9 +1258,10 @@ class StreamQuery(QueryBase):
             return self._stream(lambda blink: blink.last_by(list(keys)), request, verb="last_by")
         watch = symbols.table
         if "Symbol" in keys:
-            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
+            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows,
+            # and hides the row a re-added symbol showed before it left.
             return self._stream(
-                lambda blink: watched_rows(blink.last_by(list(keys)), watch),
+                lambda blink: rows_since_added(blink.last_by(list(keys)), watch),
                 request,
                 verb="last_by",
             )

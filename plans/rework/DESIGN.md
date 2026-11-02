@@ -1426,9 +1426,17 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`watched_rows(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted from
-the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
-removed and re-added shows its stale row until its next tick. With keys that span symbols (for
+`rows_since_added(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted
+from the result. The underlying `last_by` state keeps every symbol ever seen, so the filter also
+hides a row received before its symbol last joined the table: a symbol that is removed and
+re-added shows no row until its next tick. `rows_since_added` (`_tables/watchlist.py`) joins
+each row with the time its symbol joined, computed by the engine in the cycle the symbol appears
+(`symbol_table.select_distinct("Symbol").update("AddedAt = now()")`, under a hidden name), and
+keeps rows with `TimestampInsert >= AddedAt`. The time comes from the engine, not from a library
+publisher, which would lag the table by a cycle and let the stale row through; the stream
+subscribes the symbol in reaction to the same change, so every row received for it comes later.
+A row a shared stream received just before the symbol joined is hidden until the next one. With
+keys that span symbols (for
 example `by="Exchange"`) the filter comes first, `watched_rows(blink,
 symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
@@ -2415,9 +2423,15 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   keeps no list of quote currencies of its own. The session reads that list once, on first
   need, through its REST client, and keeps it for its life; a failed read is not kept, so the
   next need reads it again. A stream needs it when it starts or when a symbol table adds a
-  crypto ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
-  stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
-  currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
+  crypto ticker (on the session's `symbol changes` worker, section 18.1). At the start, a failed
+  read refuses the stream with the read's `MassiveError`, and a ticker the list does not hold,
+  or whose currencies do not join to it, refuses it with a `MassiveError` naming the ticker.
+  A ticker a symbol table adds later is skipped instead: never subscribed, logged at WARNING,
+  and listed in the stream's `Error` in `m.streams()` (its own warning part) until the table
+  no longer holds it, while the stream keeps its other pairs; deleting the row and adding it
+  again looks it up again. A failed read of the list is retried after 2 s and 8 s
+  (`PAIR_RETRY_DELAYS`) before the ticker is skipped; a refusal no retry can fix (a pair the
+  list does not hold, a rejected key, a plan without reference data) skips it at once. Nothing
   falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
   fails a `poll()` table, since every later cycle would read the same list. Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
@@ -3043,12 +3057,16 @@ session and the library has no holiday calendar to rule that out, and a wrong da
 than none. Its `Timestamp` and every other column are kept, and the streams' `Error` is not
 touched: the stream is healthy. A miss whose lookup is still running logs at DEBUG; any other
 logs at WARNING once per product (or contract) and rule date. So that a stream's first rows
-are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
-asks for them and waits, before it subscribes, until their products and schedules are loaded
-or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
-no Deephaven call, so a console command holding the update graph's lock may run it, and such a
-caller waits at most 1 s (`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it
-waits. A wait
+are dated, a futures stream verb with explicit contracts asks for them and waits, before it
+subscribes, until their products and schedules are loaded or failed, at most 15 s
+(`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes no Deephaven call, so a
+console command holding the update graph's lock may run it, and such a caller waits at most 1 s
+(`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it waits. The contracts a
+symbol table holds when the stream opens, and those it adds later, wait the same 15 s on the
+session's `symbol changes` worker (section 18.1), never on the table's listener: the verb
+returns at once, and each contract subscribes once its schedule loads. That worker runs each
+session's futures and crypto changes one at a time, in order, so a removal never overtakes an
+addition still waiting, and a contract the table no longer holds is never subscribed again. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
 the gap between one loaded session's close and the next one's first event gets the next
 session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
@@ -4461,7 +4479,7 @@ is no queue, rotation, JSON, custom field, or context variable: each line costs 
 
 **Correlation.** Every library thread is named after what owns it. A session's own threads are
 `massive #<session> <role>`: `reaper`, `diagnostics`, `poll-<stream id>` and its pool
-`poll-<stream id> rest_<n>`, `poll watch`, `crypto pairs`, and the call pools below. The threads of a
+`poll-<stream id> rest_<n>`, `poll watch`, `symbol changes`, and the call pools below. The threads of a
 connection group, which serve every session sharing its connections, are
 `massive group #<group> <role>`: `ws <host>/<cluster>`, `flush <host>/<cluster>`,
 `start <host>/<cluster>`, `move <host>/<cluster>`, and `futures schedules`. Each static
@@ -4629,7 +4647,7 @@ without the GIL.
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read after 2 s and 8 s and skipping a ticker it cannot split (its `Error` part in `m.streams()`), or failing the stream (`Flusher.fail`) on a defect; then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 

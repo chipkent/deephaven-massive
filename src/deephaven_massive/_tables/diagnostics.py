@@ -179,7 +179,8 @@ class NotePart(StrEnum):
 
     Several sources warn about one stream independently: its connection (an outage, silence,
     the options cap, unacknowledged topics), its flush thread (`dm.ALL` symbols whose rows are
-    dropped), and a `poll()` table's poller (a failed cycle). Each sets or clears only its own
+    dropped), its session's `symbol changes` worker (crypto pairs it cannot split), and a
+    `poll()` table's poller (a failed cycle). Each sets or clears only its own
     part with `StreamUpdate.notes`, so no source replaces or clears another's warning, and the
     `Error` column joins the current parts in this order, with the skipped symbol-table values
     last. A stopped stream's `Error` shows only why it stopped.
@@ -195,6 +196,9 @@ class NotePart(StrEnum):
     """Massive has not acknowledged some of the stream's topics after a re-send."""
     STALE_SYMBOLS = "stale_symbols"
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
+    SKIPPED_PAIRS = "skipped_pairs"
+    """Crypto pairs a symbol table added that the stream skips: Massive's crypto ticker list
+    does not split them, or could not be read."""
     POLL_CYCLE = "poll_cycle"
     """A `poll()` cycle failed; the next one runs as scheduled."""
 
