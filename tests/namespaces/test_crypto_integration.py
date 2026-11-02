@@ -25,11 +25,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.wire_symbols import wire_spellings
+from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
 from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -167,8 +167,51 @@ def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> t
     )
 
 
+def _at_day_edge(stamp_ms: int, day: date) -> bool:
+    """Tell whether a stamp is the first or the last millisecond of a UTC day.
+
+    Args:
+        stamp_ms: The stamp, in milliseconds since the epoch.
+        day: The UTC day.
+
+    Returns:
+        True for 00:00:00.000 or 23:59:59.999 UTC of `day`.
+    """
+    first = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+    return stamp_ms in {first, first + 86_400_000 - 1}
+
+
+def _assert_one_utc_day(
+    day: date,
+    prev: Mapping[str, Any],
+    *,
+    ranged: Sequence[Mapping[str, Any]],
+    grouped: Sequence[Mapping[str, Any]],
+) -> None:
+    """Assert that `/prev`, the range, and grouped daily send one bar for one UTC day.
+
+    Args:
+        day: The UTC day of `/prev`'s stamp.
+        prev: The `/prev` bar.
+        ranged: The range day bars around `day`.
+        grouped: The grouped-daily rows of the pair for `day`.
+
+    Raises:
+        AssertionError: If a source lacks the bar, stamps it off the day's first or last
+            millisecond, or sends other OHLCV.
+    """
+    assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
+    same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
+    assert len(same_day) == 1, f"range bars of {day}: {same_day}"
+    assert _at_day_edge(int(same_day[0]["t"]), day), f"range bar stamped {same_day[0]['t']}"
+    assert _same(_ohlcv(same_day[0]), _ohlcv(prev)), "the range bar is not /prev's bar"
+    assert len(grouped) == 1, f"grouped rows of {_PAIR} on {day}: {grouped}"
+    assert _at_day_edge(int(grouped[0]["t"]), day), f"grouped bar stamped {grouped[0]['t']}"
+    assert _same(_ohlcv(grouped[0]), _ohlcv(prev)), "the grouped bar is not /prev's bar"
+
+
 @pytest.mark.needs("currencies:basic")
-@pytest.mark.settles("1")
+@pytest.mark.verifies("1")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
@@ -184,15 +227,15 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
 
     Records the raw `X:BTCUSD` day bar of `/prev`, the range bars around that day, and the
     grouped-daily row, each `t` as a UTC instant, whether they agree, and what the library
-    makes of the same requests. Reading it: stamps at 00:00 UTC that agree everywhere confirm
-    the library's day cut. Stamps at midnight New York time (04:00 or 05:00 UTC) mean REST
-    uses another day cut or only another stamp; the minute-rebuild test says which, and the
-    library serves those bars labelled by the UTC day their stamp falls on (shown here), with
-    a WARNING in the log, until that is decided. A
-    grouped stamp at no day boundary (such as 20:48 UTC) is the same bar with a write-time
-    stamp if its OHLCV equal the range bar's, otherwise another day cut. With Currencies on
-    Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`
-    and `dm.ALL` history, which read the same `/prev` and grouped daily as the raw requests.
+    makes of the same requests. Passes when all three sources send the same bar (open and close
+    equal, the rest within 1e-6) for one UTC day, each stamped at its first or last millisecond,
+    which the library labels with that day; the range bar is stamped at 00:00 UTC, and `/prev`
+    and grouped daily at 23:59:59.999. A failure means a source cuts or stamps days
+    otherwise: a stamp at midnight New York time (04:00 or 05:00 UTC) or at no day boundary is
+    served with a WARNING, and the minute-rebuild test says which day it covers. With
+    Currencies on Basic, which allows 5 requests a minute, it leaves out the library's
+    `previous_day_bar` and `dm.ALL` history, which read the same `/prev` and grouped daily as
+    the raw requests.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -225,10 +268,9 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
     )
+    _assert_one_utc_day(day, prev, ranged=ranged, grouped=grouped)
     if "currencies" in classes_on_basic:
         evidence("Currencies on Basic: the library's previous_day_bar and dm.ALL are not read")
-        assert ranged
-        assert grouped
         return
     prev_bar = live_session.crypto.previous_day_bar(_PAIR)
     evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
@@ -238,12 +280,10 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     )
     shown = outcome if isinstance(outcome, str) else f"{len(outcome)} rows"
     evidence(f"library dm.ALL history(REST) (grouped daily): {shown}")
-    assert ranged
-    assert grouped
 
 
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("1")
+@pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     live_session: dm.MassiveSession,
@@ -260,10 +300,10 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     Records the file's `X:BTCUSD` row of the most recent published Monday with its `window_start`,
     the REST range bars around that day, and, for each, whether it is the same bar (open and close
     equal, the rest within 1e-6) with each field's relative error. The file writes the pair
-    `X:BTC-USD`, so the read keeps every spelling the library's own file filter keeps. Reading it: a
-    file row stamped at 00:00 or 23:59:59.999 UTC of its day and equal to the range bar of the same
-    UTC day confirms one day cut for both sources; a file row equal to no REST bar, or to a bar of
-    another day, means the two sources cut days differently.
+    `X:BTC-USD`, so the read keeps every spelling the library's own file filter keeps. Passes
+    when the file holds one row, stamped at 00:00 or 23:59:59.999 UTC of its day, and equal to the
+    range bar of the same UTC day, so both sources cut days alike; a file row equal to no REST
+    bar, or to a bar of another day, means the two sources cut days differently.
     """
     read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
@@ -301,7 +341,14 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
-    assert rows
+    assert len(rows) == 1, f"{_DAY_FILE} holds {len(rows)} rows of {_PAIR}"
+    (row,) = rows
+    stamp = row["window_start"]
+    assert stamp is not None, f"{_DAY_FILE} row without window_start"
+    assert _at_day_edge(int(stamp) // _MS, recent_monday), f"file row stamped {stamp}"
+    values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
+    same_day = [b for b in ranged if _utc_day(int(b["t"])) == recent_monday]
+    assert any(_same(values, _ohlcv(b)) for b in same_day), "the file row is not the range bar"
 
 
 @pytest.mark.needs("currencies:basic")
@@ -374,8 +421,21 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
     assert utc <= new_york / _CLOSER, "/prev is not much closer to the UTC day's rebuild"
 
 
+def _canonical(raw: Iterable[str]) -> set[str]:
+    """Read crypto pairs as Massive spelled them into the canonical form, for a comparison.
+
+    Args:
+        raw: The pairs as one source wrote them, such as `X:BTC-USD`.
+
+    Returns:
+        Each pair's canonical form, such as `X:BTCUSD`; a spelling the library cannot read is
+        kept as written.
+    """
+    return {canonical_from_wire(dm.AssetClass.CRYPTO, text) or text for text in raw}
+
+
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("39")
+@pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     *,
@@ -386,19 +446,22 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
 ) -> None:
     """Whether grouped daily and `global_crypto/day_aggs_v1` list the same pairs on a day.
 
-    Records the pairs only one of them holds on the most recent published Monday. Reading it: equal
-    sets mean `dm.ALL` crypto day bars hold the same pairs from either source; otherwise the
-    difference belongs in the documentation of `dm.ALL` day bars.
+    The two sources spell a pair differently (grouped daily `X:BTCUSD` or `C:EURUSD`, the file
+    `X:BTC-USD` or `C:EUR-USD`), so both are compared in the canonical form the library reads
+    them into; a spelling the library cannot read is kept as written, and so shows up as a
+    difference. Records the pairs only one of them holds on the most recent published Monday.
+    Passes when the two sets are equal, so `dm.ALL` crypto day bars hold the same pairs from either
+    source; a failure means the difference belongs in the documentation of `dm.ALL` day bars.
     """
-    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {})}
+    grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {}))
     read = flat_file_tickers(_DAY_FILE, recent_monday, None)
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
-    filed = {str(row["ticker"]) for row in read[0]}
+    filed = _canonical(str(row["ticker"]) for row in read[0])
     evidence(f"{recent_monday}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
-    assert filed
+    assert grouped == filed, "grouped daily and the day file hold different pairs"
 
 
 @pytest.mark.needs("currencies:basic")

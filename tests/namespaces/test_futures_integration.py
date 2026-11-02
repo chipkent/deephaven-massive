@@ -30,6 +30,7 @@ from deephaven_massive._massive import (
 )
 from tests._live import futures_bar_buckets
 from tests._live.calendar import months_before
+from tests._live.ticker_lists import accepts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -124,7 +125,7 @@ def _aggregates(
 
 
 @pytest.mark.needs("futures:starter")
-@pytest.mark.settles("23")
+@pytest.mark.verifies("23")
 def test_where_the_futures_snapshot_carries_the_ticker(
     live_session: dm.MassiveSession,
     *,
@@ -138,8 +139,9 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     `details.product_code`, while both documented samples send them at the top level. The
     live run of 2026-11-02 found them nested, which the library now reads (`Symbol` and
     `DetailsProductCode`). Records the top-level `ticker` and `product_code` and the nested
-    pair of three ES rows, and the library's `Symbol`. Reading it: nested keys, with `Symbol`
-    filled, confirm the schema; top-level keys alone mean the library must read those again.
+    pair of three ES rows, and the library's `Symbol`. Passes when every row nests its ticker
+    and product code under `details` and the library fills `Symbol`; top-level keys alone mean
+    the library must read those again.
     """
     rows = _page(live_rest, _SNAPSHOT, query={"product_code": "ES", "limit": 3})
     for row in rows:
@@ -159,10 +161,22 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     assert ticker, "no ticker anywhere in the first snapshot row"
     library = table_rows(live_session.futures.snapshots(str(ticker)).fetch())
     evidence(f"library snapshots({ticker}): Symbol {[r['Symbol'] for r in library]}")
+    flat = [row for row in rows if not isinstance(row.get("details"), dict)]
+    unnested = [
+        row
+        for row in rows
+        if not {"ticker", "product_code"} <= set(row.get("details") or {})
+        or "ticker" in row
+        or "product_code" in row
+    ]
+    assert not flat, f"rows without a details object: {flat}"
+    assert not unnested, f"rows without the nested ticker and product code: {unnested}"
+    assert library, f"the library returned no snapshot of {ticker}"
+    assert all(r["Symbol"] == ticker for r in library), f"library rows {library}"
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("29")
+@pytest.mark.verifies("29")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_the_session_after_a_holiday_and_year_candles(
@@ -183,11 +197,10 @@ def test_the_session_after_a_holiday_and_year_candles(
     it and that session's first minute bars (read raw, from the Friday before), the library's
     minute bars of that session, and the contract's 1-year candles from January 1 and from
     mid-June of the year before. With Futures on Basic, which allows 5 requests a minute, it
-    leaves out the library's minute bars and sends 4 raw requests. Reading it: a session
-    opening at or before the previous regular open, with its bars kept by the library,
-    confirms the 4-day margin covers it; a candle of the year before returned for the mid-year
-    filter means `window_start` filters match the candle's start (snap), its absence that they
-    do not.
+    leaves out the library's minute bars and sends 4 raw requests. Passes when the session
+    after the holiday has minute bars and, off Basic, the library keeps them: the 4-day margin
+    covers it. A candle of the year before returned for the mid-year filter means
+    `window_start` filters match the candle's start (snap), its absence that they do not.
     """
     holiday = recent_holiday("martin luther king day")
     session_day = holiday + timedelta(days=1)
@@ -235,6 +248,7 @@ def test_the_session_after_a_holiday_and_year_candles(
         if minutes:
             evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
             evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
+        assert minutes, f"the library kept no minute bar of the {session_day} session"
     year = holiday.year - 1
     for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
@@ -254,7 +268,7 @@ def test_the_session_after_a_holiday_and_year_candles(
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("36")
+@pytest.mark.verifies("36")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_futures_sessions_end_only_on_weekdays(
@@ -268,8 +282,8 @@ def test_futures_sessions_end_only_on_weekdays(
 
     Reads every schedule event of the most recent whole month for nine products across the
     four venues and records the weekday count of `SessionEndDate` (ISO text) and every weekend
-    session. Reading it: none confirms that requesting weekday sessions only is complete; any
-    weekend session means the library's session iteration must include those days.
+    session. Passes when no session ends on a weekend, so requesting weekday sessions only is
+    complete; a weekend session means the library's session iteration must include those days.
     """
     start, end = recent_month
     rows = table_rows(
@@ -289,6 +303,7 @@ def test_futures_sessions_end_only_on_weekdays(
     evidence(f"session end weekdays {dict(days)}")
     evidence(f"sessions ending on a Saturday or Sunday: {weekend[:50]}")
     assert rows
+    assert not weekend, f"sessions ending on a Saturday or Sunday: {weekend[:50]}"
 
 
 @pytest.mark.needs("futures:basic")
@@ -311,13 +326,14 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     Reads the three whole months ending with the most recent one, for the ES contract that
     was front at their end (it trades through all three). Records every 1-session bar's
     `window_start` and `session_end_date`, then 2-session bars requested from the first day
-    and from two days later, and 2-month bars from the first day and from a month later, side
-    by side. Reading it: compare each 2-session bar's `session_end_date` with the 1-session
-    list: its first or its last session is the label. Pairs that stay the same for both
-    starts align to a calendar; pairs that shift with the start align to `{from}`, and dates
-    cannot select them. A refused resolution is recorded and the rest still run. With Futures
-    on Basic, which allows 5 requests a minute, it leaves out the 1-month bars and the
-    library's 2-session bars and sends the other 5 requests.
+    and from one day later (a shift of two days lands on the same 2-day grid whichever way the
+    bars align, so it cannot tell the two apart), and 2-month bars from the first day and from
+    a month later, side by side. Reading it: compare each 2-session bar's `session_end_date`
+    with the 1-session list: its first or its last session is the label. Pairs that stay the
+    same for both starts align to a calendar; pairs that shift with the start align to
+    `{from}`, and dates cannot select them. A refused resolution is recorded and the rest still
+    run. With Futures on Basic, which allows 5 requests a minute, it leaves out the 1-month bars
+    and the library's 2-session bars and sends the other 5 requests.
     """
     contract = front_contract("ES", recent_month[1])
     first = recent_month[0].replace(day=1)
@@ -330,7 +346,7 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     requests = (
         ("1session", start),
         ("2session", start),
-        ("2session", start + timedelta(days=2)),
+        ("2session", start + timedelta(days=1)),
         *(() if basic else (("1month", start),)),
         ("2month", start),
         ("2month", later_month),
@@ -362,7 +378,7 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("47")
+@pytest.mark.verifies("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_shapes_of_futures_contract_tickers(
@@ -377,9 +393,9 @@ def test_shapes_of_futures_contract_tickers(
     Records one page of NG single contracts (`type=single`: without it, the page held only
     spreads) with the tickers outside a product code, a month letter, and a one- or two-digit
     year, and the library's `contracts` of NG single contracts with each row's ticker and date.
-    Reading it: every single contract inside that shape confirms the ticker grammar
-    (a year is never rewritten, so `ESZ25` is not `ESZ5`); anything else extends it, or is
-    left to the handling of unknown symbols. Spread tickers are the next test's.
+    Passes when every single contract fits that shape, the library's ticker grammar (a year
+    is never rewritten, so `ESZ25` is not `ESZ5`); anything else extends it, or is left to the
+    handling of unknown symbols. Spread tickers are the next test's.
 
     Without a `date`, Massive's page held few distinct tickers among many rows, every row a
     distinct `(ticker, date)` pair: each is the contract on another day (its point-in-time
@@ -401,6 +417,7 @@ def test_shapes_of_futures_contract_tickers(
     )
     evidence(f"library contracts(NG): (Symbol, Date) {[(r['Symbol'], r['Date']) for r in library]}")
     assert tickers
+    assert not odd, f"NG single contracts outside the ticker grammar: {odd}"
 
 
 _ES_SINGLE = re.compile(r"ES(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,2})")
@@ -408,23 +425,29 @@ _ES_SINGLE = re.compile(r"ES(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,2})")
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("72")
+@pytest.mark.verifies("72")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
-def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence: Evidence) -> None:
+def test_how_massive_writes_a_contracts_year(
+    live_rest: RestClient, *, recent_monday: date, evidence: Evidence
+) -> None:
     """Whether Massive writes a futures contract's year with one digit or two, and answers both.
 
-    Reads one page of up to 1,000 ES single contracts and records each distinct ticker with
-    its last trade date, grouped by the number of digits of its year. Then asks for the first
-    one-digit contract under its two-digit spelling (`ESZ6` as `ESZ26`), and the first
-    two-digit one under its one-digit spelling, and records how many rows each answer holds.
-    Reading it: the library never rewrites a year, so a caller who writes `ESZ25` for
-    Massive's `ESZ5` gets no rows; whether Massive answers the other spelling, and which
-    contracts it writes with two digits, decides whether the library should refuse or
-    rewrite it.
+    Reads the ES single contracts listed on the most recent published Monday (`date`, a
+    weekday that has point-in-time rows whenever the run is; without it, the page of
+    1,000 rows holds the daily history of only a few contracts) and records each distinct
+    ticker with its last trade date, grouped by the number of digits of its year. Then asks for
+    the first one-digit contract under its two-digit spelling (`ESZ6` as `ESZ26`), and the
+    first two-digit one under its one-digit spelling, and records how many rows each answer
+    holds. Passes when Massive answers neither other spelling: the library never rewrites a
+    year, so a caller who writes `ESZ25` for Massive's `ESZ5` gets no rows, and a spelling
+    Massive answered would mean the library should rewrite it.
     """
+    listed_on = recent_monday
     rows = _page(
-        live_rest, _CONTRACTS, query={"product_code": "ES", "type": "single", "limit": 1000}
+        live_rest,
+        _CONTRACTS,
+        query={"product_code": "ES", "type": "single", "date": listed_on, "limit": 1000},
     )
     expiries = sorted({(str(r.get("ticker")), str(r.get("last_trade_date"))) for r in rows})
     by_digits: dict[int, list[tuple[str, str]]] = {}
@@ -435,6 +458,7 @@ def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence:
         )
     for digits, contracts in sorted(by_digits.items()):
         evidence(f"ES contracts with a {digits}-digit year (0: another shape): {contracts}")
+    answered: dict[str, int] = {}
     for digits, contracts in sorted(by_digits.items()):
         if digits == 0:
             continue
@@ -443,13 +467,16 @@ def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence:
         assert shape is not None
         year = expiry[2:4] if digits == 1 else expiry[3]
         other = f"ES{shape['month']}{year}"
-        answer = _page(live_rest, _CONTRACTS, query={"ticker": other, "limit": 10})
+        query = {"ticker": other, "date": listed_on, "limit": 10}
+        answer = _page(live_rest, _CONTRACTS, query=query)
         evidence(f"{ticker} (last trade {expiry}) asked for as {other}: {len(answer)} rows")
+        answered[other] = len(answer)
     assert rows, "Massive listed no ES contract"
+    assert not any(answered.values()), f"Massive answered another spelling: {answered}"
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("48")
+@pytest.mark.verifies("48")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_forms_of_futures_spread_tickers_on_every_venue(
@@ -477,9 +504,9 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
     form (each run of letters written `A`, each run of digits `9`) with its count, how many
     of its tickers `canonical_symbol_future_spread` accepts, and examples with their contract
     name, product code, and the legs written out whole in the ticker; then every ticker the
-    library refuses. Reading it: forms the library accepts in full confirm its spread
-    grammar; a refused form must join the grammar (or stay a ticker kept as written), and the
-    names and legs say whether a builder from legs could produce each form.
+    library refuses. Passes when the library accepts every combo ticker read: a refused form
+    must join the grammar (or stay a ticker kept as written). The names and legs say whether
+    a builder from legs could produce each form.
     """
     products = _page(live_rest, _PRODUCTS_PATH, query={"type": "combo", "limit": 50_000})
     reads, left_out = futures_spread_reads(products)
@@ -498,6 +525,15 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
     for line in futures_spread_report(products, contracts):
         evidence(line)
     assert products, "Massive listed no combo product"
+    refused = sorted(
+        {
+            str(row["ticker"])
+            for rows in contracts.values()
+            for row in rows
+            if row.get("ticker") and not accepts(dm.canonical_symbol_future_spread, row["ticker"])
+        }
+    )
+    assert not refused, f"combo tickers the library refuses: {refused[:20]}"
 
 
 _CHICAGO = ZoneInfo("America/Chicago")
@@ -514,9 +550,30 @@ def _chicago(nanos: int) -> str:
     return f"{datetime.fromtimestamp(nanos / 1e9, UTC).astimezone(_CHICAGO):%a %Y-%m-%d %H:%M}"
 
 
+def _label_changes(rows: list[dict[str, Any]], time_column: str) -> list[str]:
+    """List where the session label (`Date`) of time-ordered rows changes.
+
+    Args:
+        rows: The rows, oldest first.
+        time_column: The column of each row's time, such as `TimestampStart` for a bar.
+
+    Returns:
+        One entry per change, the first row's included, such as
+        `"Mon 2026-10-26 17:00 -> 2026-10-27"`.
+    """
+    changes: list[str] = []
+    last = None
+    for row in rows:
+        label = row["Date"]
+        if label != last:
+            changes.append(f"{_chicago(row[time_column])} -> {label}")
+            last = label
+    return changes
+
+
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("58")
-@pytest.mark.requests(4)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_session_labels_around_the_roll_and_a_holiday(
     live_session: dm.MassiveSession,
@@ -531,7 +588,8 @@ def test_session_labels_around_the_roll_and_a_holiday(
 
     Records, per minute, the `Date` (Massive's `session_end_date`) of the front ES contract's
     minute bars from 15:30 to 17:30 Chicago time on the most recent published Monday, of the
-    front corn contract (CBOT, whose pre-open starts at 16:45) over the same hours, and of the
+    front corn contract's quotes and trades (CBOT, whose pre-open starts at 16:45 and whose
+    session opens at 19:00, so only quotes fall in the pre-open) from 16:00 to 19:30, and of the
     ES contract front around the most recent Good Friday (from 16:00 Chicago time on the
     Thursday before to 09:00 on the Monday after), beside the session the 17:00 Chicago rule
     gives. Reading it: labels that change at 17:00 confirm the WebSocket rule; a label that
@@ -541,38 +599,72 @@ def test_session_labels_around_the_roll_and_a_holiday(
     monday = datetime(recent_monday.year, recent_monday.month, recent_monday.day, tzinfo=_CHICAGO)
     good_friday = recent_holiday("good friday")
     thursday = good_friday - timedelta(days=1)
-    windows = (
-        (front_contract("ES", recent_monday), monday + timedelta(hours=15, minutes=30)),
-        (front_contract("ZC", recent_monday), monday + timedelta(hours=15, minutes=30)),
-    )
-    spans = [(contract, start, start + timedelta(hours=2)) for contract, start in windows]
     holiday_start = datetime(thursday.year, thursday.month, thursday.day, 16, tzinfo=_CHICAGO)
-    spans.append(
-        (
-            front_contract("ES", good_friday),
-            holiday_start,
-            holiday_start + timedelta(days=4, hours=-7),
-        )
-    )
+    holiday_end = holiday_start + timedelta(days=4, hours=-7)
+    es_start = monday + timedelta(hours=15, minutes=30)
     found = 0
-    for contract, start, end in spans:
-        rows = table_rows(
-            live_session.futures.bars(contract, dm.Timespan.MINUTE).history(start, end)
-        )
+    for contract, start, end in (
+        (front_contract("ES", recent_monday), es_start, es_start + timedelta(hours=2)),
+        (front_contract("ES", good_friday), holiday_start, holiday_end),
+    ):
+        bars = live_session.futures.bars(contract, dm.Timespan.MINUTE).history(start, end)
+        rows = table_rows(bars)
         found += len(rows)
-        changes: list[str] = []
-        last = None
-        for row in rows:
-            label = row["Date"]
-            if label != last:
-                changes.append(f"{_chicago(row['TimestampStart'])} -> {label}")
-                last = label
+        changes = _label_changes(rows, "TimestampStart")
         evidence(f"{contract} {start:%Y-%m-%d}: {len(rows)} bars; label changes {changes}")
+    _record_corn_labels(
+        live_session,
+        front_contract("ZC", recent_monday),
+        monday,
+        table_rows=table_rows,
+        evidence=evidence,
+    )
     assert found
 
 
+def _record_corn_labels(
+    live_session: dm.MassiveSession,
+    corn: str,
+    monday: datetime,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Record the session labels of a corn contract's quotes and trades, 16:00 to 19:30 Chicago.
+
+    CBOT grains trade from 19:00, so only quotes fall in the 16:45 pre-open; their labels from
+    16:45 to 19:00 are recorded on a line of their own, and the trades are the control from the
+    open. Each read refused for the plan (trades and quotes need Futures Developer) is
+    recorded, not raised.
+
+    Args:
+        live_session: The session that reads.
+        corn: The front corn contract, such as `"ZCZ6"`.
+        monday: Midnight of the Monday read, in Chicago time.
+        table_rows: Reads a table's rows.
+        evidence: Records a line.
+    """
+    start = monday + timedelta(hours=16)
+    end = start + timedelta(hours=3, minutes=30)
+    pre_open = (monday + timedelta(hours=16, minutes=45), monday + timedelta(hours=19))
+    reads = (("quotes", live_session.futures.quotes), ("trades", live_session.futures.trades))
+    for kind, read in reads:
+        try:
+            rows = table_rows(read(corn).history(start, end))
+        except dm.EntitlementError as error:
+            evidence(f"{corn} {kind} {start:%Y-%m-%d}: refused, {error}")
+            continue
+        changes = _label_changes(rows, "Timestamp")
+        evidence(f"{corn} {start:%Y-%m-%d}: {len(rows)} {kind}; label changes {changes}")
+        if kind == "quotes":
+            first, last = (int(t.timestamp() * 1e9) for t in pre_open)
+            labels = sorted({str(r["Date"]) for r in rows if first <= r["Timestamp"] < last})
+            evidence(f"{corn} quotes 16:45 to 19:00 Chicago: labels {labels}")
+
+
 @pytest.mark.needs("futures:starter")
-@pytest.mark.settles("58", "59")
+@pytest.mark.settles("58")
+@pytest.mark.verifies("59")
 @pytest.mark.timeout(160)
 def test_streamed_futures_dates_and_one_second_ends(
     live_session: dm.MassiveSession,
@@ -595,10 +687,11 @@ def test_streamed_futures_dates_and_one_second_ends(
     on Futures Starter and Developer, none on real-time plans); before that the test skips after the
     acknowledgement. Records each row's `Date`, the `m.streams()` errors (a schedule miss shows
     there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the
-    library logs when Massive's `e` is not the start plus one second. Reading it: no miss and
-    one-second windows confirm the calendar and the documented length; the WARNING means Massive's
-    bars span more, as its documented sample suggests, and the library keeps the later end. A
-    refused stream skips, naming the plan.
+    library logs when Massive's `e` is not the start plus one second. Passes when every
+    one-second bar spans one second: `TimestampEnd` is the later of the start plus one second
+    and Massive's `e`, so a longer span means Massive's bars span more, as its documented sample
+    (60 seconds) suggests. Reading the rest: no miss confirms the calendar. A refused stream
+    skips, naming the plan.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
@@ -624,6 +717,9 @@ def test_streamed_futures_dates_and_one_second_ends(
     if not due:
         pytest.skip(f"no ES bar is due yet: ES is {status}, or still within the feed delay")
     assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
+    assert bars, f"no one-second bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
+    longer = [span for span in spans if span[1] != 1.0]
+    assert not longer, f"one-second bars spanning more than a second: {longer[:5]}"
 
 
 def _midnight(day: date) -> datetime:
