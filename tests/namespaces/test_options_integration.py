@@ -51,10 +51,11 @@ StampedBar: TypeAlias = "tuple[int, tuple[float | None, ...]]"
 StampDays: TypeAlias = "dict[str, tuple[date, date]]"
 RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
 ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
+DayBars: TypeAlias = "dict[date, list[StampedBar]]"
 DayBarReport: TypeAlias = (
-    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], DayBars]"
 )
-PrevBarReport: TypeAlias = "Callable[[str], int]"
+PrevBarReport: TypeAlias = "Callable[[str], list[StampedBar]]"
 PeriodBarReport: TypeAlias = (
     "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
@@ -378,6 +379,18 @@ def _day_stamp(millis: int, day: date) -> bool:
     return local.date() == day and local.second == 0 and (local.hour, local.minute) in _DAY_STAMPS
 
 
+def _new_york_day(millis: int) -> date:
+    """Return the New York calendar day of an epoch-millisecond stamp.
+
+    `/prev` serves the most recent completed trading day, which the test does not know in
+    advance, so its bar's day is the day its stamp falls on.
+
+    Returns:
+        The day.
+    """
+    return datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK).date()
+
+
 def _monthly_expiry_after(day: date) -> date:
     """Return the third Friday of the month after a day's: a standard monthly expiration.
 
@@ -499,20 +512,20 @@ def _stamp_contract_weeks(
     return complete
 
 
-def _prev_answered(
+def _prev_bars(
     session: dm.MassiveSession,
     ticker: str,
     *,
     report: PrevBarReport,
     library_stamps: LibraryStamps,
     evidence: Evidence,
-) -> bool:
+) -> list[StampedBar]:
     """Record one listed contract's `/prev` bar, raw and through the library.
 
     A refusal propagates; any other error of the raw request is recorded instead.
 
     Returns:
-        Whether `/prev` returned a bar.
+        The raw `/prev` bars, stamped; empty when `/prev` returned none or failed.
 
     Raises:
         WireEntitlementError: When the key's plan refuses the request.
@@ -523,14 +536,14 @@ def _prev_answered(
         raise
     except WireError as error:
         evidence(f"{ticker} /prev: {type(error).__name__}: {error}")
-        return False
+        return []
     previous = session.options.previous_day_bar(ticker)
     evidence(f"library {ticker} previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
-    return found > 0
+    return found
 
 
 @pytest.mark.needs("options:starter", "stocks:basic")
-@pytest.mark.settles("51")
+@pytest.mark.verifies("51")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_option_day_and_week_bar_stamps_from_rest(
@@ -561,15 +574,25 @@ def test_option_day_and_week_bar_stamps_from_rest(
     follow. Reading it: range stamps at 00:00 New York time, a last minute bar at 12:59 (13:14
     for SPXW) on the half day, and a `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15
     after a half day) confirm the library's day label; a bar at any other stamp is served,
-    labelled by the New York day its stamp falls on, with a WARNING in the log.
+    labelled by the New York day its stamp falls on, with a WARNING in the log. Fails when a
+    range 1-day bar or a `/prev` bar is stamped at a time other than one the library expects
+    for its day: 00:00, 13:00, 13:15, 16:00, or 16:15 New York time.
     """
     days = stamp_days["day"]
     candidates = _stamp_candidates(range_bars, days)
     complete: dict[str, bool] = {}
+    odd: list[tuple[str, str, date, int]] = []
     for root, tickers in candidates.items():
         for ticker in tickers:
-            if day_bar_report(ticker, days, {}):
+            ranged = day_bar_report(ticker, days, {})
+            if not all(ranged.values()):
                 continue
+            odd += [
+                ("range", ticker, day, bar[0])
+                for day, bars in ranged.items()
+                for bar in bars
+                if not _day_stamp(bar[0], day)
+            ]
             for day in days:
                 minute_span_report(ticker, day)
             complete[root] = _stamp_contract_weeks(
@@ -582,16 +605,22 @@ def test_option_day_and_week_bar_stamps_from_rest(
             )
             break
     listed = _listed_calls(live_rest, rest_rows, evidence)
-    answered = [
-        ticker
-        for ticker in filter(None, listed.values())
-        if _prev_answered(
+    prevs = {
+        ticker: _prev_bars(
             live_session,
             ticker,
             report=prev_bar_report,
             library_stamps=library_stamps,
             evidence=evidence,
         )
+        for ticker in filter(None, listed.values())
+    }
+    answered = [ticker for ticker, bars in prevs.items() if bars]
+    odd += [
+        ("/prev", ticker, _new_york_day(bar[0]), bar[0])
+        for ticker, bars in prevs.items()
+        for bar in bars
+        if not _day_stamp(bar[0], _new_york_day(bar[0]))
     ]
     unpriced = [root for root in candidates if root not in complete]
     assert not unpriced, f"no {unpriced} candidate has a range bar on both days: {candidates}"
@@ -599,6 +628,7 @@ def test_option_day_and_week_bar_stamps_from_rest(
     assert len(answered) == len(listed), (
         f"/prev answered for {answered}; listed calls by root (None: none found): {listed}"
     )
+    assert not odd, f"(source, ticker, day, stamp ms) the library does not expect: {odd}"
 
 
 @pytest.mark.needs("options:starter", "s3", "stocks:basic")

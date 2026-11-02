@@ -56,10 +56,11 @@ StampedBar: TypeAlias = "tuple[int, tuple[float | None, ...]]"
 StampDays: TypeAlias = "dict[str, tuple[date, date]]"
 RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
 ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
+DayBars: TypeAlias = "dict[date, list[StampedBar]]"
 DayBarReport: TypeAlias = (
-    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], DayBars]"
 )
-PrevBarReport: TypeAlias = "Callable[[str], int]"
+PrevBarReport: TypeAlias = "Callable[[str], list[StampedBar]]"
 PeriodBarReport: TypeAlias = (
     "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
@@ -427,7 +428,7 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
         ]
         for day in read
     }
-    missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
+    ranged = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
     minutes = [minute_span_report(_SYMBOL, day) for day in read]
     spans = {span: stamp_days[span] for span in ("week", "month")}
     periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
@@ -438,7 +439,7 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
         _record_library_stock_stamps(
             live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
         )
-    assert not missing, f"no range bar on {missing}"
+    assert all(ranged.values()), f"a stamp day has no range bar: {ranged}"
     assert all(minutes), f"a stamp day has no minute bars: {dict(zip(read, minutes, strict=True))}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
     assert periods, "the range did not return one bar for each of two weeks and two months"
@@ -479,11 +480,11 @@ def test_stock_day_bar_stamps_of_the_day_file(
         rows = [] if minutes is None else [r for r in minutes[0] if r["window_start"]]
         ends = [_instant_text_ns(int(str(r["window_start"]))) for r in rows[:1] + rows[-1:]]
         evidence(f"{_MINUTE_FILE} {day}: {len(rows)} rows; first and last window_start {ends}")
-    missing = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
+    ranged = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
     as_traded = live_session.stocks.bars(_SYMBOL, dm.Timespan.DAY, adjusted=False)
     outcome = library_stamps(partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES))
     evidence(f"library history(FLAT_FILES): {outcome}")
-    assert not missing, f"no range bar on {missing}"
+    assert all(ranged.values()), f"a stamp day has no range bar: {ranged}"
     assert all(files.values()), f"the day file lacks a stamp day: {files}"
     odd = {day: [b[0] for b in bars if not _day_stamp(b[0], day)] for day, bars in files.items()}
     assert not any(odd.values()), f"day-file stamps the library does not expect: {odd}"
