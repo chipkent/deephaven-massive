@@ -67,6 +67,7 @@ __all__ = [
     "LIBRARY_BUG",
     "RAISES_THROUGH",
     "AuthenticationError",
+    "CutShortError",
     "EntitlementError",
     "ErrorCause",
     "MassiveError",
@@ -254,8 +255,10 @@ class PermanentError(MassiveError):
     Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
     errors whose cause is settled for the session or the request: a row that breaks its
     dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
-    (`SymbolRowError`), and a crypto pair missing from the session's ticker list
-    (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
+    (`SymbolRowError`), a crypto pair missing from the session's ticker list
+    (`UnlistedPairError`), and, in a read by symbol, a parameter a symbol's path does not take
+    (`UnsupportedParameterError`, `_ingest/symbol_reads.py`). A `poll()` table fails with one
+    rather than retrying it every cycle.
     `RowDataError` is defined here, since the REST transport raises it and the tables layer
     names it; `SymbolRowError` is the poll module's
     (`_tables/poll.py`) and `UnlistedPairError` the REST transport's (`_ingest/rest.py`). The
@@ -429,6 +432,16 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         return function
 
     return declare
+
+
+class CutShortError(MassiveError):
+    """A symbol's REST data cut short: Massive answered HTTP 404 for a later page of its pages.
+
+    Internal: not exported from `dm`; `fetch()` and `history()` raise it as the `MassiveError`
+    it is, with status 404. The REST transport raises it, and a read by symbol
+    (`_ingest/symbol_reads.py`) names it: unlike any other 404, which the same request would
+    meet again, a page that vanished mid-read may be there when the symbol is read again.
+    """
 
 
 class RowDataError(PermanentError):
