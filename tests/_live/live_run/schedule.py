@@ -6,10 +6,17 @@ from the state, the run's memory, and the time:
 1. Probe when the day's probe time (`timetable.probe_time`) has passed since the last probe, or
    when a probe that could not tell the tiers is due to be tried again.
 2. Sleep through the pause after a probe, so the first group starts on an unspent minute.
-3. Run the `--any-time` groups that still have due checks, at once, except on a stream day.
-4. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today,
+3. Run the planned stream night (`stream-night`) while it is open: from its start until its
+   latest restart the next morning, while its units are due and its child has started fewer
+   than `MAX_STREAM_STARTS` times.
+4. Run the `--any-time` groups that still have due checks, at once, except on a stream day and
+   during a stream night's hours.
+5. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today,
    and whose latest start has not passed; sleep until its earliest start if it is not open yet.
-5. Otherwise sleep until the next trading day's probe.
+6. Otherwise sleep until the next trading day's probe, or the planned night's start if sooner.
+
+On a stream night's evening nothing in 4 or 5 starts from `timetable.NIGHT_CLEARANCE`, and
+whatever starts before is stopped then.
 
 A group has due checks when any of its checks is due (`run_state.is_due`); a pytest group
 never collected counts as due, since its checks are not known yet. Every function is pure.
@@ -25,7 +32,7 @@ from tests._live.calendar import NEW_YORK
 from tests._live.live_run import timetable
 from tests._live.live_run.replies import EXAMPLES
 from tests._live.live_run.state import check_of, is_due
-from tests._live.live_run.stream_units import stream_units, throughput_units
+from tests._live.live_run.stream_units import night_units, stream_units, throughput_units
 
 if TYPE_CHECKING:
     from tests._live.live_run.context import RunMemory
@@ -60,7 +67,8 @@ PROBE_RETRY_AFTER: Final = timedelta(minutes=5)
 """How many times, and how soon, a probe that could not tell the tiers is tried again."""
 
 MAX_STREAM_STARTS: Final = 5
-"""How many times a stream day's child may start in one day, after it died."""
+"""How many times a stream day's child may start in one day, or a stream night's in one night,
+after it died."""
 
 
 @dataclass(frozen=True)
@@ -112,26 +120,29 @@ def known_names(state: RunState, group: str, today: date) -> list[str] | None:
         "responses": [e.name for e in EXAMPLES],
         "stream-day": stream_units(tiers),
         "throughput": throughput_units(tiers),
-        "stream-day-reconcile": _reconcile_units(state, today),
+        "stream-day-reconcile": _reconcile_units(state, "stream-day", today),
+        "stream-night": night_units(tiers),
+        "stream-night-reconcile": _reconcile_units(state, "stream-night", today),
     }
     return names.get(group, [])
 
 
-def _reconcile_units(state: RunState, today: date) -> list[str]:
-    """Return the units to compare with history: those that streamed a whole earlier day.
+def _reconcile_units(state: RunState, streamed: str, today: date) -> list[str]:
+    """Return the units to compare with history: those that streamed a whole earlier day or night.
 
     Args:
         state: The run's state.
+        streamed: The streaming group, `stream-day` or `stream-night`.
         today: The New York date.
 
     Returns:
-        The stream day's passed units, once its day is over; none before.
+        Its passed units, once its latest day is over (a night's, from the morning after its
+        evening); none before.
     """
-    if not state.stream_days or state.stream_days[-1] >= today.isoformat():
+    days = state.stream_nights if streamed == "stream-night" else state.stream_days
+    if not days or days[-1] >= today.isoformat():
         return []
-    return [
-        c.name for c in state.checks.values() if c.group == "stream-day" and c.status == "passed"
-    ]
+    return [c.name for c in state.checks.values() if c.group == streamed and c.status == "passed"]
 
 
 def due_names(
@@ -230,7 +241,35 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
         return Step("probe")
     if memory.not_before is not None and now < memory.not_before:
         return Step("sleep", "the pause after the probe", memory.not_before)
-    for group in list(state.any_time) if kind is not timetable.DayKind.STREAM else []:
+    night = _night_run(state, today, now)
+    if night is not None:
+        return night
+    clearance = night_clearance(state, now)
+    step = (
+        None if clearance is not None and now >= clearance else _group_step(state, now, kind=kind)
+    )
+    if step is None or clearance is None:
+        return step or _idle(state, today, now)
+    assert step.until is not None  # every run has a stop and every sleep an end
+    if step.action == "run":
+        return Step("run", step.group, min(step.until, clearance))
+    return step if step.until < clearance else _idle(state, today, now)
+
+
+def _group_step(state: RunState, now: datetime, *, kind: timetable.DayKind) -> Step | None:
+    """Return the next `--any-time` group or slot to run or wait for, if any.
+
+    Args:
+        state: The run's state; `--any-time` groups with nothing due leave its list.
+        now: The current time, aware.
+        kind: The kind of its New York day.
+
+    Returns:
+        The step (`next_step` 4 and 5), or None when no group runs today any more.
+    """
+    today = now.astimezone(NEW_YORK).date()
+    quiet = kind is timetable.DayKind.STREAM or _in_night(state, now)
+    for group in list(state.any_time) if not quiet else []:
         if has_due(state, group, today, any_time=True):
             return Step("run", group, any_time_stop(state, today))
         state.any_time.remove(group)
@@ -241,7 +280,97 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
             return Step("sleep", slot.group, timetable.at(today, slot.earliest))
         if now <= timetable.at(today, slot.latest):
             return Step("run", slot.group, timetable.stop_of(today, slot))
-    return Step("sleep", "the next probe", next_probe(state, today))
+    return None
+
+
+def _idle(state: RunState, today: date, now: datetime) -> Step:
+    """Return the sleep until the next probe, or until the planned night's start if sooner.
+
+    Args:
+        state: The run's state.
+        today: The New York date.
+        now: The current time, aware.
+
+    Returns:
+        The sleep.
+    """
+    wake = next_probe(state, today)
+    if state.stream_night:
+        start = timetable.night_start(date.fromisoformat(state.stream_night))
+        if now < start < wake:
+            return Step("sleep", "stream-night", start)
+    return Step("sleep", "the next probe", wake)
+
+
+def night_starts(state: RunState) -> int:
+    """Count the starts of the planned stream night's child.
+
+    Args:
+        state: The run's state.
+
+    Returns:
+        How many attempts of the planned night there are.
+    """
+    return sum(a.group == "stream-night" and a.day == state.stream_night for a in state.attempts)
+
+
+def _night_run(state: RunState, today: date, now: datetime) -> Step | None:
+    """Return the stream night's run while it may start or restart.
+
+    Args:
+        state: The run's state.
+        today: The New York date.
+        now: The current time, aware.
+
+    Returns:
+        The run, stopped at the night's end, from its start to its latest restart the next
+        morning, while its units are due and its child started fewer than `MAX_STREAM_STARTS`
+        times; otherwise None.
+    """
+    if not state.stream_night:
+        return None
+    evening = date.fromisoformat(state.stream_night)
+    last = timetable.at(evening + timedelta(days=1), timetable.NIGHT_LAST_START)
+    if not timetable.night_start(evening) <= now <= last:
+        return None
+    if night_starts(state) >= MAX_STREAM_STARTS or not has_due(state, "stream-night", today):
+        return None
+    return Step("run", "stream-night", timetable.night_end(evening))
+
+
+def _in_night(state: RunState, now: datetime) -> bool:
+    """Tell whether it is the planned stream night's hours.
+
+    Args:
+        state: The run's state.
+        now: The current time, aware.
+
+    Returns:
+        True from the night's start to its end.
+    """
+    if not state.stream_night:
+        return False
+    evening = date.fromisoformat(state.stream_night)
+    return timetable.night_start(evening) <= now < timetable.night_end(evening)
+
+
+def night_clearance(state: RunState, now: datetime) -> datetime | None:
+    """Return when the planned stream night needs the key to itself, while that is ahead.
+
+    Args:
+        state: The run's state.
+        now: The current time, aware.
+
+    Returns:
+        16:15 New York time on the night's evening (`timetable.NIGHT_CLEARANCE`) before the
+        night starts; None without a planned night, or once it started.
+    """
+    if not state.stream_night:
+        return None
+    evening = date.fromisoformat(state.stream_night)
+    if now >= timetable.night_start(evening):
+        return None
+    return timetable.at(evening, timetable.NIGHT_CLEARANCE)
 
 
 def any_time_stop(state: RunState, today: date) -> datetime:
@@ -290,6 +419,8 @@ def next_start_text(state: RunState, group: str, now: datetime) -> str:
     Returns:
         Such as `"Tue 2026-11-03 11:30 EST"` within the next 10 days, else `"not scheduled"`.
     """
+    if group == "stream-night":
+        return _night_start_text(state, now)
     today = now.astimezone(NEW_YORK).date()
     for offset in range(10):
         day = today + timedelta(days=offset)
@@ -299,3 +430,23 @@ def next_start_text(state: RunState, group: str, now: datetime) -> str:
                 start = max(timetable.at(day, slot.earliest), now.astimezone(NEW_YORK))
                 return f"{start:%a %Y-%m-%d %H:%M %Z}"
     return "not scheduled"
+
+
+def _night_start_text(state: RunState, now: datetime) -> str:
+    """Describe when the planned stream night starts, for `status`.
+
+    Args:
+        state: The run's state.
+        now: The current time, aware.
+
+    Returns:
+        Such as `"Sun 2026-11-08 16:30 EST"`, or the current time during the night; `"not
+        scheduled"` without a planned night or after its end.
+    """
+    if not state.stream_night:
+        return "not scheduled"
+    evening = date.fromisoformat(state.stream_night)
+    if now >= timetable.night_end(evening):
+        return "not scheduled"
+    start = max(timetable.night_start(evening), now.astimezone(NEW_YORK))
+    return f"{start:%a %Y-%m-%d %H:%M %Z}"

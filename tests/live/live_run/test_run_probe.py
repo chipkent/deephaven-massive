@@ -29,6 +29,17 @@ NOON = datetime(2026, 11, 3, 12, tzinfo=NEW_YORK)
 
 _REFUSED = Reply(envelope(status="NOT_AUTHORIZED", message="not entitled"), status=403)
 
+_UPCOMING = [
+    {"date": "2026-11-26", "exchange": "NYSE", "name": "Thanksgiving", "status": "closed"},
+    {"date": "2026-11-27", "exchange": "NASDAQ", "name": "Thanksgiving", "status": "early-close"},
+    {"date": "2026-12-25", "exchange": "NYSE", "name": "Christmas", "status": "early-close"},
+    {"date": "2026-12-25", "exchange": "NASDAQ", "name": "Christmas", "status": "closed"},
+    {"date": "2026-12-25", "exchange": "OTC", "name": "Christmas", "status": "early-close"},
+    {"date": "2027-01-01", "exchange": "NYSE", "name": "New Year", "status": "open"},
+]
+"""Massive's upcoming closures as a probe reads them: a closure on one exchange and an early
+close on another make the day closed, and anything but a closure is left out."""
+
 _SNAPSHOTS = (
     "/v2/snapshot/locale/us/markets/stocks/tickers",
     "/v3/snapshot/options/SPY",
@@ -47,6 +58,7 @@ def _free_key(
     server.reply("/v1/marketstatus/now", Reply(body))
     for path in _SNAPSHOTS:
         server.reply(path, _REFUSED)
+    server.reply("/v1/marketstatus/upcoming", Reply(_UPCOMING))
 
 
 def _credentials(
@@ -68,8 +80,26 @@ def test_a_free_key_reads_basic_everywhere_and_records_each_request(
     assert [(r["path"], r["status"]) for r in result.requests] == [
         ("/v1/marketstatus/now", 200),
         *((path, 403) for path in _SNAPSHOTS),
+        ("/v1/marketstatus/upcoming", 200),
     ]
     assert PLANTED not in json.dumps(result.requests)
+    assert result.closures == {
+        "2026-11-26": "closed",
+        "2026-11-27": "early-close",
+        "2026-12-25": "closed",
+    }
+
+
+def test_closures_that_cannot_be_read_are_unknown_and_the_tiers_stay(
+    fake_rest: FakeRestServer,
+) -> None:
+    _free_key(fake_rest)
+    fake_rest.reply_first("/v1/marketstatus/upcoming", Reply(["not an object"]))
+    result = run_probe.probe_key(_credentials(fake_rest), now=NOON)
+    assert (result.tiers, result.closures) == (dict.fromkeys(TIERS, "basic"), None)
+    fake_rest.reply_first("/v1/marketstatus/upcoming", Reply({"status": "NOT_FOUND"}, status=404))
+    result = run_probe.probe_key(_credentials(fake_rest), now=NOON)
+    assert (result.tiers, result.closures) == (dict.fromkeys(TIERS, "basic"), None)
 
 
 def test_a_probe_without_server_time_has_no_clock_offset(fake_rest: FakeRestServer) -> None:

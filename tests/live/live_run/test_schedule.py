@@ -271,3 +271,125 @@ def test_the_next_start_of_a_group_is_shown_in_new_york_time() -> None:
     evening = _at(WEDNESDAY, 19)
     assert schedule.next_start_text(state, "evidence", evening) == "Thu 2026-11-05 11:30 EST"
     assert schedule.next_start_text(state, "upgrade-check", noon) == "not scheduled"
+
+
+# --- the stream night ---------------------------------------------------------------------------
+
+THURSDAY = date(2026, 11, 5)
+
+
+def _night_state(evening: date = WEDNESDAY) -> RunState:
+    state = _state(currencies="starter", futures="starter")
+    _collected(state)
+    state.stream_night = evening.isoformat()
+    return state
+
+
+def test_a_planned_night_runs_from_its_evening_to_the_next_morning() -> None:
+    state = _night_state()
+    now = _at(WEDNESDAY, 16, 30)
+    assert next_step(state, _probed(now), now) == Step("run", "stream-night", _at(THURSDAY, 9, 30))
+
+
+def test_a_night_restarts_after_midnight_until_its_last_start() -> None:
+    state = _night_state()
+    state.attempts.append(Attempt("stream-night", "n", WEDNESDAY.isoformat(), ""))
+    assert schedule.night_starts(state) == 1
+    now = _at(THURSDAY, 2)
+    assert next_step(state, _probed(now), now) == Step("run", "stream-night", _at(THURSDAY, 9, 30))
+    late = _at(THURSDAY, 9, 1)  # past 09:00: the morning's own groups come next
+    assert next_step(state, _probed(late), late) == Step("sleep", "luld", _at(THURSDAY, 9, 28))
+
+
+def test_a_night_whose_child_started_too_often_runs_no_more() -> None:
+    state = _night_state()
+    for _ in range(schedule.MAX_STREAM_STARTS):
+        state.attempts.append(Attempt("stream-night", "n", WEDNESDAY.isoformat(), ""))
+    now = _at(WEDNESDAY, 23)
+    assert next_step(state, _probed(now), now) == Step("sleep", "the next probe", _at(THURSDAY, 8))
+
+
+def test_a_night_whose_units_passed_runs_no_more() -> None:
+    state = _night_state()
+    for unit in ("crypto real-time", "futures delayed"):
+        record(state, check_of(state, "stream-night", unit), status="passed", reason="", day="")
+    now = _at(WEDNESDAY, 17)
+    assert next_step(state, _probed(now), now).group != "stream-night"
+
+
+def test_any_time_groups_wait_through_the_nights_hours() -> None:
+    state = _night_state()
+    for _ in range(schedule.MAX_STREAM_STARTS):
+        state.attempts.append(Attempt("stream-night", "n", WEDNESDAY.isoformat(), ""))
+    state.any_time = ["evidence"]
+    now = _at(THURSDAY, 1)
+    assert next_step(state, _probed(now), now) == Step("sleep", "luld", _at(THURSDAY, 9, 28))
+    assert state.any_time == ["evidence"]
+
+
+def test_the_evenings_groups_stop_before_the_night_and_none_starts_late() -> None:
+    state = _night_state()
+    noon = _at(WEDNESDAY, 12)
+    assert schedule.night_clearance(state, noon) == _at(WEDNESDAY, 16, 15)
+    assert next_step(state, _probed(noon), noon) == Step(
+        "run", "rate-limits", _at(WEDNESDAY, 16, 15)
+    )
+    early = _at(WEDNESDAY, 8, 30)  # a wait that ends before the clearance stays
+    assert next_step(state, _probed(early), early) == Step("sleep", "luld", _at(WEDNESDAY, 9, 28))
+    late = _at(WEDNESDAY, 16, 20)
+    assert next_step(state, _probed(late), late) == Step(
+        "sleep", "stream-night", _at(WEDNESDAY, 16, 30)
+    )
+    assert schedule.night_clearance(state, _at(WEDNESDAY, 16, 30)) is None
+
+
+def test_a_group_that_would_open_after_the_clearance_waits_for_another_day() -> None:
+    state = _night_state()
+    state.known = {group: [] for group in state.known}
+    state.known["limits-ws"] = ["tests/x.py::test_wide"]
+    for example in schedule.known_names(state, "responses", WEDNESDAY) or []:
+        record(state, check_of(state, "responses", example), status="passed", reason="", day="")
+    now = _at(WEDNESDAY, 13)
+    assert next_step(state, _probed(now), now) == Step(
+        "sleep", "stream-night", _at(WEDNESDAY, 16, 30)
+    )
+
+
+def test_a_sunday_sleeps_until_its_night_rather_than_mondays_probe() -> None:
+    sunday = date(2026, 11, 8)
+    state = _night_state(sunday)
+    now = _at(sunday, 9)
+    assert next_step(state, _probed(now), now) == Step("sleep", "stream-night", _at(sunday, 16, 30))
+    start = _at(sunday, 16, 30)
+    assert next_step(state, _probed(start), start) == Step(
+        "run", "stream-night", _at(date(2026, 11, 9), 9, 30)
+    )
+
+
+def test_the_night_units_and_their_reconciliation() -> None:
+    state = _night_state()
+    assert schedule.known_names(state, "stream-night", WEDNESDAY) == [
+        "crypto real-time",
+        "futures delayed",
+    ]
+    record(
+        state,
+        check_of(state, "stream-night", "crypto real-time"),
+        status="passed",
+        reason="",
+        day="",
+    )
+    state.stream_nights = ["2026-11-04"]
+    assert schedule.due_names(state, "stream-night-reconcile", WEDNESDAY) == []  # not over
+    assert schedule.due_names(state, "stream-night-reconcile", THURSDAY) == ["crypto real-time"]
+
+
+def test_the_next_start_of_the_night_is_shown_in_new_york_time() -> None:
+    state = _night_state()
+    noon = _at(WEDNESDAY, 12)
+    assert schedule.next_start_text(state, "stream-night", noon) == "Wed 2026-11-04 16:30 EST"
+    during = _at(THURSDAY, 1)
+    assert schedule.next_start_text(state, "stream-night", during) == "Thu 2026-11-05 01:00 EST"
+    after = _at(THURSDAY, 9, 30)
+    assert schedule.next_start_text(state, "stream-night", after) == "not scheduled"
+    assert schedule.next_start_text(_state(), "stream-night", noon) == "not scheduled"

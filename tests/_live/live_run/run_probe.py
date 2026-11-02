@@ -8,7 +8,10 @@ The live-run program (`live_run`) probes at each start and at a fixed time each 
 2. Each subscription's tier, by the live suite's own probe (`probe.probe_tiers`): a snapshot
    of one liquid ticker, its trades and quotes, and the `fmv` field. Using the suite's probe
    keeps the tiers in the exact grammar the live tests read from `MASSIVE_LIVE_PLANS`.
-3. With both S3 credentials set, which flat-file prefixes they reach (`probe.reached_prefixes`).
+3. Massive's upcoming market closures (`/v1/marketstatus/upcoming`), which plan a stream night
+   (`timetable.next_stream_night`) around a holiday or an early close no fixed rule predicts.
+   A probe that cannot read them still tells the tiers; the program keeps the closures it had.
+4. With both S3 credentials set, which flat-file prefixes they reach (`probe.reached_prefixes`).
 
 Every request is paced as Basic (5 a minute per subscription), since nothing is known yet; no
 subscription gets more than three. A probe that cannot tell the tiers (an answer that proves
@@ -88,6 +91,9 @@ class ProbeResult:
         clock_offset: The machine clock minus Massive's `serverTime`, in seconds, or None.
         key_rejected: Whether Massive rejected the API key.
         error: Why the tiers are unknown, `""` otherwise.
+        closures: Massive's upcoming market closures: each ISO date's status, `closed` or
+            `early-close` (a date with both, on different exchanges, is `closed`); None when
+            they could not be read.
         requests: Each request made: its path, query, status, and request id.
     """
 
@@ -98,6 +104,7 @@ class ProbeResult:
     clock_offset: float | None = None
     key_rejected: bool = False
     error: str = ""
+    closures: dict[str, str] | None = None
     requests: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -166,11 +173,35 @@ def _probe_rest(client: RestClient, result: ProbeResult, now: datetime) -> None:
             stamp = datetime.fromisoformat(server_time)
             result.clock_offset = round((datetime.now(UTC) - stamp).total_seconds(), 3)
         result.tiers = probe_tiers(client, now=now.astimezone(NEW_YORK).time())
+        result.closures = _closures(client)
     except WireAuthError:
         result.key_rejected = True
         result.error = "the API key was rejected"
     except (PlanProbeError, WireError) as error:
         result.error = f"{type(error).__name__}: {error}"
+
+
+def _closures(client: RestClient) -> dict[str, str] | None:
+    """Read Massive's upcoming market closures.
+
+    Args:
+        client: The probe's REST client.
+
+    Returns:
+        Each listed date's status, `closed` winning over `early-close`; None when the request
+        failed or its answer is not a list of objects.
+    """
+    try:
+        upcoming = source(Transport.REST, "/v1/marketstatus/upcoming")
+        page = client.get(upcoming, {}, {}, bucket="other")
+    except WireError:
+        return None
+    found: dict[str, str] = {}
+    for entry in page.rows:
+        day, status = entry.get("date"), entry.get("status")
+        if isinstance(day, str) and status in {"closed", "early-close"}:
+            found[day] = "closed" if "closed" in {status, found.get(day)} else status
+    return found
 
 
 def _reached(credentials: Credentials, now: datetime) -> list[str]:

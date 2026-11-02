@@ -85,13 +85,31 @@ def test_the_upgrade_check_reports_its_verdict(
     assert _results(tmp_path, attempt) == [("indices", "failed", "tier stayed Basic")]
 
 
-@pytest.mark.parametrize("group", ["stream-day", "throughput"])
+@pytest.mark.parametrize("group", ["stream-day", "throughput", "stream-night"])
 def test_a_streaming_group_past_its_end_reports_its_units(
     group: str, open_session: Callable[[], MassiveSession], tmp_path: Path
 ) -> None:
-    attempt = _request(tmp_path, group, [])
+    attempt = _request(tmp_path, group, [], stream_day="2026-11-03")
     group_child.run_group(tmp_path, attempt, open_session=open_session, tier_of=_no_tier)
     assert _results(tmp_path, attempt) == []
+
+
+def test_the_night_reconciliation_compares_the_latest_night(
+    open_session: Callable[[], MassiveSession], tmp_path: Path
+) -> None:
+    attempt = _request(
+        tmp_path,
+        "stream-night-reconcile",
+        ["crypto real-time"],
+        stream_folder=str(tmp_path / "stream-night" / "2026-11-03-1"),
+        stream_day="2026-11-03",
+    )
+    group_child.run_group(tmp_path, attempt, open_session=open_session, tier_of=_no_tier)
+    assert _results(tmp_path, attempt) == [
+        ("crypto real-time", "failed", "no streamed bars to compare")
+    ]
+    summary = json.loads((tmp_path / attempt / "summary.json").read_text())
+    assert summary["night"] == "2026-11-03"
 
 
 def test_the_reconciliation_compares_the_latest_stream_day(

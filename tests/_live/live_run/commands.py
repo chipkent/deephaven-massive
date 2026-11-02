@@ -32,7 +32,7 @@ import secrets
 import signal
 import threading
 import traceback
-from datetime import UTC, timedelta
+from datetime import UTC, date, timedelta
 from typing import TYPE_CHECKING, Final, NoReturn
 
 from tests._live.calendar import NEW_YORK
@@ -45,7 +45,7 @@ from tests._live.live_run.run_probe import ProbeResult
 from tests._live.live_run.schedule import PYTEST_GROUPS, next_start_text, next_step
 from tests._live.live_run.secret_scrub import fingerprints
 from tests._live.live_run.state import RunState, check_of, is_due, record
-from tests._live.live_run.stream_units import stream_units
+from tests._live.live_run.stream_units import night_units, stream_units
 from tests._live.live_run.upgrade_check import PROMPT, SUBSCRIPTIONS
 
 if TYPE_CHECKING:
@@ -119,7 +119,7 @@ def is_locked(out: Path) -> bool:
 def apply_probe(
     ctx: RunContext, state: RunState, memory: RunMemory, *, result: ProbeResult
 ) -> None:
-    """Record a probe, adopt its tiers, and plan a stream day when a unit is due.
+    """Record a probe, adopt its tiers, and plan a stream day and a stream night when due.
 
     Writes `probes/<UTC time>.json` and a line of `probes/entitlements.csv`. A probe that could
     not tell the tiers keeps the previous ones, Basic everywhere before the first, and is tried
@@ -153,6 +153,8 @@ def apply_probe(
     else:
         memory.retries = 0
         memory.latest_probe = dataclasses.asdict(result)
+        if result.closures is not None:
+            state.closures = result.closures
         state.current = run_state.entitlement_id(state, result.tiers, result.flat_files)
         _append_probe_line(folder, state, result)
         ctx.say(f"subscriptions: {run_state.tiers_text(state, state.current)}")
@@ -160,6 +162,7 @@ def apply_probe(
     if "basic" in tiers.values():
         memory.not_before = now + BASIC_PAUSE
     _plan_stream_day(ctx, state, tiers)
+    _plan_stream_night(ctx, state, tiers)
     _remind_flat_files(ctx, memory, result)
     run_state.save(ctx.out, state)
 
@@ -194,8 +197,36 @@ def _plan_stream_day(ctx: RunContext, state: RunState, tiers: dict[str, str]) ->
     today = ctx.now().astimezone(NEW_YORK).date()
     due = [u for u in stream_units(tiers) if is_due(state, check_of(state, "stream-day", u))]
     if due and (not state.stream_day or state.stream_day < today.isoformat()):
-        state.stream_day = timetable.next_stream_day(today, state.stream_days).isoformat()
+        planned = timetable.next_stream_day(today, state.stream_days, night=state.stream_night)
+        state.stream_day = planned.isoformat()
         ctx.say(f"stream day planned for {state.stream_day}: keep the machine on and awake")
+
+
+def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) -> None:
+    """Plan a stream night when a night unit is due and no planned night is still to end.
+
+    A night already under way is never moved: a probe between two of its children's starts
+    finds its units still due.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+        tiers: The current tiers.
+    """
+    now = ctx.now()
+    units = [u for u in night_units(tiers) if is_due(state, check_of(state, "stream-night", u))]
+    planned = state.stream_night
+    if not units or (planned and now < timetable.night_end(date.fromisoformat(planned))):
+        return
+    evening = timetable.next_stream_night(
+        now.astimezone(NEW_YORK).date(), stream_day=state.stream_day, closures=state.closures
+    )
+    state.stream_night = evening.isoformat()
+    ctx.say(
+        f"stream night planned from {timetable.night_start(evening):%a %Y-%m-%d %H:%M} to "
+        f"{timetable.night_end(evening):%H:%M} the next morning: "
+        "keep the machine on and awake overnight"
+    )
 
 
 def _remind_flat_files(ctx: RunContext, memory: RunMemory, result: ProbeResult) -> None:

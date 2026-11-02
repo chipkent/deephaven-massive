@@ -49,6 +49,8 @@ GROUPS: Final = (
     "stream-day",
     "throughput",
     "stream-day-reconcile",
+    "stream-night",
+    "stream-night-reconcile",
     "half-day",
 )
 """The groups `--redo` accepts."""
@@ -209,7 +211,7 @@ def run_group_child(
     request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
     group = request["group"]
     memory = machine_checks.memory_total() or SMALL_HEAP * 2
-    streams = group in {"stream-day", "throughput"}
+    streams = group in {"stream-day", "throughput", "stream-night"}
     start_server(min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP, out / attempt)
     tiers = request["tiers"].items()
     basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
