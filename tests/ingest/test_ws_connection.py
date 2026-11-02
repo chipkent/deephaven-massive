@@ -1353,14 +1353,19 @@ def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
     fake_ws_server.wait_for(lambda s: "T.AAPL" in s.connections[-1].topics)
     [row] = streams_of(ws_session, dh_to_pylist)
     # Reconnected, but no data flows until the topic is acknowledged: still an outage.
-    assert re.fullmatch(_DOWN, row["Error"])
-    assert row["State"] == "RUNNING"
+    down = re.fullmatch(_DOWN, row["Error"])
+    assert down is not None
+    assert (row["State"], row["Gaps"]) == ("RUNNING", None)
     assert 280.0 < _left(ws_session, connection, 1) <= 300.0  # the default: five minutes
     with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
         fake_ws_server.send(_ack("T.AAPL"))
         wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
         assert _down(ws_session, connection) == set()
         assert _down_since(ws_session, connection) is None  # the outage is over
+    # The note is gone, but the gap it announced stays on the row: from the last frame
+    # before the drop to the data's return.
+    gaps = streams_of(ws_session, dh_to_pylist)[0]["Gaps"]
+    assert re.fullmatch(rf"{down.group(1)} to \d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\dZ", gaps)
     # Its real end, once data flows again, is logged at INFO.
     (over,) = [r for r in caplog.records if "is over" in r.getMessage()]
     assert over.levelno == logging.INFO
