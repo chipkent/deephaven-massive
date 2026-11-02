@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
@@ -170,7 +170,7 @@ def test_each_stream_reads_its_own_class_history() -> None:
     for stream, check in expected.items():
         calls: list[str] = []
         session = cast("MassiveSession", _Session(calls))
-        reconcile._history(session, stream, symbols=["X"], day=DAY)
+        reconcile._history(session, stream, symbols=["X"], first=DAY, last=DAY)
         assert check(calls), (stream, calls)
         assert calls[-2] == "history"
 
@@ -228,3 +228,117 @@ def test_the_latest_arrival_of_a_bar_wins_across_a_restart(tmp_path: Path) -> No
     )
     bars = reconcile.streamed_bars(tmp_path, "stocks-minute-bars", unreadable=[])
     assert bars[("AAPL", start)][3] == 1.6
+
+
+# --- the stream night -------------------------------------------------------------------------
+
+NIGHT = date(2026, 10, 28)
+"""A Wednesday on New York's summer time: the night runs 20:30 to 13:30 UTC."""
+
+MIDNIGHT = datetime(2026, 10, 29, tzinfo=UTC)
+
+
+def _night_bars(folder: Path, bars: list[tuple[datetime, str]]) -> None:
+    """Write a night's streamed crypto bars, `(start, Date)`, all of `X:BTCUSD`."""
+    (folder / "rows").mkdir(parents=True, exist_ok=True)
+    starts = [_ns(start) for start, _ in bars]
+    table = pa.table(
+        {
+            "Symbol": ["X:BTCUSD"] * len(bars),
+            "TimestampStart": pa.array(starts, pa.timestamp("ns", tz="UTC")),
+            "TimestampInsert": pa.array(starts, pa.timestamp("ns", tz="UTC")),
+            "Open": [1.0] * len(bars),
+            "High": [2.0] * len(bars),
+            "Low": [0.5] * len(bars),
+            "Close": [1.5] * len(bars),
+            "Volume": [100.0] * len(bars),
+            "Date": [day for _, day in bars],
+        }
+    )
+    pq.write_table(table, folder / "rows" / "crypto-minute-bars-2026-10-28T23.parquet")
+
+
+def _night_reconcile(
+    fake_rest: FakeRestServer, streamed: Path, folder: Path
+) -> list[tuple[str, str, str]]:
+    history = [
+        _rest_bar(_ns(at), 1.5)
+        for at in (
+            MIDNIGHT - timedelta(minutes=1),
+            MIDNIGHT,
+            MIDNIGHT + timedelta(minutes=1),
+            MIDNIGHT + timedelta(hours=2),  # streamed nowhere
+            MIDNIGHT + timedelta(hours=15),  # after the night's end: left out
+        )
+    ]
+    fake_rest.reply(
+        "/v2/aggs/ticker/X%3ABTCUSD/range/1/minute/1793145600000/1793318399999",
+        Reply(envelope(history, ticker="X:BTCUSD", resultsCount=len(history))),
+    )
+    seen: list[tuple[str, str, str]] = []
+    folder.mkdir()
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+        reconcile.run_night_reconcile(
+            m,
+            units=["crypto real-time", "futures delayed"],
+            stream_folder=streamed,
+            night=NIGHT,
+            folder=folder,
+            report=lambda *result: seen.append(result),
+        )
+    return seen
+
+
+def test_a_nights_bars_are_compared_over_the_night_and_at_its_boundaries(
+    fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    streamed = tmp_path / "stream-night"
+    _night_bars(
+        streamed,
+        [
+            (MIDNIGHT - timedelta(hours=5), "2026-10-28"),  # before the night's start: left out
+            (MIDNIGHT - timedelta(minutes=1), "2026-10-28"),
+            (MIDNIGHT, "2026-10-29"),
+            (MIDNIGHT + timedelta(minutes=1), "2026-10-29"),
+        ],
+    )
+    seen = _night_reconcile(fake_rest, streamed, tmp_path / "reconcile")
+    assert seen == [
+        ("crypto real-time", "passed", ""),
+        ("futures delayed", "failed", "no streamed bars to compare"),
+    ]
+    summary = json.loads((tmp_path / "reconcile" / "summary.json").read_text())
+    crypto = summary["streams"]["crypto-minute-bars"]
+    assert crypto["night"] == {
+        "symbols": 1,
+        "bars_on_both_sides": 3,
+        "match_share": 1.0,
+        "date_mismatches": 0,
+    }
+    assert crypto["00:00 UTC before"]["bars_on_both_sides"] == 1
+    assert crypto["00:00 UTC after"]["bars_on_both_sides"] == 2
+    assert set(summary["streams"]["futures-minute-bars"]) == {
+        "night",
+        "16:00 Chicago close before",
+        "16:00 Chicago close after",
+    }
+    with (tmp_path / "reconcile" / "reconciliation.csv").open(encoding="utf-8") as file:
+        night = next(r for r in csv.DictReader(file) if r["window"] == "night")
+    assert (night["streamed"], night["fetched"], night["only_fetched"]) == ("3", "4", "1")
+
+
+def test_a_night_bar_dated_unlike_history_fails_its_unit(
+    fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    streamed = tmp_path / "stream-night"
+    _night_bars(
+        streamed,
+        [(MIDNIGHT, "2026-10-29"), (MIDNIGHT + timedelta(minutes=1), "2026-10-28")],
+    )
+    seen = _night_reconcile(fake_rest, streamed, tmp_path / "reconcile")
+    assert seen[0] == ("crypto real-time", "failed", "1 bars dated other than in history")
+    summary = json.loads((tmp_path / "reconcile" / "summary.json").read_text())
+    assert summary["streams"]["crypto-minute-bars"]["00:00 UTC after"]["date_mismatches"] == 1
+    with (tmp_path / "reconcile" / "reconciliation.csv").open(encoding="utf-8") as file:
+        rows = [r for r in csv.DictReader(file) if r["window"] == "night"]
+    assert rows[0]["date_mismatches"] == "1"

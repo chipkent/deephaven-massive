@@ -188,6 +188,39 @@ def test_a_probe_is_recorded_and_its_subscriptions_adopted(harness: Harness) -> 
     assert any("stream day planned for 2026-11-05" in line for line in harness.lines)
 
 
+def test_a_probe_plans_a_stream_night_around_massives_closures(harness: Harness) -> None:
+    state, memory = RunState(commit="c1"), RunMemory()
+    tiers = BASIC | {"currencies": "starter", "futures": "starter"}
+    result = probed(tiers)
+    result.closures = {"2026-11-05": "closed"}  # Thursday, unlike the fixed rules, closed
+    commands.apply_probe(harness.ctx, state, memory, result=result)
+    assert state.closures == {"2026-11-05": "closed"}
+    assert state.stream_day == "2026-11-05"
+    # Wednesday's morning is the stream day; Thursday is closed; Friday and Saturday cannot be.
+    assert state.stream_night == "2026-11-08"
+    assert any(
+        "stream night planned from Sun 2026-11-08 16:30 to 09:30 the next morning" in line
+        for line in harness.lines
+    )
+    # A probe during the night, its closures unread, moves neither the night nor the closures.
+    harness.clock.now = datetime(2026, 11, 9, 2, tzinfo=NEW_YORK)
+    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    assert (state.stream_night, state.closures) == ("2026-11-08", {"2026-11-05": "closed"})
+    # Once it ended with its units still due, the next probe plans another, clear of the stream
+    # day it plans for Tuesday.
+    harness.clock.now = datetime(2026, 11, 9, 10, tzinfo=NEW_YORK)
+    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    assert (state.stream_day, state.stream_night) == ("2026-11-10", "2026-11-11")
+
+
+def test_a_key_that_streams_neither_crypto_nor_futures_plans_no_night(harness: Harness) -> None:
+    state = RunState(commit="c1")
+    commands.apply_probe(
+        harness.ctx, state, RunMemory(), result=probed(BASIC | {"stocks": "starter"})
+    )
+    assert (state.stream_night, state.closures) == ("", {})
+
+
 def test_a_probe_that_cannot_tell_keeps_basic_and_counts_a_retry(harness: Harness) -> None:
     state, memory = RunState(commit="c1"), RunMemory()
     commands.apply_probe(harness.ctx, state, memory, result=probed(None, error="HTTP 503"))

@@ -3,12 +3,14 @@
 The live-run program (`live_run`) keeps every check's status in its state (`run_state`). This
 module turns that state into what the tester and the owner read:
 
-- `status_lines`, the `status` command's view: the latest probe, the next stream day, every
+- `status_lines`, the `status` command's view: the latest probe, the next stream day and
+  stream night, every
   check with its status, its reason, the subscriptions of its last run, and when its group runs
   next, then one summary row per group. Skip reasons drop the monthly prices the live tests
   add, so they read `skipped: needs Stocks Starter`.
 - `write_checks_csv`, one line per check, and `write_report`, `REPORT.md`: the environment, the
-  probes over time, one table per group, the design's open verification items (from the tests'
+  probes over time, one table per group, each stream night's findings (`night_lines`), the
+  design's open verification items (from the tests'
   `settles` and `verifies` markers) with each one's status, and every check still unverified,
   grouped by what it needs.
 - `pack`, which writes both, scans every file of the results folder for the secrets
@@ -24,8 +26,10 @@ import csv
 import json
 import re
 import zipfile
+from datetime import date
 from typing import TYPE_CHECKING, Final
 
+from tests._live.live_run import timetable
 from tests._live.live_run.secret_scrub import scan
 from tests._live.live_run.state import is_need, tiers_text
 from tests._live.summary import item_order
@@ -51,6 +55,8 @@ GROUP_ORDER: Final = (
     "stream-day",
     "throughput",
     "stream-day-reconcile",
+    "stream-night",
+    "stream-night-reconcile",
     "half-day",
     "upgrade-check",
 )
@@ -105,6 +111,52 @@ def _ordered(checks: Iterable[Check]) -> list[Check]:
     return sorted(checks, key=lambda c: (order.get(c.group, len(order)), c.name))
 
 
+def night_text(state: RunState) -> str:
+    """Describe the planned stream night for a person.
+
+    Args:
+        state: The run's state.
+
+    Returns:
+        Such as `"Sun 2026-11-08 16:30 EST to Mon 09:30 EST"`, or `"none planned"`.
+    """
+    if not state.stream_night:
+        return "none planned"
+    evening = date.fromisoformat(state.stream_night)
+    start, end = timetable.night_start(evening), timetable.night_end(evening)
+    return f"{start:%a %Y-%m-%d %H:%M %Z} to {end:%a %H:%M %Z}"
+
+
+def night_lines(folder: Path, state: RunState) -> list[str]:
+    """Return the `REPORT.md` section of every stream night that wrote its summary.
+
+    Args:
+        folder: The results folder.
+        state: The run's state, whose attempts name each night's folder.
+
+    Returns:
+        Per night: its gaps, the most reconnects per connection, each unit's quiet hours, and
+        a table of the rows on each side of each boundary with their `Date` values; a line
+        saying none ran when no night wrote a summary.
+    """
+    lines: list[str] = []
+    nights = dict.fromkeys(a.folder for a in state.attempts if a.group == "stream-night")
+    for name in nights:
+        path = folder / name / "summary.json"
+        if not path.exists():
+            continue
+        night = json.loads(path.read_text(encoding="utf-8"))
+        reconnects = ", ".join(f"{k} {v}" for k, v in night["reconnects"].items()) or "none"
+        lines += ["", f"### {night['night']} ({name})", ""]
+        lines.append(f"- Gaps: {night['gaps_minutes']} minutes. Reconnects: {reconnects}.")
+        for unit, hours in night["quiet_hours"].items():
+            lines.append(f"- {unit}: quiet hours (UTC): {', '.join(hours) or 'none'}.")
+        header = ["stream", "boundary", "side", "rows", "dates", "expected", "wrong"]
+        lines.append("")
+        lines += _table(header, ([str(b[h]) for h in header] for b in night["boundaries"]))
+    return lines or ["", "No stream night has run."]
+
+
 def summary_rows(state: RunState) -> list[dict[str, object]]:
     """Count each group's checks by status.
 
@@ -142,6 +194,7 @@ def status_lines(
         lines.append(f"latest probe: {latest_probe['when']}")
         lines.append(f"  subscriptions: {tiers_text(state, state.current)}")
     lines.append(f"next stream day: {state.stream_day or 'none planned'}")
+    lines.append(f"next stream night: {night_text(state)}")
     group = ""
     for check in _ordered(state.checks.values()):
         if check.group != group:
@@ -250,6 +303,7 @@ def write_report(folder: Path, state: RunState) -> None:
             if c.group == group
         ]
         lines.extend(_table(["check", "status", "last run", "subscriptions"], rows))
+    lines.extend(["", "## Stream nights", *night_lines(folder, state)])
     lines.extend(["", "## Open verification items", ""])
     items: dict[str, list[Check]] = {}
     for check in checks:

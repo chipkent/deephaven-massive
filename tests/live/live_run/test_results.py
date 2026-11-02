@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from tests._live.live_run import results
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.live_run.state import RunState, check_of, entitlement_id, record
+from tests._live.live_run.state import Attempt, RunState, check_of, entitlement_id, record
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -170,3 +170,59 @@ def test_pack_stores_parquet_as_it_is_and_keeps_only_the_newest_zip(tmp_path: Pa
     assert kinds["rows/bars.parquet"] == zipfile.ZIP_STORED
     assert kinds["group.log"] == zipfile.ZIP_DEFLATED
     assert sorted(p.name for p in tmp_path.glob("*.zip")) == ["live-results-2026-11-04.zip"]
+
+
+def test_the_status_view_names_the_planned_night() -> None:
+    state = _state()
+    assert "next stream night: none planned" in results.status_lines(
+        state, latest_probe=None, next_start=str
+    )
+    state.stream_night = "2026-11-04"
+    lines = results.status_lines(state, latest_probe=None, next_start=str)
+    assert "next stream night: Wed 2026-11-04 16:30 EST to Thu 09:30 EST" in lines
+
+
+def test_the_report_gives_each_nights_findings(tmp_path: Path) -> None:
+    state = _state()
+    results.write_report(tmp_path, state)
+    assert "## Stream nights\n\nNo stream night has run." in (tmp_path / "REPORT.md").read_text()
+    night = "stream-night/2026-11-04-1"
+    state.attempts = [
+        Attempt("stream-night", night, "2026-11-04", ""),
+        Attempt("stream-night", night, "2026-11-04", ""),  # a restart shares the folder
+        Attempt("stream-night", "stream-night/2026-11-09-1", "2026-11-09", ""),  # no summary
+    ]
+    (tmp_path / night).mkdir(parents=True)
+    boundary = {
+        "unit": "futures delayed",
+        "stream": "futures-minute-bars",
+        "boundary": "16:00 Chicago close",
+        "at": "2026-11-04T23:00:00+00:00",
+        "side": "after",
+        "rows": 90,
+        "dates": "2026-11-04=1 2026-11-05=89",
+        "expected": "2026-11-05",
+        "wrong": 1,
+    }
+    summary = {
+        "night": "2026-11-04",
+        "gaps_minutes": 3,
+        "reconnects": {"futures delayed": 1},
+        "quiet_hours": {"futures delayed": [], "crypto real-time": ["2026-11-05T03:00:00+00:00"]},
+        "boundaries": [boundary],
+    }
+    (tmp_path / night / "summary.json").write_text(json.dumps(summary))
+    results.write_report(tmp_path, state)
+    report = (tmp_path / "REPORT.md").read_text()
+    assert report.count("### 2026-11-04") == 1
+    assert "- Gaps: 3 minutes. Reconnects: futures delayed 1." in report
+    assert "- futures delayed: quiet hours (UTC): none." in report
+    assert "- crypto real-time: quiet hours (UTC): 2026-11-05T03:00:00+00:00." in report
+    assert (
+        "| futures-minute-bars | 16:00 Chicago close | after | 90 | 2026-11-04=1 2026-11-05=89 "
+        "| 2026-11-05 | 1 |" in report
+    )
+    summary["reconnects"] = {}
+    (tmp_path / night / "summary.json").write_text(json.dumps(summary))
+    results.write_report(tmp_path, state)
+    assert "Reconnects: none." in (tmp_path / "REPORT.md").read_text()

@@ -998,6 +998,14 @@ running for days or weeks.
   connection-limit checks from 16:15. When your plan allows live data, it plans a *stream day*:
   03:45 to 20:30 New York time, streaming a full trading day, with the probe at 03:15; the next
   morning it measures throughput from 09:15 to 11:00.
+- **It also streams overnight, if your plan allows crypto or futures.** With a paid Currencies
+  or Futures plan it plans a *stream night*: from 16:30 New York time to 09:30 the next
+  morning, it streams Bitcoin and Ether, and the main stock-index futures, through the hours
+  only those markets trade. A night falls on a Sunday to Thursday evening before a normal
+  trading day, never around a holiday, and never on a stream day. It checks that each row is
+  dated to the right day as the futures session changes at the 16:00 Chicago close (17:00 New
+  York) and the crypto day changes at midnight UTC (19:00 or 20:00 New York); the next day it compares
+  the night's prices with Massive's history. Leave the computer on and awake that night.
 
 ## 3.2 Before you start
 
@@ -1064,7 +1072,9 @@ uv run python scripts/live_run.py status --out ~/massive-live
 ```
 
 It changes nothing. **You should see** the latest probe and your subscriptions, the next
-stream day if one is planned, every check grouped with when its group runs next, each as
+stream day and the next stream night if one is planned (such as
+`next stream night: Sun 2026-11-08 16:30 EST to Mon 09:30 EST`), every check grouped with when
+its group runs next, each as
 `passed`, `failed`, `error`, `refused`, `skipped: needs ...`, or `not run`, and a summary
 table:
 
@@ -1094,9 +1104,9 @@ fails twice.
 
 You are free most of the time. Good uses of it:
 
-- the try-your-own examples (2.2), with a new Deephaven server, but **not while a stream day
-  or a connection-limit check runs**, since both use your key's live connection; `status`
-  shows when those are planned;
+- the try-your-own examples (2.2), with a new Deephaven server, but **not while a stream day,
+  a stream night, or a connection-limit check runs**, since they use your key's live
+  connection; `status` shows when those are planned;
 - reading the user guide, `README.md`, and the dataset reference in `docs/datasets/` of the
   checkout, and noting anything unclear;
 - writing up anything from part 2 you have not reported yet.
@@ -1138,8 +1148,10 @@ a reason. Pressing Enter without upgrading is a rehearsal: it ends
   stop it first.
 - **The probe shows a lower plan than you bought**: a purchase can take minutes to reach the
   key; wait ten minutes, then restart the run.
-- **A stream day shows a gap**: the computer slept. Keep it awake and the lid open; a gap of
-  more than 30 minutes makes the program plan another stream day.
+- **A stream day or night shows a gap**: the computer slept. Keep it awake and the lid open;
+  a gap of more than 30 minutes makes the program plan another stream day or night. A stream
+  night also fails when an hour its market was open brought no data: that is for the owner,
+  and needs nothing from you but the zip.
 - **Anything else**: send the owner the `status` output and the zip.
 
 ---

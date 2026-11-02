@@ -680,7 +680,7 @@ def test_a_stall_between_samples_is_recorded_as_a_gap(
 
     recorder = Recorder(tmp_path)
     try:
-        stream_capture._sample_until(
+        stream_capture.sample_until(
             massive_session,
             tmp_path,
             until=START + timedelta(hours=3),

@@ -6,6 +6,10 @@ trading day (`stream-day`), compares that day with history the next day (`stream
 and measures the throughput of the busiest ones (`throughput`). A unit is new, and so due, when
 a class starts to stream or moves from delayed to real-time data.
 
+The overnight group (`stream-night`) has units of its own, named by what they stream: `crypto`
+for the Currencies subscription, whose crypto pairs trade around the clock, and `futures`, such
+as `"crypto real-time"` or `"futures delayed"`.
+
 The recency of each tier, and the documented delay of delayed data, come from Massive's plan
 tables; Basic streams nothing. Every function is pure.
 """
@@ -53,6 +57,9 @@ DELAYS: Final[Mapping[str, timedelta]] = {
 }
 """How far each class's delayed data lags the market; currencies are never delayed."""
 
+NIGHT_CLASSES: Final[Mapping[str, str]] = {"currencies": "crypto", "futures": "futures"}
+"""The subscriptions a stream night streams, each with the name its night unit starts with."""
+
 THROUGHPUT_CLASSES: Final = ("stocks", "currencies")
 """The classes whose throughput is measured: the two with a busy stream of every symbol."""
 
@@ -81,6 +88,23 @@ def stream_units(tiers: Mapping[str, str]) -> list[str]:
     """
     return [
         unit(name, RECENCY[name, tier]) for name, tier in tiers.items() if (name, tier) in RECENCY
+    ]
+
+
+def night_units(tiers: Mapping[str, str]) -> list[str]:
+    """Return the units a key's tiers can stream through a night.
+
+    Args:
+        tiers: Each class's tier.
+
+    Returns:
+        A `crypto` unit when Currencies streams and a `futures` unit when Futures does, such as
+        `["crypto real-time", "futures delayed"]`.
+    """
+    return [
+        unit(NIGHT_CLASSES[name], RECENCY[name, tier])
+        for name, tier in tiers.items()
+        if name in NIGHT_CLASSES and (name, tier) in RECENCY
     ]
 
 

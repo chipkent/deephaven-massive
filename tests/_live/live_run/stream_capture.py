@@ -34,6 +34,9 @@ the rows a second of each stream over the measured hour (09:45 to 10:45 for dela
 09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects, and any
 `SchemaDrift`, in `summary.json`; it passes when it sampled the whole hour without a gap.
 
+The overnight group (`stream_night`) reuses the recorder, the sampler, the gap records, and
+the stream holding (`held_streams`) of the stream day.
+
 Both run in a child process that started an embedded Deephaven server and opened the session;
 the functions here take the session and run on the child's main thread, apart from the
 listeners (the update graph's threads) and the writer thread.
@@ -41,6 +44,7 @@ listeners (the update graph's threads) and the writer thread.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import importlib
 import itertools
@@ -64,7 +68,7 @@ from tests._live.live_run.stream_units import delay_of
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
     from deephaven.table import Table
@@ -89,10 +93,10 @@ MAX_GAP: Final = timedelta(minutes=30)
 """Gaps after which a stream day fails."""
 
 GAP_THRESHOLD: Final = timedelta(seconds=60)
+"""A pause between samples longer than this counts as a gap."""
 
 DAY_START: Final = time(3, 45)
 """When a stream day starts, New York time (`timetable.STREAM_DAY`)."""
-"""A pause between samples longer than this counts as a gap."""
 
 OPTION_CONTRACTS: Final = 10
 """How many SPY contracts the options unit streams."""
@@ -128,14 +132,22 @@ class Stream:
     held: bool = True
 
 
-def _front(product: str, day: date) -> str:
-    """Return a quarterly index future's front contract; NQ rolls with ES."""
-    return product + front_contract("ES", day)[2:]
+def index_futures(day: date) -> list[str]:
+    """Return the front E-mini S&P 500 and Nasdaq-100 contracts of a day.
+
+    Args:
+        day: The day; NQ rolls with ES (`contracts.front_contract`).
+
+    Returns:
+        Such as `["ESZ6", "NQZ6"]`.
+    """
+    month = front_contract("ES", day)[2:]
+    return ["ES" + month, "NQ" + month]
 
 
 def _futures_bars(today: date) -> Callable[[MassiveSession], Any]:
     """Return the query builder of the front ES and NQ contracts' minute bars on a day."""
-    contracts = [_front("ES", today), _front("NQ", today)]
+    contracts = index_futures(today)
     return lambda m: m.futures.bars(contracts, dm.Timespan.MINUTE)
 
 
@@ -674,23 +686,9 @@ def run_stream_day(
         options = option_contracts(rows_of(chain), today)
     streams = stream_day_streams(units, tiers=tiers, today=today, options=options)
     recorder = Recorder(folder)
-    tables: list[Table] = []
-    listeners: list[TableListenerHandle] = []
-    try:
-        for stream in streams:
-            query = stream.query(m)
-            blink = query.blink()
-            tables.append(blink)
-            listeners.append(_listen(blink, stream, recorder))
-            if stream.held:
-                tables.extend([query.append_only(), query.last_by()])
-        _sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+    with held_streams(m, streams, recorder):
+        sample_until(m, folder, until=until, clock=clock, recorder=recorder)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
-    finally:
-        for handle in listeners:
-            handle.stop()
-        _release(m, tables)
-        recorder.close()
     rows = unit_rows(folder, streams)
     for unit in units:
         status, reason = _unit_verdict(
@@ -703,6 +701,41 @@ def run_stream_day(
             late=clock.now() >= rows_due_from(unit, today),
         )
         report(unit, status, reason)
+
+
+@contextlib.contextmanager
+def held_streams(m: MassiveSession, streams: list[Stream], recorder: Recorder) -> Iterator[None]:
+    """Hold streams while the caller samples them, every added row reaching the recorder.
+
+    Each stream's query is held as a `blink()` table with a listener (`_listen`), and a bars
+    stream (`Stream.held`) also as an `append_only()` and a `last_by()` table. On the way out,
+    even after an error, the listeners stop, the tables are released, and the recorder writes
+    what is queued and closes.
+
+    Args:
+        m: The session.
+        streams: The streams.
+        recorder: Their rows' recorder; closed on the way out.
+
+    Yields:
+        Control while the streams are held.
+    """
+    tables: list[Table] = []
+    listeners: list[TableListenerHandle] = []
+    try:
+        for stream in streams:
+            query = stream.query(m)
+            blink = query.blink()
+            tables.append(blink)
+            listeners.append(_listen(blink, stream, recorder))
+            if stream.held:
+                tables.extend([query.append_only(), query.last_by()])
+        yield
+    finally:
+        for handle in listeners:
+            handle.stop()
+        _release(m, tables)
+        recorder.close()
 
 
 def _unit_verdict(
@@ -808,7 +841,7 @@ def failed_streams(rows: list[dict[str, Any]]) -> dict[str, str]:
     return found
 
 
-def _sample_until(
+def sample_until(
     m: MassiveSession, folder: Path, *, until: datetime, clock: Clock, recorder: Recorder
 ) -> None:
     """Sample every `SAMPLE_SECONDS` until a time, writing the minute counts each minute.
@@ -882,7 +915,7 @@ def run_throughput(
     tables = [stream.query(m).last_by() for stream in streams]
     recorder = Recorder(folder)
     try:
-        _sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        sample_until(m, folder, until=until, clock=clock, recorder=recorder)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     finally:
         _release(m, tables)

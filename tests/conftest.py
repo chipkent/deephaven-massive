@@ -67,6 +67,7 @@ from tests._live import (
     calendar,
     classes,
     contracts,
+    debug_log_file,
     events,
     pacing,
     parallel,
@@ -1623,6 +1624,9 @@ _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
 _EVIDENCE_PATH: Final = pytest.StashKey[Path]()
 """The run's evidence file, named when the first line is recorded."""
 
+_DEBUG_LOG: Final = pytest.StashKey[Path]()
+"""The debug log `debug_log_file.turn_on` chose for a run that selected a live test."""
+
 _EVIDENCE_PREFIX = "live-evidence-"
 """The start of every evidence file's name; the live-run program moves each such file of the
 repository root into its attempt's folder."""
@@ -1833,6 +1837,24 @@ def _delayed_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription
 
 _FLAT_FILE_BLOCK = 1 << 20
 """Bytes of decompressed CSV per block when a live test reads a flat file."""
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Turn on the live tests' debug log once the run's selection is final, before any test.
+
+    A run that selected a live test gets a DEBUG log file of its own
+    (`debug_log_file.turn_on`) unless `DEEPHAVEN_MASSIVE_LOG_FILE` already names one; the
+    terminal summary prints its path. A run of unit tests only changes nothing.
+
+    Args:
+        session: The pytest session, whose `items` are the selected tests.
+    """
+    if not any(item.get_closest_marker(_INTEGRATION) is not None for item in session.items):
+        return
+    root = Path(__file__).resolve().parent.parent
+    path = debug_log_file.turn_on(os.environ, root=root, now=datetime.now(UTC))
+    if path is not None:
+        session.config.stash[_DEBUG_LOG] = path
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -2621,7 +2643,7 @@ def _narrowed(config: pytest.Config) -> bool:
 def pytest_terminal_summary(
     terminalreporter: pytest.TerminalReporter, config: pytest.Config
 ) -> None:
-    """Print the smoke tier's coverage, then the evidence the live tests recorded, by test.
+    """Print the smoke tier's coverage, the run's debug log, then the live tests' evidence.
 
     Args:
         terminalreporter: The terminal reporter that writes the summary.
@@ -2629,6 +2651,10 @@ def pytest_terminal_summary(
     """
     _smoke_coverage(terminalreporter)
     _settled_summary(terminalreporter, config)
+    if _DEBUG_LOG in config.stash:
+        terminalreporter.write_sep("=", "live debug log")
+        for line in debug_log_file.summary_lines(config.stash[_DEBUG_LOG], os.environ):
+            terminalreporter.write_line(line)
     stored: list[tuple[str, str]] = config.stash.setdefault(_EVIDENCE, [])
     with _EVIDENCE_LOCK:
         records = list(stored)
