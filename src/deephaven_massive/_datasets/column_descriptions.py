@@ -126,7 +126,7 @@ time" (`dates.DAY_ZONE_NAMES`)."""
 
 _WINDOW_END: Final = (
     "The exclusive end of the bar's window, as an Instant: the first instant at which the bar "
-    'is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, '
+    'is complete, so an as-of join on it, `t.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, '
     "never attaches a bar that is still open. It is when the window closes, not when Massive "
     "published the bar, and Massive may correct a bar later."
 )

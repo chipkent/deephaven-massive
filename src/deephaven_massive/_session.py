@@ -478,9 +478,11 @@ class MassiveSession:
         Returns:
             A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that
             built the query, such as `m.stocks.trades('AAPL')`), `SymbolCount` (null for
-            `dm.ALL`), `Symbols`, `HeldResults`, `Deferred`, `Transport`, `Host`, `Path`,
-            `Recency` (`REALTIME`, `DELAYED`, or `UNKNOWN`, which is never real-time; null for
-            data of no single subscription and for a background read), `RowsPublished`,
+            `dm.ALL`), `Symbols`, `HeldResults`, `Deferred`, `Transport` (`WebSocket` for a
+            stream, `REST` for a poll, and `REST` or `flat files` for a background read,
+            whichever it reads), `Host`, `Path`, `Recency` (`REALTIME`, `DELAYED`, or
+            `UNKNOWN`, which is never real-time; null for data of no single subscription and
+            for a background read), `RowsPublished`,
             `RequestsPerCycle`, `State` (`RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
             `CLOSED`), `Error`, `CreatedAt`, and `SchemaDrift`
             (`transport:field+`, `transport:field-`, or `transport:field?`, as in

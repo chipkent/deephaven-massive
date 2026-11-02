@@ -317,8 +317,9 @@ class FlatFile:
         with a header and no rows yields one empty batch, so its drift is still reported.
         Each batch has one column per `plan.columns`, named by `ReadColumn.column`, typed by
         `read_type` (or `list_type`); a documented header the file lacks is a column of nulls.
-        Blocks are read on the calling thread as it iterates; Arrow reads ahead on its own I/O
-        thread.
+        The calling thread decompresses the file as it iterates, and a pool of
+        `plan.parse_threads` threads parses it, at most `plan.parse_threads + 1` chunks ahead
+        (`_blocks`); Arrow starts no thread of its own.
 
         Args:
             plan: What to read and which rows to keep.
