@@ -1,6 +1,6 @@
 ---
 name: pre-push-review
-description: "Mandatory gate before any push that runs paid CI and the review bots. Use this skill whenever the user asks to open, create, or ship a PR, or to push commits to a branch that already has a PR. That includes pushing review fixes, addressing reviewer or bot comments (coderabbit, the owner), updating a PR description, or \"push the batch\". Invoke it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is already green. The skill does a hostile self-review of the diff, checks that the tests would catch a regression, checks the docs and the PR description, drafts replies to review threads, fixes every finding, and only then pushes once. Skip it for pushing a work-in-progress branch that has no PR (backups), for reviewing someone else's PR, for debugging CI, and for general questions."
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use this skill whenever the user asks to open, create, or ship a PR, or to push commits to a branch that already has a PR. That includes pushing review fixes, addressing reviewer or bot comments (coderabbit, the owner), updating a PR description, or \"push the batch\". Invoke it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is already green. The skill does a hostile self-review of the diff, checks that the tests would catch a regression, checks the docs, edits the PR description until it passes the writing checklist, drafts replies to review threads, fixes every finding, and only then pushes once. Skip it for pushing a work-in-progress branch that has no PR (backups), for reviewing someone else's PR, for debugging CI, and for general questions."
 ---
 
 # Review locally before you push
@@ -107,18 +107,33 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
   imperative, at most 60 characters, the effect rather than the technique, and no internal
   names or jargon. Count with `printf %s "<title>" | wc -c`. Fix the PR title with
   `gh pr edit <n> --title`, and the last unpushed commit subject with `git commit --amend`.
-- The PR description meets `docs/dev/pull-requests.md`: read that page, then go through its
-  "Checklist before a push". The common misses: file or function names in the Summary, a
-  missing section instead of "None", review labels or first-person narration, no issue line.
 - **An open question in the description is a finding** ("should this return X?", "happy to
   switch"). Answer it from `AGENTS.md`, `DESIGN.md` and the code, and record the choice and its
   reason under Decisions; if only the owner can decide, or you are unsure whether you may
   decide (section 1 of the `writing-to-the-owner` skill), stop and ask before the push, using
   that skill. Never answer one by overturning an `AGENTS.md` rule, such as dates being ISO
   strings.
-- Fix the description with `gh pr edit <n> --body-file <file>` in the same batch as the push.
 
-## 4. Check the conversation
+## 4. Edit the PR description
+
+This step must pass before the push. A description that is long, narrated, or hides a fact in
+a paragraph is a finding like any bug. The owner's verdict on such text: "rambly", "agent
+slop".
+
+1. Write the description to a file, or fetch the current one:
+   `gh pr view <n> --json body --jq .body > <file>`. Rewrite it to the branch's final state.
+2. Run the self-edit checklist in `docs/dev/pull-requests.md` on the file, every item, and
+   edit until each passes. Item 1 comes first: skim only the headings and the first words of
+   each bullet, and check that every fact is there.
+3. Check the length with `wc -w <file>`: about 350 words for an ordinary PR, 650 for a large
+   one. Over budget, cut or move detail into the docs; never drop a fact the reader needs.
+4. Grep for the banned patterns the page lists:
+   `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
+   Fix every hit that is narration, a hedge, or filler.
+5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
+   `gh pr view <n> --json closingIssuesReferences`.
+
+## 5. Check the conversation
 
 On a PR that already has reviews, every comment has a reply: the commit that fixes it and a
 summary of the fix, or why nothing changes. Read the review bodies and the conversation comments
@@ -133,16 +148,16 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$
 
 A thread with a single comment, or whose last comment is a bot's, still needs an answer, resolved
 or not. `gh` posts under the owner's account, so a last comment with the owner's login may be
-your reply or a new question from the owner: open it and check. Draft the replies now; section 6
+your reply or a new question from the owner: open it and check. Draft the replies now; section 7
 posts them.
 
-## 5. Fix, then push once
+## 6. Fix, then push once
 
 Fix every finding, rerun `./scripts/check.sh` (full), and push once. Put anything you
 deliberately left alone, with its reason, in the PR description so the reviewer does not
 rediscover it.
 
-## 6. After the push: post the replies and prove they landed
+## 7. After the push: post the replies and prove they landed
 
 1. Post each drafted reply in its thread. A reply that claims a fix names the commit (short
    SHA) that makes it; a reply that changes nothing says why.
@@ -151,5 +166,5 @@ rediscover it.
    `main` fixes nothing. For a reply that changes nothing, reread the code it cites and confirm
    the reason still holds.
 3. When CI and the review bots have finished on the pushed commit, rerun the thread query from
-   section 4: every thread's last comment is your reply. Answer any new one the same way. Only
+   section 5: every thread's last comment is your reply. Answer any new one the same way. Only
    then report the PR as addressed or ready.
