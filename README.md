@@ -308,6 +308,24 @@ Massive leaves the greeks out for some contracts, such as those deep in the mone
 columns are null then. On Options Starter or Developer the chain is delayed (see
 [real-time or delayed](#real-time-or-delayed)).
 
+A polled chain can choose what to stream. This re-reads SPY's nearest expirations every five
+minutes, keeps the contracts within 2% of the underlying's price, and streams their quotes: as
+the price moves, contracts that come near are subscribed and those that drift away are dropped
+(see [`symbols`](#symbols)):
+
+```python
+spy_chain = m.options.chain("SPY", sort="expiration_date", limit=200).poll(300)
+near = spy_chain.where(
+    "abs(DetailsStrikePrice - UnderlyingAssetPrice) <= 0.02 * UnderlyingAssetPrice"
+)
+near_quotes = m.options.quotes(near).last_by()
+```
+
+`UnderlyingAssetPrice` depends on your Stocks plan; where it is null, no contract passes the
+filter. Keep the filter narrow: the options connection carries at most 1,000 topics, one per
+contract's quotes, and a live watchlist's contracts past that wait, counted in the `Deferred`
+column of `m.streams()`, until room frees up.
+
 <a id="history-of-a-watchlist"></a>
 
 ### History of a watchlist
@@ -860,6 +878,9 @@ wrong.
   row, with none delivered, fail the streams, since Massive has most likely changed its format.
   A `history()` or `fetch()` that follows a live symbol table has a row too: `LOADING` while a
   symbol is still being read, then `RUNNING`, with `Loading` counting the symbols left.
+  `Symbols` and `SymbolCount` show what a stream is subscribed to: for one that follows a
+  live table, the symbols it holds now, updated as you add and delete rows; for a `poll()` of
+  one, `SymbolCount` counts the symbols its latest cycle read.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,
@@ -930,10 +951,16 @@ watchlist.add(new_table([string_col("Symbol", ["NVDA"])]))
 watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
 ```
 
-Delete rows by passing a static table of the keys, as above: a live view of the watchlist
-itself can hang the server. Any live table with a `Symbol` column is a watchlist, so one dataset
-can choose another's symbols. This streams the trades of the day's top gainers, re-checked every
-minute, and the trades of every E-mini S&P 500 futures contract:
+In the web UI, open the `watchlist` panel. To add a symbol, click the empty row at the bottom,
+type it, press **Enter**, and click **Commit**: rows you type are not added until you commit
+them. To delete one, select its row, right-click, and choose **Delete Selected Rows**.
+
+In code, delete rows by passing a static table of the keys, as above: a live view of the
+watchlist itself can hang the server. Any table with a `Symbol` column can choose symbols, so
+one dataset can choose another's: a live one, such as a `poll()`, is followed, and a static one,
+such as a `fetch()` of a list, is a fixed list read at the call. This streams the trades of the
+day's top gainers, re-checked every minute, and the trades of every E-mini S&P 500 futures
+contract listed when you call:
 
 ```python
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
@@ -962,9 +989,11 @@ rejected API key, a closed session, a failed watchlist, or a library bug fails t
 With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
 and raises only if every one of them failed. A symbol that comes back after you deleted it is
 downloaded again, unless you choose otherwise (`reread`, in
-[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows. The same holds for
-`underlying=` of `m.options.chain` and `m.options.contracts`, which take a table with a
-`Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode` column.
+[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows.
+
+`underlying=` of `m.options.chain` and `m.options.contracts` takes one ticker today, and
+futures `product_code=` one code or a list of codes; neither takes a table. Following a table
+there is planned; until then, call once per underlying.
 
 A large live result costs memory and time downstream: every table you derive from it updates
 when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.
