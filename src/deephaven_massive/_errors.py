@@ -67,6 +67,7 @@ __all__ = [
     "LIBRARY_BUG",
     "RAISES_THROUGH",
     "AuthenticationError",
+    "CutShortError",
     "EntitlementError",
     "ErrorCause",
     "MassiveError",
@@ -431,6 +432,16 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         return function
 
     return declare
+
+
+class CutShortError(MassiveError):
+    """A symbol's REST data cut short: Massive answered HTTP 404 for a later page of its pages.
+
+    Internal: not exported from `dm`; `fetch()` and `history()` raise it as the `MassiveError`
+    it is, with status 404. The REST transport raises it, and a read by symbol
+    (`_ingest/symbol_reads.py`) names it: unlike any other 404, which the same request would
+    meet again, a page that vanished mid-read may be there when the symbol is read again.
+    """
 
 
 class RowDataError(PermanentError):

@@ -17,24 +17,26 @@ from deephaven import arrow as dh_arrow
 
 import deephaven_massive as dm
 from deephaven_massive import _session
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    CutShortError,
     EntitlementError,
     ErrorCause,
     MassiveError,
     RowDataError,
 )
 from deephaven_massive._ingest import rate_limits
-from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import UnlistedPairError
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
     failure_kind,
-    read_flat_files_by_symbol,
+    split_by_symbol,
+    symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
@@ -169,7 +171,10 @@ def _monday() -> HistoryWindow:
         (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
         (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
         (MassiveError("connection reset"), FailureKind.TRANSIENT),
-        (MassiveError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        # Any other 404, such as one for a request of several symbols or of none (a path
+        # Massive retired), would answer the same again.
+        (MassiveError("HTTP 404 from GET /v1/retired", status=404), FailureKind.PERMANENT),
         (EntitlementError("not in the plan", status=403), FailureKind.PERMANENT),
         (RowDataError("every row was dropped"), FailureKind.PERMANENT),
         (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
@@ -372,6 +377,7 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
         "AMZN": FailureKind.TRANSIENT,
         "WMT": FailureKind.TRANSIENT,
     }
+    assert isinstance(_failure(out["AMZN"]).error, CutShortError)
     assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
     assert str(_failure(out["WMT"]).error).startswith("rate limited: ")
     # MSFT's missing data warns as history() warns it; no failure warns.
@@ -384,15 +390,20 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
     ]
 
 
-def test_every_history_read_keeps_the_rows_of_the_call_s_fixed_instant(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The call began at 12:00 New York on Monday and reads through then; its symbols are read
-    # later, when the clock has moved on, and keep only the rows before the call's instant.
+    # The call began at 12:00 New York on Monday and reads through then; its symbol is read an
+    # hour later, and keeps only the rows before the call's instant.
     call = MIDNIGHT + timedelta(hours=12)
     asked = Request(start=MIDNIGHT, end=None)
     window = history_window(TRADES, asked, start=MIDNIGHT, end=None, now=call)
     assert window.now == call
+    monkeypatch.setattr(history_source, "_now", lambda: call + timedelta(hours=1))
+    # A window built by the moved clock would keep the later row.
+    later = history_window(TRADES, asked, start=MIDNIGHT, end=None)
+    assert later.times is not None
+    assert later.times.end == call + timedelta(hours=1)
     before, after = int(call.timestamp()) * NS - 1, int(call.timestamp()) * NS + 1
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([_trade(before), _trade(after)])))
     rest = session._core.rest_transport()
@@ -441,49 +452,38 @@ def _flat_window() -> HistoryWindow:
     return history_window(FLAT_TRADES, asked, start=MONDAY, end=MONDAY, now=MIDNIGHT + timedelta(7))
 
 
-def test_a_flat_file_scan_is_split_by_symbol(massive_session: dm.MassiveSession) -> None:
-    table = _flat_rows(massive_session, ["AAPL", "MSFT", "AAPL"])
-    out = read_flat_files_by_symbol(
-        massive_session._core,
-        FLAT_TRADES,
-        ["NVDA", "AAPL", "MSFT"],
-        window=_flat_window(),
-        call=7,
-        read=lambda: table,
-    )
-    assert list(out) == ["NVDA", "AAPL", "MSFT"]
-    assert [len(_rows(outcome)) for outcome in out.values()] == [0, 2, 1]
-
-
-def test_a_failed_flat_file_scan_fails_every_symbol_with_one_error(
-    massive_session: dm.MassiveSession,
+def test_a_split_by_symbol_warns_about_rows_no_symbol_owns(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    refusal = EntitlementError("stocks.trades: S3 refused the flat files", status=403)
-
-    def read() -> Table:
-        raise refusal
-
-    out = read_flat_files_by_symbol(
-        massive_session._core,
-        FLAT_TRADES,
-        ["AAPL", "MSFT"],
-        window=_flat_window(),
-        call=7,
-        read=read,
-    )
-    assert [_failure(o).error for o in out.values()] == [refusal, refusal]
-
-
-def test_rejected_flat_file_credentials_fail_the_whole_read(
-    massive_session: dm.MassiveSession,
-) -> None:
-    def read() -> Table:
-        raise dm.AuthenticationError("S3 rejected the credentials")
-
-    with pytest.raises(dm.AuthenticationError, match="S3 rejected"):
-        read_flat_files_by_symbol(
-            massive_session._core, FLAT_TRADES, ["AAPL"], window=_flat_window(), call=7, read=read
+    table = _flat_rows(massive_session, ["AAPL", "MSFT", "AAPL", "IBM", None])
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = split_by_symbol(
+            massive_session._core,
+            FLAT_TRADES,
+            table,
+            symbols=["NVDA", "AAPL", "MSFT"],
+            source="flat files",
         )
+    assert list(out) == ["NVDA", "AAPL", "MSFT"]
+    assert [part.size for part in out.values()] == [0, 2, 1]
+    assert caplog.messages == [
+        (
+            "stocks.trades: 2 of the 5 rows read from flat files for 3 [NVDA, AAPL, MSFT] name "
+            "none of those symbols (or no symbol), so no symbol's read owns them and they are "
+            "left out"
+        )
+    ]
+
+
+def test_a_split_that_keeps_every_row_warns_nothing(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    table = _flat_rows(massive_session, ["AAPL"])
+    with caplog.at_level(logging.WARNING, LOGGER):
+        split_by_symbol(
+            massive_session._core, FLAT_TRADES, table, symbols=["AAPL"], source="flat files"
+        )
+    assert caplog.messages == []
 
 
 def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
@@ -498,13 +498,14 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
     with entered(massive_session._core.exec_ctx):
         broken = dh_arrow.to_table(pa.table(columns))
     with caplog.at_level(logging.ERROR, LOGGER):
-        out = read_flat_files_by_symbol(
+        out = symbol_outcomes(
             massive_session._core,
             FLAT_TRADES,
-            ["AAPL"],
-            window=_flat_window(),
+            symbols=["AAPL"],
+            tables={"AAPL": broken},
+            failures={},
             call=7,
-            read=lambda: broken,
+            source="flat files",
         )
     failure = _failure(out["AAPL"])
     assert failure.kind is FailureKind.PERMANENT
@@ -514,37 +515,3 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
         f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"
     )
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
-
-
-def test_the_flat_file_transport_reads_the_symbols_in_one_scan(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    asked: list[object] = []
-
-    def read_history(
-        self: FlatFileHistory, spec: DatasetSpec, request: Request, *_: object, **__: object
-    ) -> tuple[Table, str | None]:
-        asked.append(request.symbols)
-        return _flat_rows(massive_session, ["AAPL"]), None
-
-    monkeypatch.setattr(FlatFileHistory, "read_history", read_history)
-    files = FlatFileHistory(massive_session._core, cast("Any", None))
-    request = Request(start=MONDAY, end=MONDAY)
-    out = files.history_by_symbol(
-        FLAT_TRADES,
-        request,
-        _flat_window(),
-        symbols=["MSFT", "AAPL", "MSFT"],
-        dates=(MONDAY,),
-        call=7,
-        forced=False,
-    )
-    assert asked == [("AAPL", "MSFT")]
-    assert [len(_rows(outcome)) for outcome in out.values()] == [0, 1]
-    # An empty window reads nothing.
-    empty = history_window(FLAT_TRADES, request, start=MIDNIGHT, end=MIDNIGHT, now=MIDNIGHT)
-    nothing = files.history_by_symbol(
-        FLAT_TRADES, request, empty, symbols=["AAPL"], dates=(), call=8, forced=False
-    )
-    assert _rows(nothing["AAPL"]) == []
-    assert len(asked) == 1

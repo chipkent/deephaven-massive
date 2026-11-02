@@ -53,7 +53,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
   on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
-  symbol's pages means its data was cut short and raises `MassiveError`. Any other error
+  symbol's pages means its data was cut short and raises `CutShortError`. Any other error
   fails the call, and every request of the read still waiting for the rate governor stops at
   once (each read has a `Cancel` token of its own, set when a fan-out ends, and a `poll()`
   cycle's token follows its poller's). The token is also the read's lane in the governor:
@@ -134,6 +134,7 @@ from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription,
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
+    CutShortError,
     EntitlementError,
     ErrorCause,
     MassiveError,
@@ -792,8 +793,8 @@ class RestReader:
 
         Errors: the public error of each `WireError` (`public_error`), `RowDataError` for a page
         whose every row was dropped, and the `MassiveError` of `_call` for a page on another
-        adjustment basis or a symbol whose data was cut short, and the `EntitlementError` of
-        `_check_recency` for delayed data. A closed session raises
+        adjustment basis, its `CutShortError` for a symbol whose data was cut short, and the
+        `EntitlementError` of `_check_recency` for delayed data. A closed session raises
         `MassiveError("... is closed")`.
         """
         converter = RowConverter.build(
@@ -832,6 +833,7 @@ class RestReader:
         units: Sequence[RestUnit],
         *,
         request: Request,
+        limit: int | None,
         window: HistoryWindow | None,
         current: bool,
         cancel: Cancel | None,
@@ -844,14 +846,16 @@ class RestReader:
         requests may span several paths. They run on this thread when there is one, else on a
         pool of `min(max_concurrency, requests)` threads made for this read, and listen to a
         `Cancel` token of the read's own (following `cancel`), which is also the read's lane in
-        the rate governor. Each is made as `read` makes it (`_call`), capped at
-        `Request.limit`, and one WARNING per path names the symbols Massive answered HTTP 404
+        the rate governor. Each is made as `read` makes it (`_call`), capped at `limit`, and
+        one WARNING per path names the symbols Massive answered HTTP 404
         for on their first request, which have no rows.
 
         Args:
             spec: The dataset.
             units: The planned requests, each with its path.
             request: The normalized arguments, as `read` takes them.
+            limit: The cap on each request's rows: `Request.limit` for `fetch()`, None for
+                `history()`, as their static reads cap them.
             window: The `history()` window whose rows to keep, or None for `fetch()`.
             current: True when the pages are checked for a `DELAYED` label (`read`).
             cancel: Ends the read's waits when set, or None.
@@ -879,7 +883,7 @@ class RestReader:
                 converters,
                 spec=spec,
                 request=request,
-                limit=request.limit,
+                limit=limit,
                 window=window,
                 current=current,
                 stop=stop,
@@ -1085,7 +1089,7 @@ class RestReader:
             (`_page_rows`).
 
         Raises:
-            MassiveError: If a per-symbol call's later page answers HTTP 404, so the symbol's
+            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
                 data was cut short: the message names the dataset, the symbol, the path, and
                 how many pages had arrived.
 
@@ -1169,7 +1173,7 @@ class RestReader:
                     )
                     raise self.public_error(error) from error
                 if requests:
-                    raise MassiveError(
+                    raise CutShortError(
                         f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
                         f"HTTP 404 for page {requests + 1} of {template} after {requests} "
                         f"page{'s' if requests > 1 else ''} had arrived; retry the call",
@@ -2356,6 +2360,7 @@ class RestEndpoints:
             symbols=symbols,
             units=units,
             failed=failed,
+            limit=request.limit,
             window=None,
             current=_fetch_is_current(spec, request),
             call=call,
@@ -2510,6 +2515,7 @@ class RestEndpoints:
             symbols=symbols,
             units=units,
             failed=failed,
+            limit=None,
             window=window,
             current=False,
             call=call,

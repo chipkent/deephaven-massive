@@ -133,10 +133,12 @@ class FailureKind(StrEnum):
     symbol's later page that answered HTTP 404, so its data was cut short."""
 
     PERMANENT = "permanent"
-    """The same read would fail again: the plan does not include the data
-    (`EntitlementError`), Massive's rows break the dataset's schema (`RowDataError`), a crypto
-    pair Massive's ticker list does not hold, a parameter the symbol's path does not take, a
-    table without the dataset's columns (a defect of the library), or any other refusal."""
+    """The same read would fail again for this session's entitlements: the plan does not
+    include the data (`EntitlementError`; an upgrade of the plan lifts it, so a later read may
+    then succeed), Massive's rows break the dataset's schema (`RowDataError`), a crypto pair
+    Massive's ticker list does not hold, a parameter the symbol's path does not take, a table
+    without the dataset's columns (a defect of the library), or any other refusal, such as
+    the HTTP 404 of a path Massive retired."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -636,13 +638,15 @@ class FlatFileTransport(Protocol):
         forced: bool,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
-        """Read `read_history` for the symbols in one scan, and split its rows by symbol.
+        """Read flat-file `history()` for each symbol, each with its own outcome.
 
         The flat-file read of a `history()` table that follows a live symbol table. A file
         holds every symbol of its day, so the symbols are read together, in one scan of the
-        files, with the REST reads `read_history` adds under `AUTO`; the rows are then split
-        by their `Symbol`. A failure of the scan is the failure of every symbol: each holds
-        the same `SymbolFailure`.
+        files by the rules of `read_history`, and the rows are split by their `Symbol`. A
+        failure of the scan is the failure of every symbol: each holds the same
+        `SymbolFailure`. Under `AUTO`, the days the files lack are read from REST symbol by
+        symbol (`RestTransport.history_by_symbol`, over windows built for the call's
+        instant), so a symbol whose REST read fails fails alone.
 
         Args:
             spec: The dataset, with a flat-file prefix for the request.
