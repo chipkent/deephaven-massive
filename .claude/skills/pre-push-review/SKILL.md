@@ -79,6 +79,8 @@ property. For each changed file ask:
   second-guess Massive's data beyond faithful conversion of units, types, column names, and
   symbols (`AGENTS.md` rule 23)? That is a blocker unless the owner approved it. When Massive's
   data is wrong, record the evidence and draft a report to Massive for the owner instead.
+- **One bad symbol or row.** Does any failure of one symbol or row fail a whole table, or skip
+  without logging, or lack an `OnError` setting (`AGENTS.md` rule 24)? If so, it is a blocker.
 - **Secrets.** No key, secret or proxy password can reach a message, `repr` or log record.
 
 ## 2. Prove the tests would catch a regression
