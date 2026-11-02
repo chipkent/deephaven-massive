@@ -105,9 +105,9 @@ def _unconverted(stream: str, column: str, frames: Sequence[dict[str, Any]]) -> 
     converter = field_converter(field)
     refused: list[object] = []
     for frame in frames:
-        value = frame.get(field.wire_key)
-        if value is None:
+        if field.wire_key not in frame:
             continue
+        value = frame[field.wire_key]
         try:
             converter(value)
         except UnconvertibleError:

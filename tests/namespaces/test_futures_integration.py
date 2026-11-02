@@ -428,10 +428,13 @@ _ES_SINGLE = re.compile(r"ES(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,2})")
 @pytest.mark.verifies("72")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
-def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence: Evidence) -> None:
+def test_how_massive_writes_a_contracts_year(
+    live_rest: RestClient, *, recent_monday: date, evidence: Evidence
+) -> None:
     """Whether Massive writes a futures contract's year with one digit or two, and answers both.
 
-    Reads the ES single contracts listed on the run's day (`date`: without it, the page of
+    Reads the ES single contracts listed on the most recent published Monday (`date`, a
+    weekday that has point-in-time rows whenever the run is; without it, the page of
     1,000 rows holds the daily history of only a few contracts) and records each distinct
     ticker with its last trade date, grouped by the number of digits of its year. Then asks for
     the first one-digit contract under its two-digit spelling (`ESZ6` as `ESZ26`), and the
@@ -440,11 +443,11 @@ def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence:
     year, so a caller who writes `ESZ25` for Massive's `ESZ5` gets no rows, and a spelling
     Massive answered would mean the library should rewrite it.
     """
-    today = datetime.now(UTC).date()
+    listed_on = recent_monday
     rows = _page(
         live_rest,
         _CONTRACTS,
-        query={"product_code": "ES", "type": "single", "date": today, "limit": 1000},
+        query={"product_code": "ES", "type": "single", "date": listed_on, "limit": 1000},
     )
     expiries = sorted({(str(r.get("ticker")), str(r.get("last_trade_date"))) for r in rows})
     by_digits: dict[int, list[tuple[str, str]]] = {}
@@ -464,7 +467,8 @@ def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence:
         assert shape is not None
         year = expiry[2:4] if digits == 1 else expiry[3]
         other = f"ES{shape['month']}{year}"
-        answer = _page(live_rest, _CONTRACTS, query={"ticker": other, "date": today, "limit": 10})
+        query = {"ticker": other, "date": listed_on, "limit": 10}
+        answer = _page(live_rest, _CONTRACTS, query=query)
         evidence(f"{ticker} (last trade {expiry}) asked for as {other}: {len(answer)} rows")
         answered[other] = len(answer)
     assert rows, "Massive listed no ES contract"
@@ -569,7 +573,7 @@ def _label_changes(rows: list[dict[str, Any]], time_column: str) -> list[str]:
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("58")
-@pytest.mark.requests(4)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_session_labels_around_the_roll_and_a_holiday(
     live_session: dm.MassiveSession,
@@ -584,8 +588,8 @@ def test_session_labels_around_the_roll_and_a_holiday(
 
     Records, per minute, the `Date` (Massive's `session_end_date`) of the front ES contract's
     minute bars from 15:30 to 17:30 Chicago time on the most recent published Monday, of the
-    front corn contract's trades (CBOT, whose pre-open starts at 16:45 and whose session opens
-    at 19:00; it has no minute bars before then) from 16:00 to 19:30, and of the
+    front corn contract's quotes and trades (CBOT, whose pre-open starts at 16:45 and whose
+    session opens at 19:00, so only quotes fall in the pre-open) from 16:00 to 19:30, and of the
     ES contract front around the most recent Good Friday (from 16:00 Chicago time on the
     Thursday before to 09:00 on the Monday after), beside the session the 17:00 Chicago rule
     gives. Reading it: labels that change at 17:00 confirm the WebSocket rule; a label that
@@ -608,20 +612,54 @@ def test_session_labels_around_the_roll_and_a_holiday(
         found += len(rows)
         changes = _label_changes(rows, "TimestampStart")
         evidence(f"{contract} {start:%Y-%m-%d}: {len(rows)} bars; label changes {changes}")
-    corn = front_contract("ZC", recent_monday)
-    corn_start = monday + timedelta(hours=16)
-    try:
-        trades = table_rows(
-            live_session.futures.trades(corn).history(
-                corn_start, corn_start + timedelta(hours=3, minutes=30)
-            )
-        )
-    except dm.EntitlementError as error:
-        evidence(f"{corn} trades {corn_start:%Y-%m-%d}: refused, {error}")
-    else:
-        changes = _label_changes(trades, "Timestamp")
-        evidence(f"{corn} {corn_start:%Y-%m-%d}: {len(trades)} trades; label changes {changes}")
+    _record_corn_labels(
+        live_session,
+        front_contract("ZC", recent_monday),
+        monday,
+        table_rows=table_rows,
+        evidence=evidence,
+    )
     assert found
+
+
+def _record_corn_labels(
+    live_session: dm.MassiveSession,
+    corn: str,
+    monday: datetime,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Record the session labels of a corn contract's quotes and trades, 16:00 to 19:30 Chicago.
+
+    CBOT grains trade from 19:00, so only quotes fall in the 16:45 pre-open; their labels from
+    16:45 to 19:00 are recorded on a line of their own, and the trades are the control from the
+    open. Each read refused for the plan (trades and quotes need Futures Developer) is
+    recorded, not raised.
+
+    Args:
+        live_session: The session that reads.
+        corn: The front corn contract, such as `"ZCZ6"`.
+        monday: Midnight of the Monday read, in Chicago time.
+        table_rows: Reads a table's rows.
+        evidence: Records a line.
+    """
+    start = monday + timedelta(hours=16)
+    end = start + timedelta(hours=3, minutes=30)
+    pre_open = (monday + timedelta(hours=16, minutes=45), monday + timedelta(hours=19))
+    reads = (("quotes", live_session.futures.quotes), ("trades", live_session.futures.trades))
+    for kind, read in reads:
+        try:
+            rows = table_rows(read(corn).history(start, end))
+        except dm.EntitlementError as error:
+            evidence(f"{corn} {kind} {start:%Y-%m-%d}: refused, {error}")
+            continue
+        changes = _label_changes(rows, "Timestamp")
+        evidence(f"{corn} {start:%Y-%m-%d}: {len(rows)} {kind}; label changes {changes}")
+        if kind == "quotes":
+            first, last = (int(t.timestamp() * 1e9) for t in pre_open)
+            labels = sorted({str(r["Date"]) for r in rows if first <= r["Timestamp"] < last})
+            evidence(f"{corn} quotes 16:45 to 19:00 Chicago: labels {labels}")
 
 
 @pytest.mark.needs("futures:starter")

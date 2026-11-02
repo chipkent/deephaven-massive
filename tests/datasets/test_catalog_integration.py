@@ -115,7 +115,7 @@ A slot lost during the case then ends in the slot message or a pass, never in a 
 _TIMEOUTS = {"history": _HISTORY_TIMEOUT, "stream": _STREAM_TIMEOUT}
 """The verbs whose cases may take longer than `_CASE_TIMEOUT`, and their limits."""
 
-_SOURCE_CHOICE = re.compile(r" history: AUTO read \S+ \(.*\); the read leaves .* null")
+_SOURCE_CHOICE = re.compile(r" history: AUTO read .+? \(.*\); the read leaves .* null")
 """The library's once-per-session notice that an `AUTO` history read chose the source that
 leaves some columns null, such as "futures.trades history: AUTO read REST (1 symbols <
 flat_file_symbol_threshold 50); the read leaves Correction, Exchange null, ..."."""

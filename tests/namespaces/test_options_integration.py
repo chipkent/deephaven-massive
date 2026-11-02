@@ -657,52 +657,39 @@ def test_option_day_bar_stamps_of_the_day_file(
     assert not odd, f"day-file stamps the library does not expect: {odd}"
 
 
-_SPLIT_SYMBOL = "NVDA"
 _SPLIT_DAY = date(2024, 6, 10)
 _SPLIT_RATIO = 10
-"""A forward split whose underlying has listed options: NVDA's 10-for-1 of 2024-06-10. Recent
-forward splits are mostly thin over-the-counter tickers without listed options."""
+_SPLIT_CONTRACT = "O:NVDA240621C00120000"
+"""A liquid call across NVDA's 10-for-1 split of 2024-06-10: the June 21 call struck at $1,200
+before the split and at $120 after, near the money on both sides. Recent forward splits are
+mostly thin over-the-counter tickers without listed options, and the lowest-strike call a
+contracts listing returns first may not trade at all."""
 
 
 @pytest.mark.needs("options:developer")
 @pytest.mark.settles("57")
-@pytest.mark.requests(4)
+@pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_option_bars_across_the_underlyings_split(
     live_session: dm.MassiveSession,
     *,
-    live_rest: RestClient,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether option bars are split-adjusted for their underlying's split.
 
-    Takes NVDA's 10-for-1 split of 2024-06-10 and an NVDA call listed as of that day expiring a
-    week or more after it, and records the contract's day bars from three days before the split
-    to two days after, with `adjusted=true` and `adjusted=false`. It needs Options Developer:
-    Basic and Starter keep two years of history, and the split is older. Reading it: prices
-    before the split that differ by its ratio mean options are adjusted in full like stocks;
-    equal prices, or no bars before the split under the post-split ticker, mean the contract
-    was renamed instead, and the docstrings must say so. Skips when Massive lists no such call.
+    Reads the day bars of `O:NVDA240621C00120000` (expired), a liquid call across NVDA's
+    10-for-1 split of 2024-06-10, from three days before the split to two days after, with
+    `adjusted=true` and `adjusted=false`. It needs Options Developer: Basic and Starter keep two
+    years of history, and the split is older. Fails unless the `adjusted=true` read has bars on
+    both sides of the split, without which nothing can be read from it. Reading it: prices
+    before the split that differ by its ratio between the two reads mean options are adjusted
+    in full like stocks; equal prices mean the contract's history is kept as traded, and the
+    docstrings must say so.
     """
-    contracts = source(Transport.REST, _CONTRACTS)
-    query = {
-        "underlying_ticker": _SPLIT_SYMBOL,
-        "as_of": _SPLIT_DAY,
-        "contract_type": "call",
-        "expiration_date.gte": _SPLIT_DAY + timedelta(days=7),
-        "limit": 1,
-    }
-    contract = None
-    for expired in (False, True):
-        rows = live_rest.get(contracts, {}, query | {"expired": expired}, bucket="options").rows
-        if rows:
-            contract = str(rows[0]["ticker"])
-            break
-    if contract is None:
-        pytest.skip(f"Massive lists no {_SPLIT_SYMBOL} call as of {_SPLIT_DAY}")
-    evidence(f"{contract}: a call on {_SPLIT_SYMBOL}, split {_SPLIT_RATIO}:1 on {_SPLIT_DAY}")
-    # A request that fails raises; an empty result is evidence in itself (a renamed contract).
+    contract = _SPLIT_CONTRACT
+    evidence(f"{contract}: a call on NVDA, split {_SPLIT_RATIO}:1 on {_SPLIT_DAY}")
+    by_basis: dict[bool, list[str]] = {}
     for adjusted in (True, False):
         rows = table_rows(
             live_session.options.bars(contract, dm.Timespan.DAY, adjusted=adjusted).history(
@@ -711,5 +698,10 @@ def test_option_bars_across_the_underlyings_split(
                 source=dm.HistorySource.REST,
             )
         )
+        by_basis[adjusted] = [str(r["Date"]) for r in rows]
         closes = [(r["Date"], r["Close"], r["Volume"]) for r in rows]
         evidence(f"{contract} adjusted={adjusted}: (Date, Close, Volume) {closes}")
+    split = _SPLIT_DAY.isoformat()
+    days = by_basis[True]
+    assert any(day < split for day in days), f"no adjusted bar before {split}: {days}"
+    assert any(day >= split for day in days), f"no adjusted bar from {split}: {days}"
