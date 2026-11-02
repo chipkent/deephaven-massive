@@ -52,7 +52,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
     from typing import TypeAlias
 
-    import pyarrow as pa
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
@@ -400,8 +399,8 @@ def test_rows_without_a_symbol_are_dropped_and_the_all_stream_keeps_running(
     assert warning.endswith(
         "/stocks channel T: dropped a T row from 127.0.0.1/stocks: no Ticker (wire key 'sym'), "
         "which "
-        "the dataset needs; such rows are dropped and counted, and the running count is logged "
-        "at DEBUG"
+        "the dataset needs; such rows are dropped and counted: the running count is logged "
+        "at DEBUG and shown in the SchemaDrift of each live table that lost them"
     )
     del aapl
 
@@ -2460,9 +2459,10 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     core = custom_session.session._core
     pooled = threading.Event()
 
-    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int, float]:
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> poll.CycleRows:
         executor.submit(pooled.set).result(TIMEOUT)
-        return core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table(), 1, 600.0
+        rows = core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table()
+        return poll.CycleRows(rows, 1, 600.0)
 
     table = poll.open_poll(
         core,

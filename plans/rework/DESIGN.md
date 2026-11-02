@@ -302,8 +302,8 @@ _enums.py                the sixteen public enums, Recency, ChannelFamily, Class
                          _require_enum, subscription_of
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id, .cause), ErrorCause, AuthenticationError,
-                         EntitlementError, from_wire, the library-bug and user-defect texts; RowDataError and UnsupportedParameterError, which the ingest
-                         layer raises and the tables layer names
+                         EntitlementError, from_wire, the library-bug and user-defect texts; RowDataError, which the
+                         ingest layer raises and the tables layer names
 _log_limits.py           rate-limited log records: log_once, BoundedLog, log_failure (once per
                          failure, at the level its cause gives)
 _debug_log.py            enable_debug_logging, disable_debug_logging, LogOutput, the
@@ -669,6 +669,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
 | `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. `fetch()` and `poll()` of the two crypto REST paths that need the split are not covered. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
+| `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
 Not configurable:
 
@@ -2666,7 +2667,7 @@ has the same value set as that parameter.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 | `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
-| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unlisted_symbols`, and `unreadable_symbols` |
+| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, and `unavailable_symbols` |
 | `ErrorCause` | EXPECTED, USER_DEFECT, LIBRARY_DEFECT | `expected`, `user_defect`, `library_defect` (no wire value; defined in `_errors.py`, beside the exception it describes) | `MassiveError.cause`, read only; it sets the level a failure is logged at |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
@@ -3735,17 +3736,29 @@ sees:
   WARNING ("ESH5 for the session 2025-01-22"), since a session can have no data. HTTP 404 on a
   later page of one series means its data was cut short and raises `MassiveError` naming the
   symbol, the path, and the pages received. Every other error fails the call.
-- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
+- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
   a data failure of [section 19.5](#195-runtime-drift) (a page whose every row was dropped,
-  or a null or NaN `poll_keys` value, in every mode), or plans a request with a parameter the
-  chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
-  an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
+  or a null or NaN `poll_keys` value, in every mode), fails the table through
+  `publish_failure`. By default one symbol never fails the whole table
+  (`MassiveConfig.unavailable_symbols`, `LOG`): a reactive symbol table's symbol routed to a
+  path that lacks a parameter the caller set (`adjusted=False` on a crypto indicator) is left
+  out of each cycle, with one WARNING per session naming the path and the parameter, and a
+  symbol Massive answers with HTTP 404 has no rows (a `REPLACE` table drops its rows); under
+  `IGNORE` they log only at DEBUG, and under `RAISE` either fails the table. Each good cycle
+  lists both kinds in the stream's `Error` ("no rows this cycle for
+  <n> symbols: X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted']); MSFT
+  (HTTP 404: no data)", the first ten and a count), and clears the list once none is left out,
+  so a table never loses rows without saying why.
   `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
   every path, with a reactive table the parameters against the dataset's fetch paths, at
   least one of which must take every one of them. An emptied symbol table plans no request.
   Any other error sets the stream's `Error` in `m.streams()` to the error followed by "; last
   good cycle at <time>" (or "; no good cycle since the poll started at <time>"), keeps the
-  previous rows, and the next cycle runs as scheduled. A run of failing cycles begins with
+  previous rows, and the next cycle runs as scheduled. The first good cycle after a run of
+  failures clears that `Error` and records the run in the stream's `Gaps`, from its first
+  failed cycle's start (that cycle published nothing, even when pages arrived before it
+  failed) to the good cycle's start, the span over which rows may be missing, and logs it at
+  INFO. A run of failing cycles begins with
   the first failed cycle after a good cycle, at that cycle's start, or at its latest page when
   it received one; a failure that comes `max_outage` seconds or more after the run began
   fails the table instead, in every mode, with a `MassiveError` of the latest
@@ -4174,7 +4187,8 @@ AUTO on S3, then, when REST is possible:
   each trading day whose file is missing -> that day from REST, clipped to the range, one WARNING
 FLAT_FILES, or AUTO with REST not possible:
   a refusal -> raise
-  a missing trading day with a later day's file -> a day without trading, skipped with a WARNING
+  a missing trading day with a later day's file -> a day without trading, skipped with a
+    WARNING and named in a blocking read's table description
   a missing trading day with no later file within a week of the range's end:
     less than a week before today's file -> raise ("not published yet")
     a week or more before it              -> raise ("no flat file exists")
@@ -4202,8 +4216,13 @@ Massive writes a day's file after the day ends, in date order, so a missing trad
 with a later day's file after it (in the range, or looked for after it, trading days only, up
 to 7 days past the first missing one and never as far as the current day, whose file cannot
 exist) is a day without trading, skipped with a WARNING, and one with no later file may simply
-not be published yet: the call raises `MassiveError("<dataset>: the flat file for <date> is not
-published yet. Massive usually publishes a day's flat files by about 11:00 ET the next day,
+not be published yet. The inference can be wrong (Massive may have missed a trading day's
+file), and the library supplies Massive's data without hiding a gap in it, so a blocking read's
+table description also names every day it skipped this way (`No flat file exists for
+2025-03-04, though a later day's does, so that day was taken for a day without trading (a
+holiday?) and has no rows here.`); a background read's description is written before the read,
+so only the WARNING names them. For a day with no later file, the call raises
+`MassiveError("<dataset>: the flat file for <date> is not published yet. Massive usually publishes a day's flat files by about 11:00 ET the next day,
 but the time varies. Retry later, or read REST with source=dm.HistorySource.REST")` (or, when
 REST cannot serve it, `Retry later; REST cannot serve this read: <reason>`). Likewise, when S3
 refuses the flat files a read needs (HTTP 403: the plan lacks them) or rejects the S3
@@ -4369,7 +4388,7 @@ table, so the queue stays bounded however fast rows arrive.
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
-| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
+| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (rows whose key could not be read, counted), sorted, truncated at 200 characters |
 
 **`m.streams()`**: one row per stream, per `poll()` table, and per background read
 (`wait=False`), told apart by `Kind`. A row is written when the stream has opened and on
@@ -4394,9 +4413,10 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `RowsPublished` | count; a read's is set once, when its rows land |
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
-| `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
+| `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, the symbols the latest good `poll()` cycle left out, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
+| `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the start of its first failed cycle (which published nothing, whatever pages it received) to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
 | `CreatedAt` | `Instant` |
-| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
+| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (rows whose key could not be read), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
 `Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
@@ -6195,10 +6215,11 @@ that declares no key has none.
 |---|---|---|---|---|
 | **Extra field** | key not in the path's fields, unless the path ignores it (`Source.ignored_keys`, from `IGNORED_KEYS`: dropped, never reported) | key not in the channel's fields, unless the channel ignores it | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field), naming where it was seen, the first symbol, and the first value ([section 17.1](#171-the-log)). Shown in `SchemaDrift`. |
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
-| **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); later drops log the dataset's running count at DEBUG, at most once a minute. Never a failure, unless every row of a payload is dropped (below). |
+| **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); later drops log the dataset's running count at DEBUG, at most once a minute, and every live table that lost rows counts them in its `SchemaDrift` (`REST:3 rows dropped`). Never a failure, unless every row of a payload is dropped (below). |
 | **Malformed line** (a flat-file line that does not split into the header's fields: too few, too many, or a quote that does not close) | | | skipped and counted (`FlatFile.malformed_lines`) through Arrow's `invalid_row_handler`, with the first one's row number and field count (`malformed_reason`), never its text; the rest of its block is read | One WARNING per file naming the count and the first line's row and field count. A file whose every line is malformed fails (`MassiveError` naming the file). |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
+| **Whole number beyond 2<sup>53</sup> in a widened column** (a `long` field in a `double` column, by the lattice join) | the library, after decoding (`source_columns.widen`, `RoundedFields`) | the same | the same | Served rounded, as the lattice join means it; never nulled or changed further. The cast is cast back and compared with the original (and a value reaching 2<sup>63</sup> counts as rounded); the field goes in `DriftReport.rounded` with its first value: WARNING once per (dataset, transport, field), and `SchemaDrift` as `field~`. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/recency_labels.py` | | | Never read as delayed: the host decision streams from the real-time feed with a WARNING naming the field and the value ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `unreadable_symbols=LOG`, the default, the row is kept with a null `Symbol` and the text in `RawSymbol`, ERROR once per spelling with the library-bug text (at most 100); under `IGNORE` the same at DEBUG; under `RAISE`, a loud failure whose message names the setting and the bug report. |
@@ -6237,10 +6258,20 @@ entitlement failure.
 
 **`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)),
 sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` for extra,
-`transport:field-` for missing, and `transport:field?` for a field that held a value that does
-not fit, with the transport spelled `WebSocket` or `REST`, and `m.connections()` uses
-`channel:field+`, `channel:field-`, and `channel:field?`. Dropped rows add no entry: the log
-counts them.
+`transport:field-` for missing, `transport:field?` for a field that held a value that does
+not fit, and `transport:field~` for a `long` field whose widening into a `double` column
+rounded a value, with the transport spelled `WebSocket` or `REST`, and `m.connections()` uses
+`channel:field+`, `channel:field-`, `channel:field?`, and `channel:field~`. Dropped rows add
+one entry per transport or channel with the owner's running count, `REST:3 rows dropped`,
+which sorts before the fields so a cut text keeps it: after its one WARNING, a dropped row
+stays visible on every live table that lost it.
+
+**The library supplies Massive's data and never repairs it.** Whatever it cannot serve as
+Massive sent it is reported where a user looks, never absorbed: a row it drops is counted in
+`SchemaDrift`, a value it changes (a whole number a `double` rounds, a futures one-second bar's
+`TimestampEnd` that is not Massive's `e`) logs a WARNING, a symbol a `poll()` cycle cannot read
+is listed in `Error`, a gap in a live table's rows is kept in `Gaps`, and a flat-file day taken
+for a holiday is named in the table's description.
 
 ### 19.6 Refresh and drift
 
@@ -7191,7 +7222,10 @@ document already reflects them.
     both `LOG` by default (the owner's decision, which replaces the earlier "fails by
     default"): `noncanonical_symbols`, for a row of a symbol table that is not Massive's exact
     ticker, and `unreadable_symbols` (renamed from `unknown_symbols`), for a symbol Massive
-    sends in a spelling the library cannot read. They have no environment variables: code or
+    sends in a spelling the library cannot read. A third, `unavailable_symbols` (owner
+    standard, 2026-11-02: log and continue with an `OnError` option), governs a symbol a
+    `poll()` cycle cannot read from Massive (HTTP 404, or a path that lacks a parameter the
+    poll sends). They have no environment variables: code or
     the settings file sets them (decision 80). A `str` or a list in code
     always raises, whatever the setting, and `canonicalize_symbols(on_error=OnError.RAISE)`
     keeps its own argument, since it is a standalone function. No per-dataset parameter: it
@@ -7472,7 +7506,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 56 | Whether `adjusted=true` applies `stock_dividend` events of the splits dataset | Documented as unknown: the README's recipe applies every factor the splits dataset lists | none (documentation) | `tests/namespaces/test_stocks_integration.py`: one ticker with a `stock_dividend` event; compare both bases across its execution date |
 | 57 | Whether option bars are adjusted for splits of the underlying in full (`adjusted=true`) | Options take `adjusted` like stocks, with the same guarantee | `tests/namespaces/test_options.py`: the parameter is sent and its echo checked | `tests/namespaces/test_options_integration.py`: a contract of NVDA across 2024-06-10 under both bases; record the prices |
 | 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place gets a null `Date` with a WARNING; a row between sessions gets the next session's date. The live check of 2026-10-31 found Massive's REST label flipping at 17:00 Chicago: ESZ6 minute bars of Monday 2026-10-26 carry `2026-10-26` before 17:00 and `2026-10-27` from 17:00, and ESM6 around Good Friday carries `2026-04-03` from Thursday 17:00 and `2026-04-06` from Sunday 17:00. ZCZ6 had no bars that Monday, so the 16:45 CBOT pre-open is still unrecorded | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
-| 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
+| 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once, at WARNING, with both ends: the library never changes a vendor value without saying so | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
 | 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served, labelled by the day it falls on, with a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
 | 62 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | A symbol with no data returns no rows; a 404 after the first page of a request series raises `MassiveError`; a futures session is its own series, so a 404 on a later session drops that session with its own WARNING | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises; a later futures session's 404 is left out with a per-session WARNING | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |

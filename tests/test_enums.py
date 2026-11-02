@@ -317,6 +317,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unlisted_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.unavailable_symbols": _SYMBOL_SETTINGS,
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
     "canonicalize_symbols.asset_class": _CANONICALIZE_ENUMS,

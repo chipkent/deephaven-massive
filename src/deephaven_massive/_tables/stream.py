@@ -96,7 +96,12 @@ from deephaven.column import string_col
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import TimeRule, time_column
-from deephaven_massive._datasets.source_columns import key_column, rename, required_fields, widen
+from deephaven_massive._datasets.source_columns import (
+    RoundedFields,
+    key_column,
+    rename,
+    required_fields,
+)
 from deephaven_massive._datasets.symbols import SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import (
     first_failure,
@@ -445,8 +450,8 @@ class ChannelPlan:
             and for bars the channel's timespan (`row_times.TimeRule`).
         time_name: The dataset's time column (`Timestamp`, or a bar's `TimestampStart`), whose
             epoch `0` is kept, and so fails the timestamp bound, rather than read as absent.
-        wire_keys: The wire key of each epoch column the channel carries, by dataset column,
-            for the drift of a value the timestamp routine fails.
+        wire_keys: The wire key of each column the channel carries, by dataset column, for the
+            drift of a value the timestamp routine fails or the widening rounds.
     """
 
     dataset: str
@@ -531,11 +536,7 @@ class ChannelPlan:
             required=frozenset(f.column for f in required_fields(spec, source)),
             times=TimeRule(spec.name, spec.times, asset_class, timespan),
             time_name=time_column(spec.times),
-            wire_keys={
-                name: field.wire_key
-                for name, (column, field) in fields.items()
-                if column.unit is not None
-            },
+            wire_keys={name: field.wire_key for name, (_, field) in fields.items()},
         )
 
     def convert(
@@ -552,7 +553,8 @@ class ChannelPlan:
         rows turned into columns in one call, each column converted to Arrow in one call), each
         distinct raw symbol is read once (`WireSymbols.read`, remembered in `symbols`), every
         epoch column runs through the masked timestamp routine, every column is widened to its
-        dataset type, the derived columns (`OptionRoot`, `RawSymbol`) are computed, and the
+        dataset type (a whole number the widening rounds is reported as drift,
+        `RoundedFields`), the derived columns (`OptionRoot`, `RawSymbol`) are computed, and the
         library's time columns are filled (`row_times.TimeRule.fill`). A row whose time column
         overflows or lies outside 1990 to 2100 is dropped and counted; any other timestamp that
         does is null and reported as drift. A row whose symbol is a spelling the library cannot
@@ -592,6 +594,7 @@ class ChannelPlan:
         found: list[DriftReport] = []
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(count, pa.string())
+        rounded = RoundedFields()
         for column_type, name, field, unit in self.columns:
             bad = None
             if name == OPTION_ROOT:
@@ -609,7 +612,10 @@ class ChannelPlan:
                 values = wire.column(field).combine_chunks()
             if bad is not None:
                 dropped = bad if dropped is None else pc.call_function("or", [dropped, bad])
-            arrays[name] = widen(values, column_type.arrow_type)
+            arrays[name] = rounded.widen(
+                values, column_type.arrow_type, wire_key=self.wire_keys.get(name)
+            )
+        found.append(rounded.drift())
         batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         batch = self.times.fill(
             batch,

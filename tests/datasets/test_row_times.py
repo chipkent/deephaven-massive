@@ -298,7 +298,13 @@ def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
         ]
         fill(rule, sent)
     warned = [r for r in caplog.records if "is not its start plus one second" in r.message]
-    assert [r.levelno for r in warned] == [logging.INFO]  # once per process; nothing to act on
+    # Once per process, at WARNING: TimestampEnd then differs from Massive's own `e`.
+    assert [r.levelno for r in warned] == [logging.WARNING]
+    assert warned[0].message == (
+        "futures.bars: a one-second bar's end from Massive (1741359660000000000 ns) is not its "
+        "start plus one second (1741359601000000000 ns); TimestampEnd holds the later of the "
+        "two, so it can differ from Massive's e"
+    )
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()
     assert fill(rule, agreeing)[END] == ["2025-03-07T15:00:01+00:00"]

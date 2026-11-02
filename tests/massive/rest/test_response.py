@@ -194,8 +194,8 @@ def test_the_page_repr_leaves_out_rows_and_body() -> None:
     assert "apiKey" not in shown
     assert shown == (
         "Page(status='OK', request_id=None, drift=DriftReport(extra=frozenset(), "
-        "missing=frozenset(), unconvertible=frozenset(), statuses=frozenset(), "
-        "dropped_rows=0))"
+        "missing=frozenset(), unconvertible=frozenset(), rounded=frozenset(), "
+        "statuses=frozenset(), dropped_rows=0))"
     )
 
 

@@ -265,7 +265,7 @@ class FlatFiles:
         call: int,
         forced: bool,
         stop: threading.Event | None = None,
-    ) -> tuple[Table, str | None]:
+    ) -> tuple[Table, str | None, str | None]:
         return history_reads.read_history(
             spec,
             request,
@@ -1495,7 +1495,7 @@ class EmptyTransport(Recorder):
             interval=interval,
             mode=mode,
             query=query,
-            read=lambda **_: (empty, 0, 600.0),
+            read=lambda **_: poll.CycleRows(empty, 0, 600.0),
             pollers=self.pollers,
             host="api.massive.com",
             path=spec.fetch_path or "",

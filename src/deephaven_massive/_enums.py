@@ -452,7 +452,7 @@ class SymbolConvention(StrEnum):
 class OnError(StrEnum):
     """What a bad symbol does: fail, or keep going with or without a log record.
 
-    One enum for every symbol problem, used in four places:
+    One enum for every symbol problem, used in five places:
 
     - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The
       default there is `RAISE`.
@@ -463,6 +463,8 @@ class OnError(StrEnum):
       crypto ticker list does not hold, in a live stream. The default is `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
+    - `MassiveConfig.unavailable_symbols`, for a symbol a `poll()` table cannot read from
+      Massive. The default is `LOG`.
 
     The members:
 
