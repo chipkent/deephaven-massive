@@ -23,13 +23,14 @@ that names their legs. The schedules cannot place their rows, so they are misses
 
 A futures stream's verb asks for its contracts (`watch`) and waits, bounded, until their
 products and schedules are loaded (`wait_loaded`), before the stream subscribes, so its first
-rows are dated by the schedules.
+rows are dated by the schedules; the contracts a symbol table holds or adds wait the same way
+on the session's `symbol changes` worker (`_ingest/ws.py`).
 
 `correct` runs on the connection's flush thread and never waits: a row inside a loaded session
 gets that session's date, and a row in the gap between a close and the next loaded session's
 first event gets the next session's date. A row the calendar cannot place is a miss: a spread,
-a contract or product still loading (a contract a reactive table or a `dm.ALL` stream adds, or
-one whose verb stopped waiting), a row before the first or past the last loaded session, a
+a contract or product still loading (a contract a `dm.ALL` stream adds, or one whose wait
+ran out), a row before the first or past the last loaded session, a
 contract Massive's contracts do not list, or a lookup that failed. A miss gets a null `Date`,
 never the 17:00 rule's: without the schedule the rule can be wrong on any weekday (a holiday
 folds its trading into the next session), and the library has no holiday calendar to rule that

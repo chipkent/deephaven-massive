@@ -112,6 +112,7 @@ from deephaven_massive._tables.transports import FlatFileTransport, RestTranspor
 from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
     read_symbols,
+    rows_since_added,
     skipped_rows_text,
     watched_rows,
 )
@@ -984,7 +985,9 @@ class StreamQuery(QueryBase):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair of
+        the table that Massive's crypto ticker list does not hold follows
+        `unlisted_symbols` (`StreamTransport.tradable_pairs`).
 
         Returns:
             The request.
@@ -992,10 +995,10 @@ class StreamQuery(QueryBase):
         request = self._request
         symbols = request.symbols
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
-            return replace(
-                request,
-                symbols=_read_symbol_table(self._core, self._spec, symbols, query=repr(self)),
-            )
+            read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
+            if self._spec.asset_class is AssetClass.CRYPTO:
+                read = self._core.stream_transport().tradable_pairs(self._spec, read)
+            return replace(request, symbols=read)
         return request
 
     def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
@@ -1007,7 +1010,10 @@ class StreamQuery(QueryBase):
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
         crypto ticker list when the stream starts (read once per session); a failed read, or a
-        pair the list does not hold, raises `MassiveError` before any topic is subscribed.
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A pair
+        of a symbol table, at the call or added later, follows `MassiveConfig.unlisted_symbols`
+        instead: skipped (and, for a reactive table, listed in `m.streams()`) under `LOG` and
+        `IGNORE`.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -1048,6 +1054,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
     )
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
@@ -1075,7 +1082,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
@@ -1087,6 +1095,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
     )
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
@@ -1113,7 +1122,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
@@ -1125,6 +1135,7 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
         require_positive_int,
     )
     def ring(self, capacity: int) -> Table:
@@ -1155,7 +1166,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -1205,20 +1217,22 @@ class StreamQuery(QueryBase):
         read_symbols,
         SessionCore.stream_result,
         StreamTransport.open_stream,
+        StreamTransport.tradable_pairs,
         _last_by_keys,
     )
     def last_by(self, by: str | Sequence[str] = "Symbol") -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
 
         The underlying state keeps every key ever seen. With a reactive symbol table and
-        `Symbol` among the keys, rows of symbols removed from it are filtered out; a symbol
-        removed and re-added shows its last row until it ticks again. With keys that span
-        symbols (`by="Exchange"`), each group's row is the latest from a symbol watched when it
-        arrived. A table row that is not Massive's exact ticker is skipped and listed in
-        `m.streams()` (convert with `dm.canonicalize_symbols`). `last_by()` never seeds from
-        REST: for current state, use `snapshots(symbols).poll(n)`, which needs a plan that
-        includes snapshots (README.md#plans-and-errors). A static symbol table is read once,
-        now.
+        `Symbol` among the keys, a symbol's row shows only while the table holds the symbol and
+        only once a row has arrived since the symbol last joined it: a symbol removed and added
+        again shows no row until it ticks again. With keys that span symbols
+        (`by="Exchange"`), each group's row is the latest from a symbol watched when it arrived,
+        and removing that symbol does not remove the group's row. A table row that is not
+        Massive's exact ticker is skipped and listed in `m.streams()` (convert with
+        `dm.canonicalize_symbols`). `last_by()` never seeds from REST: for current state, use
+        `snapshots(symbols).poll(n)`, which needs a plan that includes snapshots
+        (README.md#plans-and-errors). A static symbol table is read once, now.
 
         Args:
             by: The key column or columns, positionally or by keyword as in Deephaven's
@@ -1246,7 +1260,8 @@ class StreamQuery(QueryBase):
                 delayed; the message names the line to add (README.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
-                does not hold a crypto pair.
+                does not hold a crypto pair of a list, or of a symbol table under
+                `unlisted_symbols=OnError.RAISE`, or holds no pair of a symbol table.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()
@@ -1255,9 +1270,10 @@ class StreamQuery(QueryBase):
             return self._stream(lambda blink: blink.last_by(list(keys)), request, verb="last_by")
         watch = symbols.table
         if "Symbol" in keys:
-            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
+            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows,
+            # and hides the row a re-added symbol showed before it left.
             return self._stream(
-                lambda blink: watched_rows(blink.last_by(list(keys)), watch),
+                lambda blink: rows_since_added(blink.last_by(list(keys)), watch),
                 request,
                 verb="last_by",
             )

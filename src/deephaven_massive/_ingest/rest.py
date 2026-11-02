@@ -2054,9 +2054,9 @@ class RestEndpoints:
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote, from Massive's reference data if needed.
 
-        The WebSocket transport calls it, before a stream starts or on its lookup worker, for a
-        crypto ticker (`RestReader.crypto_pair`), from the session's crypto ticker list, read
-        once.
+        The WebSocket transport calls it, before a stream starts or on its `symbol changes`
+        worker, for a crypto ticker (`RestReader.crypto_pair`), from the session's crypto
+        ticker list, read once.
 
         Args:
             symbol: A canonical crypto ticker.

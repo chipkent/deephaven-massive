@@ -669,6 +669,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
 | `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
+| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. `fetch()` and `poll()` of the two crypto REST paths that need the split are not covered. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 | `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
@@ -1486,9 +1487,17 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`watched_rows(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted from
-the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
-removed and re-added shows its stale row until its next tick. With keys that span symbols (for
+`rows_since_added(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted
+from the result. The underlying `last_by` state keeps every symbol ever seen, so the filter also
+hides a row received before its symbol last joined the table: a symbol that is removed and
+re-added shows no row until its next tick. `rows_since_added` (`_tables/watchlist.py`) joins
+each row with the time its symbol joined, computed by the engine in the cycle the symbol appears
+(`symbol_table.select_distinct("Symbol").update("AddedAt = now()")`, under a hidden name), and
+keeps rows with `TimestampInsert >= AddedAt`. The time comes from the engine, not from a library
+publisher, which would lag the table by a cycle and let the stale row through; the stream
+subscribes the symbol in reaction to the same change, so every row received for it comes later.
+A row a shared stream received just before the symbol joined is hidden until the next one. With
+keys that span symbols (for
 example `by="Exchange"`) the filter comes first, `watched_rows(blink,
 symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
@@ -1896,7 +1905,7 @@ Every verb follows a refreshing symbol table, `fetch()` and `history()` included
 subscribes and unsubscribes, `poll()` re-reads the table each cycle, and `fetch()` and
 `history()` read each added symbol and drop each removed one. History and live data are never
 mixed: a followed `history()` reads only its fixed past range, and no verb backfills a stream
-(§ 22, decisions 81 and 82).
+(§ 22, decisions 82 and 83).
 
 **Scope.** Only a refreshing `Table` passed as `symbols` (or as `underlying=` or
 `product_code=`, below) is followed. A string, a list, `dm.ALL`, `None`, and a static table
@@ -1988,7 +1997,7 @@ it.`).
   for two symbols is two copies the library made, so the result removes the duplicates in the
   engine, keeping one per row; removing one symbol leaves the other symbol's copy.
 
-**`limit`** caps each symbol's rows in a followed read, on every dataset (§ 22, decision 83):
+**`limit`** caps each symbol's rows in a followed read, on every dataset (§ 22, decision 84):
 a symbol read in a batch that has a `limit` is read one symbol per request.
 
 **One-value inputs** follow tables too: `options.chain(underlying=)` and
@@ -2650,9 +2659,24 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   keeps no list of quote currencies of its own. The session reads that list once, on first
   need, through its REST client, and keeps it for its life; a failed read is not kept, so the
   next need reads it again. A stream needs it when it starts or when a symbol table adds a
-  crypto ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
-  stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
-  currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
+  crypto ticker (on the session's `symbol changes` worker, section 18.1). At the start, a failed
+  read refuses the stream with the read's `MassiveError`, and a ticker the list does not hold,
+  or whose currencies do not join to it, refuses it with a `MassiveError` naming the ticker.
+  That holds for a list in code. A pair of a symbol table, present at the call or added later,
+  follows `MassiveConfig.unlisted_symbols` instead, as a misspelled row follows
+  `noncanonical_symbols`: under `LOG`, the default, and `IGNORE` the pair is skipped, never
+  subscribed, logged once (at WARNING under `LOG`), and, for a reactive table, listed in the
+  stream's `Error` in `m.streams()` (its own warning part) until the table no longer holds it,
+  while the stream keeps its other pairs; a table whose pairs are all unlisted raises at the
+  call. Under `RAISE` such a pair raises at the call and fails the stream when added later. A
+  skipped pair stays skipped until its row is deleted and added again. For a pair added later,
+  a failed read of the list is retried for the change's whole batch of tickers, after 2 s and
+  8 s (`PAIR_RETRY_DELAYS`), each try reading the list at most once for the tickers not yet
+  split; the tickers still unsplit after the last try are then treated as unlisted, and the
+  `Error` says the list could not be read. A rejected key or a plan without reference data
+  ends the retries at once. At the call there is no retry: a failed read treats the pairs it
+  could not split as unlisted, and the stream's worker looks a reactive table's skipped pairs
+  up again, with the retries, as it subscribes the table's rows. Nothing
   falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
   fails a `poll()` table, since every later cycle would read the same list. Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
@@ -2873,7 +2897,7 @@ has the same value set as that parameter.
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
 | `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
-| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unreadable_symbols`, and `unavailable_symbols`, and their `DEEPHAVEN_MASSIVE_*` variables |
+| `OnError` | RAISE, LOG, IGNORE | `raise`, `log`, `ignore` | `canonicalize_symbols` (`on_error`), `MassiveConfig.noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, and `unavailable_symbols` |
 | `ErrorCause` | EXPECTED, USER_DEFECT, LIBRARY_DEFECT | `expected`, `user_defect`, `library_defect` (no wire value; defined in `_errors.py`, beside the exception it describes) | `MassiveError.cause`, read only; it sets the level a failure is logged at |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
@@ -3290,12 +3314,17 @@ session and the library has no holiday calendar to rule that out, and a wrong da
 than none. Its `Timestamp` and every other column are kept, and the streams' `Error` is not
 touched: the stream is healthy. A miss whose lookup is still running logs at DEBUG; any other
 logs at WARNING once per product (or contract) and rule date. So that a stream's first rows
-are dated, a futures stream verb with explicit contracts (or a symbol table's first symbols)
-asks for them and waits, before it subscribes, until their products and schedules are loaded
-or failed, at most 15 s (`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes
-no Deephaven call, so a console command holding the update graph's lock may run it, and such a
-caller waits at most 1 s (`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it
-waits. A wait
+are dated, a futures stream verb with explicit contracts asks for them and waits, before it
+subscribes, until their products and schedules are loaded or failed, at most 15 s
+(`SCHEDULE_WAIT`): it waits only on the calendar's worker, which makes no Deephaven call, so a
+console command holding the update graph's lock may run it, and such a caller waits at most 1 s
+(`SCHEDULE_WAIT_HOLDING_LOCK`), since no live table updates while it waits. The contracts a
+symbol table holds when the stream opens, and those it adds later, wait the same 15 s on the
+session's `symbol changes` worker (section 18.1), never on the table's listener, which only
+starts their lookups: the verb returns at once, and each contract subscribes once its schedule
+loads. That worker runs each
+session's futures and crypto changes one at a time, in order, so a removal never overtakes an
+addition still waiting, and a contract the table no longer holds is never subscribed again. A wait
 that runs out logs one WARNING; those rows get a null `Date` until the lookup ends. A row in
 the gap between one loaded session's close and the next one's first event gets the next
 session's date; a row with no readable symbol or no instant gets a null `Date` too; the 17:00
@@ -4761,7 +4790,7 @@ is no queue, rotation, JSON, custom field, or context variable: each line costs 
 
 **Correlation.** Every library thread is named after what owns it. A session's own threads are
 `massive #<session> <role>`: `reaper`, `diagnostics`, `poll-<stream id>` and its pool
-`poll-<stream id> rest_<n>`, `poll watch`, `crypto pairs`, and the call pools below. The threads of a
+`poll-<stream id> rest_<n>`, `poll watch`, `symbol changes`, and the call pools below. The threads of a
 connection group, which serve every session sharing its connections, are
 `massive group #<group> <role>`: `ws <host>/<cluster>`, `flush <host>/<cluster>`,
 `start <host>/<cluster>`, `move <host>/<cluster>`, and `futures schedules`. Each static
@@ -4931,7 +4960,7 @@ without the GIL.
 | follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session while it has a followed read | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
@@ -7658,17 +7687,25 @@ document already reflects them.
     since the log belongs to the process, not to a session. The vocabulary layer's rule becomes
     "no network I/O and no threads", since `_config` reads the file
     ([section 5](#5-massiveconfig)).
+81. **A symbol problem is logged and the table continues, with an `OnError` setting for other
+    behavior** (2026-11-02, owner standard). Every per-symbol problem follows the pattern of
+    `noncanonical_symbols`: `LOG`, the default, skips the symbol, warns once per value, lists
+    it in the stream's `m.streams()` `Error`, and keeps running; `IGNORE` skips it quietly;
+    `RAISE` raises at the call and fails the result for a symbol added later; a table whose
+    symbols are all bad raises at the call. A crypto pair of a symbol table that Massive's
+    crypto ticker list does not hold follows it through `MassiveConfig.unlisted_symbols`, for
+    pairs present at the call and added later; a temporary failure to read the list is retried,
+    bounded, and then treated the same way, with an `Error` that says the list could not be
+    read ([section 10](#10-symbols-and-all)).
 
-The owner decisions of 2026-11-02 follow.
-
-81. **Every API accepts a live table and follows it** (2026-11-02, owner). Wherever an
+82. **Every API accepts a live table and follows it** (2026-11-02, owner). Wherever an
     argument takes symbols or another key value, a refreshing Deephaven table is accepted and
     followed as it changes, the Deephaven-idiomatic way: never refused, and never read once
     without the user asking for it (`table.snapshot()` does).
-82. **History and live data are never mixed** (2026-11-02, owner). No verb returns history
+83. **History and live data are never mixed** (2026-11-02, owner). No verb returns history
     followed by live rows, and nothing backfills a stream table; `merge` of a `history()` and a
     stream verb stays the user's recipe.
-83. **`history()` and `fetch()` follow a live symbol table** (2026-11-02, owner), as
+84. **`history()` and `fetch()` follow a live symbol table** (2026-11-02, owner), as
     [section 7.8](#78-following-a-live-symbol-table) specifies. Only a refreshing table is
     followed, and its result is always refreshing, with an `m.streams()` row that gains a
     `Loading` column. The range is fixed at the call. An added symbol is read over the same
@@ -7689,7 +7726,7 @@ The owner decisions of 2026-11-02 follow.
     - **`m.symbol_reads()`** shows each symbol's read: its state, source, row count, attempts,
       and error, kept for the session.
     The alternatives were a table that fails when its symbols change, which reads the table
-    once and leaves the user no idiomatic way to react (decision 81), and reading `dm.ALL` and
+    once and leaves the user no idiomatic way to react (decision 82), and reading `dm.ALL` and
     filtering it, which most datasets and plans cannot serve and which would turn a
     three-symbol read into a read of the whole market; it stays a documented recipe.
 
