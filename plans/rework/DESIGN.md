@@ -158,7 +158,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 42 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 43 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -203,6 +203,8 @@ dm.AssetClass
 dm.Timespan
 dm.PollMode
 dm.HistorySource
+dm.Reread                  # ALWAYS, NEVER: whether history() of a followed symbol table
+                           # downloads a returning symbol again (section 7.8)
 dm.FuturesVenue
 dm.Direction
 dm.ContractType
@@ -759,6 +761,8 @@ m.snapshots(symbols: Symbols, *, sort=None, order=None, limit=None, filters=None
 m.connections() -> Table      # live diagnostics: one row per connection and per resolved (class, family)
 m.streams() -> Table          # live diagnostics: one row per stream
 m.rate_limits() -> Table      # live diagnostics: one row per REST rate-limit bucket (section 17)
+m.symbol_reads() -> Table     # live diagnostics: one row per symbol of each followed history() or
+                              # fetch() (section 7.8)
 m.release(table: Table) -> None   # deterministic teardown of one result
 m.close() -> None             # stops every stream and poller now; every live table fails
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
@@ -805,8 +809,8 @@ session's lease on it from the process's registry when it is created and registe
 release as a session closer, so `close()` and the collection of an unclosed session both
 release it; the lease refers to the registry, never to the core.
 
-After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, `m.streams()`, and
-`m.rate_limits()` raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
+After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, `m.streams()`,
+`m.rate_limits()`, and `m.symbol_reads()` raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
 does garbage-collection release of results; building queries and reaching namespaces never fail.
 Every live table of the session, and every table derived from one, **fails** with
 `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so a closed
@@ -817,8 +821,8 @@ operation derived from a failed table (`t.where(...)`, `t.update(...)`) raises D
 "Can not listen to failed table". A verb that passed the closed check just before `close()` ran
 also raises `MassiveError`: the stream registry is checked again under `registry_lock`, and the
 verb checks once more after it has tracked its result, so it never returns a table whose
-failure would land a cycle later. A `connections()`, `streams()`, or `rate_limits()` table
-obtained before `close()` keeps working and shows the final rows, `CLOSED` included
+failure would land a cycle later. A `connections()`, `streams()`, `rate_limits()`, or
+`symbol_reads()` table obtained before `close()` keeps working and shows the final rows, `CLOSED` included
 ([section 17](#17-diagnostics)).
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
@@ -828,8 +832,8 @@ session raises `MassiveError`. Verbs create tables and take the registry lock; b
 forbidden on the UG thread ([section 18](#18-concurrency-model)).
 
 A thread that only holds the UG lock is not a UG thread, and every call works there:
-`MassiveSession()`, every verb, `columns()`, `connections()`, `streams()`, `release()`, and
-`close()`. This is the main deployment path, not an edge case: Deephaven's console runs every
+`MassiveSession()`, every verb, `columns()`, `connections()`, `streams()`, `symbol_reads()`,
+`release()`, and `close()`. This is the main deployment path, not an edge case: Deephaven's console runs every
 command holding the UG's exclusive lock (`PythonDeephavenSession.evaluate` runs the script
 inside `exclusiveLock().doLockedInterruptibly`), so no update cycle runs until the command
 returns. A call on such a thread never waits on a thread that may need the UG lock or an
@@ -853,7 +857,7 @@ not a script.
 **How long a session lives.** The rule: a live table keeps alive everything it needs, and
 nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
 namespace), and while it has a running stream, a running `poll()` table, a background read
-(`wait=False`) whose result is held or still in use, or a diagnostics table someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
+(`wait=False`) or a followed read whose result is held or still in use, or a diagnostics table someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
 the session strongly; nothing else in the library does, and the library forms no reference
 cycle through it, so an unused session is freed by reference counting, even with
 `gc.disable()`. (A caller can still form one: an exception raised out of a call keeps the
@@ -980,7 +984,7 @@ return result
   library code releases a scope without the lock; the suite runs every branch of the library.
 - **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
   only under `registry_lock`, never the other way round). A core is in it exactly while its
-  stream registry, its worker-table registry (`poll()` tables and background reads), or its count
+  stream registry, its worker-table registry (`poll()` tables, background reads, and followed reads), or its count
   of held diagnostics tables is non-empty;
   every method that changes one of them updates the set in the same `registry_lock` section.
   The set is what keeps a session with a running stream or poll alive after the user dropped
@@ -1201,6 +1205,58 @@ it is never half loaded. Its row in `m.streams()` is `Kind=read`, `LOADING` unti
   publish and the failure check a flag set under it, so a table either gets its rows (and later
   failures are skipped) or fails (and the publish is skipped), never both.
 
+**Followed reads** (`fetch()` and `history()` given a refreshing symbol table,
+[section 7.8](#78-following-a-live-symbol-table)) are worker tables too, kept alive and
+released by the same rule. Everything is created on the caller thread inside the result's own
+scope:
+
+```python
+blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": int, "Constituent": TABLE}, ...)
+latest = blink.last_by("Symbol")                    # each symbol's latest cell
+held = latest                                       # wait=False
+held = merge([seed.natural_join(latest, on="Symbol", joins="Over=Seq")   # wait=True: the
+                  .where("isNull(Over)").drop_columns("Over"),           # static seed, masked
+              latest])                                                   # once a symbol has a
+                                                                         # newer cell
+shown = watched_rows(held.where("!isNull(Constituent)"), symbol_table)
+parts = PartitionedTable.from_partitioned_table(shown, key_cols=["Symbol"], unique_keys=True,
+            constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
+            constituent_changes_permitted=True)
+result = describe(parts.merge(), spec, schema)      # [list-column datasets: the dedupe]
+```
+
+A cell holds one symbol's complete static rows, built off the update-graph lock; `Seq` orders a
+result's cells. A symbol lands, is replaced, or leaves as one constituent, so no rows are copied
+in the update cycle. A removed symbol's rows leave in the cycle that removes its row from the
+user's table, because `watched_rows` drops its partition there. With `wait=True` the seed is a
+static table of the call-time symbols' cells, so their rows are visible at once, also inside a
+console command. A cell with a null `Constituent` (a tombstone) frees a symbol's rows: under
+`reread=ALWAYS` a removal publishes one, and `NEVER` keeps the cell and republishes it on a
+re-add. There is no `input_table` and no `add_async`: `add_async` runs on the JVM's shared
+`ForkJoinPool.commonPool()`, and on an input table already destroyed it never completes and
+keeps a pool thread (measured: 20 calls left all 9 threads busy, 11 more queued, and no
+callback). `publisher.add` returns without waiting for an update cycle, also under the
+exclusive lock (measured).
+
+- **One follow coordinator per session** (`massive #1 follow`, section 18.1) owns all
+  per-symbol state of every followed read of the session and does no I/O. It takes the symbol
+  tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`, starts reads on
+  the session's read pool, times the retries, and publishes each cell. The `SymbolWatch`
+  listener only enqueues.
+- **One read pool per session**, of `max_concurrency` threads, runs every followed read: the
+  transport call, in the session's execution context, and the static conversion. It hands the
+  outcome back to the coordinator through the queue.
+- **Per result**: a publish lock and a failed flag. A cell's `publisher.add` and the
+  failure check the flag under the lock, so a failed result never gets another cell.
+- **Releasing stops it.** The blink table's shutdown, once nothing uses the result, sets the
+  result's stop token and enqueues a stop; reads in flight stop at their next request, and the
+  watch's stop is queued on the reaper. Every symbol's row in `m.symbol_reads()` becomes
+  `STOPPED`. A table derived from the result keeps it following.
+- **Failures.** A failure of the whole table is recorded first (`SessionCore.fail_stream`) and
+  then delivered only through the publisher's `publish_failure`, under the result's publish
+  lock, by the coordinator, never from the listener. `m.close()` fails a followed read like
+  any live table and marks its symbols `CLOSED`.
+
 There is no `stop()` on queries. Release is automatic (garbage collection) or explicit
 (`m.release`); `m.close()` stops anything, whatever still holds it.
 
@@ -1243,7 +1299,8 @@ class QueryBase:                           # the base of all four classes below
 class Query:                               # REST list, snapshot, and one-row datasets
     def fetch(self, *, wait: bool = True) -> Table: ...
                                            # every row the endpoint returns, fully paginated;
-                                           # static, or with wait=False read in the background
+                                           # static, or with wait=False read in the background;
+                                           # follows a refreshing symbol table (section 7.8)
     def poll(self, interval: float | timedelta, *, mode: PollMode = PollMode.AUTO) -> Table: ...
                                            # live; re-runs fetch() every interval
 
@@ -1256,7 +1313,9 @@ class StreamQuery:                         # WebSocket datasets
 class HistoryQuery:                        # datasets with a historical retrieval path
     def history(self, start: DateLike, end: DateLike | None = None, *,
                 source: HistorySource = HistorySource.AUTO,
-                wait: bool = True) -> Table: ...   # static, or read in the background
+                reread: Reread = Reread.ALWAYS,
+                wait: bool = True) -> Table: ...   # static, or read in the background;
+                                           # follows a refreshing symbol table (section 7.8)
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
 ```
@@ -1468,11 +1527,13 @@ empty table without any request; two equal dates are that one day. A bar is retu
 its whole window lies inside the range and has ended, so the current day's, week's, or month's
 bar never appears. The full rules are in [section 12](#12-timestamp-units-and-day-boundaries).
 There is no `limit`: the library pages internally. (The aggregates endpoint's `limit` counts
-base aggregates, not rows, so it cannot serve as a row cap.) A `Table` passed as `symbols`,
-static or refreshing, is read once, when the verb is called, on the caller thread inside the
-session's execution context: its rows become the sorted symbol tuple that every source
-receives (`REST`, `FLAT_FILES`, and the `AUTO` choice). A row that is not Massive's exact
-ticker raises `ValueError`, and so does a table with no symbol, as an empty symbol list does.
+base aggregates, not rows, so it cannot serve as a row cap.) A static `Table` passed as
+`symbols` is read once, when the verb is called, on the caller thread inside the session's
+execution context: its rows become the sorted symbol tuple that every source receives (`REST`,
+`FLAT_FILES`, and the `AUTO` choice). A row that is not Massive's exact ticker raises
+`ValueError`, and so does a table with no symbol, as an empty symbol list does. A refreshing
+`Table` is followed instead, and the result is refreshing
+([section 7.8](#78-following-a-live-symbol-table)); `reread` applies only then.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
 
@@ -1487,7 +1548,8 @@ rows between the two can be missing or duplicated. The user owns that boundary.
 **`wait`.** `fetch()` and `history()` take `wait: bool = True`, keyword-only, on every dataset
 that has them, the one-row datasets included; the live verbs already return at once. A bool,
 like `adjusted` and `expired`: a yes or no, not a choice among several. `wait=True` blocks until
-the whole result is read and returns a static table, as before. `wait=False` returns at once a
+the whole result is read and returns a static table, as before, except for a followed symbol
+table ([section 7.8](#78-following-a-live-symbol-table)), whose result is always refreshing. `wait=False` returns at once a
 `Table` with the same columns and no rows, refreshing. When the whole download has landed, the
 complete result appears in one update and never changes again; it is never half loaded, and
 the return type is the same as `wait=True`, with no `Future`, since a `Future` would need a
@@ -1497,7 +1559,7 @@ every live table keeps updating while the read runs.
 
 - **Arguments raise at the call.** Everything `wait=True` checks before its first request is
   checked on the caller thread before the table exists: types and ranges, `dm.ALL` where it is
-  not allowed, a symbol table's rows (read once, now), the source choice of `history()`, every
+  not allowed, a symbol table's current rows, the source choice of `history()`, every
   REST path's parameters (`RestTransport.check_fetch` and `check_history` plan the requests
   with no request made; a crypto pair is split later, by the read), a closed session, and the
   update-graph thread. A failure during the download fails the table instead
@@ -1836,6 +1898,168 @@ description:
 `Verbs` and `Transports` are arrays, so a filter tests membership:
 ``dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")``. The function is a module-level
 name rather than a session method because the catalog needs no session.
+
+### 7.8 Following a live symbol table
+
+Every verb follows a refreshing symbol table, `fetch()` and `history()` included: a stream
+subscribes and unsubscribes, `poll()` re-reads the table each cycle, and `fetch()` and
+`history()` read each added symbol and drop each removed one. History and live data are never
+mixed: a followed `history()` reads only its fixed past range, and no verb backfills a stream
+(§ 22, decisions 82 and 83).
+
+**Scope.** Only a refreshing `Table` passed as `symbols` (or as `underlying=` or
+`product_code=`, below) is followed. A string, a list, `dm.ALL`, `None`, and a static table
+behave exactly as [section 7](#7-query-classes-and-verbs) describes. `history(wl.snapshot())`
+reads a live table once.
+
+```python
+wl = input_table({"Symbol": dht.string}, key_cols="Symbol")      # holds AAPL and MSFT
+bars = m.stocks.bars(wl, dm.Timespan.MINUTE).history("2026-10-01")
+wl.add(new_table([string_col("Symbol", ["NVDA"])]))     # NVDA's bars of the same range land later
+wl.delete(new_table([string_col("Symbol", ["MSFT"])]))  # MSFT's rows leave in the same cycle
+```
+
+**The result** is always a refreshing table, with its own liveness scope, result record, and
+`m.streams()` row (`Kind=read`), for both values of `wait`. It holds, for each canonical symbol
+now in the table, the complete rows of that symbol's latest completed read, or none while the
+symbol's first read is loading or after it failed. A symbol's rows land whole, in one update
+cycle: never half a symbol. One symbol is never read twice at once; an outcome of a read that a
+later removal or re-add has overtaken is discarded. Null rows are ignored, a symbol in several
+rows counts once, and rows that are not Massive's tickers follow
+`MassiveConfig.noncanonical_symbols` as they do for streams
+([section 10](#10-symbols-and-all)). The mechanism is in
+[section 6.1](#61-how-a-live-table-is-kept-alive-and-released).
+
+**The range is fixed at the call.** `start`, `end`, and the call instant are fixed when the
+verb is called, and every read, of a call-time symbol or of one added hours later, covers the
+same window. `end=None` means through the call instant: the "bar has ended" cutoff and "today"
+are the call's ([section 12](#12-timestamp-units-and-day-boundaries)). The table description
+prints the absolute end (`Follows its symbol table over 2026-10-01 through
+2026-11-02T14:05:12Z.`), so the window is never read as "now". `fetch()` has no window: its
+`start`, `end`, and `as_of` are sent as built, and each read is Massive's answer as of that
+read (a snapshot of a symbol added at 14:00 is the 14:00 snapshot).
+
+**Adds and removes.**
+
+- **Add:** the symbol is queued; its rows land when its read completes, over the same window.
+- **Remove:** its rows leave in the same update cycle as its row leaves the user's table.
+- **Re-add:** `history()` follows `reread` (below); `fetch()` always reads again.
+
+**`reread`** (`history()` only; `dm.Reread`, default `ALWAYS`) says whether a symbol that
+returns to the table after a removal is downloaded again or gets its latest completed download
+back with no request. It has no effect when `symbols` is not followed, and `fetch()` has no
+such option: it always reads again.
+
+| Member | A returning symbol |
+|---|---|
+| `ALWAYS` (default) | Is downloaded again and shows Massive's current answer. A removal drops its rows in the same cycle; a re-added symbol has no rows until its new download lands. |
+| `NEVER` (opt-in) | Gets its earlier download back with no request; the download is kept for the life of the result. |
+
+A symbol whose read `FAILED` is downloaded again on every re-add, under both members. Each
+symbol's rows are Massive's answer as of its `ReadAt` in `m.symbol_reads()`.
+
+**Costs.** Under `ALWAYS`, a table whose symbols churn re-reads a symbol every time it returns.
+Under `NEVER`, the result keeps the rows of every symbol it has ever held, in memory, and a
+returning symbol shows data as old as its first download.
+
+**Why there is no automatic choice.** No date or time rule can tell that Massive's data for a
+range is final, so the library never guesses that a reuse is safe (research of 2026-11-02):
+
+- Cancellations reach REST days after the session (Massive's knowledge base, "How much does
+  Massive's feeds handle canceled trades").
+- Published flat files are rewritten (knowledge base, "What time are Massive's flat files ready
+  each day").
+- Massive backfills history (changelog entries of 2025-11-03, 2026-07-31, and 2026-10-16).
+- Splits are applied overnight, at a time Massive does not publish
+  (`vendor/massive/rest/stocks/corporate-actions/splits.md`, `execution_date`).
+- FINRA allows trades to be reported late, with no limit.
+
+A reuse that is provably safe, for a flat-file download whose every file still shows the same
+ETag or Last-Modified in a fresh listing, is a separate follow-up (issue #454).
+
+**The source under `AUTO`.** For a followed table, `HistorySource.AUTO` reads REST whenever
+REST can serve the request, and flat files otherwise ([section 16](#16-historysourceauto)).
+The symbol count is ignored, so adding one symbol never re-reads a year of flat files, and the
+source is the same for every symbol whenever it is read. `source=` wins: `FLAT_FILES` reads
+every symbol from flat files. Symbols waiting together for a flat-file read are read in one
+scan, which downloads the same files whatever the number of symbols. The description names
+the source (`Read from REST: AUTO reads a followed symbol table from REST, which can serve
+it.`).
+
+**`fetch()` request shapes.**
+
+- **Per-symbol paths** (one symbol in the path): one read per symbol.
+- **`ticker.any_of` and `tickers` batches:** the waiting symbols are batched as today, and each
+  row is assigned to its symbol by its `Symbol` column, which the filter matches exactly.
+- **List-column datasets** (rows with a `Tickers` list and no `Symbol`: the financial
+  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, `partners.benzinga.news`):
+  one request per symbol, each row belonging to the request that returned it. A row returned
+  for two symbols is two copies the library made, so the result removes the duplicates in the
+  engine, keeping one per row; removing one symbol leaves the other symbol's copy.
+
+**`limit`** caps each symbol's rows in a followed read, on every dataset (§ 22, decision 84):
+a symbol read in a batch that has a `limit` is read one symbol per request.
+
+**One-value inputs** follow tables too: `options.chain(underlying=)` and
+`options.contracts(underlying=)` take a table with a `Symbol` column, and every futures
+`product_code=` a table with a `ProductCode` column (as `futures.products` rows carry it). A
+refreshing one is followed with the same machinery, keyed by that value; `poll()` of such a
+query re-reads it each cycle, as for `symbols`.
+
+**`wait`.**
+
+- **`wait=True`** blocks while the call-time symbols get their first attempt, read as one call
+  of them, and returns a refreshing table that already holds their rows. Symbols added later,
+  and retries, load in the background. It raises only when every call-time symbol fails, with
+  the error a list call would raise; a partial failure logs one WARNING naming the failed
+  symbols and their causes, and they show `FAILED` or `RETRYING` in `m.symbol_reads()`.
+- **`wait=False`** returns at once an empty refreshing table; every symbol, the call-time ones
+  included, loads in the background and lands on its own.
+- **Both** raise at the call for bad arguments, the update-graph thread, a closed session, a
+  failed symbol table, and a bad row under `noncanonical_symbols=RAISE`.
+
+**Errors of one symbol** leave the table following:
+
+| Cause | The symbol |
+|---|---|
+| HTTP 404 on the first request (Massive has no data) | `DONE` with 0 rows, and the existing WARNING |
+| Transient: a rate limit beyond the read's patience, a network failure, or a 5xx after the REST client's own retries | `RETRYING`, then read again 1, 5, and 15 minutes later; `FAILED` after the last |
+| Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold | `FAILED` at once |
+
+A read of several symbols (an `any_of` batch, a flat-file scan) fails as a unit: every symbol
+of it gets the same state and error. Deleting and re-adding a `FAILED` symbol's row reads it
+again.
+
+**Errors of the whole table** fail the result through its publisher's `publish_failure`: `AuthenticationError` (a
+401, or S3's verdict that the keys are wrong) on any read; a closed session; the symbol table
+failing upstream; a bad row added under `noncanonical_symbols=RAISE`; and a library bug, a
+`MassiveError` naming it.
+
+**Diagnostics.** The result's `m.streams()` row is `LOADING` while any current symbol is
+queued, loading, or waiting to retry, and `RUNNING` once every current symbol has landed or
+failed; it keeps following. `FAILED`, `RELEASED`, and `CLOSED` mean what they mean for a stream.
+`SymbolCount` and `Symbols` are the table's current symbols, `RowsPublished` the rows now in
+the result, `Transport` the sources used, and the new `Loading` column counts the symbols
+queued, loading, or waiting to retry. `Error` groups the failed symbols by cause, bounded like
+every `Error`. `m.symbol_reads()` has one row per symbol ([section 17](#17-diagnostics)). The
+log has the call's `call 7 start` line, one DEBUG line per symbol read (`call 7 AAPL: 1234
+rows in 0.8 s from REST`), and one WARNING per result and cause of failure.
+
+**Cost.** Each added symbol costs what `history()` or `fetch()` of that one symbol costs, and
+each re-download pays again; the shared rate governor paces them, and on Basic (5 requests a
+minute) a year of minute bars is about 5 requests per symbol. A large refreshing result also
+costs downstream: every table derived from it updates when a symbol lands or leaves, and a
+refreshing `sort` of tens of millions of rows takes seconds per change. `snapshot()` of the
+result gives a static copy to analyze.
+
+**The `dm.ALL` recipe.** Where a dataset serves `dm.ALL` (daily bars, reference lists, one day
+of minute bars), reading every symbol once and filtering by the live table follows it at engine
+speed, with no request per symbol: `day = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(...)`,
+a data index on `Symbol` (`deephaven.experimental.data_index.data_index(day, ["Symbol"])`),
+then `day.where_in(wl, "Symbol")`. It is a documented recipe, never the library's automatic
+behaviour, which would turn a three-symbol read into a read of the whole market. It does not
+scale to long ranges of minute bars, trades, or quotes, whose whole-market rows do not fit in
+memory.
 
 ## 8. Namespace tree
 
@@ -2539,24 +2763,29 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   passed as `symbols` in code always raises, whatever the setting, since a typo in code is
   fixed in code.
   A refreshing table is reactive: streams listen to it and subscribe or unsubscribe as rows are
-  added or removed; polls re-read it each cycle; `fetch()` and `history()` read it once. A
-  static (non-refreshing) table is a fixed symbol list for the stream verbs: read once when the
-  verb is called, as `fetch()` and `history()` read any table, it opens the same stream as the
-  equal symbol list, and one holding no symbol raises `ValueError`. `poll()` re-reads it each
+  added or removed; polls re-read it each cycle; `fetch()` and `history()` read each added
+  symbol and drop each removed one, returning a refreshing table
+  ([section 7.8](#78-following-a-live-symbol-table)). A static (non-refreshing) table is a
+  fixed symbol list: read once when the verb is called, as `fetch()` and `history()` read it,
+  it opens the same stream as the equal symbol list, and one holding no symbol raises
+  `ValueError`. `poll()` re-reads it each
   cycle, which for a static table returns the same symbols every time. Every verb reads the
   table's current rows first (`read_symbols` in `_tables/watchlist.py`); a static verb raises
   `ValueError` for a table without symbols. A null row is ignored. The setting governs every
-  row read from the table, present at the call or added later, for streams and `poll()` alike:
+  row read from the table, present at the call or added later, for streams, `poll()`, and
+  followed reads alike:
   - **`RAISE`**: a bad row present at the call raises `ValueError` at once. A **later** bad
     row is never subscribed or requested: it fails that result (the stream through its
-    session's reaper, a `poll()` table with `SymbolRowError`) and logs at ERROR, with a message
+    session's reaper, a `poll()` table with `SymbolRowError`, a followed read through the
+    session's follow coordinator) and logs at ERROR, with a message
     that names the row, the reason, and the fix: correct the row, or pass the table through
     `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.LOG)` (for a
     dataset that spans classes, `dm.canonical_symbol` per row with each row's class).
   - **`LOG`** and **`IGNORE`**: a bad row is skipped, never subscribed or requested, and the
     result keeps running on the good rows. `LOG` logs each distinct value once at WARNING
     (bounded, at most 100 per process), naming the row, the reason, and the fix; `IGNORE` logs
-    it at DEBUG only. A stream's or a `poll()` table's `m.streams()` row lists the values
+    it at DEBUG only. A stream's, a `poll()` table's, or a followed read's `m.streams()` row
+    lists the values
     skipped now in `Error` (`skipping 2 symbol-table rows that are not Massive's tickers:
     'aapl', 'EUR/USD'`, the count and the first five), and the text is cleared once none is
     left. Fixing or deleting a row clears it, and a fixed row subscribes (a stream) or is
@@ -2636,8 +2865,8 @@ free-threaded target: pyarrow, numpy, and pandas no longer publish cp313t wheels
 
 **Criterion.** Every closed set of values in a public signature is a `StrEnum` whose values are
 Massive's wire strings; an enum of a library setting that never reaches the wire
-(`HistorySource`, `SymbolConvention`, `OnError`, `ErrorCause`, and `PollMode.AUTO`) takes its
-member names in lower case. Signatures take only the enum. There are no string `Literal`
+(`HistorySource`, `Reread`, `SymbolConvention`, `OnError`, `ErrorCause`, and `PollMode.AUTO`)
+takes its member names in lower case. Signatures take only the enum. There are no string `Literal`
 categoricals and no `Enum | Literal` unions. Open sets (`sort`, `form_type`) are
 `str`. The one spelling per value gives tab completion in every IDE, including the Deephaven web
 console, and typo safety at both type-check time and run time.
@@ -2655,6 +2884,7 @@ has the same value set as that parameter.
 | `Timespan` | SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR, SESSION | `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`, `session` | `bars`, `indicators`; selects channel, REST path or resolution, flat-file prefix, and overload |
 | `PollMode` | AUTO, REPLACE, UPSERT, APPEND | `auto`, `replace`, `upsert`, `append` | `poll()`; `AUTO`, the default, is the dataset's own mode |
 | `HistorySource` | AUTO, REST, FLAT_FILES | `auto`, `rest`, `flat_files` | `history()` |
+| `Reread` | ALWAYS, NEVER | `always`, `never` (no wire value) | `history()` (`reread`): whether a symbol that returns to a followed symbol table is downloaded again ([section 7.8](#78-following-a-live-symbol-table)) |
 | `FuturesVenue` | CME, CBOT, NYMEX, COMEX | `cme`, `cbot`, `nymex`, `comex` | futures factory methods (`venues`, a set); flat-file prefix only |
 | `Direction` | GAINERS, LOSERS | `gainers`, `losers` | `movers()` |
 | `ContractType` | CALL, PUT | `call`, `put` | `options.chain`, `options.contracts` |
@@ -4182,6 +4412,7 @@ REST possible iff the dataset has a REST history endpoint
 none possible -> ValueError listing, per source, the violated constraint
 one possible  -> use it
 both          -> S3 if symbols is ALL or len(symbols) >= flat_file_symbol_threshold, else REST
+                 a followed symbol table (section 7.8): REST, whatever the symbol count
 AUTO on S3, then, when REST is possible:
   S3 refuses the files (403) or the S3 credentials -> the whole call from REST, one WARNING
   each trading day whose file is missing -> that day from REST, clipped to the range, one WARNING
@@ -4249,6 +4480,11 @@ crypto bars turn out to be cut at midnight New York time, every REST crypto dail
 warns (the morning before yesterday's file is published included), and the owner
 decides the source rule after that live check ([section 23](#23-open-verification-items)
 item 1). `source=` selects either source explicitly. A dataset without instruments counts as `ALL`.
+A followed symbol table ([section 7.8](#78-following-a-live-symbol-table)) ignores the symbol
+count: `AUTO` reads REST whenever REST can serve the request, and flat files otherwise, so each
+symbol, whenever it is added, is read from the source a `history()` of that one symbol would
+use, and one added symbol never re-reads the flat files of the whole range. The missing-day
+fallback to REST applies to its flat-file reads as to any other.
 `HistoryQuery.history()` makes the choice (`choose_source` in `_datasets/history_source.py`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
 capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adjusted` check on
@@ -4361,9 +4597,9 @@ whatever that request returned.
 
 ## 17. Diagnostics
 
-Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
-`m.close()` releases. `m.connections()` and `m.streams()` each return a new view of one of
-them, built in its own result scope and tracked like any live result: while the view is held it
+The diagnostics tables are keyed `input_table`s. They live in one session-owned
+`LivenessScope` that `m.close()` releases. `m.connections()`, `m.streams()`, and
+`m.symbol_reads()` each return a new view of one of them, built in its own result scope and tracked like any live result: while the view is held it
 keeps the session alive and current, and after `close()` it keeps showing the final rows. They
 are written by one diagnostics writer thread per session, which
 applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
@@ -4390,8 +4626,9 @@ table, so the queue stays bounded however fast rows arrive.
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 | `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (rows whose key could not be read, counted), sorted, truncated at 200 characters |
 
-**`m.streams()`**: one row per stream, per `poll()` table, and per background read
-(`wait=False`), told apart by `Kind`. A row is written when the stream has opened and on
+**`m.streams()`**: one row per stream, per `poll()` table, per background read
+(`wait=False`), and per followed read (a `fetch()` or `history()` that follows a refreshing
+symbol table, [section 7.8](#78-following-a-live-symbol-table)), told apart by `Kind`. A row is written when the stream has opened and on
 every change until the stream leaves the registry (its holds released and its blink table shut
 down), so a released stream still kept alive by a derived table keeps reporting
 `RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
@@ -4402,7 +4639,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | Column | Meaning |
 |---|---|
 | `StreamId` | key; a read's is its call id |
-| `Kind` | `stream` (a WebSocket stream), `poll` (a `poll()` table), or `read` (a background `fetch()` or `history()`) |
+| `Kind` | `stream` (a WebSocket stream), `poll` (a `poll()` table), or `read` (a background or followed `fetch()` or `history()`) |
 | `Dataset` | `"stocks.trades"` |
 | `Query` | the `repr` of the query whose verb opened the stream or `poll()`, the call that built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
@@ -4410,9 +4647,10 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `Deferred` | options contracts deferred by the cap |
 | `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream, `REST` for a `poll()`, and for a read the source it reads, `REST` or `flat files`; a read's `Host` and `Path` are null |
 | `Recency` | `REALTIME` or `DELAYED`: the feed a stream reads (`UNKNOWN` on a pinned host of no known feed); for a `poll()` table of current data, what the labels of its latest labelled cycle showed (`REALTIME`, or `DELAYED` for a subscription listed in `MassiveConfig.delayed_subscriptions`, since a delayed label on any other fails the table), `UNKNOWN` until one does for the data of one subscription, and null until one does for the cross-class snapshot; null for reference, economy, and partner data and for a background read. `UNKNOWN` is never shown as real-time |
-| `RowsPublished` | count; a read's is set once, when its rows land |
+| `RowsPublished` | count; a background read's is set once, when its rows land; a followed read's is the rows now in the result |
+| `Loading` | a followed read's symbols that are queued, loading, or waiting to retry; null on every other row |
 | `RequestsPerCycle` | `poll()` fan-out |
-| `State` | `RUNNING` (a stream or poll), `LOADING` (a read still downloading), `DONE` (a read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
+| `State` | `RUNNING` (a stream or poll; a followed read whose every current symbol has landed or failed), `LOADING` (a read still downloading; a followed read with a symbol queued, loading, or waiting to retry), `DONE` (a background read whose rows have landed), `FAILED`, `RELEASED`, `CLOSED` |
 | `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, the symbols the latest good `poll()` cycle left out, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
 | `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the start of its first failed cycle (which published nothing, whatever pages it received) to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
 | `CreatedAt` | `Instant` |
@@ -4437,6 +4675,28 @@ again; a batch handled after that moment pulls them too, so a busy queue cannot 
 | `Attempts`, `Refusals` | totals since the governor was created; every retry and refused attempt counts |
 | `PausedUntil`, `UpdatedAt` | `Instant` |
 | `LastRefusal` | text of the latest 429: status, path, `request_id`, and Massive's message |
+
+**`m.symbol_reads()`**: one row per symbol of each followed read, keyed by `StreamId` and
+`Symbol`, so a user sees which symbols are loading, which failed, and why
+([section 7.8](#78-following-a-live-symbol-table)). The rows are kept for the session's life,
+also after their result is released; at `m.close()` every symbol not in a final state is
+written `CLOSED`. It is written by the diagnostics writer like `m.streams()`, from row
+snapshots the session's follow coordinator queues.
+
+| Column | Meaning |
+|---|---|
+| `StreamId` | key; the followed read's row in `m.streams()` |
+| `Symbol` | key; the canonical symbol |
+| `Dataset` | `"stocks.bars"` |
+| `State` | `QUEUED` (waiting for a read), `LOADING` (being read), `RETRYING` (a transient failure; read again at `NextAttemptAt`), `DONE` (its rows are in the result; 0 rows for Massive's 404), `FAILED` (a permanent failure or the last retry's; `Error` says why), `REMOVED` (its row left the symbol table, and its rows the result), `STOPPED` (the result was released and nothing uses it), `CLOSED` (`m.close()`) |
+| `Transport` | `REST` or `flat files`: the source of its latest read |
+| `AddedAt` | `Instant`: when its row last entered the symbol table |
+| `ReadAt` | `Instant`: when the download whose rows the result holds began; the rows are Massive's answer as of then |
+| `Rows` | its rows in the result |
+| `Attempts` | reads started since it was last added |
+| `NextAttemptAt` | `Instant`; set only while `RETRYING` |
+| `Error` | text of its latest failure, as in `m.streams()`; cleared when a read succeeds |
+| `UpdatedAt` | `Instant` |
 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
@@ -4696,8 +4956,10 @@ without the GIL.
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause, then for one of the client's `max_concurrency` connections; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
+| follow coordinator, one per session while it has a followed read (`fetch()` or `history()` of a refreshing symbol table) | library | owns all per-symbol state of the session's followed reads: takes the symbol tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`; starts reads on the follow read pool (flat-file scans of one result one at a time); times the retries; publishes each symbol's cell (`publisher.add`) and a failure of the whole table (`publish_failure`, after `SessionCore.fail_stream`) under the result's publish lock, checking its failed flag; queues `m.streams()` and `m.symbol_reads()` row snapshots | any I/O; wait for an update cycle or on a read; take `registry_lock` across a Deephaven call; let another thread touch per-symbol state |
+| follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session while it has a followed read | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
@@ -7435,6 +7697,38 @@ document already reflects them.
     pairs present at the call and added later; a temporary failure to read the list is retried,
     bounded, and then treated the same way, with an `Error` that says the list could not be
     read ([section 10](#10-symbols-and-all)).
+
+82. **Every API accepts a live table and follows it** (2026-11-02, owner). Wherever an
+    argument takes symbols or another key value, a refreshing Deephaven table is accepted and
+    followed as it changes, the Deephaven-idiomatic way: never refused, and never read once
+    without the user asking for it (`table.snapshot()` does).
+83. **History and live data are never mixed** (2026-11-02, owner). No verb returns history
+    followed by live rows, and nothing backfills a stream table; `merge` of a `history()` and a
+    stream verb stays the user's recipe.
+84. **`history()` and `fetch()` follow a live symbol table** (2026-11-02, owner), as
+    [section 7.8](#78-following-a-live-symbol-table) specifies. Only a refreshing table is
+    followed, and its result is always refreshing, with an `m.streams()` row that gains a
+    `Loading` column. The range is fixed at the call. An added symbol is read over the same
+    window and lands whole in one cycle; a removed one leaves in the same cycle. Under `AUTO`
+    a followed read uses REST whenever REST can serve it. A symbol's 404 is `DONE` with no
+    rows, transient errors retry after 1, 5, and 15 minutes, permanent ones fail that symbol,
+    and only authentication, a closed session, a failed symbol table, `RAISE`, or a library
+    bug fails the table. `wait=True` raises only when every call-time symbol fails. The
+    single-value inputs `underlying=` and `product_code=` follow tables too. Within it:
+    - **`limit` caps each symbol's rows** in a followed read, on every dataset, extending
+      decision 74 there.
+    - **`reread=dm.Reread.ALWAYS`** on `history()` (owner decision D-1, 2026-11-02: `ALWAYS`
+      the default, `NEVER` opt-in): `ALWAYS` downloads a returning symbol again, and `NEVER`
+      reuses its earlier download for the life of the table. There is no automatic member,
+      because no date or time rule can tell that Massive's data is final
+      ([section 7.8](#78-following-a-live-symbol-table) cites the evidence). `fetch()` always
+      reads again.
+    - **`m.symbol_reads()`** shows each symbol's read: its state, source, row count, attempts,
+      and error, kept for the session.
+    The alternatives were a table that fails when its symbols change, which reads the table
+    once and leaves the user no idiomatic way to react (decision 82), and reading `dm.ALL` and
+    filtering it, which most datasets and plans cannot serve and which would turn a
+    three-symbol read into a read of the whole market; it stays a documented recipe.
 
 ## 23. Open verification items
 
