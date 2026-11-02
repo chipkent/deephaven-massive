@@ -12,10 +12,10 @@ sorts every question the run touched:
   some of its tests).
 
 Each group's line gives its count, and each question follows on a line of its own, its number
-beside its one-line title (the first line of the docstring of the first test that answers it),
-so a reader need not look the numbers up. A run whose paths may leave tests uncollected reports
-its counts "in this selection". Every function is pure; `tests/conftest.py`'s terminal summary
-gathers the outcomes and writes the lines.
+beside its one-line title (`question_titles`: the first line of a test's docstring that asks
+it alone, or first), so a reader need not look the numbers up. A run whose paths may leave
+tests uncollected reports its counts "in this selection". Every function is pure;
+`tests/conftest.py`'s terminal summary gathers the outcomes and writes the lines.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from tests._live.plans import LivePlans, plan_text, plans_text, unmet
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 
 def item_order(item: str) -> tuple[int, str]:
@@ -38,6 +38,33 @@ def item_order(item: str) -> tuple[int, str]:
         The sort key.
     """
     return (int(item), "") if item.isdigit() else (10_000, item)
+
+
+def question_titles(tests: Iterable[tuple[tuple[str, ...], str]]) -> dict[str, str]:
+    """Title each question by the docstring of a test that is about it.
+
+    A test that answers several questions has one docstring, whose first line names the first
+    of them, so it titles only that one. A question takes the title of the first test that
+    answers it alone; failing that, of the first test that names it first; failing that, none,
+    and the summary lists it by its item alone rather than under another question's title.
+
+    Args:
+        tests: Each test's questions (its `settles` items, then its `verifies` items) and its
+            docstring, in collection order.
+
+    Returns:
+        Each titled question's one-line title, by item.
+    """
+    alone: dict[str, str] = {}
+    leading: dict[str, str] = {}
+    for answered, doc in tests:
+        if not answered:
+            continue
+        title = doc.partition("\n")[0]
+        leading.setdefault(answered[0], title)
+        if len(answered) == 1:
+            alone.setdefault(answered[0], title)
+    return leading | alone
 
 
 def _titled(items: list[str], titles: Mapping[str, str]) -> list[str]:

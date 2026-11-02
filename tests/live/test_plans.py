@@ -82,6 +82,17 @@ def test_unmet_requirements() -> None:
     assert plans.unmet(("some:basic", "s3"), paid) == ["some:basic", "s3"]
 
 
+def test_a_delayed_requirement_is_met_by_a_delayed_plan_alone() -> None:
+    assert plans.unmet(("futures:delayed",), plans.declared_plans("futures=developer")) == []
+    assert plans.unmet(("indices:delayed",), plans.declared_plans("indices=starter")) == []
+    real_time = plans.declared_plans("futures=advanced,options=business")
+    assert plans.unmet(("futures:delayed", "options:delayed"), real_time) == [
+        "futures:delayed",
+        "options:delayed",
+    ]
+    assert plans.unmet(("futures:delayed",), plans.declared_plans("")) == ["futures:delayed"]
+
+
 @pytest.mark.parametrize(
     ("requirement", "text"),
     [
@@ -89,6 +100,11 @@ def test_unmet_requirements() -> None:
         ("some:basic", "at least one class left on Basic"),
         ("stocks:basic", "Stocks Basic (free)"),
         ("currencies:starter", "Currencies Starter ($49/month)"),
+        (
+            "futures:delayed",
+            "a delayed Futures plan: Starter ($29/month) or Developer ($79/month)",
+        ),
+        ("indices:delayed", "a delayed Indices plan: Starter ($49/month)"),
         (
             "options:business_expansion",
             "Options Business with the trades and quotes expansion (price on request)",

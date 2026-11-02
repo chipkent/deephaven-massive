@@ -2,8 +2,8 @@
 
 Massive sells one subscription per asset class (stocks, options, indices, currencies,
 futures), each on its own plan, and the S3 flat files ride on the paid plans. A live test
-declares the plans it needs (`needs("<class>:<plan>")`); the run's plans decide whether it
-runs. This module holds:
+declares the plans it needs (`needs("<class>:<plan>")`, or `needs("<class>:delayed")` for a
+delayed plan of the class); the run's plans decide whether it runs. This module holds:
 
 - the plans per class, which plan covers which (a stocks or options Business plan is a branch
   of its own), and their prices;
@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from tests._live.classes import class_of_path
+from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -101,6 +102,12 @@ S3: Final = "s3"
 
 SOME_BASIC: Final = "some:basic"
 """A requirement met when at least one class is on Basic: the rate-limit test needs one."""
+
+DELAYED_PLAN: Final = "delayed"
+"""The plan word of a requirement met only by a delayed plan of its class, as
+`futures:delayed`: Starter or Developer for stocks, options, and futures, Starter for indices.
+A question about what a delayed plan receives cannot be answered on a real-time plan, which
+covers the delayed ones by price but not by feed."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -216,16 +223,21 @@ def plan_text(requirement: str) -> str:
     """Name a requirement for a person: its plan and monthly price.
 
     Args:
-        requirement: `"<class>:<plan>"`, `"s3"`, or `"some:basic"`.
+        requirement: `"<class>:<plan>"`, `"<class>:delayed"`, `"s3"`, or `"some:basic"`.
 
     Returns:
-        Such as `"Currencies Starter ($49/month)"`.
+        Such as `"Currencies Starter ($49/month)"`, or for a delayed plan
+        `"a delayed Futures plan: Starter ($29/month) or Developer ($79/month)"`.
     """
     if requirement == S3:
         return "S3 flat files (MASSIVE_S3_* credentials, on the class's Starter plan)"
     if requirement == SOME_BASIC:
         return "at least one class left on Basic"
     name, _, tier = requirement.partition(":")
+    if tier == DELAYED_PLAN:
+        delayed = [t for t in TIERS[name] if RECENCY.get((name, t)) == DELAYED]
+        shown = " or ".join(f"{t.capitalize()} ({PRICES[name, t]}/month)" for t in delayed)
+        return f"a delayed {name.capitalize()} plan: {shown}"
     price = "free" if tier == "basic" else PRICES[name, tier]
     shown = tier.replace("_expansion", " with the trades and quotes expansion")
     month = "" if price in {"free", "price on request"} else "/month"
@@ -236,7 +248,7 @@ def unmet(requirements: tuple[str, ...], plans: LivePlans) -> list[str]:
     """Return the requirements the run's plans do not meet.
 
     Args:
-        requirements: `"<class>:<plan>"`, `"s3"`, or `"some:basic"` each.
+        requirements: `"<class>:<plan>"`, `"<class>:delayed"`, `"s3"`, or `"some:basic"` each.
         plans: The run's plans.
 
     Returns:
@@ -250,7 +262,10 @@ def unmet(requirements: tuple[str, ...], plans: LivePlans) -> list[str]:
             met = "basic" in plans.tiers.values()
         else:
             name, _, tier = requirement.partition(":")
-            met = meets(name, plans.tiers[name], tier)
+            if tier == DELAYED_PLAN:
+                met = RECENCY.get((name, plans.tiers[name])) == DELAYED
+            else:
+                met = meets(name, plans.tiers[name], tier)
         if not met:
             found.append(requirement)
     return found

@@ -34,6 +34,7 @@ from deephaven_massive._massive import (
     source,
     sources,
 )
+from deephaven_massive._massive.spec.convert import UnconvertibleError, field_converter
 from deephaven_massive._massive.ws import protocol
 from tests._live import plans
 from tests._live.live_run.stream_units import DELAYED, RECENCY
@@ -85,6 +86,33 @@ def _refuses_plan(message: str) -> bool:
     """
     lowered = message.lower()
     return any(word in lowered for word in _PLAN_REFUSALS)
+
+
+def _unconverted(stream: str, column: str, frames: Sequence[dict[str, Any]]) -> list[object]:
+    """Return the values of one field of raw frames that the library's conversion refuses.
+
+    Args:
+        stream: The WebSocket source, such as `"forex/C"`.
+        column: The field's column, such as `"Exchange"`.
+        frames: The raw frames, as decoded JSON objects.
+
+    Returns:
+        Each refused value, in frame order; empty when every frame's value converts. A frame
+        without the field is left out: a missing key is drift, not a value the conversion
+        refuses.
+    """
+    field = source(Transport.WS, stream).field(column)
+    converter = field_converter(field)
+    refused: list[object] = []
+    for frame in frames:
+        if field.wire_key not in frame:
+            continue
+        value = frame[field.wire_key]
+        try:
+            converter(value)
+        except UnconvertibleError:
+            refused.append(value)
+    return refused
 
 
 @dataclass(frozen=True)
@@ -378,18 +406,19 @@ def target(live_plans: plans.LivePlans, rows_due: RowsDue) -> Callable[..., _Tar
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("19")
+@pytest.mark.verifies("19")
 @pytest.mark.timeout(160)
 def test_form_of_the_forex_quote_exchange_id(
     probe: OpenProbe, *, market_status: Callable[[str], str], evidence: Evidence
 ) -> None:
     """Whether a forex quote's `x` arrives as an integer or as decimal-digit text.
 
-    It is declared an integer and sampled as the text `"44"`; the library reads either.
-    Subscribes `C.EUR-USD`, asserts that Massive acknowledged it, and records the raw `C`
-    frames and the JSON type of `x`. Quotes are required unless `/v1/marketstatus/now` says
-    the forex market is closed, when the test skips after the acknowledgement. Reading it:
-    either form settles the question; nothing else changes.
+    It is declared an integer and sampled as the text `"44"`, and arrives as an integer such
+    as `48`; the library reads either. Subscribes `C.EUR-USD`, asserts that Massive
+    acknowledged it, and records the raw `C` frames and the JSON type of `x`. Quotes are
+    required unless `/v1/marketstatus/now` says the forex market is closed, when the test
+    skips after the acknowledgement. Passes when the library's conversion of the `Exchange`
+    column reads every quote's `x`; any other form would fail the row.
     """
     made = probe("forex", _FRAMES)
     made.send("subscribe", ["C.EUR-USD"])
@@ -405,17 +434,20 @@ def test_form_of_the_forex_quote_exchange_id(
     if status == "closed":
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
     assert quotes, f"no forex quote arrived in {_WAIT:.0f} s of an open market"
+    refused = _unconverted("forex/C", "Exchange", quotes)
+    assert not refused, f"forex quote `x` values the library cannot read: {refused[:5]}"
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("20")
+@pytest.mark.verifies("20")
 @pytest.mark.timeout(100)
 def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) -> None:
     """Whether a crypto trade's `i` arrives as an integer or as text on the WebSocket.
 
-    It is declared and sampled as an integer, while REST and the flat files send text; the
-    library keeps either as text. Records the raw `XT` frames of `XT.BTC-USD` and the JSON type
-    of `i`. Reading it: either form settles the question; nothing else changes.
+    It is declared and sampled as an integer, while REST and the flat files send text, and it
+    arrives as text such as `"1114020236"`; the library keeps either as text. Records the raw
+    `XT` frames of `XT.BTC-USD` and the JSON type of `i`. Passes when trades arrived and the
+    library's conversion of the `Id` column reads every trade's `i`.
     """
     made = probe("crypto", _FRAMES)
     made.send("subscribe", ["XT.BTC-USD"])
@@ -426,6 +458,8 @@ def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) ->
     for trade in trades[:5]:
         evidence(f"raw XT: i={trade.get('i')!r} ({type(trade.get('i')).__name__}) {trade}")
     assert trades
+    refused = _unconverted("crypto/XT", "Id", trades)
+    assert not refused, f"crypto trade `i` values the library cannot read: {refused[:5]}"
 
 
 @pytest.mark.settles("9")
