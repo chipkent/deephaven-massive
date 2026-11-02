@@ -140,8 +140,11 @@ No test reads a fixed date. Each computes its days from the run's New York day w
 exchanges' holiday rules: the most recent Monday that traded and whose files are published,
 the most recent calendar week without a holiday, the most recent whole month, and the most
 recent half day (the Friday after Thanksgiving, July 3, or December 24) whose week has ended.
-The futures tests read the contract that was front on their day, and the holiday-session
-checks the most recent Martin Luther King Day and Good Friday. The split and dividend checks
+The many-index check reads four or five days: the three trading days before the run's, the
+most recent Monday, and the trading day after the most recent holiday. The futures tests read
+the contract that was front on their day (for the bucket check, the end of the most recent
+whole month), and the holiday-session checks the most recent Martin Luther King Day and Good
+Friday. The split and dividend checks
 find the year's most recent forward split and special cash dividend through the library's own
 `stocks.splits` and `stocks.dividends`, choosing common stocks with no later split. So every
 read stays inside a Basic plan's two years of history. The three adjusted option roots of the
@@ -219,8 +222,8 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
-| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**), its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
-| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
+| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, and live cattle (where each session and longer bar falls, the 2-session grid, and clipping at `{from}`): most of the open questions |
+| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes) and the day windows and file agreement of about ten indices over recent days, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
@@ -297,7 +300,7 @@ uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 
 uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
 ```
 
-Two checks answer questions the library's design leans on; make sure each ran, and read its
+Four checks answer questions the library's design leans on; make sure each ran, and read its
 evidence:
 
 - **The options cap** (`test_the_options_cap_counts_contracts_or_topics`, a limit test, so only
@@ -312,6 +315,30 @@ evidence:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
+```
+
+- **Index day windows across many indices**
+  (`test_index_day_windows_and_files_across_many_indices`, in the main run; it needs Indices
+  Starter and `s3`): which day (New York or Chicago) each index day source covers, and whether
+  the index day and minute files match REST, for about ten indices over four or five recent
+  days. It sends about 110 REST requests and reads two flat files a day. Its last three
+  evidence lines answer: (a) whether REST day bars cover the Chicago day for most indices that
+  update outside the stock session; (b) for regular-hours and around-the-clock indices apart,
+  which day files cover another window than the range bar, which match no window, and which
+  minute files have gaps or other prices; (c) whether `I:AAVE100`'s wrong values (a day file
+  in no window, or other minute prices) are an isolated case.
+- **Futures bar buckets** (`test_futures_bar_buckets_against_the_bars_inside_them`, in the main
+  run; it needs Futures Starter): for ES, corn, and live cattle over the most recent whole
+  month, where each 1-session bar's `window_start` falls against its first minute bar, whether
+  2-session bars follow a fixed grid, the day 1-week bars start on, whether each longer bar
+  holds exactly the whole sessions that start in its UTC days, and whether a 2-month bar read
+  from inside its bucket is clipped at `{from}`. It sends about 30 REST requests; its
+  `VERDICT` lines answer each question per contract.
+
+To run these two alone:
+
+```bash
+uv run pytest -m integration tests/namespaces/test_indices_integration.py tests/namespaces/test_futures_integration.py -k "many_indices or bar_buckets" 2>&1 | tee -a live-checks.log
 ```
 
 ## The debug log of a pytest run

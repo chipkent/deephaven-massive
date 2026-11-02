@@ -42,6 +42,19 @@ def test_corn_rolls_on_its_first_notice_day(day: date, front: str) -> None:
     assert contracts.front_contract("ZC", day) == front
 
 
+@pytest.mark.parametrize(
+    ("day", "front"),
+    [
+        (date(2026, 9, 29), "LEV6"),
+        (date(2026, 9, 30), "LEZ6"),  # the last weekday before October, the contract's month
+        (date(2026, 10, 30), "LEZ6"),
+        (date(2026, 11, 30), "LEG7"),
+    ],
+)
+def test_live_cattle_rolls_before_its_delivery_month(day: date, front: str) -> None:
+    assert contracts.front_contract("LE", day) == front
+
+
 def test_roll_days() -> None:
     assert contracts.roll_day("ES", 2026, 12) == date(2026, 12, 10)
     assert contracts.roll_day("ZC", 2026, 5) == date(2026, 4, 30)
