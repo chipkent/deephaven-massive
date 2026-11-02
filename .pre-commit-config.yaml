@@ -1,6 +1,7 @@
 # Git hooks. Install both stages once per clone:
 #   uv run pre-commit install --hook-type pre-commit --hook-type pre-push
-# The commit stage runs the fast check tier; the push stage runs the full tier.
+# The commit stage runs the fast check tier; the push stage runs the full tier, which runs the
+# tests only when the branch changes a file CI's tests read (scripts/check_scope.py).
 default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
 
