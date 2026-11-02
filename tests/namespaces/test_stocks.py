@@ -1278,22 +1278,6 @@ def test_list_datasets_send_their_exact_request(
     assert ("Symbol" in out[0]) == CATALOG.takes_symbols(spec_of(name))
 
 
-def test_a_fetch_keeps_the_ex_dividend_days_of_its_range_both_ends_included(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
-) -> None:
-    # Rows outside the days asked for are dropped as Massive should have, and the inclusive
-    # bounds keep the first and the last day: a calendar-date axis compares days, not instants.
-    path = "/stocks/v1/dividends"
-    body = json.loads(load_fixture(FIXTURES, "dividends.json"))
-    days = ["2025-07-31", "2025-08-01", "2025-08-11", "2025-08-31", "2025-09-01"]
-    first = body["results"][0]
-    body["results"] = [first | {"ex_dividend_date": day, "id": f"E{day}"} for day in days]
-    fake_rest.reply(path, Reply(body=body))
-    query = rest_session.stocks.dividends("AAPL", start="2025-08-01", end="2025-08-31")
-    out = table_rows(query.fetch())
-    assert sorted(row["ExDividendDate"] for row in out) == days[1:4]
-
-
 def test_limit_caps_the_rows_and_never_raises_the_page_size(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:

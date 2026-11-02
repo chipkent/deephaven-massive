@@ -18,9 +18,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
   size (`DatasetSpec.page_size`, else the path's documented maximum `limit`, or `Request.limit`
   when that is smaller, so a small cap fetches no more than it keeps), and for `history()` the
-  ascending direction (`_ascending`). A `fetch()` or `poll()` keeps only the rows inside the
-  time-axis bounds it sent (`keep_sent_bounds`): Massive's indicator endpoints ignore
-  `timestamp.lt` and return the latest values past the end.
+  ascending direction (`_ascending`).
   `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
   sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
   indicator) it caps each symbol's rows instead, and for a dataset whose symbols overlap
@@ -165,7 +163,6 @@ from deephaven_massive._ingest.rest_requests import (
 )
 from deephaven_massive._ingest.rest_rows import (
     RowConverter,
-    keep_sent_bounds,
     keep_window,
     stamped,
     whole_bars,
@@ -193,7 +190,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
-    from deephaven_massive._ingest.rest_rows import SentBound
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
@@ -299,24 +295,6 @@ def _cut(text: str) -> str:
         The text, or its first characters ending in `…` when it is longer.
     """
     return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
-
-
-def _first_rows(batches: Sequence[pa.RecordBatch], count: int) -> list[pa.RecordBatch]:
-    """Return the first `count` rows of a list of batches, cutting the batch that crosses it.
-
-    Args:
-        batches: Batches in order.
-        count: The rows to keep; at most the batches' total.
-
-    Returns:
-        The batches that hold the first `count` rows.
-    """
-    kept = []
-    left = count
-    for batch in batches:
-        kept.append(batch.slice(0, left))
-        left = max(left - batch.num_rows, 0)
-    return kept
 
 
 def _page_rows(
@@ -863,11 +841,9 @@ class RestReader:
 
         Each page of current data is checked for a `DELAYED` label (`_check_recency`), each
         page against the requested adjustment basis (`_check_adjusted`), its
-        rows of a `fetch()` or `poll()` outside the time-axis bounds the call sent dropped
-        (`keep_sent_bounds`, which Massive's indicator endpoints need), its bars of a day or
-        longer stamped (`stamped`; a stamp Massive is not known to use is served and logs one
-        WARNING per dataset and timespan per session), its rows outside the `history()` window
-        dropped (`keep_window`), and its rows given the library's time columns
+        bars of a day or longer are stamped (`stamped`; a stamp Massive is not known to use is
+        served and logs one WARNING per dataset and timespan per session), its rows outside the
+        `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
 
@@ -911,9 +887,6 @@ class RestReader:
         stamps = stamp_rule(spec, request, warnings=self.warnings, asset_class=zone_class)
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
-        # A `history()` window keeps its own rows (`keep_window`); a fetch or poll keeps the
-        # rows inside the time-axis bounds it sent, which Massive does not always apply.
-        bounds = () if window is not None else converter.sent_bounds(spec.time_axis, call.query)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -922,9 +895,7 @@ class RestReader:
                 bucket=bucket,
                 cancel=stop,
                 patience=patience,
-                # Rows outside the bounds sent do not count toward the cap: the call stops
-                # once it keeps `limit` rows inside them.
-                limit=None if bounds else limit,
+                limit=limit,
             ):
                 received = time.time_ns()
                 requests += 1
@@ -948,14 +919,6 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
-                if bounds:
-                    batches = self._inside_sent_bounds(
-                        spec,
-                        batches,
-                        bounds,
-                        where=f"{spec.name}: page {requests} of {template} for "
-                        f"{call.symbol or 'the request'}",
-                    )
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
@@ -971,9 +934,6 @@ class RestReader:
                         read=len(page.rows),
                     )
                 )
-                if bounds and limit is not None and sum(b.num_rows for b in kept) >= limit:
-                    kept = _first_rows(kept, limit)
-                    break
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 # A 404 that arrives after the session closed is no answer about the symbol,
@@ -1015,65 +975,6 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
-
-    def _inside_sent_bounds(
-        self,
-        spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        bounds: Sequence[SentBound],
-        *,
-        where: str,
-    ) -> list[pa.RecordBatch]:
-        """Keep a page's rows inside the time-axis bounds its request sent (`keep_sent_bounds`).
-
-        Logs one DEBUG line for a page that had rows outside them: the count, the bounds, and
-        the page's first and last value of the bounded column, so a table that lacks a day, or
-        holds one too many, can be traced here. A page that loses every row also logs one
-        WARNING per dataset and session, since an empty table would otherwise say nothing.
-
-        Args:
-            spec: The dataset, for the WARNING.
-            batches: The page's converted rows, before their stamps are moved.
-            bounds: The bounds the request sent (`RowConverter.sent_bounds`); both bounds of
-                an axis test the same column.
-            where: The dataset, page, path, and symbol, for the lines.
-
-        Returns:
-            The rows inside every bound.
-        """
-        kept = [keep_sent_bounds(batch, bounds) for batch in batches]
-        total = sum(batch.num_rows for batch in batches)
-        inside = sum(batch.num_rows for batch in kept)
-        if inside == total:
-            return kept
-        column = bounds[0].column
-        span = pc.min_max(pa.chunked_array([batch.column(column) for batch in batches]))
-        sent = ", ".join(f"{bound.name}={bound.value}" for bound in bounds)
-        logger.debug(
-            "%s: dropped %d of %d rows outside the bounds sent (%s), which Massive did not "
-            "apply; the page's %s ran from %s to %s",
-            where,
-            total - inside,
-            total,
-            sent,
-            column,
-            span["min"],
-            span["max"],
-        )
-        if not inside and self.state.first("emptied-by-bounds", spec.name):
-            logger.warning(
-                "%s: every one of the %d rows Massive returned lay outside the range asked "
-                "for (%s; %s ran from %s to %s), so they were dropped; later pages of %s "
-                "emptied this way are logged at DEBUG",
-                where,
-                total,
-                sent,
-                column,
-                span["min"],
-                span["max"],
-                spec.name,
-            )
-        return kept
 
     def _check_recency(
         self,

@@ -440,10 +440,8 @@ def shared_params(
     `True` is left out there); and the
     futures `resolution` and the page size when the path takes them. The page size is
     `DatasetSpec.page_size`, or else the path's documented maximum `limit`, or `Request.limit`
-    when that is smaller and the request sends no time-axis bound (with a bound, the cap
-    counts the rows kept inside it, so a page Massive fills past the bound cannot use it
-    up); a path that documents no maximum, for a dataset without a `page_size`, gets only
-    `Request.limit` under the same rule.
+    when that is smaller; a path that documents no maximum, for a dataset without a
+    `page_size`, gets only `Request.limit`.
 
     Args:
         spec: The dataset.
@@ -478,11 +476,7 @@ def shared_params(
         # A page size, as the list paths read `limit`. The aggregates' range path reads its
         # `limit` as the number of base aggregates queried instead (at most 50,000); its
         # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
-        # With a time-axis bound sent, `limit` counts the rows kept inside it, not the rows
-        # Massive returns (some endpoints ignore a bound), so it does not shrink the page.
-        bounded = spec.time_axis is not None and (request.start, request.end) != (None, None)
-        cap = None if bounded else request.limit
-        sizes = [v for v in (page_size(spec, rest_path), cap) if v is not None]
+        sizes = [v for v in (page_size(spec, rest_path), request.limit) if v is not None]
         if sizes:
             query["limit"] = min(sizes)
     path.update(fixed)

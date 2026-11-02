@@ -1,8 +1,7 @@
 """Tests for turning REST page rows into batches of a dataset's schema."""
 
 import functools
-import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 import pyarrow as pa
 import pytest
@@ -70,102 +69,6 @@ def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:
 )
 def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged: bool) -> None:
     assert is_error_row(row) is flagged
-
-
-# --- The bounds a fetch or poll sent --------------------------------------------------------
-
-
-def converter_of(name: str, path: str) -> rest_rows.RowConverter:
-    return rest_rows.RowConverter.build(
-        CATALOG, CATALOG.by_name[name], source(Transport.REST, path), unreadable_symbols=OnError.LOG
-    )
-
-
-SMA = "/v1/indicators/sma/{stockTicker}"
-DIVIDENDS = "/stocks/v1/dividends"
-NEWS = "/v2/reference/news"
-INDICATOR_AXIS = ("timestamp.gte", "timestamp.lt")
-DIVIDEND_AXIS = ("ex_dividend_date.gte", "ex_dividend_date.lte")
-
-
-def test_an_instant_axis_keeps_its_half_open_range_and_rows_without_a_time() -> None:
-    first, end = datetime(2026, 10, 26, 4, tzinfo=UTC), datetime(2026, 10, 31, 4, tzinfo=UTC)
-    bounds = converter_of("indicators.sma", SMA).sent_bounds(
-        INDICATOR_AXIS, {"timestamp.gte": first, "timestamp.lt": end, "window": 5}
-    )
-    assert [(b.name, b.column) for b in bounds] == [
-        ("timestamp.gte", "TimestampStart"),
-        ("timestamp.lt", "TimestampStart"),
-    ]
-    stamps = [first - timedelta(days=1), first, end - timedelta(microseconds=1), end, None]
-    batch = pa.RecordBatch.from_pydict(
-        {"TimestampStart": pa.array(stamps, pa.timestamp("ns", "UTC"))}
-    )
-    kept = rest_rows.keep_sent_bounds(batch, bounds).column("TimestampStart").to_pylist()
-    # The start is included, the end excluded, and a null is not outside the range.
-    assert kept == [first, end - timedelta(microseconds=1), None]
-    assert rest_rows.keep_sent_bounds(batch, ()) is batch
-
-
-def test_a_calendar_date_axis_keeps_both_end_days() -> None:
-    converter = converter_of("stocks.dividends", DIVIDENDS)
-    days = ["2025-01-31", "2025-02-01", "2025-02-10", "2025-02-28", "2025-03-01"]
-    batch = pa.RecordBatch.from_pydict({"ExDividendDate": pa.array(days, pa.string())})
-    query = {"ex_dividend_date.gte": date(2025, 2, 1), "ex_dividend_date.lte": date(2025, 2, 28)}
-    bounds = converter.sent_bounds(DIVIDEND_AXIS, query)
-    kept = rest_rows.keep_sent_bounds(batch, bounds).column("ExDividendDate").to_pylist()
-    assert kept == ["2025-02-01", "2025-02-10", "2025-02-28"]
-
-
-def test_a_date_typed_parameter_over_an_instant_field_bounds_its_instants() -> None:
-    # News's `published_utc.gte` is typed as a date, but its field is an instant.
-    sent = datetime(2025, 2, 1, 5, tzinfo=UTC)
-    bounds = converter_of("reference.news", NEWS).sent_bounds(
-        ("published_utc.gte", "published_utc.lt"), {"published_utc.gte": sent}
-    )
-    assert [(b.name, b.column, b.value.as_py()) for b in bounds] == [
-        ("published_utc.gte", "PublishedUtc", sent)
-    ]
-
-
-def test_a_bound_of_another_kind_than_its_column_drops_no_row(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A date never tests an instant, nor an instant a day's text, whichever way round.
-    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest_rows")
-    instant = datetime(2025, 2, 1, 5, tzinfo=UTC)
-    dividends = converter_of("stocks.dividends", DIVIDENDS)
-    sma = converter_of("indicators.sma", SMA)
-    assert dividends.sent_bounds(DIVIDEND_AXIS, {"ex_dividend_date.gte": instant}) == ()
-    assert dividends.sent_bounds(DIVIDEND_AXIS, {"ex_dividend_date.lte": "2025-02-01T05:00Z"}) == ()
-    assert sma.sent_bounds(INDICATOR_AXIS, {"timestamp.gte": date(2025, 2, 1)}) == ()
-    assert sma.sent_bounds(("timestamp.eq", "timestamp.lt"), {"timestamp.eq": instant}) == ()
-    assert sma.sent_bounds(("missing.gte", "missing.lt"), {"missing.gte": instant}) == ()
-    assert sma.sent_bounds(None, {"timestamp.gte": instant}) == ()
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages[0] == (
-        "stocks.dividends: ex_dividend_date.gte=datetime.datetime(2025, 2, 1, 5, 0, "
-        "tzinfo=datetime.timezone.utc) sent to /stocks/v1/dividends tests none of its rows "
-        "(ExDividendDate is String, another kind of value), so they are kept whatever their "
-        "ex_dividend_date"
-    )
-    assert messages[-1] == (
-        "indicators.sma: missing.gte=datetime.datetime(2025, 2, 1, 5, 0, "
-        "tzinfo=datetime.timezone.utc) sent to /v1/indicators/sma/{stockTicker} tests none of "
-        "its rows (its rows carry no such field), so they are kept whatever their missing"
-    )
-    assert "(its suffix is no comparison)" in messages[3]
-    assert len(messages) == 5
-
-
-def test_an_instant_bound_past_the_columns_range_holds_every_row() -> None:
-    far = datetime(2999, 1, 2, tzinfo=UTC)
-    bounds = converter_of("indicators.sma", SMA).sent_bounds(
-        INDICATOR_AXIS, {"timestamp.gte": datetime(1, 1, 1, tzinfo=UTC), "timestamp.lt": far}
-    )
-    stamps = pa.array([datetime(2026, 10, 26, tzinfo=UTC)], pa.timestamp("ns", "UTC"))
-    batch = pa.RecordBatch.from_pydict({"TimestampStart": stamps})
-    assert rest_rows.keep_sent_bounds(batch, bounds).num_rows == 1
 
 
 # --- Odd values and rows ---------------------------------------------------------------------

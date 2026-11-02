@@ -2367,12 +2367,7 @@ segments instead ([section 13.4](#134-rest)). `futures.bars`, whose path
 `/futures/v1/aggs/{ticker}` has no such segments, declares the instant pair
 `window_start.gte`/`window_start.lt`. Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
-`ValueError`. A `fetch()` or `poll()` keeps only the rows inside the bounds it sent, testing
-each row's axis field as Massive should have, since Massive does not apply every bound (the
-indicator endpoints ignore `timestamp.lt` and return the latest values past the end). An
-instant bound tests an instant column and a day a calendar-date column; a bound whose kind
-differs from its column's tests nothing, so a row is never dropped by comparing a date with an
-instant.
+`ValueError`.
 
 ## 10. Symbols and `ALL`
 
