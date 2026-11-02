@@ -1771,6 +1771,31 @@ def test_a_futures_watchlist_starts_each_lookup_while_an_earlier_change_waits(
     ws_session.session.release(result)
 
 
+def test_a_futures_removal_goes_through_the_worker_without_a_lookup(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reported on this thread, so its path is measured on every Python: a removal starts no
+    # lookup, and reaches the connection through the worker, in order with the additions.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
+    result = ws_session.query(FUTURES, watchlist).blink()
+    ws_session.subscribed("T.GCQ6-GCJ7")
+    (stream_id,) = ws_session.connections.group.streams
+    posted = threading.Event()
+    changes: list[tuple[frozenset[str], frozenset[str]]] = []
+
+    def recorded(_stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
+        changes.append((added, removed))
+        posted.set()
+
+    monkeypatch.setattr(ws_session.connections, "_post_change", recorded)
+    ws_session.connections._symbols_changed(stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}))
+    assert posted.wait(TIMEOUT)
+    assert changes == [(frozenset(), frozenset({"GCQ6-GCJ7"}))]
+    assert not any(path == "/futures/v1/contracts" for path, _ in ws_session.fetched)
+    ws_session.session.release(result)
+
+
 def test_a_futures_watchlist_removal_never_overtakes_a_waiting_addition(
     ws_session: WsSession, fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
