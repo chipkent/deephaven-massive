@@ -717,7 +717,9 @@ naming the file and the keys it set.
   loader or the C loader, so every scalar is text: YAML 1.1's type guessing never turns the
   ticker `ON` or `NO` into a boolean or `0700` into a number. The file is refused when it holds
   a duplicate key, any explicit tag (`!!python/...` included), an anchor or alias, more than one
-  document, or a top level that is not a mapping (an empty file included).
+  document, a top level that is not a mapping (an empty file included), or lists and mappings
+  nested more than 10 deep (a setting needs two levels; deeper nesting would overflow the
+  parser's recursion), each refusal naming the line.
 - **Conversion** goes through one table that maps every field but the credentials to a
   converter: a list of subscription words (`[stocks, options]`), an enum word of `OnError`
   written exactly as its value (`raise`, `log`, `ignore`; `Raise` and `" raise"` are refused
@@ -6126,6 +6128,7 @@ that declares no key has none.
 | **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field), naming where it was seen, the first symbol, and the first value ([section 17.1](#171-the-log)). Shown in `SchemaDrift`. |
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Key that cannot be read** (absent, null, or a value that does not fit) | the row is dropped and counted (`dropped_rows`), the whole row logged at DEBUG (first 2,000 characters) | the row is dropped as a `Reject(channel, symbol or None, WireError, raw)`, logged whole at DEBUG; the library counts it in the frame's `dropped_rows` | a file without a key header: `WireError` before the first block; a row whose key field is empty or does not parse: dropped and counted | The row is dropped. One WARNING per dataset per session for the first dropped row, naming the transport, where, and the reason (the key, the expected type, and the value); later drops log the dataset's running count at DEBUG, at most once a minute. Never a failure, unless every row of a payload is dropped (below). |
+| **Malformed line** (a flat-file line that does not split into the header's fields: too few, too many, or a quote that does not close) | | | skipped and counted (`FlatFile.malformed_lines`) through Arrow's `invalid_row_handler`, with the first one's row number and field count (`malformed_reason`), never its text; the rest of its block is read | One WARNING per file naming the count and the first line's row and field count. A file whose every line is malformed fails (`MassiveError` naming the file). |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-required field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** outside the key columns (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text, a nested object that is not an object) | null, the field in `unconvertible` with its first value, the whole row logged at DEBUG | the same | every header is read as text and converted afterwards, a typed value's surrounding spaces trimmed as Arrow's typed parsing does, so a value that does not parse is null, the header in `unconvertible` with its first text; the odd values are found by vectorized pattern, range, and calendar tests, never a Python call per value | Null. WARNING once per (dataset, transport, field), quoting the first value; shown in `SchemaDrift` as `field?`. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse is unconvertible. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` (`masked_instants`), in `_ingest/rest_rows.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | the time header in the reader, through `ReadPlan.to_ns`; the others in `_ingest/flatfiles.py` | In the time column, a key that cannot be read: the row is dropped and counted, its reason naming the dataset, the column, the unit, and the value. In any other column, an unconvertible value: null, `unconvertible`, WARNING once. |
@@ -6141,9 +6144,9 @@ serving it would quietly return an empty table. So a loud failure, a defect of t
   from `rest_rows.RowConverter.convert`). A one-row page whose row is dropped is such a page.
 - **Flat files**: a file holds rows of the requested symbols, and every one of them is
   dropped (`WireError` from the reader after the file's last block, then `MassiveError` naming
-  the file). Rows the symbol filter removes do not count. The rule is per file, never per
-  block: a block can hold a single row of an illiquid symbol, and its one odd row must not
-  fail the call.
+  the file), or every line of the file is malformed. Rows the symbol filter removes do not
+  count. The rule is per file, never per block: a block can hold a single row of an illiquid
+  symbol, and its one odd row must not fail the call.
 - **WebSocket**: `DROPPED_RUN_LIMIT` (100) rows of one dataset on one channel of a connection
   have been dropped in a row, across flushes and symbols, with no row of the dataset published
   between them (`Flusher._counted`, counting the client's drops and the flush's). A flush is
