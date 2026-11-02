@@ -3787,7 +3787,10 @@ def largest_error() -> Callable[[tuple[float | None, ...], tuple[float | None, .
 def day_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
     evidence: Callable[[str], None],
-) -> Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]:
+) -> Callable[
+    [str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]],
+    dict[date, list[StampedBar]],
+]:
     """Return a function that compares one ticker's 1-day bars across sources.
 
     It reads the ticker's 1-day bars once from the aggregates range endpoint, unfiltered,
@@ -3805,28 +3808,27 @@ def day_bar_report(
     Returns:
         A function `(ticker, days, others)`: the ticker (its prefix selects the class), the
         days, and the other sources' bars, by source name and day. It records the evidence
-        and returns the days without a range bar.
+        and returns each asked day's range bars, by day: an empty list for a day without one.
     """
 
     def report(
         ticker: str,
         days: tuple[date, ...],
         others: Mapping[str, Mapping[date, list[StampedBar]]],
-    ) -> list[date]:
+    ) -> dict[date, list[StampedBar]]:
         bounds = (_weekday_after(min(days), -1), _weekday_after(max(days), 1))
         ranged = [
             _stamped(bar) for bar in _read_range(rest_rows, ticker, span="day", bounds=bounds)
         ]
         lines = [f"{ticker} range 1-day bars {bounds[0]} to {bounds[1]}: {len(ranged)}"]
-        missing = []
+        by_day: dict[date, list[StampedBar]] = {}
         for day in days:
-            own = [bar for bar in ranged if _new_york_day(bar[0]) == day]
+            own = by_day[day] = [bar for bar in ranged if _new_york_day(bar[0]) == day]
             if not own:
-                missing.append(day)
                 lines.append(f"{ticker} {day} range: no 1-day bar")
             lines.extend(f"{ticker} {day} range 1-day bar: {_bar_text(bar)}" for bar in own)
-            for name, by_day in others.items():
-                found = by_day.get(day, [])
+            for name, theirs in others.items():
+                found = theirs.get(day, [])
                 if not found:
                     lines.append(f"{ticker} {day} {name}: no bar")
                 lines.extend(
@@ -3835,7 +3837,7 @@ def day_bar_report(
                 )
         for line in lines:
             evidence(line)
-        return missing
+        return by_day
 
     return report
 
@@ -3844,7 +3846,7 @@ def day_bar_report(
 def prev_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
     evidence: Callable[[str], None],
-) -> Callable[[str], int]:
+) -> Callable[[str], list[StampedBar]]:
     """Return a function that compares `/prev` with the range bar of the same day.
 
     `/prev` serves only the most recent completed trading day, so its stamp is checked on
@@ -3860,17 +3862,16 @@ def prev_bar_report(
 
     Returns:
         A function taking the ticker (its prefix selects the class). It records the evidence
-        and returns how many `/prev` bars it read.
+        and returns the `/prev` bars it read, stamped, in the order Massive sent them.
     """
 
-    def report(ticker: str) -> int:
+    def report(ticker: str) -> list[StampedBar]:
         param = _ticker_param(ticker)
         prevs = rest_rows(f"/v2/aggs/ticker/{{{param}}}/prev", {param: ticker}, {})
         if not prevs:
             evidence(f"{ticker} /prev: no bar")
-            return 0
-        for prev in prevs:
-            bar = _stamped(prev)
+        bars = [_stamped(prev) for prev in prevs]
+        for bar in bars:
             day = _new_york_day(bar[0])
             half = "yes" if calendar.is_half_day(day) else "no"
             evidence(f"{ticker} /prev ({day}, half day: {half}): {_bar_text(bar)}")
@@ -3881,7 +3882,7 @@ def prev_bar_report(
             for r in ranged:
                 evidence(f"{ticker} range 1-day bar: {_bar_text(r)}")
             evidence(f"{ticker} /prev {_match_text(bar[1], ranged)}")
-        return len(prevs)
+        return bars
 
     return report
 
