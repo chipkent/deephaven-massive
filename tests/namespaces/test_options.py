@@ -856,14 +856,15 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
     assert not stamp_warnings(caplog)
-    # 14:30 is served too, labelled by its New York day, with one WARNING.
+    # 14:30 is served too, as sent: its stamp, a day later its end, no Date, one WARNING.
     odd = rows(rest_session.options.previous_day_bar(TSLA).fetch())
-    assert [(r["Date"], r["TimestampStart"]) for r in odd] == [
-        ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd] == [
+        (None, afternoon * 10**6, (afternoon + 86_400_000) * 10**6)
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "options.previous_day_bar: a 1-day bar from /v2/aggs/ticker/{optionsTicker}/prev is "
+        f"options.previous_day_bar: a 1-day bar of {TSLA} from "
+        "/v2/aggs/ticker/{optionsTicker}/prev is "
         "stamped 2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), "
         "which is not a stamp Massive is known to use"
     )

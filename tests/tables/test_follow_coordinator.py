@@ -692,7 +692,9 @@ def test_the_flat_files_and_rest_label(
     massive_session: dm.MassiveSession, drain: Callable[[], None], dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = [SymbolRows(rows_of(massive_session, "AAPL", 1), with_rest_days=True)]
+    script.answers["AAPL"] = [
+        SymbolRows(rows_of(massive_session, "AAPL", 1), source=FLAT_FILES_AND_REST)
+    ]
     result = follow(massive_session, watchlist("AAPL"), script, one_scan=True)
     assert (
         wait_state(massive_session, "AAPL", SymbolReadState.DONE).transport == FLAT_FILES_AND_REST
@@ -759,16 +761,21 @@ def test_a_dying_coordinator_fails_every_followed_table(
     first = follow(massive_session, watchlist("AAPL"), script)
     second = follow(massive_session, watchlist("MSFT"), script)
     until(lambda: [r.state for r in reads(massive_session).values()] == [SymbolReadState.DONE] * 2)
-    handle = follow_coordinator.FollowCoordinator._handle
 
-    def dies(self: follow_coordinator.FollowCoordinator, batch: list[Any]) -> None:
+    def dies(_self: follow_coordinator.FollowCoordinator, _touched: object = None) -> None:
         raise SystemExit("the coordinator is told to die")
 
-    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_handle", dies)
+    escaped: list[threading.ExceptHookArgs] = []
+    # The thread's exception must still escape; collect it instead of pytest's warning.
+    monkeypatch.setattr(threading, "excepthook", escaped.append)
+    # Each batch checks the retries: an interrupt there ends the thread.
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_retry_due", dies)
     with caplog.at_level(logging.ERROR):
         massive_session._core.follows.wake()
         until(lambda: bool(first.j_table.isFailed()) and bool(second.j_table.isFailed()))
-    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_handle", handle)
+    assert "massive #" in caplog.text
+    assert "died; its queue is no longer handled" in caplog.text
+    until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.thread is None
     with massive_session._core.registry_lock:
         errors = [w.row.error for w in massive_session._core._workers.values()]

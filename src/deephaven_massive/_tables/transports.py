@@ -133,10 +133,12 @@ class FailureKind(StrEnum):
     symbol's later page that answered HTTP 404, so its data was cut short."""
 
     PERMANENT = "permanent"
-    """The same read would fail again: the plan does not include the data
-    (`EntitlementError`), Massive's rows break the dataset's schema (`RowDataError`), a crypto
-    pair Massive's ticker list does not hold, a parameter the symbol's path does not take, a
-    table without the dataset's columns (a defect of the library), or any other refusal."""
+    """The same read would fail again for this session's entitlements: the plan does not
+    include the data (`EntitlementError`; an upgrade of the plan lifts it, so a later read may
+    then succeed), Massive's rows break the dataset's schema (`RowDataError`), a crypto pair
+    Massive's ticker list does not hold, a parameter the symbol's path does not take, a table
+    without the dataset's columns (a defect of the library), or any other refusal, such as
+    the HTTP 404 of a path Massive retired."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,12 +152,13 @@ class SymbolRows:
             (`SessionCore.dataset_schema`), in the order the transport returned them; empty
             when Massive has no data for the symbol (HTTP 404 on its first request, or no row
             in the range).
-        with_rest_days: True when a flat-file read also read some days from REST, since their
-            files were missing; False for a read from one source.
+        source: Where the rows came from, as users read it: `"REST"`, `"flat files"`, or
+            `"flat files and REST"` when REST served the days the files lack; empty when the
+            maker did not say.
     """
 
     table: Table
-    with_rest_days: bool = False
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,10 +220,10 @@ class RestTransport(Protocol):
         """Return a crypto ticker's base and quote, looking them up in Massive if needed.
 
         Called by the WebSocket transport for each crypto ticker of a stream, before it starts
-        or on its lookup worker. The first such call of the session blocks while it reads
-        Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page, listed
-        and delisted pairs), which the session then keeps; a failed read is read again by the
-        next call.
+        or on its `symbol changes` worker. The first such call of the session blocks while it
+        reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page,
+        listed and delisted pairs), which the session then keeps; a failed read is read again by
+        the next call.
 
         Args:
             symbol: A canonical crypto ticker.
@@ -495,6 +498,31 @@ class StreamTransport(Protocol):
         """
         ...
 
+    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the pairs of a static symbol table, read at the call, a stream can subscribe.
+
+        Called only for a crypto dataset. A pair that Massive's crypto ticker list does not
+        hold, or that a failed read of the list cannot split, follows
+        `MassiveConfig.unlisted_symbols`: left out (and logged once) under `LOG` and `IGNORE`,
+        raised under `RAISE`. Runs on the verb's thread, before the stream starts; may block for
+        one read of the list.
+
+        Args:
+            spec: A crypto dataset.
+            symbols: The table's canonical symbols, sorted.
+
+        Returns:
+            The symbols a stream can subscribe, in order.
+
+        Raises:
+            AuthenticationError: Under `RAISE`, if Massive rejects the key on the read of the
+                list.
+            EntitlementError: Under `RAISE`, if the plan does not include reference data.
+            MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
+                if no pair can, so the result would follow nothing.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class FlatFileRead:
@@ -639,13 +667,15 @@ class FlatFileTransport(Protocol):
         forced: bool,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
-        """Read `read_history` for the symbols in one scan, and split its rows by symbol.
+        """Read flat-file `history()` for each symbol, each with its own outcome.
 
         The flat-file read of a `history()` table that follows a live symbol table. A file
         holds every symbol of its day, so the symbols are read together, in one scan of the
-        files, with the REST reads `read_history` adds under `AUTO`; the rows are then split
-        by their `Symbol`. A failure of the scan is the failure of every symbol: each holds
-        the same `SymbolFailure`.
+        files by the rules of `read_history`, and the rows are split by their `Symbol`. A
+        failure of the scan is the failure of every symbol: each holds the same
+        `SymbolFailure`. Under `AUTO`, the days the files lack are read from REST symbol by
+        symbol (`RestTransport.history_by_symbol`, over windows built for the call's
+        instant), so a symbol whose REST read fails fails alone.
 
         Args:
             spec: The dataset, with a flat-file prefix for the request.

@@ -146,13 +146,13 @@ quote as it happens; and **flat files**, Massive's daily bulk files.
 
 | Verb | Table | Transport |
 |---|---|---|
-| `fetch()` | static: every row the request covers, read once | REST |
+| `fetch()` | static: every row the request covers, read once; live when it follows a live symbol table | REST |
 | `poll(seconds)` | live: the same request again every few seconds | REST |
 | `blink()` | live: only the rows of the latest update cycle | WebSocket |
 | `append_only()` | live: every row since the call | WebSocket |
 | `ring(n)` | live: the latest `n` rows | WebSocket |
 | `last_by()` | live: the latest row per symbol (or per the columns you name) | WebSocket |
-| `history(start, end)` | static: past rows in a range | REST or flat files |
+| `history(start, end)` | static: past rows in a range; live when it follows a live symbol table | REST or flat files |
 
 A verb a dataset cannot serve does not exist on its query. Calling one raises `AttributeError`
 naming the verbs the query has and, where one exists, the dataset that has the verb you wanted:
@@ -205,6 +205,7 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 | stream minute bars | `m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()` |
 | keep the current state of symbols without a stream | `m.stocks.snapshots(["AAPL", "MSFT"]).poll(15)`, where your plan includes snapshots |
 | follow a watchlist I can edit | pass a table with a `Symbol` column: see [`symbols`](#symbols) |
+| read the history of a watchlist I can edit | the recipes in [history of a watchlist](#history-of-a-watchlist) |
 | backfill history, then continue live | the recipe in [backfill, then live](#backfill-then-live) |
 | start a live board with values before the first trade | the recipe in [seed a live board](#seed-a-live-board) |
 | read an option chain with its greeks | `m.options.chain("SPY").fetch()`: see [option chain](#option-chain) |
@@ -307,13 +308,45 @@ Massive leaves the greeks out for some contracts, such as those deep in the mone
 columns are null then. On Options Starter or Developer the chain is delayed (see
 [real-time or delayed](#real-time-or-delayed)).
 
+<a id="history-of-a-watchlist"></a>
+
+### History of a watchlist
+
+Pass a live watchlist to `history()` and the table follows it: each symbol you add is read over
+the same range, and each one you delete leaves (see [`symbols`](#symbols)). Two other ways fit
+other needs. To read the watchlist's symbols once, as they stand now, pass `snapshot()` of it.
+To follow it with no request per symbol, read every symbol once and filter by the watchlist:
+adding or deleting a symbol then costs nothing. That works where the dataset serves `dm.ALL`
+and the whole market fits in memory: daily bars, reference lists, or one day of minute bars,
+but not a year of minute bars or any range of trades and quotes. A data index on `Symbol` keeps
+each change of the watchlist fast:
+
+```python
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+from deephaven.experimental.data_index import data_index
+
+names = input_table({"Symbol": dht.string}, key_cols="Symbol")
+names.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
+
+# Read once: the watchlist's symbols now, never again.
+fixed = m.stocks.bars(names.snapshot(), dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
+
+# Every stock's daily bars, read once and filtered by the live watchlist.
+every = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
+data_index(every, ["Symbol"])
+mine = every.where_in(names, "Symbol")
+```
+
 ## Concepts
 
 <a id="table-shapes"></a>
 
 ### Table shapes
 
-A **static** table never changes once you have it: `fetch()` and `history()` return one. A
+A **static** table never changes once you have it: `fetch()` and `history()` return one,
+unless they follow a live symbol table (see [`symbols`](#symbols)). A
 **live** table changes while you watch it. The live verbs differ in what they keep:
 
 | You want | Use |
@@ -422,7 +455,15 @@ and the trade count. These rules hold for every `bars()` dataset.
 - **Join on the end.** A bar's values are final only once its window has ended, so join other
   data on `TimestampEnd`: `trades.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])` gives
   each trade the latest bar that had closed by then. Minute bars of every class end on whole
-  minutes, so a stock's and an index's 10:31 bars join exactly on `TimestampEnd`.
+  minutes, so a stock's and an index's 10:31 bars join exactly on `TimestampEnd`. A row read
+  before its window ended (today's bar from `fetch()`, an indicator's latest value) has
+  `TimestampInsert` before `TimestampEnd` and can still change:
+  `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window
+  ended. Two cases need care. A futures bar of several sessions or longer, read before its
+  last session, passes once its latest session so far has ended, though later sessions can
+  still join it. A `poll(mode=dm.PollMode.APPEND)` table of indicators keeps the first
+  unfinished value it sees and never receives the finished one, so the filter drops that
+  period for good: `poll()` in its default mode holds the updated value.
 - **`Date`** is the bar's trading day. It is null for a bar that spans more than one date: a
   bar of several days, a week or longer, or an intraday bar across midnight.
 - **Which bars `history()` returns.** Only bars whose whole window lies inside the range and has
@@ -432,10 +473,15 @@ and the trade count. These rules hold for every `bars()` dataset.
 - **Odd stamps.** Massive stamps the same bar differently on different sources, such as a daily
   stock bar at 00:00 on one and at the 16:00 close on another; the library moves each known
   stamp to the start of its day, so every source gives the same rows. A bar stamped at a time it
-  does not expect, such as a daily bar at 14:30, is still served, labelled by the day its stamp
-  falls on, with one WARNING per dataset and timespan: check its dates before you rely on them,
-  and report the WARNING on the [issues page](https://github.com/chipkent/deephaven-massive/issues).
-  A crypto `daily_open_close` row that Massive marks as not UTC is treated the same way.
+  does not expect, such as a daily bar at 14:30, could cover that day or the next, so it is
+  served as Massive stamped it: `TimestampStart` is the stamp, `TimestampEnd` one period later
+  (no earlier than the end of any such period that holds the stamp), and `Date` is empty, with
+  one WARNING for each time of day such stamps take. `history()` returns such a bar only when the range holds that whole window, so it may need a
+  range one period longer. Please report the WARNING on the
+  [issues page](https://github.com/chipkent/deephaven-massive/issues). A crypto
+  `daily_open_close` row that Massive marks as not UTC keeps its `Date`, but its window is the
+  widest that date has in any time zone, from 14 hours before UTC midnight to 12 hours after the
+  next.
 
 <a id="history-sources"></a>
 
@@ -455,8 +501,10 @@ what the first cannot serve, so a call returns your data whenever either source 
 
 The default, `source=dm.HistorySource.AUTO`, picks flat files when only they can serve the read,
 or when both can and the read has many symbols (50 or more, the `flat_file_symbol_threshold`
-setting) or `dm.ALL`; otherwise REST. Pass `source=dm.HistorySource.REST` or `FLAT_FILES` to
-choose. The two sources sometimes fill different columns (REST trades have `DecimalSize`; the
+setting) or `dm.ALL`; otherwise REST. A `history()` that follows a live symbol table ignores
+the count: it reads REST whenever REST can serve the read, so adding one symbol never re-reads a
+year of flat files. Pass `source=dm.HistorySource.REST` or `FLAT_FILES` to choose. The two
+sources sometimes fill different columns (REST trades have `DecimalSize`; the
 files do not); when `AUTO`'s choice leaves columns empty that the other source fills, the
 library logs a WARNING naming them and the `source=` that fills them. Each result's description,
 shown in the web UI, names its source and why.
@@ -549,6 +597,8 @@ table derived from it, or a panel open in the web UI), the library unsubscribes 
 poll; otherwise `m.streams()` shows it `RELEASED` until the last user goes. It accepts the live
 tables the session's verbs returned, background downloads, and the diagnostics tables;
 releasing twice does nothing, and a table you derived yourself is refused with `ValueError`.
+A `history()` or `fetch()` that follows a live symbol table is a live table too: it keeps
+reading the symbols you add while it is in use, and releasing it stops its reads.
 
 **Stop everything with `m.close()`.** Every stream, poll, and download of the session stops, and
 every live table of the session, with everything derived from it, **fails** with
@@ -729,6 +779,10 @@ max_concurrency: 4
 # A row of a symbol table that is not Massive's exact ticker: raise, log, or ignore.
 noncanonical_symbols: raise
 
+# A crypto pair of a symbol table that Massive's crypto ticker list does not hold, in a live
+# stream: raise, log, or ignore.
+unlisted_symbols: log
+
 # A symbol a poll cannot read from Massive (no data, or an argument its endpoint does not
 # take): log (leave it out and keep polling), ignore (the same, quietly), or raise (stop).
 unavailable_symbols: log
@@ -778,7 +832,7 @@ the file's name and the settings it set at INFO.
 
 ### Diagnostics
 
-Three live tables show what the library is doing. Start with `m.streams()` when a table looks
+Four live tables show what the library is doing. Start with `m.streams()` when a table looks
 wrong.
 
 - **`m.streams()`**: one row per stream, poll, and background download. `State` is `RUNNING`,
@@ -799,6 +853,8 @@ wrong.
   decimal column, which holds it rounded (`WebSocket:s~`), and counts the rows dropped because
   their symbol or time cannot be read (`REST:3 rows dropped`). 100 such streamed rows in a
   row, with none delivered, fail the streams, since Massive has most likely changed its format.
+  A `history()` or `fetch()` that follows a live symbol table has a row too: `LOADING` while a
+  symbol is still being read, then `RUNNING`, with `Loading` counting the symbols left.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,
@@ -807,6 +863,11 @@ wrong.
   is `READY`, `PACED` (five a minute), or `PAUSED` (Massive refused a request for coming too
   fast, until `PausedUntil`). Programs elsewhere that use your key count against the same limit
   without appearing here.
+- **`m.symbol_reads()`**: one row per symbol of each `history()` or `fetch()` that follows a live
+  symbol table. `State` is `QUEUED`, `LOADING`, `RETRYING` (a passing failure, read again at
+  `NextAttemptAt`), `DONE`, `FAILED` (`Error` says why), `REMOVED`, `STOPPED` (you released the
+  table), or `CLOSED`. `ReadAt` is when the rows you see were downloaded, and `Rows` counts them.
+  The symbols that failed: ``m.symbol_reads().where("State == `FAILED`")``.
 
 ```python
 streams = m.streams()
@@ -844,8 +905,11 @@ once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/
 The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
 
 **A live table is followed.** Add a row and a stream subscribes to it; delete one and it
-unsubscribes. `poll()` reads the table at every cycle; `fetch()` and `history()` read it once,
-when called. A static table, such as one from `new_table`, is a fixed list. An input table makes
+unsubscribes. `poll()` reads the table at every cycle. `fetch()` and `history()` return a live
+table: an added symbol's rows, over the same range, appear whole once they are read, and a
+deleted symbol's rows leave at once. The range is fixed when you call: an open `end` means
+through that moment. A static table, such as one from `new_table` or `snapshot()`, is a fixed
+list, read once. An input table makes
 a watchlist you can edit in code or by typing in the web UI:
 
 ```python
@@ -885,11 +949,36 @@ board = m.stocks.quotes(watchlist).last_by()
 aapl = board.where("Symbol == `AAPL`")
 ```
 
-In a live table, `last_by()` drops the row of a symbol that leaves the watchlist, while
-`append_only()` and `ring()` keep the rows it already produced. A watchlist row that is not
-Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
-`m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
-fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+A `history()` or `fetch()` that follows a watchlist reads each symbol on its own, so one bad
+symbol never stops the table: Massive's "no data" gives that symbol no rows, a passing failure
+(a rate limit, a dropped connection) is retried after 1, 5, and 15 minutes, and a refusal marks
+that symbol failed in `m.symbol_reads()`; delete and re-add its row to read it again. Only a
+rejected API key, a closed session, a failed watchlist, or a library bug fails the whole table.
+With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
+and raises only if every one of them failed. A symbol that comes back after you deleted it is
+downloaded again, unless you choose otherwise (`reread`, in
+[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows. The same holds for
+`underlying=` of `m.options.chain` and `m.options.contracts`, which take a table with a
+`Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode` column.
+
+A large live result costs memory and time downstream: every table you derive from it updates
+when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.
+Derive from `snapshot()` of it when you need a fixed copy.
+
+In a live table, `last_by()` by `Symbol` (the default) drops the row of a symbol that leaves
+the watchlist, and shows nothing for a symbol added back until it trades again; with keys that
+span symbols, such as `last_by("Exchange")`, a group keeps its row after the symbol behind it
+leaves. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
+watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
+stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
+bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+A crypto pair that Massive's list of crypto tickers does not hold, in the watchlist at the call
+or added later, is skipped and listed the same way, and the stream keeps its other pairs; a
+skipped pair stays skipped until its row is deleted and added again. If the list cannot be
+read when a pair is added, it is tried twice more over about ten seconds first, and the `Error`
+says so. To fail instead, set `dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE)`. A
+futures contract a watchlist holds subscribes once its trading schedule has loaded (up to 15
+seconds), so its first rows carry a `Date`.
 
 The options connection carries at most 1,000 topics, counted across every session that shares
 it, and each stream of a contract is one (its trades and its quotes are two). A list or static
@@ -972,7 +1061,8 @@ use up the whole cap. Some datasets cap each request instead, because each reque
 symbol: the indicators, `reference.tickers` and `stocks.ipos` when tickers are named, and
 `reference.news`, whose `sort` and `order` apply to each ticker's request too. On
 `options.contracts` with explicit symbols, each contract is one row, so `limit` has no effect.
-Each dataset's `help()` says when its `limit` is per symbol. `limit` keeps the first rows in
+Each dataset's `help()` says when its `limit` is per symbol. A `fetch()` that follows a live
+symbol table caps each symbol's rows on every dataset. `limit` keeps the first rows in
 Massive's order, so ask for newest first when you want the latest:
 `m.reference.news("AAPL", sort="published_utc", order=dm.Order.DESC, limit=50).poll(60)`. A news
 or filings poll needs a `start` or a `limit`: without either, every cycle would re-read the whole
@@ -1025,10 +1115,19 @@ The members are `CME`, `CBOT`, `NYMEX`, and `COMEX`. Streams and REST reads igno
   as in [table shapes](#table-shapes).
 - `ring(capacity)`: the number of rows to keep.
 - `last_by(by="Symbol")`: the key column or columns.
-- `history(start, end=None, *, source=dm.HistorySource.AUTO, wait=True)`: the range as in
-  [`start` and `end`](#start-and-end); `source` as in [history sources](#history-sources);
-  `wait=False` reads in the background, as in [live tables](#live-tables).
-- `fetch(*, wait=True)`: `wait` as for `history()`.
+- `history(start, end=None, *, source=dm.HistorySource.AUTO, reread=dm.Reread.ALWAYS,
+  wait=True)`: the range as in [`start` and `end`](#start-and-end); `source` as in
+  [history sources](#history-sources); `wait=False` reads in the background, as in
+  [live tables](#live-tables). `reread` matters only when `symbols` is a live table: it says
+  whether a symbol that returns after you deleted it is downloaded again. `dm.Reread.ALWAYS`,
+  the default, downloads it again and shows Massive's current answer; it has no rows until the
+  download lands. `dm.Reread.NEVER` gives back the earlier download with no request, at the
+  cost of keeping every symbol the table ever held in memory. A symbol that failed is always
+  read again. Massive corrects past data (late cancellations, backfills, splits), so no rule can
+  tell when an earlier download is still right: choose `NEVER` only when stale rows are
+  acceptable. Each symbol's rows are as of its `ReadAt` in `m.symbol_reads()`.
+- `fetch(*, wait=True)`: `wait` as for `history()`. A `fetch()` that follows a live symbol
+  table reads a returning symbol again, as Massive answers at that moment.
 
 <a id="troubleshooting"></a>
 
@@ -1060,7 +1159,7 @@ this section) and look at what the library did.
 | `MassiveSession #1 was closed; this table no longer updates` | The session was closed. Take `table.snapshot()` to keep the rows; create a new session for new tables. |
 | `Can not listen to failed table` | Deephaven builds nothing on a failed table. Work on `table.snapshot()`. |
 | `... inside a Deephaven console command, which holds the update graph's lock` | A long command paused every live table. Pass `wait=False` to long reads. |
-| `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served, but check its dates. See [bars](#bars), and please report it. |
+| `... which is not a stamp Massive is known to use` | Massive stamped a bar unexpectedly; it is served at its own stamp with no `Date`. See [bars](#bars), and please report it. |
 | a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [history sources](#history-sources). |
 | `WAITING_SLOT` in `m.connections()` | Another program or computer uses your key's one connection for this class. Stop it; the library connects when the slot frees. |
 | `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries on its own; the note clears once data flows, and `Gaps` keeps the span whose rows may be missing. |
@@ -1124,7 +1223,9 @@ servers that answer as Massive's documentation says Massive does, and the live t
 against Massive on a mix of paid and free plans. Some questions remain open because those plans
 cannot settle them, such as how index daily bars and futures sessions are stamped and parts of
 the flat files; on those, the library follows its best reading of Massive's documentation and
-warns when what Massive sends differs. The library is not on PyPI yet. Outside testers start
+warns when what Massive sends differs. Following a live symbol table in `history()` and
+`fetch()`, with `reread` and `m.symbol_reads()`, is specified but not built yet: until it is,
+both read a live table once, when called. The library is not on PyPI yet. Outside testers start
 with the [tester guide](docs/tester-guide.md).
 
 <a id="contributing"></a>

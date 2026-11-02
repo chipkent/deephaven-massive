@@ -19,6 +19,10 @@ and decides what the call returns when they cannot serve all of it:
   names REST when REST could serve the read.
 - A futures read by dates whose files held rows of other sessions warns that the range's
   first or last session may be incomplete, and says so on the table.
+- A read by symbol (`read_history_by_symbol`, for a table that follows a live symbol table)
+  follows the same rules, but reads the days the files lack from REST symbol by symbol
+  (`RestTransport.history_by_symbol`), so one symbol's REST failure fails only that symbol. A
+  failure of the files themselves, which serve every symbol at once, is every symbol's.
 
 Runs on the calling thread (a background read's own thread for `wait=False`); the REST reads go
 through the session's REST transport (`SessionCore.rest_transport`).
@@ -45,13 +49,16 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.transports import SymbolFailure
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from deephaven.table import Table
 
@@ -60,9 +67,9 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._ingest.flatfiles import FlatFileHistory
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.transports import FlatFileRead
+    from deephaven_massive._tables.transports import FlatFileRead, SymbolOutcome
 
-__all__ = ["read_history"]
+__all__ = ["read_history", "read_history_by_symbol"]
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +121,84 @@ def read_history(
             today (`FlatFileRead.absent`): `"<dataset>: no flat file exists for <dates>, ..."`.
     """
     problem = rest_history_problem(spec, request)
+    read = _scan(
+        spec,
+        request,
+        window,
+        core=core,
+        files=files,
+        dates=dates,
+        call=call,
+        stop=stop,
+        problem=problem,
+        forced=forced,
+    )
+    if read is None:
+        rows = core.rest_transport().history(spec, request, window, call=call, stop=stop)
+        return rows, "Read from REST: AUTO chose flat files, which S3 refused.", None
+    _check_published(spec, read, problem=problem, forced=forced)
+    lacks = _files_lack_note(spec, read)
+    if not read.unread:
+        with entered(core.exec_ctx):
+            return merge([read.empty, *(part for _, part in read.parts)]), None, lacks
+    rest = _rest_days(spec, request, window, core=core, days=read.unread, call=call, stop=stop)
+    with entered(core.exec_ctx):
+        # The files' days and REST's tile (the files are trimmed to their own days), so
+        # sorting by the time column puts every row in time order across the sources.
+        merged = merge([read.empty, *(part for _, part in read.parts), *rest])
+        table = merged.sort(time_column(spec.times))
+    days = ", ".join(day.isoformat() for day in read.unread)
+    missing = bounded_list(day.isoformat() for day in read.unread)
+    _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
+    flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
+    served = f"Read from {flat}, and from REST for {days}, whose files are missing."
+    return table, served, lacks
+
+
+def _scan(
+    spec: DatasetSpec,
+    request: Request,
+    window: HistoryWindow,
+    *,
+    core: SessionCore,
+    files: FlatFileHistory,
+    dates: Sequence[date],
+    call: int,
+    stop: threading.Event | None,
+    problem: str | None,
+    forced: bool,
+) -> FlatFileRead | None:
+    """Read the flat files of a call, or learn that REST must serve all of it instead.
+
+    Under `FLAT_FILES`, or when REST cannot serve the request (`problem`), holidays are
+    inferred and a refusal raises; otherwise a refusal of the files logs the WARNING of
+    `_warn_rest_served` and the whole call is read from REST.
+
+    Args:
+        spec: The dataset.
+        request: The request with static symbols and the parsed bounds.
+        window: The call's window.
+        core: The session's core.
+        files: The call's flat-file transport.
+        dates: The partition dates of the files the window needs.
+        call: The call id.
+        stop: A read's stop token, or None.
+        problem: Why REST cannot serve the request (`rest_history_problem`), or None.
+        forced: True for `source=FLAT_FILES`.
+
+    Returns:
+        The files' read, or None when S3 refused them and REST serves the whole call.
+
+    Raises:
+        AuthenticationError: When S3 rejects the credentials and REST may not serve the call.
+        EntitlementError: The refusal of `_refused_flat_files`, when REST may not serve the
+            call.
+
+    Any other error is the flat-file transport's (`FlatFileHistory.history`).
+    """
     infer = forced or problem is not None
     try:
-        read = files.history(
+        return files.history(
             spec, request, window, dates=dates, call=call, infer_holidays=infer, stop=stop
         )
     except (EntitlementError, AuthenticationError) as error:
@@ -126,8 +208,24 @@ def read_history(
                 raise refusal from error
             raise
         _warn_rest_served(core, spec, f"S3 refused the flat files ({error})")
-        rows = core.rest_transport().history(spec, request, window, call=call, stop=stop)
-        return rows, "Read from REST: AUTO chose flat files, which S3 refused.", None
+        return None
+
+
+def _check_published(
+    spec: DatasetSpec, read: FlatFileRead, *, problem: str | None, forced: bool
+) -> None:
+    """Refuse a read whose files are missing where REST may not serve the days.
+
+    Args:
+        spec: The dataset.
+        read: The files' read.
+        problem: Why REST cannot serve the request, or None.
+        forced: True for `source=FLAT_FILES`.
+
+    Raises:
+        MassiveError: The errors `read_history` lists for an absent or unpublished file.
+    """
+    infer = forced or problem is not None
     if read.absent:
         days = ", ".join(day.isoformat() for day in read.absent)
         remedy = (
@@ -151,22 +249,6 @@ def read_history(
             f"{spec.name}: the flat file for {first} is not published yet. "
             f"{PUBLICATION_NOTE}. {remedy}"
         )
-    lacks = _files_lack_note(spec, read)
-    if not read.unread:
-        with entered(core.exec_ctx):
-            return merge([read.empty, *(part for _, part in read.parts)]), None, lacks
-    rest = _rest_days(spec, request, window, core=core, days=read.unread, call=call, stop=stop)
-    with entered(core.exec_ctx):
-        # The files' days and REST's tile (the files are trimmed to their own days), so
-        # sorting by the time column puts every row in time order across the sources.
-        merged = merge([read.empty, *(part for _, part in read.parts), *rest])
-        table = merged.sort(time_column(spec.times))
-    days = ", ".join(day.isoformat() for day in read.unread)
-    missing = bounded_list(day.isoformat() for day in read.unread)
-    _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
-    flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
-    served = f"Read from {flat}, and from REST for {days}, whose files are missing."
-    return table, served, lacks
 
 
 def _files_lack_note(spec: DatasetSpec, read: FlatFileRead) -> str | None:
@@ -241,17 +323,10 @@ def _uncertain_sessions(spec: DatasetSpec, sessions: Sequence[date]) -> str | No
     )
 
 
-def _rest_days(
-    spec: DatasetSpec,
-    request: Request,
-    window: HistoryWindow,
-    *,
-    core: SessionCore,
-    days: Sequence[date],
-    call: int,
-    stop: threading.Event | None,
-) -> list[Table]:
-    """Read the days the flat files could not serve from REST, each within the call's range.
+def _rest_day_reads(
+    spec: DatasetSpec, request: Request, window: HistoryWindow, *, days: Sequence[date]
+) -> list[tuple[Request, HistoryWindow, Table | None]]:
+    """Plan the REST reads of the days the flat files could not serve, within the call's range.
 
     Bars of a day or longer are read with the call's own request and window, which keep a bar
     only when its whole window fits the range, and then only the days asked for are kept, by
@@ -267,26 +342,18 @@ def _rest_days(
         spec: The dataset.
         request: The request with static symbols and the parsed bounds.
         window: The call's window: whole days, or a range of instants.
-        core: The session's core.
         days: The days (for futures, sessions), oldest first.
-        call: The call id.
-        stop: A background read's stop token, or None for a blocking read.
 
     Returns:
-        The days' rows inside the range; none for a day without trading.
+        Each read's request and window, and the `Date` labels of the rows to keep from it as a
+        static key table (a static table, not a formula, whose query scope would capture the
+        caller's frame and with it the session), or None to keep every row.
     """
-    rest = core.rest_transport()
     timespan = request.timespan
     if spec.is_bars and timespan is not None and not intraday(timespan):
-        # The window keeps whole bars; `days` limits an all-symbol read to one grouped-daily
-        # request per missing day instead of one per day of the range.
-        rows = rest.history(spec, request, window, call=call, stop=stop, days=days)
-        # A static key table, not a formula: a formula's query scope would capture this
-        # frame, and with it the session.
         labels = pa.table({"Date": [day.isoformat() for day in days]})
-        with entered(core.exec_ctx):
-            return [rows.where_in(dh_arrow.to_table(labels), "Date")]
-    tables = []
+        return [(request, window, dh_arrow.to_table(labels))]
+    reads: list[tuple[Request, HistoryWindow, Table | None]] = []
     for day in days:
         start: date | datetime = day
         end: date | datetime | None = day
@@ -296,9 +363,231 @@ def _rest_days(
             start = max(cast("datetime", request.start), opens)
             end = closes if request.end is None else min(cast("datetime", request.end), closes)
         one = replace(request, start=start, end=end)
-        one_window = history_window(spec, one, start=start, end=end, now=window.now)
-        tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
+        reads.append((one, history_window(spec, one, start=start, end=end, now=window.now), None))
+    return reads
+
+
+def _rest_days(
+    spec: DatasetSpec,
+    request: Request,
+    window: HistoryWindow,
+    *,
+    core: SessionCore,
+    days: Sequence[date],
+    call: int,
+    stop: threading.Event | None,
+) -> list[Table]:
+    """Read the days the flat files could not serve from REST (`_rest_day_reads`).
+
+    Args:
+        spec: The dataset.
+        request: The request with static symbols and the parsed bounds.
+        window: The call's window: whole days, or a range of instants.
+        core: The session's core.
+        days: The days (for futures, sessions), oldest first.
+        call: The call id.
+        stop: A background read's stop token, or None for a blocking read.
+
+    Returns:
+        The days' rows inside the range; none for a day without trading.
+    """
+    rest = core.rest_transport()
+    with entered(core.exec_ctx):
+        reads = _rest_day_reads(spec, request, window, days=days)
+    tables = []
+    for one, one_window, keep in reads:
+        if keep is None:
+            tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
+            continue
+        # `days` limits an all-symbol read of bars to one grouped-daily request per missing
+        # day instead of one per day of the range.
+        rows = rest.history(spec, one, one_window, call=call, stop=stop, days=days)
+        with entered(core.exec_ctx):
+            tables.append(rows.where_in(keep, "Date"))
     return tables
+
+
+def read_history_by_symbol(
+    spec: DatasetSpec,
+    request: Request,
+    window: HistoryWindow,
+    *,
+    core: SessionCore,
+    files: FlatFileHistory,
+    symbols: Sequence[str],
+    dates: Sequence[date],
+    call: int,
+    stop: threading.Event | None,
+    forced: bool,
+) -> dict[str, SymbolOutcome]:
+    """Read `history()` from the flat files for each symbol, each with its own outcome.
+
+    The files are scanned once for every symbol, by the rules of `read_history`, and their rows
+    split by `Symbol` (`symbol_reads.split_by_symbol`). A failure of the scan (an absent or
+    unpublished file where REST may not serve it, a refusal, a failed read) is every symbol's.
+    The days the files lack are read from REST for each symbol (`RestTransport.
+    history_by_symbol`, over day windows built for the call's instant), so a symbol fails
+    alone when its own REST read fails, and a symbol that failed is not read for later days.
+    When S3 refuses the files and REST may serve the call, the whole call is read from REST by
+    symbol. An empty window reads nothing.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments, with the parsed bounds; its symbols are ignored.
+        window: The call's window.
+        core: The session's core.
+        files: The call's flat-file transport.
+        symbols: The canonical symbols; a repeated one is read once.
+        dates: The partition dates of the files the window needs.
+        call: The call id.
+        stop: A read's stop token, or None.
+        forced: True for `source=FLAT_FILES`, which never reads REST.
+
+    Returns:
+        Each symbol, in the order given, with its outcome.
+
+    Errors are those of `symbol_reads.symbol_outcomes`, and the `AuthenticationError` of
+    `RestTransport.history_by_symbol`.
+    """
+    ordered = tuple(dict.fromkeys(symbols))
+    flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
+    schema = core.dataset_schema(spec)
+    if window.empty:
+        with entered(core.exec_ctx):
+            nothing = dataset_table(schema.arrow_schema().empty_table(), schema.date_columns)
+        empty = dict.fromkeys(ordered, nothing)
+        return symbol_outcomes(
+            core, spec, symbols=ordered, tables=empty, failures={}, call=call, source=flat
+        )
+    asked = replace(request, symbols=tuple(sorted(ordered)))
+    problem = rest_history_problem(spec, asked)
+    try:
+        read = _scan(
+            spec,
+            asked,
+            window,
+            core=core,
+            files=files,
+            dates=dates,
+            call=call,
+            stop=stop,
+            problem=problem,
+            forced=forced,
+        )
+        if read is not None:
+            _check_published(spec, read, problem=problem, forced=forced)
+    except MassiveError as error:
+        shared = dict.fromkeys(ordered, error)
+        return symbol_outcomes(
+            core, spec, symbols=ordered, tables={}, failures=shared, call=call, source=flat
+        )
+    rest = core.rest_transport()
+    if read is None:
+        return dict(
+            rest.history_by_symbol(spec, asked, window, symbols=ordered, call=call, stop=stop)
+        )
+    lacks = _files_lack_note(spec, read)
+    if lacks is not None:
+        logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
+    with entered(core.exec_ctx):
+        files_rows = merge([read.empty, *(part for _, part in read.parts)])
+    tables = split_by_symbol(core, spec, files_rows, symbols=ordered, source=flat)
+    if not read.unread:
+        return symbol_outcomes(
+            core, spec, symbols=ordered, tables=tables, failures={}, call=call, source=flat
+        )
+    merged, failures = _rest_days_by_symbol(
+        spec, asked, window, core=core, tables=tables, days=read.unread, call=call, stop=stop
+    )
+    return symbol_outcomes(
+        core,
+        spec,
+        symbols=ordered,
+        tables=merged,
+        failures=failures,
+        call=call,
+        source=f"{flat} and REST",
+    )
+
+
+def _rest_days_by_symbol(
+    spec: DatasetSpec,
+    request: Request,
+    window: HistoryWindow,
+    *,
+    core: SessionCore,
+    tables: Mapping[str, Table],
+    days: Sequence[date],
+    call: int,
+    stop: threading.Event | None,
+) -> tuple[dict[str, Table], dict[str, MassiveError]]:
+    """Read the days the flat files lack from REST for each symbol, and merge each symbol's rows.
+
+    Logs the WARNING of `_warn_rest_served` naming the days. A symbol whose REST read of a day
+    fails is not read for the later days.
+
+    Args:
+        spec: The dataset.
+        request: The request with the symbols and the parsed bounds.
+        window: The call's window.
+        core: The session's core.
+        tables: Each symbol's rows from the files.
+        days: The days the files lack, oldest first.
+        call: The call id.
+        stop: A read's stop token, or None.
+
+    Returns:
+        Each symbol that did not fail with its rows from both sources in time order, and each
+        symbol that failed with its error.
+    """
+    missing = bounded_list(day.isoformat() for day in days)
+    _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
+    rest = core.rest_transport()
+    pieces = {symbol: [table] for symbol, table in tables.items()}
+    failures: dict[str, MassiveError] = {}
+    with entered(core.exec_ctx):
+        reads = _rest_day_reads(spec, request, window, days=days)
+    for one, one_window, keep in reads:
+        left = [symbol for symbol in tables if symbol not in failures]
+        outcomes = rest.history_by_symbol(spec, one, one_window, symbols=left, call=call, stop=stop)
+        _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
+    with entered(core.exec_ctx):
+        # The files' days and REST's tile, so sorting by the time column puts every row of a
+        # symbol in time order across the sources.
+        merged = {
+            symbol: merge(parts).sort(time_column(spec.times))
+            for symbol, parts in pieces.items()
+            if symbol not in failures
+        }
+    return merged, failures
+
+
+def _gather(
+    core: SessionCore,
+    outcomes: Mapping[str, SymbolOutcome],
+    *,
+    keep: Table | None,
+    pieces: dict[str, list[Table]],
+    failures: dict[str, MassiveError],
+) -> None:
+    """Add one REST day read's outcomes to each symbol's rows or failure.
+
+    Args:
+        core: The session's core.
+        outcomes: The read's outcome of each symbol.
+        keep: The `Date` labels of the rows to keep, or None to keep every row.
+        pieces: Each symbol's tables so far, which receive the read's rows.
+        failures: Each failed symbol's error, which receives the read's failures.
+    """
+    for symbol, outcome in outcomes.items():
+        if isinstance(outcome, SymbolFailure):
+            failures[symbol] = outcome.error
+            continue
+        rows = outcome.table
+        if keep is not None:
+            with entered(core.exec_ctx):
+                rows = rows.where_in(keep, "Date")
+        pieces[symbol].append(rows)
 
 
 def _warn_rest_served(core: SessionCore, spec: DatasetSpec, why: str) -> None:

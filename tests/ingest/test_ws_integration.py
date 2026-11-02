@@ -144,7 +144,7 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
 
 
 @pytest.mark.needs("stocks:advanced")
-@pytest.mark.settles("70")
+@pytest.mark.verifies("70")
 @pytest.mark.timeout(1200)
 def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     live_config: dm.MassiveConfig,
@@ -165,8 +165,9 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     the test skips after the acknowledgement. While it is open, it waits until the session
     has been open longer than the delayed feed's 15 minutes, then up to 45 s for a trade, and
     requires one, so the test runs up to about 17 minutes in the first quarter hour of a
-    session. Reading it: rows mean a real-time key may choose delayed data; a refusal means
-    the setting needs a delayed plan, and its message must say so.
+    session. Passes when Massive acknowledged the subscription without refusing it and, in an
+    open market, sent a trade: a real-time key may choose delayed data. A refusal would mean
+    the setting needs a delayed plan, and the library's message would have to say so.
     """
     config = dataclasses.replace(live_config, delayed_subscriptions={dm.Subscription.STOCKS})
     session = dm.MassiveSession(config)
@@ -190,10 +191,11 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
         session.close()
     evidence(f"T.AAPL acknowledged {acked}; rows {len(rows)}; errors {errors or 'none'}")
     evidence(f"refused on the delayed feed: {bool(errors)}")
-    assert acked or errors, "Massive neither acknowledged nor refused T.AAPL"
-    if opened is None and not errors:
+    assert not errors, f"Massive refused a real-time key on the delayed feed: {errors}"
+    assert acked, "Massive did not acknowledge T.AAPL on the delayed feed"
+    if opened is None:
         pytest.skip(f"not exercised: the stock market is {status} (acknowledged)")
-    assert rows or errors, f"no AAPL trade arrived on the delayed feed of an open market ({status})"
+    assert rows, f"no AAPL trade arrived on the delayed feed of an open market ({status})"
 
 
 @pytest.mark.needs("currencies:starter")

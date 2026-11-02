@@ -16,14 +16,17 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   symbol; a request of several (`ticker.any_of`) gives each its rows by their `Symbol`, and its
   failure is the failure of each of them. A row of such a request whose `Symbol` names none of
   them belongs to no symbol: it is left out, with one WARNING per dataset and path a session.
-  A flat-file scan reads every symbol at once (`read_flat_files_by_symbol`): its rows are
-  split by `Symbol`, and its failure is every symbol's.
+  A flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its
+  rows are split by `Symbol` (`split_by_symbol`), and its failure is every symbol's; the days
+  its files lack are read from REST symbol by symbol.
 - **Classes of failure** (`failure_kind`): `TRANSIENT` when the cause may pass (a rate limit
   beyond the read's patience, a server error after the client's retries, a network failure, a
-  symbol's later page that answered HTTP 404), `PERMANENT` otherwise (a refusal of the plan, rows
-  that break the schema, a crypto pair Massive does not list, a parameter the path does not
-  take, a defect of the library). HTTP 404 on a symbol's first request is no failure: the
-  symbol has no data, and its table is empty.
+  symbol's later page that answered HTTP 404), `PERMANENT` otherwise: the same read would fail
+  again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
+  lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
+  does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
+  HTTP 404 on a symbol's first request is no failure: the symbol has no data, and its table is
+  empty.
 - **Whole-read failures**: a rejected API key (`AuthenticationError`) and a session closed
   during the read would fail every symbol alike, so they raise.
 - **Columns**: each symbol's table must have exactly the dataset's columns
@@ -51,6 +54,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._errors import (
     AuthenticationError,
+    CutShortError,
     EntitlementError,
     ErrorCause,
     MassiveError,
@@ -65,7 +69,7 @@ from deephaven_massive._ingest.rest_requests import (
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables.columns import col_defs, dataset_table
+from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
 
@@ -90,8 +94,9 @@ __all__ = [
     "failure_kind",
     "fetch_units",
     "history_units",
-    "read_flat_files_by_symbol",
     "read_rest_by_symbol",
+    "split_by_symbol",
+    "symbol_outcomes",
 ]
 
 logger = logging.getLogger(__name__)
@@ -115,11 +120,6 @@ class UnsupportedParameterError(PermanentError):
 _SYMBOL = "Symbol"
 """The column that names each row's symbol, by which a request of several symbols is split."""
 
-_PASSING_STATUSES = frozenset({HTTPStatus.NOT_FOUND, HTTPStatus.TOO_MANY_REQUESTS})
-"""The statuses, besides a server error, of a failure that may pass: a symbol's later page
-that answered HTTP 404 (its first request's 404 is no failure), and a rate limit that outlasted
-the read's patience."""
-
 
 def failure_kind(error: MassiveError) -> FailureKind:
     """Class a symbol's failure: may the same read succeed if it is made again later?
@@ -128,19 +128,28 @@ def failure_kind(error: MassiveError) -> FailureKind:
         error: The failure, as the transport raised or returned it.
 
     Returns:
-        `PERMANENT` for a refusal of the plan (`EntitlementError`), a failure a retry cannot
-        fix (`PermanentError`: rows that break the schema, a parameter the path does not take,
-        a crypto pair Massive does not list), any defect (`ErrorCause.LIBRARY_DEFECT` or
-        `USER_DEFECT`), and any other HTTP status Massive answered with, such as 400.
-        `TRANSIENT` for an expected failure with no status (a network failure, a read
-        stopped), a server error (5xx), a rate limit (429), and a later page's 404.
+        `TRANSIENT` for a symbol's data cut short (`CutShortError`: a later page's 404), and
+        for an expected failure with no status (a network failure, a read stopped), a server
+        error (5xx), or a rate limit (429). `PERMANENT`, meaning the same read would fail
+        again for this session's entitlements, for everything else: a refusal of the plan
+        (`EntitlementError`, which an upgrade of the plan lifts), a failure a retry cannot fix
+        (`PermanentError`: rows that break the schema, a parameter the path does not take, a
+        crypto pair Massive does not list), any defect (`ErrorCause.LIBRARY_DEFECT` or
+        `USER_DEFECT`), and any other HTTP status, such as 400 or the 404 of a path Massive
+        retired.
     """
+    if isinstance(error, CutShortError):
+        return FailureKind.TRANSIENT
     if isinstance(error, (EntitlementError, PermanentError)):
         return FailureKind.PERMANENT
     if error.cause is not ErrorCause.EXPECTED:
         return FailureKind.PERMANENT
     status = error.status
-    if status is None or status in _PASSING_STATUSES or status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+    if (
+        status is None
+        or status == HTTPStatus.TOO_MANY_REQUESTS
+        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
+    ):
         return FailureKind.TRANSIENT
     return FailureKind.PERMANENT
 
@@ -327,6 +336,7 @@ def read_rest_by_symbol(
     symbols: Sequence[str],
     units: Sequence[RestUnit],
     failed: Mapping[str, MassiveError],
+    limit: int | None,
     window: HistoryWindow | None,
     current: bool,
     call: int,
@@ -346,6 +356,7 @@ def read_rest_by_symbol(
         symbols: The canonical symbols, in the order the outcomes follow.
         units: The planned requests (`fetch_units`, `history_units`).
         failed: The symbols that failed before any request, with their errors.
+        limit: The cap on each request's rows (`RestReader.read_each`).
         window: The `history()` window whose rows to keep, or None for `fetch()`.
         current: True when the pages are checked for a `DELAYED` label
             (`rest._fetch_is_current`).
@@ -356,7 +367,8 @@ def read_rest_by_symbol(
     Returns:
         Each symbol, in the order given, with its outcome.
 
-    Errors are those of `_outcomes`, and the `AuthenticationError` of `RestReader.read_each`.
+    Errors are those of `symbol_outcomes`, and the `AuthenticationError` of
+    `RestReader.read_each`.
     """
     ordered = _ordered(symbols)
     patience = reader.patience()  # once for every request, on this thread, before any fan-out
@@ -364,6 +376,7 @@ def read_rest_by_symbol(
         spec,
         units,
         request=request,
+        limit=limit,
         window=window,
         current=current,
         cancel=cancel,
@@ -392,14 +405,14 @@ def read_rest_by_symbol(
         for symbol, rows in pieces.items()
         if symbol not in failures
     }
-    return _outcomes(
+    return symbol_outcomes(
         core,
         spec,
         symbols=ordered,
         tables=tables,
         failures=failures,
         call=call,
-        source=Transport.REST,
+        source=TRANSPORT_LABELS[Transport.REST],
     )
 
 
@@ -451,76 +464,47 @@ def _attribute(
     )
 
 
-def read_flat_files_by_symbol(
-    core: SessionCore,
-    spec: DatasetSpec,
-    symbols: Sequence[str],
-    *,
-    window: HistoryWindow,
-    call: int,
-    read: Callable[[], Table],
-) -> dict[str, SymbolOutcome]:
-    """Read every symbol in one flat-file scan, and split the rows by symbol.
+def split_by_symbol(
+    core: SessionCore, spec: DatasetSpec, table: Table, *, symbols: Sequence[str], source: str
+) -> dict[str, Table]:
+    """Split one read's static rows of several symbols into each symbol's table.
+
+    A row whose `Symbol` names none of the symbols, or is null, belongs to no symbol: the rows
+    the split leaves out are counted against the table's size and logged at WARNING, so no row
+    Massive sent disappears without a trace.
 
     Args:
-        core: The session's core.
+        core: The session's core, whose execution context the split runs in.
         spec: The dataset.
-        symbols: The canonical symbols, in the order the outcomes follow.
-        window: The call's window; an empty one reads nothing, and every symbol has no rows.
-        call: The verb call's id, for the log lines.
-        read: Reads the symbols' rows (`FlatFileHistory.read_history`), raising its failure.
+        table: The rows, a static table with a `Symbol` column.
+        symbols: The symbols, in the order the result follows.
+        source: Where the rows came from, for the log line, such as `"flat files"`.
 
     Returns:
-        Each symbol, in the order given, with its outcome; when the scan failed, every
-        symbol's `SymbolFailure` holds the same error.
-
-    Errors are those of `_outcomes`.
+        Each symbol with its rows; a symbol without rows has an empty table with the same
+        columns.
     """
-    ordered = _ordered(symbols)
-    if window.empty:
-        empty = core.dataset_schema(spec).arrow_schema().empty_table()
-        with entered(core.exec_ctx):
-            nothing = dataset_table(empty, core.dataset_schema(spec).date_columns)
-        tables = dict.fromkeys(ordered, nothing)
-        return _outcomes(
-            core,
-            spec,
-            symbols=ordered,
-            tables=tables,
-            failures={},
-            call=call,
-            source=Transport.FLAT_FILES,
-        )
-    try:
-        table = read()
-    except MassiveError as error:
-        failures = dict.fromkeys(ordered, error)
-        return _outcomes(
-            core,
-            spec,
-            symbols=ordered,
-            tables={},
-            failures=failures,
-            call=call,
-            source=Transport.FLAT_FILES,
-        )
     with entered(core.exec_ctx):
         parts = table.partition_by(_SYMBOL)
         none = table.head(0)
-        found = {symbol: parts.get_constituent(symbol) for symbol in ordered}
-    tables = {symbol: none if part is None else part for symbol, part in found.items()}
-    return _outcomes(
-        core,
-        spec,
-        symbols=ordered,
-        tables=tables,
-        failures={},
-        call=call,
-        source=Transport.FLAT_FILES,
-    )
+        found = {symbol: parts.get_constituent(symbol) for symbol in symbols}
+        tables = {symbol: none if part is None else part for symbol, part in found.items()}
+        total = table.size
+        kept = sum(part.size for part in tables.values())
+    if kept != total:
+        logger.warning(
+            "%s: %d of the %d rows read from %s for %s name none of those symbols (or no "
+            "symbol), so no symbol's read owns them and they are left out",
+            spec.name,
+            total - kept,
+            total,
+            source,
+            bounded_list(symbols),
+        )
+    return tables
 
 
-def _outcomes(
+def symbol_outcomes(
     core: SessionCore,
     spec: DatasetSpec,
     *,
@@ -528,9 +512,11 @@ def _outcomes(
     tables: Mapping[str, Table],
     failures: Mapping[str, MassiveError],
     call: int,
-    source: Transport,
+    source: str,
 ) -> dict[str, SymbolOutcome]:
     """Turn each symbol's table or error into its outcome, and log each one.
+
+    The last step of every read by symbol, REST or flat files.
 
     Args:
         core: The session's core.
@@ -539,17 +525,18 @@ def _outcomes(
         tables: The table of each symbol that did not fail.
         failures: The error of each symbol that failed.
         call: The verb call's id.
-        source: The transport that read the rows.
+        source: Where the rows came from, for the log lines: `"REST"`, `"flat files"`, or
+            `"flat files and REST"` when REST served the days the files lack.
 
     Returns:
-        Each symbol with its `SymbolRows`, or its `SymbolFailure` classed by `failure_kind`;
+        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`
+        classed by `failure_kind`;
         a table without exactly the dataset's columns fails its symbol as a library defect.
 
     Raises:
         AuthenticationError: When any symbol failed with it: every symbol would.
         MassiveError: `"<session> is closed"` when the session closed during the read.
     """
-    label = TRANSPORT_LABELS[source]
     refused = next((e for e in failures.values() if isinstance(e, AuthenticationError)), None)
     if refused is not None:
         logger.debug(
@@ -566,18 +553,18 @@ def _outcomes(
             table = tables[symbol]
             problem = _column_problem(table, expected)
             if problem is None:
-                outcomes[symbol] = SymbolRows(table)
+                outcomes[symbol] = SymbolRows(table, source=source)
                 logger.debug(
                     "call %d %s %s: rows read from %s: %d",
                     call,
                     spec.name,
                     symbol,
-                    label,
+                    source,
                     table.size,
                 )
                 continue
             error = MassiveError(
-                library_bug(f"{spec.name}: {symbol}'s rows from {label} {problem}"),
+                library_bug(f"{spec.name}: {symbol}'s rows from {source} {problem}"),
                 cause=ErrorCause.LIBRARY_DEFECT,
             )
         kind = failure_kind(error)
@@ -589,7 +576,7 @@ def _outcomes(
             call,
             spec.name,
             symbol,
-            label,
+            source,
             kind.value,
             expected=logging.DEBUG,
         )

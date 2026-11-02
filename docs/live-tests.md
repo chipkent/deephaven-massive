@@ -66,7 +66,9 @@ export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
 ```
 
 Each test declares the plans it needs (`@pytest.mark.needs("currencies:starter", "s3")`). A
-test whose plans the key lacks skips before any request, naming the plan and its monthly
+question about what a delayed plan receives declares `<class>:delayed`, such as
+`futures:delayed`: only Starter or Developer (Starter for indices) meets it, since a real-time
+plan cannot answer it. A test whose plans the key lacks skips before any request, naming the plan and its monthly
 price, such as "needs Currencies Starter ($49/month)". A request refused because it reaches
 further back than the plan's history ("Your plan doesn't include this data timeframe") skips
 the test as "outside the plan's history" when the day it asked for is before the first day
@@ -147,7 +149,9 @@ whole month), and the holiday-session checks the most recent Martin Luther King 
 Friday. The split and dividend checks
 find the year's most recent forward split and special cash dividend through the library's own
 `stocks.splits` and `stocks.dividends`, choosing common stocks with no later split. So every
-read stays inside a Basic plan's two years of history. The three adjusted option roots of the
+read stays inside a Basic plan's two years of history. The option split check is an
+exception: it reads NVDA's 10-for-1 split of 2024-06-10, whose thin OTC neighbors list no
+options, and needs Options Developer, which keeps four years. The three adjusted option roots of the
 deliverable check (from 2014, 2021, and 2024) are the exception: each is read only when the
 key's Options plan keeps its day, by the documented history windows, and is otherwise
 recorded as outside the plan's history.
@@ -219,11 +223,12 @@ plan keeps its access to the month's end ([S4], [S5]).
 |---|---|---|
 | Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, whether past stock data (the previous day's bar, a day's open and close) reads on the default configuration though Massive labels it `DELAYED`, the futures session labels around the 17:00 Chicago roll and Good Friday; the futures spread ticker forms of every venue, how Massive writes a futures contract's year (one digit or two), the crypto ticker list's currencies; plus the 429 text, the rate buckets, whether a market-filtered ticker lookup is charged to its class, how a spent minute frees its requests, and whether a learned limit outlives the key's sessions |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
-| Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
+| Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
-| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, and live cattle (where each session and longer bar falls, the 2-session grid, and clipping at `{from}`): most of the open questions |
+| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, and live cattle (where each session and longer bar falls, the 2-session grid, and clipping at `{from}`): most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes) and the day windows and file agreement of about ten indices over recent days, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
+| Options Developer | $79 | adds option bars across NVDA's 2024 split under both bases (whether `adjusted=true` adjusts option bars for the underlying's split) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 

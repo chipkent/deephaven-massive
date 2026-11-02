@@ -26,7 +26,10 @@ Two pieces apply that rule:
   `on_skipped`.
 
 A third piece, `watched_rows`, keeps the rows of a live table whose symbol a watchlist holds,
-as `last_by()` does to drop the rows of a symbol the watchlist no longer holds.
+as `last_by()` with keys that span symbols does before its aggregation; a fourth,
+`rows_since_added`, keeps a symbol's row only while the watchlist holds the symbol and only if
+the row arrived after the symbol last joined it, as `last_by()` keyed by `Symbol` does after its
+aggregation, so a symbol deleted and added again shows no stale row.
 
 A table in other spellings is converted by `canonicalize_symbols` in `_tables/symbols.py`, the
 table form of the symbol converters.
@@ -47,7 +50,7 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven.table_listener import TableListener, TableListenerHandle
 
-from deephaven_massive._datasets.row_times import ISSUES_URL
+from deephaven_massive._datasets.row_times import INSERT, ISSUES_URL
 from deephaven_massive._datasets.symbols import (
     canonical_symbol,
     check_symbol,
@@ -73,6 +76,7 @@ __all__ = [
     "SymbolWatch",
     "invalid_row_message",
     "read_symbols",
+    "rows_since_added",
     "skipped_rows_text",
     "watched_rows",
 ]
@@ -85,6 +89,9 @@ _SHOWN: Final = 5
 _WATCHED: Final = "__MassiveWatched"
 """The hidden column `watched_rows` joins on and drops. Dataset columns are PascalCase wire names,
 so none can take this name."""
+_ADDED_AT: Final = "__MassiveAddedAt"
+"""The hidden column `rows_since_added` joins on and drops: when a symbol last joined the
+watchlist."""
 _SKIPPED_LIMIT: Final = 100
 """The most skipped values logged per process under each of `LOG` and `IGNORE`."""
 _logged_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.WARNING)
@@ -610,3 +617,37 @@ def watched_rows(table: Table, watchlist: Table) -> Table:
     marks = watchlist.select_distinct(_SYMBOL).update_view(f"{_WATCHED} = true")
     joined = table.natural_join(marks, on=_SYMBOL, joins=_WATCHED)
     return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)
+
+
+def rows_since_added(table: Table, watchlist: Table) -> Table:
+    """Keep each row whose symbol the watchlist holds and that arrived since the symbol joined.
+
+    A row is kept while the watchlist holds its `Symbol` and its `TimestampInsert`, when the
+    library received it, is no earlier than the time the symbol last joined the watchlist. The
+    engine computes that time in the update cycle in which the symbol appears in the watchlist
+    (`select_distinct`, then `update` with `now()`), so it never lags the watchlist, and the
+    subscription a new symbol starts follows that same change, so every row received for it
+    comes later. A symbol deleted and added again is a new row of the distinct table, with a new
+    time, so the row it showed before it left stays hidden until a new one arrives. A row
+    received before its symbol joined, from a stream that already carried the symbol, is hidden
+    too, until the symbol's next row.
+
+    Meant for `last_by()` keyed by `Symbol`: applied after the aggregation, which remembers every
+    symbol it has seen, it hides what the aggregation remembers from before a symbol's latest
+    join. It is built from a join, for the reason `watched_rows` gives.
+
+    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    result's liveness scope, which then manages the tables it creates.
+
+    Args:
+        table: A live table with `Symbol` and `TimestampInsert` columns, such as a stream's
+            `last_by`.
+        watchlist: The user's symbol table; only its `Symbol` column is read.
+
+    Returns:
+        The kept rows, with the table's columns.
+    """
+    joined_at = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_AT} = now()")
+    joined = table.natural_join(joined_at, on=_SYMBOL, joins=_ADDED_AT)
+    kept = joined.where(f"!isNull({_ADDED_AT}) && {INSERT} >= {_ADDED_AT}")
+    return kept.drop_columns(_ADDED_AT)

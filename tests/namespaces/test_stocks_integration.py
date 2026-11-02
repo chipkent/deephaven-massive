@@ -84,6 +84,9 @@ _GROUPED = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
 _DAY_FILE = "us_stocks_sip/day_aggs_v1"
 _MINUTE_FILE = "us_stocks_sip/minute_aggs_v1"
 _DAY_NS = 86_400 * 1_000_000_000
+_DAY_STAMPS = frozenset({(0, 0, 0), (13, 0, 0), (16, 0, 0)})
+"""The New York times of day (hour, minute, second) at which the library expects a stock 1-day
+bar's stamp: midnight, a half day's 13:00 close, and the 16:00 close."""
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits for its first frame; stocks trade on weekdays only."""
 
@@ -259,7 +262,7 @@ def test_stock_week_bars_start_on_monday_or_sunday(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("34")
+@pytest.mark.verifies("34")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_month_bars_from_mid_month_against_the_whole_month(
@@ -268,9 +271,10 @@ def test_month_bars_from_mid_month_against_the_whole_month(
     """Whether the range returns a partial month bar for a `{from}` inside a month.
 
     Records `AAPL` month bars over the four months ending with the most recent whole month,
-    from the first month's first day and from its 15th. Reading it: a first bar of the next
-    month, or a first-month bar with the whole month's volume, means no partial bar; a
-    first-month bar with less volume is a partial bar, which the library already avoids by
+    from the first month's first day and from its 15th. Passes when every bar read from the
+    15th is one read from the 1st, with the same stamp and volume: Massive sends no partial bar
+    for the month `{from}` falls inside, whether it drops that month or sends it whole. A
+    first-month bar with less volume is a partial bar, which the library avoids anyway by
     starting at period boundaries.
     """
     index = recent_month[0].year * 12 + recent_month[0].month - 1 - 3
@@ -285,6 +289,9 @@ def test_month_bars_from_mid_month_against_the_whole_month(
             )
     assert whole
     assert partial
+    sent = {(bar["t"], bar["v"]) for bar in whole}
+    extra = [(bar["t"], bar["v"]) for bar in partial if (bar["t"], bar["v"]) not in sent]
+    assert not extra, f"bars from mid-month that are not whole months: {extra}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -372,7 +379,7 @@ def _record_library_stock_stamps(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("50")
+@pytest.mark.verifies("50")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_stock_day_and_longer_bar_stamps_from_rest(
@@ -402,12 +409,14 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
     same requests. With Stocks on Basic, which allows 5 requests a minute, it reads the range
     bars of both days, the grouped-daily row and minute bars of the half day only, and the week
-    and month bars, and leaves out `/prev` and the library's lines. Reading it: 1-day stamps
-    at 00:00, 13:00, or 16:00 New York time, longer bars at 00:00 New York time on their
-    period's first day (or the weekend before a week's Monday), and matching values confirm
-    the library's day label; minute bars ending at 12:59 on the half day confirm a whole day
-    cut short; a raw stamp of any other form is served by the library, labelled by the New
-    York day it falls on, with a WARNING in the log.
+    and month bars, and leaves out `/prev` and the library's lines. Passes when every source
+    answered and each grouped-daily row is stamped where the library expects a 1-day bar: at
+    00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range stamps there,
+    longer bars at 00:00 New York time on their period's first day (or the weekend before a
+    week's Monday), and matching values confirm the library's day label; minute bars ending at
+    12:59 on the half day confirm a whole day cut short; a raw stamp of any other form is
+    served by the library, labelled by the New York day it falls on, with a WARNING in the log.
+    Grouped-daily volume runs a little below the range bar's, so only the stamps are asserted.
     """
     days = stamp_days["day"]
     basic = "stocks" in classes_on_basic
@@ -433,10 +442,12 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     assert all(minutes), f"a stamp day has no minute bars: {dict(zip(read, minutes, strict=True))}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
     assert periods, "the range did not return one bar for each of two weeks and two months"
+    odd = {day: [b[0] for b in bars if not _day_stamp(b[0], day)] for day, bars in grouped.items()}
+    assert not any(odd.values()), f"grouped-daily stamps the library does not expect: {odd}"
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("50")
+@pytest.mark.verifies("50")
 @pytest.mark.timeout(200)
 def test_stock_day_bar_stamps_of_the_day_file(
     live_session: dm.MassiveSession,
@@ -454,10 +465,10 @@ def test_stock_day_bar_stamps_of_the_day_file(
     has ended and of the full trading day before it, its `window_start` in UTC and New York
     time, beside the range endpoint's bars around those days and which day's bar it matches
     with the largest relative error; the first and last AAPL rows of `minute_aggs_v1` on both
-    days; and the library's `history(source=FLAT_FILES)` windows. Reading it: a stamp the
-    library accepts (00:00 or 16:00 New York time, or 13:00 on the half day), a match on the
-    same day, and minute rows ending where the REST minute bars end confirm one day cut for
-    files and REST.
+    days; and the library's `history(source=FLAT_FILES)` windows. Passes when the file holds
+    each day and stamps it where the library expects a 1-day bar: at 00:00, 13:00, or 16:00 New
+    York time of its own day. Reading the rest: a match with the range bar of the same day, and
+    minute rows ending where the REST minute bars end, confirm one day cut for files and REST.
     """
     days = stamp_days["day"]
     files: dict[date, list[StampedBar]] = {}
@@ -474,12 +485,22 @@ def test_stock_day_bar_stamps_of_the_day_file(
     evidence(f"library history(FLAT_FILES): {outcome}")
     assert not missing, f"no range bar on {missing}"
     assert all(files.values()), f"the day file lacks a stamp day: {files}"
+    odd = {day: [b[0] for b in bars if not _day_stamp(b[0], day)] for day, bars in files.items()}
+    assert not any(odd.values()), f"day-file stamps the library does not expect: {odd}"
 
 
-_DIVIDEND_TRIES: Final = 3
-"""How many `stock_dividend` events the dividend check tries for one whose ticker has day
-bars: one request for the events, one per try, and one for the as-traded bars keep it within
-the five requests a minute of Stocks Basic."""
+_DIVIDEND_TRIES: Final = 10
+"""How many `stock_dividend` events the dividend check tries on a paid Stocks plan for one whose
+ticker has day bars: most such tickers are thin over-the-counter issues without a bar in a
+given month, so a handful is not enough."""
+
+_DIVIDEND_TRIES_BASIC: Final = 3
+"""How many it tries on Stocks Basic: one request for the events, one per try, and one for the
+as-traded bars keep it within the five requests a minute of Stocks Basic."""
+
+_DIVIDEND_WINDOW: Final = timedelta(days=30)
+"""How far before a `stock_dividend` event's execution date the check looks for a day bar: a
+thin ticker may go weeks without a trade."""
 
 
 def _days(
@@ -502,7 +523,7 @@ def _days(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("54")
+@pytest.mark.verifies("54")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_every_page_echoes_its_adjustment(
@@ -512,9 +533,11 @@ def test_every_page_echoes_its_adjustment(
 
     Pages through the minute bars of AAPL over the most recent week without a holiday and the
     week before, with a small `limit`, so the range answers in several pages, and reads the
-    grouped daily of that week's Monday and Tuesday, recording each page's `adjusted` echo.
-    Reading it: `True` on every page confirms the library's page-by-page check; a missing echo
-    on a later page means the check can only warn there.
+    grouped daily of that week's Monday with `adjusted=true` and its Tuesday with
+    `adjusted=false`, so an echo that follows the request can be told from a constant, recording
+    each page's `adjusted` echo. Passes when every page echoes the value it was sent, which the
+    library's page-by-page check relies on; a missing echo on a later page means the check can
+    only warn there.
     """
     monday = recent_week[0]
     range_path = source(Transport.REST, _RANGE)
@@ -535,10 +558,14 @@ def test_every_page_echoes_its_adjustment(
     ]
     evidence(f"range pages' adjusted echoes: {echoes}")
     grouped = source(Transport.REST, _GROUPED)
-    for day in (monday, monday + timedelta(days=1)):
-        page = live_rest.get(grouped, {"date": day}, {"adjusted": False}, bucket="stocks")
-        evidence(f"grouped daily {day}: adjusted echo {page.adjusted}")
-    assert echoes
+    grouped_echoes = []
+    for day, adjusted in ((monday, True), (monday + timedelta(days=1), False)):
+        page = live_rest.get(grouped, {"date": day}, {"adjusted": adjusted}, bucket="stocks")
+        evidence(f"grouped daily {day} adjusted={adjusted}: adjusted echo {page.adjusted}")
+        grouped_echoes.append((adjusted, page.adjusted))
+    assert len(echoes) > 1, f"the range answered in {len(echoes)} page"
+    assert all(echo is True for echo in echoes), f"range pages' echoes: {echoes}"
+    assert all(sent is echo for sent, echo in grouped_echoes), f"grouped: {grouped_echoes}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -605,6 +632,7 @@ def test_cash_dividends_are_never_adjusted(
 def test_stock_dividend_events_and_the_adjustment(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     recent_month: DaySpan,
     table_rows: TableRows,
     evidence: Evidence,
@@ -612,8 +640,9 @@ def test_stock_dividend_events_and_the_adjustment(
     """Whether `adjusted=true` applies a `stock_dividend` event of the splits dataset.
 
     Walks the most recent `stock_dividend` events of the year ending with the most recent whole
-    month, newest first, until one's ticker has a day bar in the week before its execution date
-    (many such tickers are thinly traded or delisted), at most `_DIVIDEND_TRIES` of them, and
+    month, newest first, until one's ticker has a day bar in the 30 days before its execution
+    date (many such tickers are thinly traded or delisted), at most 10 of them (3 with Stocks on
+    Basic, which allows 5 requests a minute), and
     records each event's adjustment factor and that ticker's day bars on both bases across the
     date. Skips as not exercised when none has such a bar; fails when the as-traded bars lack
     the earlier day the adjusted ones hold.
@@ -629,14 +658,14 @@ def test_stock_dividend_events_and_the_adjustment(
             sort="execution_date",
             order=dm.Order.DESC,
             filters={"adjustment_type": "stock_dividend"},
-            limit=_DIVIDEND_TRIES,
+            limit=_DIVIDEND_TRIES_BASIC if "stocks" in classes_on_basic else _DIVIDEND_TRIES,
         ).fetch()
     )
     listed = [(e["Symbol"], e["ExecutionDate"], e["HistoricalAdjustmentFactor"]) for e in events]
     evidence(f"stock_dividend events (symbol, execution date, adjustment factor): {listed}")
     for event in events:
         day = date.fromisoformat(str(event["ExecutionDate"]))
-        span = (day - timedelta(days=7), day + timedelta(days=3))
+        span = (day - _DIVIDEND_WINDOW, day + timedelta(days=3))
         symbol = str(event["Symbol"])
         adjusted = _days(live_session, symbol, span=span, adjusted=True, table_rows=table_rows)
         earlier = sorted(d for d in adjusted if d < day.isoformat())
@@ -677,16 +706,17 @@ def test_daily_indicator_stamps(
     `TimestampStart` and `Date`, or the `MassiveError` the read raised. The library expects a
     daily value where its class's range bars are stamped, 00:00 New York time for a stock and
     00:00 UTC for crypto. Reading it: raw stamps there mean the labels are right; stamps
-    elsewhere are still served, labelled by the day they fall on, with a WARNING in the log,
-    and say which day each value really belongs to.
+    elsewhere are still served at those stamps, with no `Date` and a WARNING in the log, and
+    say which day each value really belongs to.
     """
-    # The wire client encodes a date parameter from a `date`, never from text.
-    start, end = recent_week[0], recent_week[1] + timedelta(days=1)
+    # The wire client encodes a date parameter from a `date`, never from text. The raw request
+    # takes an exclusive bound, the day after the week; the library's `end` is inclusive.
+    start, end = recent_week[0], recent_week[1]
     found = 0
     paths = {"AAPL": ("stockTicker", "AAPL"), "X:BTCUSD": ("cryptoTicker", "X:BTCUSD")}
     for symbol, (name, ticker) in paths.items():
         query = {"timespan": "day", "window": 5, "limit": 50}
-        query |= {"timestamp.gte": start, "timestamp.lt": end}
+        query |= {"timestamp.gte": start, "timestamp.lt": end + timedelta(days=1)}
         raw = rest_rows(f"/v1/indicators/sma/{{{name}}}", {name: ticker}, query)
         found += len(raw)
         sent = [instant_text(r["timestamp"] * _MS) for r in raw]
@@ -703,7 +733,7 @@ def test_daily_indicator_stamps(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("62")
+@pytest.mark.verifies("62")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_unknown_ticker_statuses(
@@ -713,8 +743,9 @@ def test_unknown_ticker_statuses(
 
     Requests `ZZZZZQ` from `/prev`, the range (over the most recent week without a holiday),
     `/v3/trades`, and the ticker details, and records each answer's status and row count.
-    Reading it: an empty 200 or a 404 both return no rows in the library; a 404 is the only way
-    a symbol is dropped with a WARNING.
+    Passes when each answer is an empty 200 or a 404, both of which the library reads as no
+    rows; a 404 is the only way a symbol is dropped with a WARNING. Another status, or rows,
+    means the library would report an error, or data, for a ticker that does not exist.
     """
     ticker = "ZZZZZQ"
     requests = (
@@ -727,7 +758,7 @@ def test_unknown_ticker_statuses(
         ("/v3/trades/{stockTicker}", {"stockTicker": ticker}),
         ("/v3/reference/tickers/{ticker}", {"ticker": ticker}),
     )
-    answered = 0
+    unexpected = []
     for template, params in requests:
         # Ticker details are reference data of no subscription; the rest are stocks data.
         bucket = "other" if template.startswith("/v3/reference/") else "stocks"
@@ -735,10 +766,13 @@ def test_unknown_ticker_statuses(
             page = live_rest.get(source(Transport.REST, template), params, {}, bucket=bucket)
         except WireError as error:
             evidence(f"{template}: HTTP {error.status} {error.message[:120]}")
+            if error.status != 404:
+                unexpected.append(f"{template}: HTTP {error.status}")
         else:
             evidence(f"{template}: HTTP 200, status {page.status}, {len(page.rows)} rows")
-        answered += 1
-    assert answered == len(requests)
+            if page.rows:
+                unexpected.append(f"{template}: {len(page.rows)} rows")
+    assert not unexpected, f"answers other than an empty 200 or a 404: {unexpected}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -788,6 +822,21 @@ def _new_york_date(millis: int) -> date:
         The date the stamp falls on in New York time.
     """
     return datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK).date()
+
+
+def _day_stamp(millis: int, day: date) -> bool:
+    """Tell whether a 1-day bar's stamp is one the library expects for its day.
+
+    Args:
+        millis: The stamp, in epoch milliseconds.
+        day: The bar's trading day.
+
+    Returns:
+        True for 00:00, 13:00 (a half day's close), or 16:00 (the regular close) New York time
+        of `day`.
+    """
+    local = datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK)
+    return local.date() == day and (local.hour, local.minute, local.second) in _DAY_STAMPS
 
 
 def _year_before(month: DaySpan) -> DaySpan:

@@ -62,7 +62,6 @@ from deephaven_massive._errors import (
     library_bug,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
-from deephaven_massive._massive import Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -252,7 +251,7 @@ class _Symbol:
     kept: bool = False
     error: str | None = None
     cause: str | None = None
-    transport: Transport | str | None = None
+    transport: str | None = None
 
 
 @dataclass(slots=True)
@@ -281,7 +280,7 @@ class _Result:
     ended: bool = False
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
-    transports: set[Transport | str] = field(default_factory=set)
+    transports: set[str] = field(default_factory=set)
     skipped: str | None = None
     shown: object = None
 
@@ -304,7 +303,7 @@ def _cause(error: MassiveError) -> str:
     return name if error.status is None else f"{name} {error.status}"
 
 
-def _transport(read: FollowedRead, outcome: SymbolOutcome) -> Transport | str:
+def _transport(read: FollowedRead, outcome: SymbolOutcome) -> str:
     """Return the source a symbol's read used, as `m.symbol_reads()` shows it.
 
     Args:
@@ -312,27 +311,28 @@ def _transport(read: FollowedRead, outcome: SymbolOutcome) -> Transport | str:
         outcome: The symbol's outcome.
 
     Returns:
-        The plan's source, or `FLAT_FILES_AND_REST` for flat-file rows some of which REST read.
+        The source the rows name (`SymbolRows.source`), such as `"flat files and REST"`, or
+        else the plan's source, such as `"REST"`.
     """
-    if isinstance(outcome, SymbolRows) and outcome.with_rest_days:
-        return FLAT_FILES_AND_REST
-    return read.plan.transport
+    if isinstance(outcome, SymbolRows) and outcome.source:
+        return outcome.source
+    return TRANSPORT_LABELS[read.plan.transport]
 
 
-def _shown_transport(transports: Iterable[Transport | str]) -> Transport | str | None:
+def _shown_transport(transports: Iterable[str]) -> str | None:
     """Return the `Transport` of a followed read's `m.streams()` row: the sources used so far.
 
     Args:
-        transports: The sources its reads used.
+        transports: The sources its reads used, as `_transport` names them.
 
     Returns:
-        The one source, `FLAT_FILES_AND_REST` when REST filled some flat-file days, or None
-        before any read.
+        The one source, `FLAT_FILES_AND_REST` when both REST and flat files served rows, or
+        None before any read.
     """
     used = set(transports)
-    if FLAT_FILES_AND_REST in used:
+    if len(used) > 1:
         return FLAT_FILES_AND_REST
-    return used.pop() if len(used) == 1 else None
+    return used.pop() if used else None
 
 
 class FollowCoordinator:
@@ -721,7 +721,6 @@ class FollowCoordinator:
         symbol.transport = transport
         result.transports.add(transport)
         result.dirty.add(name)
-        label = TRANSPORT_LABELS[transport] if isinstance(transport, Transport) else transport
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
@@ -738,7 +737,7 @@ class FollowCoordinator:
                 name,
                 symbol.rows,
                 seconds,
-                label,
+                transport,
             )
             return
         self._failed(result, name, outcome)

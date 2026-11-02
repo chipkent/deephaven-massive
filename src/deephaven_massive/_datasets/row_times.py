@@ -53,8 +53,13 @@ become `Date`.
   1-session bar and null for a longer one. Since a session opens the evening before its date,
   consecutive bars overlap by about 22 hours.
 - **Daily open-close.** As a 1-day bar of its date. A crypto summary whose `isUTC` is false
-  is served too, with the UTC day's window; its day boundary differs from the other crypto
-  tables', so it logs one WARNING per dataset per session.
+  keeps Massive's `Date` and `IsUtc`, but its day is not the UTC day and the library cannot
+  tell which zone's day it is, so its window is the widest that date's day has in any time
+  zone: from 00:00 at UTC+14 to 24:00 at UTC-12. It logs one WARNING per dataset per session.
+- **A period stamped where Massive is not known to stamp one.** A bar or indicator value of a
+  day or longer whose stamp `StampRule` does not expect keeps that stamp as `TimestampStart`,
+  ends at the stamp plus its period (`_plus_period`), and has a null `Date` ("Bar stamps"
+  below).
 
 The indices' extra hour is conservative: an index day bar is stamped at midnight in Chicago,
 and whether it covers the New York or the Chicago day is not verified, so its end is the later
@@ -68,13 +73,16 @@ change keeps its true length.
 class day zone, whichever source serves them, before their time columns are filled. Massive
 stamps the same bar differently by source (the day's start on the aggregates range, the 16:00
 New York session close on the stock grouped daily and `/prev`, the day's last millisecond in
-the forex and crypto day files), so every stamp moves to 00:00 of the day it falls on
+the forex and crypto day files), so every known stamp moves to 00:00 of the day it falls on
 (`day_starts`), and every bar Massive returns is served. A stamp at a time or on a day Massive
-is not known to use for the class and timespan is served too, labelled by the day it falls on,
-the best rule available; but such a bar may cover other days than its label, so it logs one
-WARNING per dataset and timespan per session that names the stamp and asks for it to be
-reported. `stamp_rule` decides which stamps each class is known to use, and the transports
-apply it through `StampRule.stamp`.
+is not known to use for the class and timespan is served as Massive sent it: which day it
+covers would be a guess, and a wrong guess could end the window before the data closed, a
+look-ahead. So the row keeps the stamp as `TimestampStart`, has a null `Date`, and ends at the
+stamp plus its period, no earlier than the end of any period that starts on or before the stamp
+and contains it; it logs one WARNING per form of stamp per session that names the symbol and
+the stamp and asks for it to be reported. `stamp_rule` decides which stamps each class is
+known to use; the transports apply it through `StampRule.stamp`, and `TimeRule` asks it again
+(`StampRule.expects`) which stamps were kept as sent.
 
 **Zones.** Day boundaries are computed with `zoneinfo`, once per distinct UTC day of a batch
 (and once more on a day that changes its clock), and applied to the whole column with Arrow;
@@ -181,6 +189,10 @@ _NEVER: Final = 2**62
 _INSTANT: Final = pa.timestamp("ns", tz="UTC")
 _UTC_FLAG: Final = "IsUtc"
 """The column in which a daily summary (the crypto open-close) says its times are UTC."""
+_ANY_ZONE_DAY: Final = (14 * 3600 * _SECOND_NS, 12 * 3600 * _SECOND_NS)
+"""How much earlier than its UTC day, and how much later, a date's day can start and end in
+some time zone: clocks run from UTC-12 to UTC+14, so the day starts at most 14 hours before
+UTC midnight and ends at most 12 hours after the next."""
 
 _Rows = TypeVar("_Rows", pa.RecordBatch, pa.Table)
 
@@ -585,6 +597,10 @@ class TimeRule:
         warnings: The session's once-per-session warnings (`SessionCore.warnings`), which log
             the WARNING of a day summary whose `IsUtc` is false; required for a `DAY` rule and
             None, absent, for every other.
+        stamps: For bars and indicator values of a day or longer of a class with a day zone,
+            the stamps Massive is known to use (`stamp_rule`), which tell the rows the
+            transports kept as sent; None, absent, for every other rule, whose stamps are
+            all taken as known.
     """
 
     dataset: str
@@ -593,6 +609,7 @@ class TimeRule:
     timespan: Timespan | None = None
     multiplier: int = 1
     warnings: BoundedLog | None = None
+    stamps: StampRule | None = None
 
     def __post_init__(self) -> None:
         """Reject a bar rule without a timespan and a daily rule without its warnings.
@@ -622,11 +639,12 @@ class TimeRule:
         """Fill the time columns of one batch of rows, in place of what the batch carries.
 
         The batch is in the dataset's schema. Its `Timestamp` or `TimestampStart` is Massive's
-        (for bars of a day or longer, already moved to 00:00 of their day by `StampRule`),
-        its `Date` the futures session or open-close date where the source sends one (else
-        null), and its `TimestampEnd` Massive's WebSocket bar end where the source sends one
-        (else null). This computes the rest by the table of the module docstring and sets
-        every row's `TimestampInsert` to `received`.
+        (for bars of a day or longer, a known stamp already moved to 00:00 of its day by
+        `StampRule.stamp`, any other kept as sent), its `Date` the futures session or
+        open-close date where the source sends one (else null), and its `TimestampEnd`
+        Massive's WebSocket bar end where the source sends one (else null). This computes the
+        rest by the table of the module docstring and sets every row's `TimestampInsert` to
+        `received`.
 
         Args:
             rows: The batch, a `pyarrow.RecordBatch` or `pyarrow.Table` of the dataset's schema.
@@ -640,8 +658,8 @@ class TimeRule:
             The rows, of the same type and schema, with `Date`, `TimestampStart`,
             `TimestampEnd`, and `TimestampInsert` filled as the dataset has them.
 
-        A daily summary whose `IsUtc` is false (the crypto open-close) is filled like any other
-        and logs one WARNING per dataset per session (`_daily`).
+        A daily summary whose `IsUtc` is false (the crypto open-close) gets the widest window
+        its date has in any time zone and logs one WARNING per dataset per session (`_daily`).
         """
         arrived = (
             pa.repeat(pa.scalar(received, _INSTANT), rows.num_rows)
@@ -705,23 +723,12 @@ class TimeRule:
         Returns:
             The batch with `TimestampStart` and `TimestampEnd`.
 
-        A row whose `IsUtc` (the crypto open-close's) is false is served with the UTC day's
-        window like every other, though Massive cut its day elsewhere, so it logs one WARNING
-        per dataset per session through `warnings`: its open and close may not line up with
-        the dates of the other crypto tables, which are UTC days.
+        A row whose `IsUtc` (the crypto open-close's) is false keeps its `Date`, but Massive
+        cut its day elsewhere than at UTC midnight and does not say where, so its window is
+        the widest that date's day has in any time zone (`_ANY_ZONE_DAY`): a join on its
+        `TimestampEnd` never attaches it before its day ended, wherever that day was cut. It
+        logs one WARNING per dataset per session through `warnings`.
         """
-        if _UTC_FLAG in rows.schema.names and self.warnings is not None:
-            flags = _column(rows, _UTC_FLAG)
-            if pc.any(pc.invert(pc.fill_null(flags, fill_value=True))).as_py():
-                self.warnings.log(
-                    f"day summary not in UTC {self.dataset}",
-                    "%s: Massive sent a day summary with isUTC false, so its day boundary is "
-                    "not the UTC midnight the other crypto tables use, and its dates may not "
-                    "line up with theirs. The row is served, with the UTC day's window; please "
-                    "report it at %s (logged once per dataset per session)",
-                    self.dataset,
-                    ISSUES_URL,
-                )
         zone = self._zone()
         labels = _column(rows, DATE)
         distinct = pc.unique(labels)
@@ -736,8 +743,66 @@ class TimeRule:
             starts.append(epoch_ns(midnight(day, zone)))
             ends.append(epoch_ns(day_end(self.asset_class, day)))
         index = pc.index_in(labels, value_set=distinct)
-        rows = _set(rows, START, _instants(starts).take(index))
-        return _set(rows, END, _instants(ends).take(index))
+        start = _instants(starts).take(index)
+        end = _instants(ends).take(index)
+        if _UTC_FLAG in rows.schema.names:
+            start, end = self._any_zone_days(rows, labels=labels, start=start, end=end)
+        rows = _set(rows, START, start)
+        return _set(rows, END, end)
+
+    def _any_zone_days(
+        self, rows: _Rows, *, labels: pa.Array, start: pa.Array, end: pa.Array
+    ) -> tuple[pa.Array, pa.Array]:
+        """Widen the window of each day summary not in UTC to its date's day in any zone.
+
+        Args:
+            rows: The batch, which has `IsUtc`.
+            labels: The rows' `Date`, ISO text.
+            start: The rows' UTC-day starts, epoch nanoseconds as Instants.
+            end: The rows' UTC-day ends, likewise.
+
+        Returns:
+            The starts and ends, those of each row whose `IsUtc` is false moved 14 hours
+            earlier and 12 hours later; a null `IsUtc` is taken as UTC, Massive's documented
+            form.
+        """
+        flags = _column(rows, _UTC_FLAG)
+        other = pc.invert(pc.fill_null(flags, fill_value=True))
+        if not pc.any(other).as_py():
+            return start, end
+        first = pc.index(other, True).as_py()
+        earliest, latest = _ANY_ZONE_DAY
+        wide_start = pc.subtract(_to_int(start), earliest)
+        wide_end = pc.add(_to_int(end), latest)
+        logger.debug(
+            "%s: %d of %d day summaries with isUTC false get their date's widest window in any "
+            "time zone; the first, of %s for %s",
+            self.dataset,
+            pc.sum(other).as_py(),
+            len(other),
+            _column(rows, "Symbol")[first].as_py(),
+            labels[first].as_py(),
+        )
+        # A daily rule always has its warnings (`__post_init__`).
+        cast("BoundedLog", self.warnings).log(
+            f"day summary not in UTC {self.dataset}",
+            "%s: Massive sent the day summary of %s for %s with isUTC false, so its day is not "
+            "the UTC day the other crypto tables use, and Massive does not say which zone's day "
+            "it is. The row keeps Massive's Date and IsUtc, and gets the widest window that "
+            "date's day has in any time zone, TimestampStart %s to TimestampEnd %s (00:00 at "
+            "UTC+14 to 24:00 at UTC-12), so a join on TimestampEnd never attaches it before its "
+            "day ended; please report it at %s (logged once per dataset per session)",
+            self.dataset,
+            _column(rows, "Symbol")[first].as_py(),
+            labels[first].as_py(),
+            epoch_instant(wide_start[first].as_py()).isoformat(),
+            epoch_instant(wide_end[first].as_py()).isoformat(),
+            ISSUES_URL,
+        )
+        return (
+            pc.if_else(other, pc.cast(wide_start, _INSTANT), start),
+            pc.if_else(other, pc.cast(wide_end, _INSTANT), end),
+        )
 
     def _bar(self, rows: _Rows, session_dates: SessionDates | None) -> _Rows:
         """Fill a bar's window and `Date` by its timespan, multiplier, and class.
@@ -827,8 +892,13 @@ class TimeRule:
         window's last day (`bar_periods.bar_days`), plus an hour for indices; a 1-day bar's
         `Date` is its day, and every longer bar's is null.
 
+        A stamp Massive is not known to use (`StampRule.expects`), which `StampRule.stamp`
+        kept as sent, stays the bar's start; the bar ends at the stamp plus its period
+        (`_plus_period`), and its `Date` is null, since which day it covers is not known.
+
         Args:
-            rows: The batch, whose starts `StampRule` already moved to 00:00 of their day.
+            rows: The batch, whose known starts `StampRule.stamp` already moved to 00:00 of
+                their day.
             timespan: The bar unit, a day or longer.
 
         Returns:
@@ -845,6 +915,13 @@ class TimeRule:
             if value is None:
                 starts.append(None)
                 ends.append(None)
+                dates.append(None)
+                continue
+            if self.stamps is not None and not self.stamps.expects(value):
+                starts.append(value)
+                ends.append(
+                    _plus_period(value, zone, timespan=timespan, multiplier=self.multiplier)
+                )
                 dates.append(None)
                 continue
             day = epoch_instant(value).astimezone(zone).date()
@@ -920,15 +997,23 @@ def time_rule(
         asset_class: The class whose day rules the request follows (`dates.day_class`): the
             dataset's own, or for a dataset of every class (the indicators) its symbols'.
         warnings: The session's once-per-session warnings, which a daily summary's rule logs
-            to (`TimeRule._daily`).
+            to (`TimeRule._daily`), and which its bars' stamp rule holds.
 
     Returns:
-        The rule: of the request's timespan and multiplier for bars and indicators, of one day
-        for a daily summary, and of neither for every other dataset.
+        The rule: of the request's timespan and multiplier for bars and indicators, with
+        their stamp rule (`stamp_rule`, None where stamps are kept as sent), of one day for a
+        daily summary, and of neither for every other dataset.
     """
     times = spec.times
     if times is RowTimes.BAR:
-        return TimeRule(spec.name, times, asset_class, request.timespan, request.multiplier)
+        return TimeRule(
+            spec.name,
+            times,
+            asset_class,
+            request.timespan,
+            request.multiplier,
+            stamps=stamp_rule(spec, request, warnings=warnings, asset_class=asset_class),
+        )
     if times is RowTimes.DAY:
         return TimeRule(spec.name, times, asset_class, Timespan.DAY, warnings=warnings)
     return TimeRule(spec.name, times, asset_class)
@@ -946,8 +1031,8 @@ class StampRule:
         known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
             the class's bars of this length on some source.
         what: The kind of row, for the WARNING: `"1-day bar"`, `"bar"`, or `"indicator value"`.
-        timespan: The request's bar unit, a day or longer: the WARNING of an unexpected stamp
-            is logged once per dataset and timespan.
+        timespan: The request's bar unit, a day or longer, for the WARNING's period.
+        multiplier: How many units one bar spans, for the WARNING's period.
         warnings: The session's once-per-session warnings (`SessionCore.warnings`), which log
             the WARNING of an unexpected stamp.
         weekdays: For week bars, the weekdays (Monday is 0) Massive is known to stamp a bar on
@@ -960,54 +1045,124 @@ class StampRule:
     known: frozenset[time]
     what: str
     timespan: Timespan
+    multiplier: int
     warnings: BoundedLog
     weekdays: frozenset[int] = frozenset()
     months: frozenset[int] = frozenset()
 
-    def stamp(self, label: str, values: pa.Array, *, source: str) -> pa.Array:
-        """Stamp a column of bars at 00:00 of their days (`day_starts`), serving every bar.
+    def expects(self, stamp: int) -> bool:
+        """Tell whether Massive is known to stamp such a bar at an instant (`day_starts`).
+
+        A stamp `stamp` already moved to 00:00 of its day is still expected, since 00:00 is
+        always accepted and the move keeps the day, so `TimeRule` can ask again after the
+        transports stamped the rows.
+
+        Args:
+            stamp: The stamp, epoch nanoseconds.
+
+        Returns:
+            True for 00:00 or a time of `known` in `zone`, on a day `weekdays` and `months`
+            allow.
+        """
+        return _expected_stamp(
+            epoch_instant(stamp).astimezone(self.zone),
+            {0, *(_millisecond_of_day(moment) for moment in self.known)},
+            weekdays=self.weekdays,
+            months=self.months,
+        )
+
+    def stamp(self, label: str, rows: _Rows, *, source: str) -> _Rows:
+        """Stamp a batch of bars at 00:00 of their days (`day_starts`), serving every bar.
 
         A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
-        or `months` rules out, is moved the same way, to 00:00 of the day it falls on, and
-        logs one WARNING per dataset and timespan per session through `warnings`. The WARNING
-        names the dataset, the source, the first such stamp, and the stamps expected; says
-        that the bar's `Date`, `TimestampStart`, and `TimestampEnd` may cover other days than
-        the bar does; and asks for the stamp to be reported at `ISSUES_URL`.
+        or `months` rules out, is kept as Massive sent it (`TimeRule` then ends the bar at the
+        stamp plus its period and leaves its `Date` null), and logs one WARNING per form of
+        stamp per session through `warnings` (`_warn`). The WARNING names the dataset, the
+        source, the symbol and the stamp, and the stamps expected; says how the row is served
+        and that its `Date` is left empty; and asks for the stamp to be reported at
+        `ISSUES_URL`. Each batch with such a stamp logs one DEBUG line with how many rows it
+        kept so.
 
         Args:
             label: The dataset, for the WARNING, such as `"stocks.bars"`.
-            values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+            rows: The bars, a batch or table of the dataset's schema whose `TimestampStart`
+                holds Massive's stamps.
             source: Where the bars came from, for the WARNING: a REST path template or a
                 flat-file prefix.
 
         Returns:
-            The stamps at the start of their days, in the same type; nulls stay null.
+            The rows, their known stamps at the start of their days; nulls stay null.
         """
+        values = _column(rows, START)
         starts, odd = day_starts(
             values, zone=self.zone, known=self.known, weekdays=self.weekdays, months=self.months
         )
-        if odd is not None:
-            zone = self.zone
-            local = "" if zone is UTC else f" ({odd.astimezone(zone).isoformat()} in {zone})"
-            article = "an" if self.what[:1] in "aeiou" else "a"
-            self.warnings.log(
-                f"unexpected bar stamp {label} {self.timespan.value}",
-                "%s: %s %s from %s is stamped %s%s, which is not a stamp Massive is known to use "
-                "for such a bar (%s). The bar is served, labelled by the day its stamp falls on "
-                "in %s, so its Date, TimestampStart, and TimestampEnd may cover other days than "
-                "the bar does; please report the stamp at %s so the day cut can be settled "
-                "(logged once per dataset and timespan per session)",
+        if pc.any(odd).as_py():
+            ns = _to_int(values)
+            symbols = _column(rows, "Symbol")
+            first = pc.index(odd, True).as_py()
+            logger.debug(
+                "%s: %d of %d rows from %s kept at Massive's stamp, which it is not known to use "
+                "for a %d-%s bar; the first, of %s, at %s",
                 label,
-                article,
-                self.what,
+                pc.sum(odd).as_py(),
+                len(odd),
                 source,
-                odd.isoformat(),
-                local,
-                _expected(zone, self.known, weekdays=self.weekdays, months=self.months),
-                zone,
-                ISSUES_URL,
+                self.multiplier,
+                self.timespan.value,
+                symbols[first].as_py(),
+                epoch_instant(ns[first].as_py()).isoformat(),
             )
-        return starts
+            for value in pc.unique(pc.filter(ns, odd)).to_pylist():
+                row = pc.index(ns, value).as_py()
+                self._warn(label, epoch_instant(value), symbols[row].as_py(), source=source)
+        return _set(rows, START, starts)
+
+    def _warn(self, label: str, stamp: datetime, symbol: str | None, *, source: str) -> None:
+        """Log the WARNING of one stamp kept as sent, once per form of stamp per session.
+
+        A form is the dataset, the zone, the bar length, and the stamp's wall-clock time of day
+        in `zone`, with its weekday for week bars and its day of the month for month, quarter,
+        and year bars: each distinct odd stamp warns once, and a form Massive repeats every day
+        does not warn again.
+
+        Args:
+            label: The dataset, such as `"stocks.bars"`.
+            stamp: The stamp, an aware UTC `datetime`.
+            symbol: The symbol of the first row with that stamp, or None when it is unreadable.
+            source: Where the bars came from: a REST path template or a flat-file prefix.
+        """
+        zone = self.zone
+        local_stamp = stamp.astimezone(zone)
+        form = local_stamp.time().isoformat("milliseconds")
+        if self.weekdays:
+            form += f" {_WEEKDAY_NAMES[local_stamp.weekday()]}"
+        if self.months:
+            form += f" day {local_stamp.day}"
+        local = "" if zone is UTC else f" ({local_stamp.isoformat()} in {zone})"
+        article = "an" if self.what[:1] in "aeiou" else "a"
+        unit = self.timespan.value if self.multiplier == 1 else f"{self.timespan.value}s"
+        self.warnings.log(
+            f"unexpected bar stamp {label} {zone} {self.multiplier} {self.timespan.value} {form}",
+            "%s: %s %s of %s from %s is stamped %s%s, which is not a stamp Massive is known to "
+            "use for such a bar (%s). The library cannot tell which day it covers, so the row is "
+            "served as sent: TimestampStart is Massive's stamp, TimestampEnd that stamp plus %d "
+            "%s (no earlier than the end of any such period that holds the stamp), and Date is "
+            "left empty; history() returns such a row only when its range holds that whole "
+            "window. Please report the stamp at %s so the day cut can be settled (logged once "
+            "per dataset, bar length, and time of day of the stamp per session)",
+            label,
+            article,
+            self.what,
+            symbol,
+            source,
+            stamp.isoformat(),
+            local,
+            _expected(zone, self.known, weekdays=self.weekdays, months=self.months),
+            self.multiplier,
+            unit,
+            ISSUES_URL,
+        )
 
 
 _SESSION_CLOSE: Final = time(16)
@@ -1089,10 +1244,11 @@ def stamp_rule(
     millisecond (forex, crypto) on other sources, and the indices range and day files at
     midnight in Chicago; those stamps move to the day's start. Massive is known to stamp a
     week, month, quarter, or year bar on the day its period starts (a week's Sunday, a longer
-    period's 1st). Every other stamp is served too, moved to the start of the day it falls on,
-    and logs one WARNING per dataset and timespan per session (`StampRule.stamp`), since such
-    a bar may cover other days than its label (the documented crypto REST samples sit at
-    midnight New York time, another day cut).
+    period's 1st). Every other stamp is served too, kept as Massive sent it, and logs one
+    WARNING per form of stamp per session (`StampRule.stamp`): such a bar may cover other days than
+    the one its stamp falls on (the documented crypto REST samples sit at midnight New York
+    time, another day cut), so its row ends at the stamp plus its period and has no `Date`
+    (`TimeRule`).
 
     The indicators' values are computed over the aggregates range's bars and carry those
     bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
@@ -1128,13 +1284,15 @@ def stamp_rule(
     timespan = request.timespan
     single = timespan is Timespan.DAY and request.multiplier == 1
     if single and not indicator:
-        return StampRule(zone, _ONE_DAY_STAMPS[cls], "1-day bar", timespan, warnings)
+        return StampRule(zone, _ONE_DAY_STAMPS[cls], "1-day bar", timespan, 1, warnings)
     known = _LONGER_STAMPS[cls]
     what = "indicator value" if indicator else "bar"
     if timespan is Timespan.WEEK:
-        return StampRule(zone, known, what, timespan, warnings, weekdays=_SUNDAY)
+        return StampRule(
+            zone, known, what, timespan, request.multiplier, warnings, weekdays=_SUNDAY
+        )
     months = _PERIOD_MONTHS.get(timespan, frozenset())
-    return StampRule(zone, known, what, timespan, warnings, months=months)
+    return StampRule(zone, known, what, timespan, request.multiplier, warnings, months=months)
 
 
 ISSUES_URL: Final = "https://github.com/chipkent/deephaven-massive/issues"
@@ -1173,17 +1331,17 @@ def day_starts(
     known: Collection[time],
     weekdays: Collection[int] = (),
     months: Collection[int] = (),
-) -> tuple[pa.Array, datetime | None]:
-    """Stamp each bar at 00:00 of the day it falls on, and find a stamp of an unexpected form.
+) -> tuple[pa.Array, pa.Array]:
+    """Stamp each bar at 00:00 of the day it falls on, and find the stamps of unexpected form.
 
     Massive stamps the same bar of a day or longer differently by source: at the start of the
     day on the aggregates range, at the session close (16:00 New York time) on the stock
     grouped daily and `/prev`, at the day's last millisecond in the forex day files. Every
-    stamp moves to 00:00 of its date in `zone`, so every source labels a bar alike. A stamp is
-    expected when its wall-clock time of day in `zone`, to the millisecond, is 00:00 or one of
-    `known`, on a day `weekdays` and `months` allow; any other is moved the same way, and the
-    first one is returned so that the caller can warn that its bar may cover other days than
-    the one it is labelled with.
+    expected stamp moves to 00:00 of its date in `zone`, so every source labels a bar alike. A
+    stamp is expected when its wall-clock time of day in `zone`, to the millisecond, is 00:00
+    or one of `known`, on a day `weekdays` and `months` allow (`_expected_stamp`); any other
+    is kept as sent, since which day it covers is not known, and marked so that the caller
+    can warn.
 
     The zone's offsets come from `zoneinfo`, one conversion per distinct stamp (a batch of
     daily bars holds about one per day), applied to the column with Arrow's `take`; Arrow's
@@ -1200,9 +1358,9 @@ def day_starts(
         months: The months whose 1st an expected stamp's date in `zone` is; empty for any day.
 
     Returns:
-        The stamps at 00:00 of their day in `zone`, in the type of `values`, nulls staying
-        null; and the first unexpected stamp in column order, an aware UTC `datetime`, or None
-        when every stamp is expected.
+        The stamps, in the type of `values`: each expected one at 00:00 of its day in `zone`,
+        each other as sent, nulls staying null; and one boolean per stamp, True where it is
+        unexpected (False for a null).
     """
     ns = values.cast(pa.int64())
     distinct = pc.unique(ns)
@@ -1215,16 +1373,81 @@ def day_starts(
             unexpected.append(False)
             continue
         local = epoch_instant(value).astimezone(zone)
-        day = local.date()
-        on_day = (not weekdays or day.weekday() in weekdays) and (
-            not months or (day.day == 1 and day.month in months)
-        )
-        unexpected.append(not on_day or _millisecond_of_day(local.time()) not in accepted)
-        starts.append(epoch_ns(midnight(day, zone)))
+        expected = _expected_stamp(local, accepted, weekdays=weekdays, months=months)
+        unexpected.append(not expected)
+        starts.append(epoch_ns(midnight(local.date(), zone)) if expected else value)
     index = pc.index_in(ns, value_set=distinct)
     odd = pa.array(unexpected, pa.bool_()).take(index)
-    first = epoch_instant(pc.filter(ns, odd)[0].as_py()) if pc.any(odd).as_py() else None
-    return pa.array(starts, pa.int64()).take(index).cast(values.type), first
+    return pa.array(starts, pa.int64()).take(index).cast(values.type), odd
+
+
+def _expected_stamp(
+    local: datetime,
+    accepted: Collection[int],
+    *,
+    weekdays: Collection[int],
+    months: Collection[int],
+) -> bool:
+    """Tell whether a stamp has a form Massive is known to use for a bar.
+
+    Args:
+        local: The stamp, as wall-clock time in the class day zone.
+        accepted: The expected times of day, in milliseconds since midnight
+            (`_millisecond_of_day`).
+        weekdays: The weekdays (Monday is 0) an expected stamp falls on; empty for any day.
+        months: The months whose 1st an expected stamp falls on; empty for any day.
+
+    Returns:
+        True when the stamp's time of day is accepted and its day allowed.
+    """
+    day = local.date()
+    on_day = (not weekdays or day.weekday() in weekdays) and (
+        not months or (day.day == 1 and day.month in months)
+    )
+    return on_day and _millisecond_of_day(local.time()) in accepted
+
+
+_PERIOD_MONTHS_PER_UNIT: Final[Mapping[Timespan, int]] = {
+    Timespan.MONTH: 1,
+    Timespan.QUARTER: 3,
+    Timespan.YEAR: 12,
+}
+"""How many calendar months one month, quarter, or year bar spans."""
+
+
+def _plus_period(stamp: int, zone: tzinfo, *, timespan: Timespan, multiplier: int) -> int:
+    """Return the instant one bar's period after a stamp, on the zone's wall clock.
+
+    The end of a bar kept at a stamp Massive is not known to use: no earlier than the end of
+    any period of that length that starts at or before the stamp and holds it, so a join on it
+    never attaches the bar before its data closed. Days and weeks add calendar days, so a day
+    across a daylight-saving change keeps its wall-clock time; months, quarters, and years add
+    calendar months, and a day the target month lacks (the 31st) moves to the 1st of the month
+    after, which is later. A wall-clock time a clock change skips or repeats takes the later of
+    its two readings.
+
+    Args:
+        stamp: The stamp, epoch nanoseconds.
+        zone: The class day zone.
+        timespan: The bar unit, `DAY`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans, at least 1.
+
+    Returns:
+        The end, epoch nanoseconds.
+    """
+    local = epoch_instant(stamp).astimezone(zone).replace(tzinfo=None)
+    if timespan in (Timespan.DAY, Timespan.WEEK):
+        days = multiplier * (7 if timespan is Timespan.WEEK else 1)
+        after = local + timedelta(days=days)
+    else:
+        months = local.month - 1 + multiplier * _PERIOD_MONTHS_PER_UNIT[timespan]
+        year, month = local.year + months // 12, months % 12 + 1
+        if local.day > calendar.monthrange(year, month)[1]:
+            year, month = year + month // 12, month % 12 + 1
+            after = local.replace(year=year, month=month, day=1)
+        else:
+            after = local.replace(year=year, month=month)
+    return max(epoch_ns(after.replace(tzinfo=zone, fold=fold)) for fold in (0, 1))
 
 
 def _millisecond_of_day(moment: time) -> int:

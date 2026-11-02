@@ -59,7 +59,7 @@ def _repeated(keys: Iterable[tuple[object, ...]]) -> list[tuple[tuple[object, ..
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("24")
+@pytest.mark.verifies("24")
 @pytest.mark.requests(2)
 def test_key_of_the_ticker_event_type(
     live_session: dm.MassiveSession,
@@ -71,9 +71,9 @@ def test_key_of_the_ticker_event_type(
     """Which key the ticker events carry their event type in: `type` or `event_type`.
 
     The schema requires `event_type` while every sample uses `type`; the library reads `type`
-    into `Type`. Records the raw keys of `META`'s events and the library's `Type`. Reading it:
-    `type` with `Type` filled confirms the library; `event_type` means `Type` is null and the
-    library must read that key.
+    into `Type`. Records the raw keys of `META`'s events and the library's `Type`. Passes when
+    every raw event carries `type` and the library fills `Type` on every row; `event_type`
+    would leave `Type` null, and the library would have to read that key.
     """
     rows = live_rest.get(source(Transport.REST, _EVENTS), {"id": _RENAMED}, {}, bucket="other").rows
     for row in rows:
@@ -81,10 +81,13 @@ def test_key_of_the_ticker_event_type(
     library = table_rows(live_session.reference.ticker_events(_RENAMED).fetch())
     evidence(f"library ticker_events({_RENAMED}): Type {[r['Type'] for r in library]}")
     assert rows
+    assert all("type" in row for row in rows), f"events without `type`: {rows}"
+    assert library, f"the library read no event of {_RENAMED}"
+    assert all(r["Type"] is not None for r in library), f"a null Type: {library}"
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("30")
+@pytest.mark.verifies("30")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(110)
 def test_inactive_tickers_on_several_rows(
@@ -98,8 +101,8 @@ def test_inactive_tickers_on_several_rows(
 
     `reference.tickers` polls keyed by `Symbol`. Records inactive tickers from `A` to `AC`
     (up to 10,000 rows, or 5,000 with Stocks on Basic, five requests) that occur on more than
-    one row. Reading it: none confirms the key; any means a polled table keeps one of them,
-    and the key needs an owner decision.
+    one row. Passes when no ticker is on several rows, so the key holds; a repeated ticker
+    means a polled table keeps one of its rows, and the key needs another column.
     """
     limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
     rows = table_rows(
@@ -115,23 +118,25 @@ def test_inactive_tickers_on_several_rows(
     for key, count in repeated[:20]:
         evidence(f"    {key[0]} on {count} rows")
     assert rows
+    assert not repeated, f"inactive tickers on several rows: {repeated[:20]}"
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("31")
+@pytest.mark.verifies("31")
 @pytest.mark.requests(1)
 def test_exchanges_are_keyed_by_asset_class_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
     """Whether `(AssetClass, Id)` identifies one exchange, the key `reference.exchanges` polls by.
 
-    Records every repeated key. Reading it: none confirms the key; any means it needs another
-    column.
+    Records every repeated key. Passes when no key repeats; a repeated one means the key
+    needs another column.
     """
     rows = table_rows(live_session.reference.exchanges().fetch())
     repeated = _repeated((row["AssetClass"], row["Id"]) for row in rows)
     evidence(f"exchanges: {len(rows)} rows; repeated (AssetClass, Id): {repeated}")
     assert rows
+    assert not repeated, f"exchanges sharing (AssetClass, Id): {repeated}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -188,7 +193,7 @@ def _hashable(value: object) -> object:
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("43")
+@pytest.mark.verifies("43")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(110)
 def test_stock_ticker_spellings_the_library_cannot_read(
@@ -199,12 +204,15 @@ def test_stock_ticker_spellings_the_library_cannot_read(
     Reads one page of stock tickers of each type `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and
     one page of three partner datasets, and records every ticker `dm.canonical_symbol_stock`
     refuses: a row with such a ticker gets a null `Symbol` and keeps the text in `RawSymbol`.
-    Reading it: none confirms the symbol grammar; each other spelling must join the grammar or
-    be left to the handling of unknown symbols. A refused
-    partner page (no entitlement) is recorded and skipped. With Stocks on Basic, which allows
-    5 requests a minute, the partner pages are left out, so the test sends 4 requests.
+    Passes when the grammar reads every ticker of the four types; another spelling must join
+    the grammar or be left to the handling of unknown symbols. The partner pages are evidence
+    only, since they also hold tickers of other markets (ETF Global's currency instruments,
+    TMX's Canadian listings). A refused partner page (no entitlement) is recorded and skipped.
+    With Stocks on Basic, which allows 5 requests a minute, the partner pages are left out, so
+    the test sends 4 requests.
     """
     seen = 0
+    unread: dict[str, list[str]] = {}
     for ticker_type in _TYPES:
         rows = live_rest.get(
             source(Transport.REST, _TICKERS),
@@ -217,6 +225,8 @@ def test_stock_ticker_spellings_the_library_cannot_read(
         odd = [ticker for ticker in tickers if _unreadable(ticker)]
         evidence(f"{ticker_type}: {len(tickers)} tickers, e.g. {tickers[:10]}")
         evidence(f"    outside the stock grammar: {odd}")
+        if odd:
+            unread[ticker_type] = odd
     if "stocks" in classes_on_basic:
         evidence("Stocks on Basic: the partner pages are not read")
     for path in () if "stocks" in classes_on_basic else _PARTNER_PAGES:
@@ -236,6 +246,7 @@ def test_stock_ticker_spellings_the_library_cannot_read(
         odd = [value for value in values if _unreadable(value)]
         evidence(f"{path}: {len(values)} ticker values; outside the stock grammar: {odd}")
     assert seen
+    assert not unread, f"stock tickers outside the grammar: {unread}"
 
 
 def _unreadable(ticker: str) -> bool:

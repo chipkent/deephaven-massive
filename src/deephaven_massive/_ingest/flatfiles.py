@@ -19,8 +19,8 @@ to keep.
   converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
   start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
   23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
-  (`row_times.stamp_rule`); a stamp of another form is moved the same way and logs one
-  WARNING per dataset and timespan per session, so every bar of a file is served. Every
+  (`row_times.stamp_rule`); a stamp of another form is kept as sent and logs one WARNING per
+  form of stamp per session, so every bar of a file is served. Every
   block's rows then get the library's time columns (`row_times.TimeRule`), with
   `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
@@ -120,7 +120,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
@@ -137,9 +137,7 @@ from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
     BarBounds,
-    StampRule,
     TimeRule,
-    stamp_rule,
     time_column,
     time_rule,
     within,
@@ -164,8 +162,7 @@ from deephaven_massive._errors import (
     MassiveError,
     from_wire,
 )
-from deephaven_massive._ingest.history_reads import read_history
-from deephaven_massive._ingest.symbol_reads import read_flat_files_by_symbol
+from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -462,8 +459,6 @@ class _Transform:
             the library cannot read does.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
-        stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
-            zone (`row_times.stamp_rule`); None otherwise.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
             None for ticks.
         seen: What the read's futures files showed of other sessions' rows, for the
@@ -483,7 +478,6 @@ class _Transform:
     times: TimeRule
     time_name: str
     symbols: WireSymbols
-    stamps: StampRule | None = None
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
 
@@ -498,7 +492,6 @@ class _Transform:
         window: HistoryWindow,
         unreadable_symbols: OnError,
         warnings: BoundedLog,
-        stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -521,10 +514,8 @@ class _Transform:
                 `HistoryWindow.sessions`, by each row's own session.
             unreadable_symbols: The session's setting for a ticker spelling the library cannot
                 read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
-            warnings: The session's once-per-session warnings, which the time rule of a daily
-                summary logs to (`row_times.time_rule`).
-            stamps: How the bars' stamps are treated (`row_times.stamp_rule`), or None
-                to keep them; the files hold only 1-day bars of the classes that have one.
+            warnings: The session's once-per-session warnings, which the time rule logs to
+                (`row_times.time_rule`): that of a daily summary, and its bars' stamp rule.
 
         Returns:
             The transform.
@@ -588,7 +579,6 @@ class _Transform:
             symbols=WireSymbols(
                 spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
             ),
-            stamps=stamps,
             bars=window.bars,
         )
 
@@ -622,8 +612,8 @@ class _Transform:
             routine cannot place (null), and those of the integer columns whose widening to a
             `double` rounded a value (`RoundedFields`), each with its first such value.
 
-        A 1-day bar stamped at a time of day Massive is not known to use is served and logs
-        the WARNING of `row_times.StampRule.stamp`.
+        A 1-day bar stamped at a time of day Massive is not known to use is served as sent and
+        logs the WARNING of `row_times.StampRule.stamp`.
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
@@ -656,6 +646,9 @@ class _Transform:
             # A field's column is widened already (`_column`); this casts the others.
             arrays[name] = rounded.widen(values, column_type.arrow_type, wire_key=None)
         rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+        stamps = self.times.stamps
+        if stamps is not None:
+            rows = stamps.stamp(self.dataset, rows, source=f"the flat files {self.prefix}")
         filled = self.times.fill(rows, received=received)
         kept = filled if self.bars is None else within(filled, self.bars)
         drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
@@ -734,14 +727,7 @@ class _Transform:
             first = first_failure(sent, failed)
             if first is not None:
                 odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
-        values = rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
-        if name == self.time_name and self.stamps is not None:
-            values = self.stamps.stamp(
-                self.dataset,
-                values,
-                source=f"the flat files {self.prefix}",
-            )
-        return values
+        return rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
 
 
 def _time_nanos(label: str, unit: TimeUnit, values: pa.Array) -> tuple[pa.Array, str]:
@@ -859,7 +845,6 @@ class FlatFileHistory:
             window=window,
             unreadable_symbols=self._core.config.unreadable_symbols,
             warnings=self._core.warnings,
-            stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
         tiled = not infer_holidays and _tiles(spec, request, window)
         keys = _keys(prefix, request.venues, dates)
@@ -934,12 +919,11 @@ class FlatFileHistory:
         forced: bool,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
-        """Read `read_history` for the symbols in one scan, and split its rows by symbol.
+        """Read `history()` from the flat files for each symbol, each with its own outcome.
 
-        See `FlatFileTransport.history_by_symbol`: the symbols are read together, as one
-        `history()` call of them reads them (`read_history`, with the REST reads it adds under
-        `AUTO`), and the rows are split by their `Symbol`
-        (`symbol_reads.read_flat_files_by_symbol`). An empty window reads nothing.
+        See `FlatFileTransport.history_by_symbol` and `history_reads.read_history_by_symbol`:
+        the files are scanned once for every symbol and split by `Symbol`, and the days they
+        lack under `AUTO` are read from REST symbol by symbol.
 
         Args:
             spec: The dataset, with a flat-file prefix for the request.
@@ -952,21 +936,21 @@ class FlatFileHistory:
             stop: A read's stop token; None for a read only the session's close stops.
 
         Returns:
-            Each symbol, in the order given, with its outcome; a failed scan is every symbol's
-            failure.
+            Each symbol, in the order given, with its outcome.
 
-        Errors are those of `symbol_reads.read_flat_files_by_symbol`.
+        Errors are those of `history_reads.read_history_by_symbol`.
         """
-        asked = replace(request, symbols=tuple(sorted(dict.fromkeys(symbols))))
-        return read_flat_files_by_symbol(
-            self._core,
+        return read_history_by_symbol(
             spec,
-            symbols,
-            window=window,
+            request,
+            window,
+            core=self._core,
+            files=self,
+            symbols=symbols,
+            dates=dates,
             call=call,
-            read=lambda: self.read_history(
-                spec, asked, window, dates=dates, call=call, forced=forced, stop=stop
-            )[0],
+            stop=stop,
+            forced=forced,
         )
 
     def _read(
