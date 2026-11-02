@@ -3219,6 +3219,17 @@ def recent_monday() -> date:
 
 
 @pytest.fixture(scope="session")
+def index_check_days() -> tuple[date, ...]:
+    """Return the trading days the many-index check reads.
+
+    Returns:
+        The three trading days before the run's, the most recent published Monday, and the
+        day after the most recent holiday, oldest first (see `calendar.index_check_days`).
+    """
+    return calendar.index_check_days(calendar.today())
+
+
+@pytest.fixture(scope="session")
 def recent_week() -> tuple[date, date]:
     """Return the most recent ended calendar week without an exchange holiday.
 
@@ -3265,7 +3276,8 @@ def front_contract() -> Callable[[str, date], str]:
     """Return a function that names a futures product's front contract on a day.
 
     Returns:
-        A function `(product, day)`, the product `"ES"` or `"ZC"` (see `contracts.front_contract`).
+        A function `(product, day)`, the product `"ES"`, `"ZC"`, or `"LE"` (see
+        `contracts.front_contract`).
     """
     return contracts.front_contract
 
