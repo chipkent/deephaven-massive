@@ -50,7 +50,6 @@ PRICES = {"Symbol": dtypes.string, "Price": dtypes.int32}
 STAMPED = {**PRICES, "TimestampInsert": dtypes.Instant}
 EXCHANGED = {**STAMPED, "Exchange": dtypes.int32}
 _JPY = cast("Any", importlib.import_module("jpy"))
-_JAVA_CLASS = _JPY.get_type("java.lang.Class")
 _JAVA_BOOLEAN = _JPY.get_type("java.lang.Boolean")
 
 
@@ -639,7 +638,8 @@ def parallel_updates() -> Iterator[None]:
     # Make every `select` and `update` run on Deephaven's parallel threads, then restore the
     # setting: a formula that read the cycle number without an execution context there would
     # see a clock frozen at its first step.
-    query_table = _JAVA_CLASS.forName("io.deephaven.engine.table.impl.QueryTable")
+    # The class jpy already loaded: `Class.forName` from a test thread may use another loader.
+    query_table = _JPY.get_type("io.deephaven.engine.table.impl.QueryTable").jclass
     field = query_table.getDeclaredField("FORCE_PARALLEL_SELECT_AND_UPDATE")
     field.setAccessible(True)
     before = field.getBoolean(None)
