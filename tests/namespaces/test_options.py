@@ -532,8 +532,8 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     assert request_of(contracts()) == {"symbols": None, "params": {}, "filters": {}}
     # False, the default, is Massive's own, so it is not sent, also beside named contracts.
     assert request_of(contracts(expired=False)) == request_of(contracts())
-    # The contracts list finds no contract for `I:SPX`: an index is sent bare.
-    assert request_of(contracts(underlying="I:SPX"))["params"] == {"underlying_ticker": "SPX"}
+    # The request keeps the canonical index; only the wire gets the bare one.
+    assert request_of(contracts(underlying="I:SPX"))["params"] == {"underlying_ticker": "I:SPX"}
     assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
@@ -1037,11 +1037,77 @@ def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
         ("O:SPX261120C00600000", "I:SPX", "SPX"),
     ]
     messages = [r.getMessage() for r in caplog.records]
-    assert "options.contracts sends underlying='I:SPX' as underlying_ticker='SPX'" in messages
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert (
         "options.contracts: 2 of 2 Underlying values from /v3/reference/options/contracts are "
         "indices by their CFI code and get the I: prefix, the first 'SPX'"
     ) in messages
+
+
+def contract_row(ticker: str, underlying: str, cfi: str | None) -> dict[str, object]:
+    row: dict[str, object] = {"ticker": ticker, "underlying_ticker": underlying}
+    return row if cfi is None else row | {"cfi": cfi}
+
+
+def warnings_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_rows_of_another_instrument_keep_their_underlying_and_warn_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # `I:DJT` is sent as `DJT`, which is a stock: its options are no index's, so they keep the
+    # underlying Massive wrote rather than read as the index's.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    stock = contract_row("O:DJT261120C00020000", "DJT", "OCASPS")
+    reply = Reply(body={"status": "OK", "request_id": "r", "results": [stock]})
+    fake_rest.reply("/v3/reference/options/contracts", reply)
+    for _ in range(2):
+        listed = rows(rest_session.options.contracts(underlying="I:DJT").fetch())
+        assert [(r["Symbol"], r["Underlying"]) for r in listed] == [("O:DJT261120C00020000", "DJT")]
+    assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
+    assert warnings_of(caplog) == [
+        (
+            "options.contracts: asked /v3/reference/options/contracts for the contracts of I:DJT "
+            "by its bare ticker, underlying_ticker=DJT, and 1 rows are not options on an index by "
+            "their CFI code, so Massive answered about another instrument; they keep the "
+            "underlying Massive wrote. The first (Symbol, Underlying, Cfi): "
+            "[('O:DJT261120C00020000', 'DJT', 'OCASPS')]"
+        )
+    ]
+
+
+def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    path = "/v3/reference/options/contracts"
+    # An empty answer first, then one coded row and one without a code, repeated.
+    coded = contract_row("O:SPX261120C00400000", "SPX", "OCEICS")
+    bare = contract_row("O:SPX261120C00600000", "SPX", None)
+    empty = Reply(body={"status": "OK", "request_id": "r", "results": []})
+    both = Reply(body={"status": "OK", "request_id": "r", "results": [coded, bare]})
+    fake_rest.reply(path, empty, both)
+    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch()) == []
+    for _ in range(2):
+        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+        assert [(r["Symbol"], r["Underlying"]) for r in listed] == [
+            ("O:SPX261120C00400000", "I:SPX"),
+            ("O:SPX261120C00600000", "SPX"),
+        ]
+    assert warnings_of(caplog) == [
+        (
+            "options.contracts: 1 rows of the contracts of I:SPX from "
+            "/v3/reference/options/contracts have no CFI code, so nothing says their underlying is "
+            "an index and they keep Massive's bare 'SPX'; the first: O:SPX261120C00600000"
+        )
+    ]
 
 
 def test_a_list_argument_with_named_contracts_fails_before_any_request(

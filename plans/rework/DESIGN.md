@@ -1975,7 +1975,12 @@ sends an index bare (`SPX`), since Massive's `underlying_ticker` finds no contra
 and every contract of `SPX`. `Underlying` is Massive's field in the canonical form: the chain
 and the snapshots write an index as `I:SPX`, and the contracts list writes it bare, so a
 contracts row whose CFI code marks an option on an index (an `O`, then its fourth letter `I`,
-as in `OCEICS`) gets the `I:` prefix, and the two tables join on `Underlying`. It names the
+as in `OCEICS`) gets the `I:` prefix, and the two tables join on `Underlying`. The request
+keeps the canonical `I:SPX`; only the wire gets `SPX`. A bare ticker can name another
+instrument (`DJT` is a stock), so a row of an index's request whose code marks another kind of
+option keeps the underlying Massive wrote, and one WARNING per dataset and index per session
+names the request and the rows; a row without a code keeps the bare ticker, with one WARNING
+per dataset per session. No row is dropped. It names the
 instrument Massive links the contract to, not the deliverable, and is never derived from or
 mapped to the root (`AAPL1` is never `AAPL`). The
 contracts dataset exposes the raw deliverable fields with their vendor descriptions:

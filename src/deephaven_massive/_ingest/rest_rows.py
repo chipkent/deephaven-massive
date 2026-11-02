@@ -58,6 +58,8 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath
 
 __all__ = [
+    "CFI",
+    "UNDERLYING",
     "RowConverter",
     "is_error_row",
     "keep_window",
@@ -67,10 +69,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_UNDERLYING: Final = KEY_COLUMNS["fanout"]
+UNDERLYING: Final = KEY_COLUMNS["fanout"]
 """The column naming the instrument a row is linked to, such as an option's underlying."""
 
-_CFI: Final = "Cfi"
+CFI: Final = "Cfi"
 """The column of a row's CFI code (ISO 10962), which the options contracts list carries."""
 
 
@@ -275,10 +277,10 @@ class RowConverter:
         Args:
             arrays: The page's columns by name; its `Underlying` is replaced in place.
         """
-        if _UNDERLYING not in arrays or _CFI not in arrays:
+        if UNDERLYING not in arrays or CFI not in arrays:
             return
-        underlyings = arrays[_UNDERLYING]
-        canonical = index_underlyings(underlyings, arrays[_CFI])
+        underlyings = arrays[UNDERLYING]
+        canonical = index_underlyings(underlyings, arrays[CFI])
         changed = pc.fill_null(pc.not_equal(underlyings, canonical), fill_value=False)
         count = pc.sum(changed).as_py() or 0
         if count:
@@ -288,11 +290,11 @@ class RowConverter:
                 self.dataset,
                 count,
                 len(underlyings),
-                _UNDERLYING,
+                UNDERLYING,
                 self.rest_path.template,
                 pc.filter(underlyings, changed)[0].as_py(),
             )
-        arrays[_UNDERLYING] = canonical
+        arrays[UNDERLYING] = canonical
 
 
 def whole_bars(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:

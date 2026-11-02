@@ -21,8 +21,8 @@ contract to as `Underlying`, a canonical ticker: it names the linked instrument,
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
 of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
 too. The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes
-it bare (`SPX`, and no contract for `I:SPX`), so `contracts` sends it bare
-(`wire_symbols.contracts_underlying`) and its rows' index underlyings get their `I:` back by
+it bare (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
+(`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
 their CFI code (`wire_symbols.index_underlyings`).
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import check_symbol, is_canonical, symbol_class
-from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -315,8 +314,8 @@ def _underlying(value: object) -> str:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
 
     Returns:
-        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted. The contracts
-        list takes an index bare, which `contracts` writes (`contracts_underlying`).
+        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted. The REST
+        transport sends an index bare to the contracts list (`contracts_underlying`).
 
     Raises:
         TypeError: If `value` is not a `str`.
@@ -813,17 +812,8 @@ class _Options(Namespace):
                 f"{symbols!r} is an underlying, not an options contract: list its contracts "
                 f"with m.options.contracts(underlying={symbols!r})"
             )
-        wire_underlying = None
-        if underlying is not None:
-            # The contracts list finds no contract for `I:SPX`; it takes and writes `SPX`.
-            wire_underlying = contracts_underlying(_underlying(underlying))
-            logger.debug(
-                "options.contracts sends underlying=%r as underlying_ticker=%r",
-                underlying,
-                wire_underlying,
-            )
         params: dict[str, object] = {
-            "underlying_ticker": wire_underlying,
+            "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
             "as_of": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             "expired": _expired(expired),
