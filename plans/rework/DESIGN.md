@@ -1207,28 +1207,54 @@ it is never half loaded. Its row in `m.streams()` is `Kind=read`, `LOADING` unti
 **Followed reads** (`fetch()` and `history()` given a refreshing symbol table,
 [section 7.8](#78-following-a-live-symbol-table)) are worker tables too, kept alive and
 released by the same rule. Everything is created on the caller thread inside the result's own
-scope: a keyed `input_table` with one row per symbol whose `Constituent` cell holds that
-symbol's static rows, a never-filled blink table from `blink_publisher` that carries a failure
-of the whole table, their merge filtered to rows with a constituent, `watched_rows` of that
-against the user's symbol table, and the merge of a `PartitionedTable` over the result. A
-symbol's rows are one static table, so adding or removing a symbol adds or removes one
-constituent: no rows are copied in the update cycle, and a removed symbol's rows leave in the
-cycle that removes its row from the user's table, because `watched_rows` drops its partition
-there. With `wait=True` the input table is created seeded with the call-time symbols' rows,
-which are visible at once, also inside a console command.
+scope:
 
-- **One owner thread per result** (`massive #1 follow-7`, section 18.1) holds all per-symbol
-  state and is the only writer of the input table, through `add_async`, so its writes apply in
-  order and it never waits for an update cycle. The `SymbolWatch` listener only queues the
-  symbol table's changes for it.
-- **Releasing stops it.** The carrier blink table's shutdown, once nothing uses the result,
-  sets the result's stop token and queues a stop for the owner thread; reads in flight stop at
-  their next request, and the watch's stop is queued on the reaper. Every symbol's row in
-  `m.symbol_reads()` becomes `STOPPED`. A table derived from the result keeps it following.
-- **Failures.** A failure of the whole table is recorded first (`SessionCore.fail_stream`), then
-  published through the carrier's `BlinkPublisher` under the result's publish lock, by the
-  owner thread, never from the listener. `m.close()` fails a followed read like any live table
-  and marks its symbols `CLOSED`.
+```python
+blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": int, "Constituent": TABLE}, ...)
+latest = blink.last_by("Symbol")                    # each symbol's latest cell
+held = latest                                       # wait=False
+held = merge([seed.natural_join(latest, on="Symbol", joins="Over=Seq")   # wait=True: the
+                  .where("isNull(Over)").drop_columns("Over"),           # static seed, masked
+              latest])                                                   # once a symbol has a
+                                                                         # newer cell
+shown = watched_rows(held.where("!isNull(Constituent)"), symbol_table)
+parts = PartitionedTable.from_partitioned_table(shown, key_cols=["Symbol"], unique_keys=True,
+            constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
+            constituent_changes_permitted=True)
+result = describe(parts.merge(), spec, schema)      # [list-column datasets: the dedupe]
+```
+
+A cell holds one symbol's complete static rows, built off the update-graph lock; `Seq` orders a
+result's cells. A symbol lands, is replaced, or leaves as one constituent, so no rows are copied
+in the update cycle. A removed symbol's rows leave in the cycle that removes its row from the
+user's table, because `watched_rows` drops its partition there. With `wait=True` the seed is a
+static table of the call-time symbols' cells, so their rows are visible at once, also inside a
+console command. A cell with a null `Constituent` (a tombstone) frees a symbol's rows: under
+`reread=ALWAYS` a removal publishes one, and `NEVER` keeps the cell and republishes it on a
+re-add. There is no `input_table` and no `add_async`: `add_async` runs on the JVM's shared
+`ForkJoinPool.commonPool()`, and on an input table already destroyed it never completes and
+keeps a pool thread (measured: 20 calls left all 9 threads busy, 11 more queued, and no
+callback). `publisher.add` returns without waiting for an update cycle, also under the
+exclusive lock (measured).
+
+- **One follow coordinator per session** (`massive #1 follow`, section 18.1) owns all
+  per-symbol state of every followed read of the session and does no I/O. It takes the symbol
+  tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`, starts reads on
+  the session's read pool, times the retries, and publishes each cell. The `SymbolWatch`
+  listener only enqueues.
+- **One read pool per session**, of `max_concurrency` threads, runs every followed read: the
+  transport call, in the session's execution context, and the static conversion. It hands the
+  outcome back to the coordinator through the queue.
+- **Per result**: a publish lock and a failed flag. A cell's `publisher.add` and the
+  failure check the flag under the lock, so a failed result never gets another cell.
+- **Releasing stops it.** The blink table's shutdown, once nothing uses the result, sets the
+  result's stop token and enqueues a stop; reads in flight stop at their next request, and the
+  watch's stop is queued on the reaper. Every symbol's row in `m.symbol_reads()` becomes
+  `STOPPED`. A table derived from the result keeps it following.
+- **Failures.** A failure of the whole table is recorded first (`SessionCore.fail_stream`) and
+  then delivered only through the publisher's `publish_failure`, under the result's publish
+  lock, by the coordinator, never from the listener. `m.close()` fails a followed read like
+  any live table and marks its symbols `CLOSED`.
 
 There is no `stop()` on queries. Release is automatic (garbage collection) or explicit
 (`m.release`); `m.close()` stops anything, whatever still holds it.
@@ -1995,7 +2021,7 @@ A read of several symbols (an `any_of` batch, a flat-file scan) fails as a unit:
 of it gets the same state and error. Deleting and re-adding a `FAILED` symbol's row reads it
 again.
 
-**Errors of the whole table** fail the result through its carrier: `AuthenticationError` (a
+**Errors of the whole table** fail the result through its publisher's `publish_failure`: `AuthenticationError` (a
 401, or S3's verdict that the keys are wrong) on any read; a closed session; the symbol table
 failing upstream; a bad row added under `noncanonical_symbols=RAISE`; and a library bug, a
 `MassiveError` naming it.
@@ -2726,8 +2752,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   followed reads alike:
   - **`RAISE`**: a bad row present at the call raises `ValueError` at once. A **later** bad
     row is never subscribed or requested: it fails that result (the stream through its
-    session's reaper, a `poll()` table with `SymbolRowError`, a followed read through its
-    owner thread) and logs at ERROR, with a message
+    session's reaper, a `poll()` table with `SymbolRowError`, a followed read through the
+    session's follow coordinator) and logs at ERROR, with a message
     that names the row, the reason, and the fix: correct the row, or pass the table through
     `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.LOG)` (for a
     dataset that spans classes, `dm.canonical_symbol` per row with each row's class).
@@ -4626,7 +4652,7 @@ again; a batch handled after that moment pulls them too, so a busy queue cannot 
 ([section 7.8](#78-following-a-live-symbol-table)). The rows are kept for the session's life,
 also after their result is released; at `m.close()` every symbol not in a final state is
 written `CLOSED`. It is written by the diagnostics writer like `m.streams()`, from row
-snapshots the follow owner thread queues.
+snapshots the session's follow coordinator queues.
 
 | Column | Meaning |
 |---|---|
@@ -4901,7 +4927,8 @@ without the GIL.
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause, then for one of the client's `max_concurrency` connections; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| follow owner, one per followed read (`fetch()` or `history()` of a refreshing symbol table), ended when its result shuts down, fails, or the session closes; plus a `ThreadPoolExecutor(max_concurrency)` per result for its reads | library | owns all per-symbol state: takes the symbol table's changes, read outcomes, and the stop from one `SimpleQueue`; starts each symbol's read on the executor (REST reads in parallel, flat-file scans one at a time), each listening to the result's stop token; writes the input table of symbol constituents with `add_async`; times the retries; queues `m.streams()` and `m.symbol_reads()` row snapshots; records a failure of the whole table and publishes it through the carrier under the result's publish lock | wait for an update cycle; call `add` (which waits for one); take `registry_lock` across a Deephaven call; touch per-symbol state from another thread |
+| follow coordinator, one per session while it has a followed read (`fetch()` or `history()` of a refreshing symbol table) | library | owns all per-symbol state of the session's followed reads: takes the symbol tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`; starts reads on the follow read pool (flat-file scans of one result one at a time); times the retries; publishes each symbol's cell (`publisher.add`) and a failure of the whole table (`publish_failure`, after `SessionCore.fail_stream`) under the result's publish lock, checking its failed flag; queues `m.streams()` and `m.symbol_reads()` row snapshots | any I/O; wait for an update cycle or on a read; take `registry_lock` across a Deephaven call; let another thread touch per-symbol state |
+| follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session while it has a followed read | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
