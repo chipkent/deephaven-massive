@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import wire_spellings
 from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
@@ -258,12 +259,13 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
 
     Records the file's `X:BTCUSD` row of the most recent published Monday with its `window_start`,
     the REST range bars around that day, and, for each, whether it is the same bar (open and close
-    equal, the rest within 1e-6) with each field's relative error. Reading it: a file row stamped at
-    00:00 or 23:59:59.999 UTC of its day and equal to the range bar of the same UTC day confirms one
-    day cut for both sources; a file row equal to no REST bar, or to a bar of another day, means the
-    two sources cut days differently.
+    equal, the rest within 1e-6) with each field's relative error. The file writes the pair
+    `X:BTC-USD`, so the read keeps every spelling the library's own file filter keeps. Reading it: a
+    file row stamped at 00:00 or 23:59:59.999 UTC of its day and equal to the range bar of the same
+    UTC day confirms one day cut for both sources; a file row equal to no REST bar, or to a bar of
+    another day, means the two sources cut days differently.
     """
-    read = flat_file_tickers(_DAY_FILE, recent_monday, [_PAIR])
+    read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     rows, extra = read
     for row in rows:

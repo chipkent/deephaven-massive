@@ -211,7 +211,8 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
 
     Streams `X:BTCUSD` trades (crypto trades all the time) until the first rows arrive, then
     aborts the socket's transport on the wire client's loop thread, as a network failure
-    would, and samples the connection every quarter second. Passes when the connection counts
+    would, and samples the crypto WebSocket row of `m.connections()` (the class also has a
+    `Transport=REST` row) every quarter second. Passes when the connection counts
     a reconnect, is `CONNECTED` again, its stream is `RUNNING`, and a trade the library
     received after the drop reached the table, within 120 s. Every connection state seen is
     recorded in order, `WAITING_SLOT` included: a reconnect that finds the old connection's
@@ -240,7 +241,11 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     pause = threading.Event()  # never set; only paces the polling
     deadline = time.monotonic() + _RECOVERY_WAIT
     while time.monotonic() < deadline:
-        connection = table_rows(live_session.connections())[0]
+        (connection,) = [  # the REST row of the same class is not the socket that dropped
+            r
+            for r in table_rows(live_session.connections())
+            if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
+        ]
         stream = table_rows(live_session.streams())[0]
         if not states or states[-1] != connection["State"]:
             states.append(str(connection["State"]))

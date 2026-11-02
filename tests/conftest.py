@@ -1702,19 +1702,20 @@ def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
 
 @pytest.fixture(scope="session")
 def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
-    """Return the plans of the run's key: declared, cached today, or probed now.
+    """Return the plans of the run's key: declared, cached within the hour, or probed now.
 
-    `MASSIVE_LIVE_PLANS`, when set, overrides everything and nothing is probed. Otherwise the
-    plans come from `.live-plans.json` in the repository root when it was written today (New
-    York time), in this layout, for the same API key and S3 access key id, and else from a
-    probe: per class, a snapshot of one liquid ticker (Starter), its trades (Developer) and
-    quotes (Advanced), and the snapshot's `fmv` field (Business, for stocks, options, and
-    currencies); then one file of every flat-file prefix. The probe writes the cache, which
-    holds digests, never the credentials. The plans are recorded as evidence under "live
-    plans". Only the live tests request this fixture, so a unit run never probes. Being
-    session-scoped, it is set up before any function-scoped fixture of the first live test that
-    needs it, the autouse key check included, so it makes the same check first itself: under
-    CI, or without `MASSIVE_API_KEY`, the test skips before anything reaches Massive.
+    `MASSIVE_LIVE_PLANS`, when set, overrides everything and nothing is probed. Otherwise the plans
+    come from `.live-plans.json` in the repository root when it was probed less than
+    `probe.CACHE_LIFETIME` ago, in this layout, for the same API key and S3 access key id (a line on
+    the terminal then says so, when, and how to probe again), and else from a probe: per class, a
+    snapshot of one liquid ticker (Starter), its trades (Developer) and quotes (Advanced), and the
+    snapshot's `fmv` field (Business, for stocks, options, and currencies); then one file of every
+    flat-file prefix. The probe writes the cache, which holds digests, never the credentials. The
+    plans are recorded as evidence under "live plans". Only the live tests request this fixture, so
+    a unit run never probes. Being session-scoped, it is set up before any function-scoped fixture
+    of the first live test that needs it, the autouse key check included, so it makes the same check
+    first itself: under CI, or without `MASSIVE_API_KEY`, the test skips before anything reaches
+    Massive.
 
     Args:
         pytestconfig: The pytest configuration, for the repository root and the stash.
@@ -1739,7 +1740,7 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
             "s3": probe.digest(config.s3_access_key_id),
         }
         path = pytestconfig.rootpath / probe.PLANS_CACHE
-        cached = probe.cached_plans(path, owner=owner, day=today)
+        cached = probe.cached_plans(path, owner=owner, now=datetime.now(UTC))
         if cached is None:
             try:
                 run_plans = _probe_plans(config, today)
@@ -1749,9 +1750,15 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
                     f"{plans.PLANS_VARIABLE}, such as stocks=starter,currencies=starter,s3"
                 )
                 raise pytest.UsageError(msg) from error
-            probe.store_plans(path, run_plans, owner=owner, day=today)
+            probe.store_plans(path, run_plans, owner=owner)
         else:
             run_plans = cached
+            _write_live_line(
+                pytestconfig,
+                "live plans: ",
+                f"{cached.source}, reused for up to {probe.CACHE_LIFETIME}; delete {path} to "
+                "probe again now, as a plan bought or cancelled since needs",
+            )
     pytestconfig.stash[_PLANS_KEY] = run_plans
     _record(pytestconfig, "live plans", plans.plans_text(run_plans))
     return run_plans
