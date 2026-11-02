@@ -17,7 +17,8 @@ From the diff (`git diff origin/main...HEAD`), the issue, and your notes, list i
 file:
 
 - what a user or developer can do or sees differently after the merge;
-- the problem it solves, with one concrete example;
+- why it exists: what prompted it and the problem it solves, with one concrete example, plus
+  any term a reviewer new to the PR needs to follow it;
 - each choice the PR makes, with its reason;
 - each check run and its result, and anything not yet run;
 - what is left, with its issue.

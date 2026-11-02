@@ -78,6 +78,10 @@ As long as the content needs and no longer: cut padding, repetition and narratio
 | Verification | Each check and its result; what is not yet run, and how to run it. |
 | Follow-ups | Work left out, with its issue or reason. "None" when there is none. |
 
+In the Summary and Why, assume the reviewer knows nothing about why this PR exists. Give the
+context and terms they need to follow the change, and no more; don't explain code the change
+doesn't depend on.
+
 Then `Closes #<issue>` on its own line, then the required footer.
 
 ### Banned patterns
@@ -141,15 +145,17 @@ Run it on every draft, and before every push that changes the PR:
    the list at the top of this page.
 3. **Read the first three sentences alone.** A reader with no context can say what the PR does
    and why.
-4. **Cut padding, never facts.** Delete every sentence that is padding, repetition, or
+4. **A reviewer new to the PR knows why it exists and can follow every section without
+   asking.**
+5. **Cut padding, never facts.** Delete every sentence that is padding, repetition, or
    narration; keep every fact the reader needs, however complex the PR.
-5. **Sweep for the banned patterns** above, starting with a grep for narration and hedges, and
+6. **Sweep for the banned patterns** above, starting with a grep for narration and hedges, and
    fix every hit that is one:
 
    ```bash
    grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>
    ```
 
-6. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
+7. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
    title that meets the rules, text that describes the branch after this push, and the issue in
    `closingIssuesReferences`.

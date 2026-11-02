@@ -48,7 +48,8 @@ uv build                                 # sdist and wheel
    how, or say why nothing changes. Never resolve a thread without a reply.
 7. **PR descriptions read as if an O'Reilly technical editor wrote them**, and a reader
    skimming the headings and bullets gets every fact that matters: no slop, no narration, no
-   padding, never a fact cut for length. Write them with the `writing-a-pr-description` skill
+   padding, never a fact cut for length, and the context a reviewer new to the PR needs to
+   follow it, no more. Write them with the `writing-a-pr-description` skill
    (`gh pr create --body-file` never shows the template); the sections, banned patterns, and
    self-edit checklist of `docs/dev/pull-requests.md` all apply. Rewrite the description to the
    final state on every push, and end it with `Closes #<issue>` on its own line. Issue bodies
