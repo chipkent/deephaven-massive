@@ -82,6 +82,41 @@ def test_trading_days_skip_weekends_and_holidays() -> None:
     assert calendar.trading_day_before(date(2026, 11, 27)) == date(2026, 11, 25)
 
 
+def test_the_trading_day_after_skips_weekends_and_holidays() -> None:
+    assert calendar.trading_day_after(date(2026, 10, 29)) == date(2026, 10, 30)
+    assert calendar.trading_day_after(date(2026, 9, 4)) == date(2026, 9, 8)
+
+
+def test_the_index_check_days_are_recent_a_monday_and_after_a_holiday() -> None:
+    assert calendar.index_check_days(date(2026, 11, 2)) == (
+        date(2026, 9, 8),  # after Labor Day
+        date(2026, 10, 26),  # the recent Monday
+        date(2026, 10, 28),
+        date(2026, 10, 29),
+        date(2026, 10, 30),
+    )
+
+
+def test_an_index_check_day_that_is_two_of_them_is_read_once() -> None:
+    # September 8 is a recent day and the day after Labor Day; the Monday is the week before.
+    assert calendar.index_check_days(date(2026, 9, 10)) == (
+        date(2026, 8, 31),
+        date(2026, 9, 4),
+        date(2026, 9, 8),
+        date(2026, 9, 9),
+    )
+
+
+def test_a_weekend_holiday_is_not_the_holiday_an_index_check_day_follows() -> None:
+    # New Year's Day 2022 fell on a Saturday and closed no weekday, so Christmas Eve counts.
+    assert calendar.index_check_days(date(2022, 1, 5)) == (
+        date(2021, 12, 27),
+        date(2021, 12, 31),
+        date(2022, 1, 3),
+        date(2022, 1, 4),
+    )
+
+
 def test_the_recent_monday_is_published_and_traded() -> None:
     assert calendar.recent_monday(date(2026, 10, 29)) == date(2026, 10, 26)
     assert calendar.recent_monday(date(2026, 10, 27)) == date(2026, 10, 19)

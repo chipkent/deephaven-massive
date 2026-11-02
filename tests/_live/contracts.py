@@ -3,7 +3,7 @@
 A futures test reads the contract most of a product's trading is in on its day: a fixed
 contract expires (`ESH6` did in March 2026) and then streams nothing. Trading leaves a contract
 on its roll day for the next listed one; the products the live tests read are the E-mini
-S&P 500 (CME) and corn (CBOT).
+S&P 500 (CME), corn (CBOT), and live cattle (CME).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from tests._live.calendar import nth_weekday, trading_day_before
 MONTH_CODES: Final = "FGHJKMNQUVXZ"
 """The futures month codes, January to December."""
 
-CONTRACT_MONTHS: Final = {"ES": "HMUZ", "ZC": "HKNUZ"}
+CONTRACT_MONTHS: Final = {"ES": "HMUZ", "ZC": "HKNUZ", "LE": "GJMQVZ"}
 """The contract months of each product, by month code."""
 
 
@@ -26,10 +26,11 @@ def roll_day(product: str, year: int, month: int) -> date:
     An E-mini S&P 500 contract expires on its month's third Friday, and the market rolls to
     the next contract eight days before, on the Thursday of the week before. A corn contract's
     holders must take delivery from its first notice day, the last business day of the month
-    before its month, so trading leaves it by then.
+    before its month, so trading leaves it by then. A live cattle contract is delivered during
+    its own month, so trading leaves it by the last business day before that month too.
 
     Args:
-        product: `"ES"` or `"ZC"`.
+        product: `"ES"`, `"ZC"`, or `"LE"`.
         year: The contract's year.
         month: The contract's month.
 
@@ -45,11 +46,12 @@ def front_contract(product: str, day: date) -> str:
     """Return a product's front contract on a day: the first listed one not yet rolled.
 
     Args:
-        product: `"ES"` or `"ZC"`.
+        product: `"ES"`, `"ZC"`, or `"LE"`.
         day: The day.
 
     Returns:
-        Such as `"ESZ6"` on 2026-10-29, `"ESH7"` on 2026-12-10, or `"ZCK6"` on 2026-03-02.
+        Such as `"ESZ6"` on 2026-10-29, `"ESH7"` on 2026-12-10, `"ZCK6"` on 2026-03-02, or
+        `"LEZ6"` on 2026-10-30.
     """
     months = [MONTH_CODES.index(code) + 1 for code in CONTRACT_MONTHS[product]]
     listed = [(year, month) for year in (day.year, day.year + 1) for month in months]

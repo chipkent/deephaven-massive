@@ -25,6 +25,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from tests._live import index_day_sources
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -231,17 +232,8 @@ def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> S
         no volume), or None when no minute bar falls inside.
     """
     first, last = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
-    inside = [m for m in minutes if first <= m["t"] < last]
-    if not inside:
-        return None
-    values = (
-        float(inside[0]["o"]),
-        float(max(m["h"] for m in inside)),
-        float(min(m["l"] for m in inside)),
-        float(inside[-1]["c"]),
-        None,
-    )
-    return first, values
+    found = index_day_sources.rebuilt(minutes, first, last)
+    return None if found is None else (first, (*found, None))
 
 
 def _day_window(day: date, zone: ZoneInfo, days: int = 1) -> tuple[datetime, datetime]:
@@ -613,3 +605,264 @@ def _wall_clock(stamp_ms: int) -> str:
     """
     utc = datetime.fromtimestamp(stamp_ms / 1000, UTC)
     return f"{utc:%Y-%m-%dT%H:%M:%SZ} = {utc.astimezone(_NEW_YORK):%H:%M} New York"
+
+
+_WELL_KNOWN = ("I:SPX", "I:NDX", "I:DJI", "I:RUT", "I:VIX", index_day_sources.ROUND_THE_CLOCK)
+"""The indices the many-index check always reads: four computed during the stock session,
+the volatility index, which is computed in extended hours too, and the crypto index whose
+files disagreed with REST."""
+
+_CRYPTO_FAMILIES = ("AAVE", "BTC", "ETH")
+"""The coins whose indices the many-index check finds in Massive's index ticker list."""
+
+_PER_FAMILY = 2
+"""The most indices read per coin."""
+
+_TICKERS = "/v3/reference/tickers"
+_PREV = "/v2/aggs/ticker/{indicesTicker}/prev"
+_OPEN_CLOSE = "/v1/open-close/{indicesTicker}/{date}"
+_NS_PER_MS = 1_000_000
+
+FileRead: TypeAlias = "tuple[list[dict[str, str | None]], frozenset[str]] | None"
+FileRows: TypeAlias = "list[dict[str, str | None]]"
+
+
+def _file_rows(read: FileRead, index: str) -> FileRows | None:
+    """Return one index's rows of a flat file read for many, whatever spelling the file uses.
+
+    Returns:
+        The rows, oldest first; None when the file was not published.
+    """
+    if read is None:
+        return None
+    spellings = set(wire_spellings(dm.AssetClass.INDICES, index))
+    rows = [row for row in read[0] if row.get("ticker") in spellings]
+    return sorted(rows, key=lambda row: int(str(row["window_start"])))
+
+
+def _optional_row(
+    rest_rows: RestRows, path: str, path_params: Mapping[str, object], *, evidence: Evidence
+) -> dict[str, Any] | None:
+    """Read a one-row REST answer, recording an error answer instead of failing on it.
+
+    Returns:
+        The first row, or None when Massive answered with an error or no row.
+    """
+    try:
+        rows = rest_rows(path, path_params, {})
+    except WireError as error:
+        evidence(f"{path} {dict(path_params)}: {type(error).__name__}: {error}")
+        return None
+    return rows[0] if rows else None
+
+
+def _record_minute_file(
+    index: str,
+    day: date,
+    rows: FileRows | None,
+    *,
+    minutes: list[dict[str, Any]],
+    evidence: Evidence,
+) -> index_day_sources.MinuteFileComparison | None:
+    """Record how one day's minute-file rows of an index compare with its REST minutes.
+
+    Returns:
+        The comparison; None when the file was not published.
+    """
+    if rows is None:
+        evidence(f"{index} {day}: no minute file published")
+        return None
+    found = index_day_sources.compare_minute_file(rows, minutes, day)
+    ends = [_wall_clock(s) for s in (found.first_ms, found.last_ms) if s is not None]
+    evidence(
+        f"{index} {day} minute file: {found.rows} rows, first and last {ends}; lacks "
+        f"{len(found.lacks)} REST minutes {[_wall_clock(s) for s in found.lacks[:5]]}; adds "
+        f"{len(found.adds)} {[_wall_clock(s) for s in found.adds[:5]]}; "
+        f"{len(found.outside)} outside the New York day; prices differ at "
+        f"{len(found.differing)} minutes {list(found.differing[:3])}"
+    )
+    return found
+
+
+def _record_day(
+    tally: index_day_sources.IndexTally,
+    day: date,
+    *,
+    minutes: list[dict[str, Any]],
+    sources: Mapping[str, dict[str, Any] | None],
+    files: tuple[FileRows | None, FileRows | None],
+    evidence: Evidence,
+) -> None:
+    """Record one index-day: the window each source covers, and the files against REST.
+
+    Args:
+        tally: The index's tally, which it adds to.
+        day: The day.
+        minutes: The index's REST minute bars around the day.
+        sources: Each REST source's row of the day (range, `/prev`, open-close), None for none.
+        files: The day file's and the minute file's rows of the index, each None when that
+            file was not published.
+        evidence: Records one evidence line.
+    """
+    index, (day_file, minute_file) = tally.index, files
+    rebuilds = {
+        name: index_day_sources.rebuilt(minutes, *index_day_sources.day_window_ms(day, zone))
+        for name, zone in index_day_sources.WINDOWS
+    }
+    if index_day_sources.windows_differ(minutes, day):
+        tally.windows_differ_days.add(day)
+    differ = "differ" if day in tally.windows_differ_days else "hold the same minutes"
+    evidence(f"{index} {day}: the New York and Chicago days {differ}; rebuilds {rebuilds}")
+    bars = {
+        name: None if row is None else index_day_sources.prices(row)
+        for name, row in sources.items()
+    }
+    if day_file is not None:
+        stamps = [_wall_clock(int(str(r["window_start"])) // _NS_PER_MS) for r in day_file]
+        evidence(f"{index} {day} day file rows stamped {stamps}")
+        bars[index_day_sources.FILE_SOURCE] = (
+            index_day_sources.prices(day_file[0]) if day_file else None
+        )
+    for name, values in bars.items():
+        verdict, error = index_day_sources.window_verdict(values, rebuilds)
+        tally.add_verdict(name, verdict, error)
+        shown = "" if error is None else f" (closest {error:.2e})"
+        evidence(f"{index} {day} {name}: {values}: {verdict}{shown}")
+    ranged = bars.get(index_day_sources.RANGE_SOURCE)
+    filed = bars.get(index_day_sources.FILE_SOURCE)
+    day_file_agrees = None
+    if ranged is not None and filed is not None:
+        error = index_day_sources.relative_error(ranged, filed)
+        day_file_agrees = error <= index_day_sources.MATCH
+        evidence(f"{index} {day} day file against the range bar: {error:.2e}")
+    compared = _record_minute_file(index, day, minute_file, minutes=minutes, evidence=evidence)
+    tally.add_files(day, day_file=day_file_agrees, minute_file=compared)
+
+
+def _read_index(
+    index: str,
+    days: tuple[date, ...],
+    files: Mapping[date, tuple[FileRead, FileRead]],
+    *,
+    rest_rows: RestRows,
+    range_bars: RangeBars,
+    evidence: Evidence,
+) -> tuple[index_day_sources.IndexTally, bool]:
+    """Read and record one index over every day.
+
+    Args:
+        index: The index.
+        days: The days, oldest first.
+        files: The day file and minute file read of each day, for every index at once.
+        rest_rows: Reads raw REST rows.
+        range_bars: Reads raw range bars.
+        evidence: Records one evidence line.
+
+    Returns:
+        The index's tally, and whether REST sent it both day and minute bars.
+    """
+    tally = index_day_sources.IndexTally(index)
+    ranged = range_bars(index, "day", (days[0] - timedelta(days=3), days[-1] + timedelta(days=3)))
+    by_day = {_new_york_day(int(bar["t"])): bar for bar in ranged}
+    prev = _optional_row(rest_rows, _PREV, {"indicesTicker": index}, evidence=evidence)
+    prev_day = None if prev is None else _new_york_day(int(prev["t"]))
+    evidence(f"{index} /prev: {prev}; its New York day {prev_day}")
+    spans = index_day_sources.minute_read_spans(days)
+    minutes = [m for span in spans for m in range_bars(index, "minute", span)]
+    minutes.sort(key=lambda m: int(m["t"]))
+    evidence(f"{index}: {len(ranged)} range day bars, {len(minutes)} REST minute bars")
+    for day in days:
+        open_close = _optional_row(
+            rest_rows, _OPEN_CLOSE, {"indicesTicker": index, "date": day}, evidence=evidence
+        )
+        sources = {
+            index_day_sources.RANGE_SOURCE: by_day.get(day),
+            "open-close": open_close,
+            **({"/prev": prev} if prev_day == day else {}),
+        }
+        day_file, minute_file = files[day]
+        _record_day(
+            tally,
+            day,
+            minutes=minutes,
+            sources=sources,
+            files=(_file_rows(day_file, index), _file_rows(minute_file, index)),
+            evidence=evidence,
+        )
+    return tally, bool(ranged and minutes)
+
+
+@pytest.mark.needs("indices:starter", "s3")
+@pytest.mark.settles("60", "80")
+@pytest.mark.timeout(900)
+def test_index_day_windows_and_files_across_many_indices(
+    *,
+    index_check_days: tuple[date, ...],
+    rest_rows: RestRows,
+    range_bars: RangeBars,
+    flat_file_tickers: FlatFileTickers,
+    evidence: Evidence,
+) -> None:
+    """Which day each index day source covers, and whether the index files match REST, broadly.
+
+    One odd index on two days must not drive a library change, so this measures about ten
+    indices over four or five recent trading days (the three before the run, the most recent
+    Monday, and the day after the most recent holiday): `I:SPX`, `I:NDX`, `I:DJI`, and `I:RUT`,
+    computed during the stock session; `I:VIX`, computed in extended hours too; `I:AAVE100`;
+    and up to two indices each of AAVE, BTC, and ETH found in Massive's index ticker list (the
+    `100` index first). For each index and day it records the range's 1-day bar, `/prev` (on
+    its own day), the daily open and close, and the `us_indices/day_aggs_v1` row, each with the
+    window it matches: the day rebuilt from REST minute bars over the New York day or over the
+    Chicago day (an hour later), both when they hold the same minutes, or neither; then the
+    `us_indices/minute_aggs_v1` rows against REST's minutes: count, first and last stamp, the
+    REST minutes it lacks, the minutes it adds or holds outside its New York day, and the
+    minutes whose prices differ. It ends with a line per index (each source's windows, its
+    largest relative error to the closest window, and the days its files disagree with REST)
+    and a verdict line per question: (a) do REST day bars of indices cover the Chicago day,
+    generally; (b) do the files match REST for most indices or only the regular-hours ones;
+    (c) is `I:AAVE100`'s mismatch an isolated case.
+
+    It asserts only that each index has REST day and minute bars and that at least one day
+    file and one minute file were read; everything else is evidence. Cost: 3 ticker-list
+    searches, then per index one 1-day range, one `/prev`, one open-close per day, and one
+    minute range per run of adjacent days (two for the usual days): at most about 100 REST
+    requests, on Indices Starter, which has no request limit, and 2 flat files per day.
+    """
+    days = index_check_days
+    found = {
+        family: rest_rows(
+            _TICKERS, {}, {"market": "indices", "search": family, "active": "true", "limit": 1000}
+        )
+        for family in _CRYPTO_FAMILIES
+    }
+    for family, rows in found.items():
+        shown = [(row.get("ticker"), row.get("name")) for row in rows[:10]]
+        evidence(f"index tickers found for {family!r}: {len(rows)}, such as {shown}")
+    chosen = index_day_sources.crypto_choices(found, each=_PER_FAMILY)
+    indices = list(dict.fromkeys((*_WELL_KNOWN, *chosen)))
+    evidence(f"indices: {indices}; days: {[str(day) for day in days]}")
+    spellings = sorted({s for i in indices for s in wire_spellings(dm.AssetClass.INDICES, i)})
+    files = {
+        day: (
+            flat_file_tickers(_DAY_FILE, day, spellings),
+            flat_file_tickers(_MINUTE_FILE, day, spellings),
+        )
+        for day in days
+    }
+    for day, (day_file, minute_file) in files.items():
+        evidence(
+            f"{day}: day file published: {day_file is not None}; minute file: "
+            f"{minute_file is not None}"
+        )
+    reads = [
+        _read_index(
+            index, days, files, rest_rows=rest_rows, range_bars=range_bars, evidence=evidence
+        )
+        for index in indices
+    ]
+    for line in index_day_sources.summary_lines([tally for tally, _ in reads]):
+        evidence(line)
+    empty = [tally.index for tally, complete in reads if not complete]
+    assert not empty, f"no REST day or minute bars for {empty}"
+    assert any(day_file for day_file, _ in files.values()), f"no {_DAY_FILE} file of {days}"
+    assert any(minute for _, minute in files.values()), f"no {_MINUTE_FILE} file of {days}"
