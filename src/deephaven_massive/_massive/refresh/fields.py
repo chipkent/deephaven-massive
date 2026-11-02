@@ -399,6 +399,16 @@ class SourceFields:
             wire_type = WireType.EPOCH
         else:
             wire_type = fix.wire_type if fix is not None else spec_type
+        required = raw.required
+        if (self.source, raw.wire_key) in self.hand.optional_fields:
+            if not required:
+                self.problem(
+                    Gate.STALE_ENTRY,
+                    raw.wire_key,
+                    "OPTIONAL_FIELDS entry for a field the specification does not mark required",
+                    description=description,
+                )
+            required = False
         described, class_texts = self.noted(raw, description)
         column = naming.column_name(long_names)
         self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
@@ -408,7 +418,7 @@ class SourceFields:
             column=column,
             wire_type=wire_type,
             unit=unit,
-            required=raw.required,
+            required=required,
             conversion=fix,
             description=described,
             class_descriptions=class_texts,

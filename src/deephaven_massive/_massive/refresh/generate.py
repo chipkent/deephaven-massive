@@ -10,7 +10,8 @@ other modules and adds only the rule for writing:
    source; then the checks that span sources and transports (`gates`: stale hand entries,
    conversions no sample needs any more, one concept per column; `kinds`: one type per column,
    columns on two transports, the column order), and finally writes each source's memberships and
-   orders its fields from its kind (`kinds.apply`);
+   orders its fields from its kind (`kinds.apply`), and writes the keys `IGNORED_KEYS` lists for
+   it (`Source.ignored_keys`);
 3. `render` writes the sources as the canonical text of `spec/rest.json`, `spec/ws.json`,
    `spec/flatfiles.json`, and `spec/descriptions.json` (which also holds each documenting
    page's plan tables, `plan_access`); each file is replaced only when every
@@ -25,6 +26,7 @@ checkout only: neither the refresh package nor the snapshot ships in a distribut
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
@@ -42,7 +44,7 @@ from deephaven_massive._massive.refresh.ws_sources import WsCoverage, generate_w
 from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
 # What a generator returns: its sources and its coverage.
@@ -121,9 +123,9 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
             if page is not None:
                 plans[page_urls[name]] = page
     return Generated(
-        rest=tuple(kinds.apply(paths, found, orders)),
-        ws=tuple(kinds.apply(channels, found, orders)),
-        flat_files=tuple(kinds.apply(files, found, orders)),
+        rest=_ignoring(kinds.apply(paths, found, orders), hand),
+        ws=_ignoring(kinds.apply(channels, found, orders), hand),
+        flat_files=_ignoring(kinds.apply(files, found, orders), hand),
         rest_coverage=rest,
         ws_coverage=ws,
         flat_file_coverage=flat,
@@ -133,6 +135,31 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
             Transport.FLAT_FILES: {f.key: [file_urls[n] for n in flat.pages[f.key]] for f in files},
         },
         plans=plans,
+    )
+
+
+_S = TypeVar("_S", bound=Source)
+
+
+def _ignoring(sources: Iterable[_S], hand: HandInput) -> tuple[_S, ...]:
+    """Return the sources, each with the keys `IGNORED_KEYS` lists for it.
+
+    Args:
+        sources: Generated sources of one transport. A stale entry has already stopped the
+            refresh (`gates.stale_entries`), so every entry names a key no source declares.
+        hand: The hand input.
+
+    Returns:
+        The sources in order, each with its `ignored_keys`.
+    """
+    ignored: dict[str, set[str]] = {}
+    for entry in hand.ignored_keys:
+        ignored.setdefault(entry.source, set()).add(entry.wire_key)
+    return tuple(
+        dataclasses.replace(source, ignored_keys=frozenset(ignored[source.key]))
+        if source.key in ignored
+        else source
+        for source in sources
     )
 
 

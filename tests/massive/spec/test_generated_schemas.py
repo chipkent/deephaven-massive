@@ -58,6 +58,14 @@ def test_parse_reads_memberships_and_other_transports() -> None:
     )
 
 
+def test_parse_reads_ignored_keys_and_refuses_ones_that_are_not_text() -> None:
+    entry = {"key": "forex/C", "ignored_keys": ["i"], "fields": [], "memberships": []}
+    (value,) = generated_schemas.parse(Transport.WS, _file(entry)).values()
+    assert value.ignored_keys == frozenset({"i"})
+    with pytest.raises(TypeError, match="ignored keys of 'forex/C'"):
+        generated_schemas.parse(Transport.WS, _file({**entry, "ignored_keys": [1]}))
+
+
 def test_parse_reads_parameter_values() -> None:
     entry = {
         "key": "/v1/x",

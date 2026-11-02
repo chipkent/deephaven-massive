@@ -1,9 +1,10 @@
 import pytest
 
 from deephaven_massive._enums import AssetClass, FuturesVenue
+from deephaven_massive._massive import spec
 from deephaven_massive._massive.refresh import naming, overrides
-from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS
-from deephaven_massive._massive.spec.types import Conversion, WireUnit
+from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS, FOREX_SNAPSHOTS
+from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 
 
 def test_every_entry_has_a_reason() -> None:
@@ -179,14 +180,46 @@ def test_the_ticker_event_type_is_read_as_the_samples_send_it() -> None:
     assert naming.column_name([fix.wire_key]) == "Type"
 
 
-def test_the_futures_snapshot_ticker_and_product_code_are_read_at_the_top_level() -> None:
-    # The schema nests both under `details`; every documented sample sends them at the top.
-    found = {
-        declared: overrides.KEY_FIXES["/futures/v1/snapshot", declared].wire_key
-        for declared in ("details.ticker", "details.product_code")
-    }
-    assert found == {"details.ticker": "ticker", "details.product_code": "product_code"}
-    assert [naming.column_name([key]) for key in found.values()] == ["Ticker", "ProductCode"]
+def test_the_futures_snapshot_ticker_and_product_code_are_read_where_the_schema_nests_them() -> (
+    None
+):
+    # The documented samples send both at the top level, but the live run of 2026-11-02 found
+    # them under `details`, as the schema declares, so no key fix moves them.
+    assert not [key for key in overrides.KEY_FIXES if key[0] == "/futures/v1/snapshot"]
+    futures = spec.source(Transport.REST, "/futures/v1/snapshot")
+    assert futures.field("DetailsTicker").wire_key == "details.ticker"
+    assert futures.field("DetailsProductCode").wire_key == "details.product_code"
+
+
+def test_the_futures_stream_prices_read_text_as_massive_sends_it() -> None:
+    # The live run of 2026-11-02 received every futures price as text on both hosts.
+    for channel, keys in {
+        "futures/T": ("p",),
+        "futures/Q": ("bp", "ap"),
+        "futures/AM": ("o", "h", "l", "c", "dv"),
+        "futures/A": ("o", "h", "l", "c", "dv"),
+    }.items():
+        for key in keys:
+            fix = overrides.TYPE_FIXES[channel, key]
+            assert fix.conversion is Conversion.DECIMAL_TEXT_NUMBER, (channel, key)
+            assert "2026-11-02" in fix.reason
+
+
+def test_the_forex_and_crypto_snapshot_update_times_are_read_by_magnitude() -> None:
+    # Documented in milliseconds; the live run of 2026-11-02 received nanoseconds.
+    for path in (*FOREX_SNAPSHOTS, *CRYPTO_SNAPSHOTS):
+        assert overrides.UNITS[path, "updated"].unit is WireUnit.MS_OR_NS
+
+
+def test_every_undeclared_and_optional_field_cites_the_live_run() -> None:
+    assert overrides.UNDECLARED_FIELDS
+    for key, entry in overrides.UNDECLARED_FIELDS.items():
+        assert "2026-11-02" in entry.reason, key
+        assert entry.json_type in {"string", "number", "integer", "boolean"}, key
+        assert entry.description.endswith("."), key
+    assert overrides.OPTIONAL_FIELDS
+    for key, reason in overrides.OPTIONAL_FIELDS.items():
+        assert "2026-11-02" in reason, key
 
 
 def test_result_keys_may_be_nested_or_the_body() -> None:

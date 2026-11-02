@@ -48,6 +48,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST |
 | `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. | REST |
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST |
+| `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
 
 <details><summary>Massive fields</summary>
@@ -72,6 +73,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `Tape` | `z` |
 | `TrfId` | `r` |
 | `TrfTimestamp` | `f` |
+| `DecimalSize` | `ds` |
 | `TimestampInsert` |  |
 
 </details>

@@ -212,6 +212,29 @@ def test_extra_keys_are_dropped_and_reported_by_their_dotted_key() -> None:
     }
 
 
+def test_an_ignored_key_is_dropped_without_drift(caplog: pytest.LogCaptureFixture) -> None:
+    # The financial statements as Massive sent them on 2026-11-02, with two keys the library
+    # ignores beside one it does not know.
+    path = RestPath(
+        key="/stocks/financials/v1/balance-sheets",
+        fields=(_field("cik", WireType.STRING),),
+        ignored_keys=frozenset({"max_ticker", "min_ticker"}),
+    )
+    rows: list[dict[str, object]] = [
+        {"cik": "0000320193", "max_ticker": "AAPL", "min_ticker": "AAPL", "zz": 1},
+        {"cik": "0000320193"},
+    ]
+    for page in (rows, rows[1:]):
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
+            batch, drift = to_batch(page, path, required=())
+        assert batch.column("Cik").to_pylist() == ["0000320193"] * len(page)
+        assert drift.extra == ({"zz"} if len(page) == 2 else set())
+        assert set(drift.samples) == drift.extra
+        dropped = "/stocks/financials/v1/balance-sheets: dropped the keys it ignores"
+        assert (dropped in caplog.text) == (len(page) == 2)
+
+
 def test_a_missing_vendor_required_field_is_reported() -> None:
     rows: list[dict[str, object]] = [
         {"sip_timestamp": 1, "price": 1.0},

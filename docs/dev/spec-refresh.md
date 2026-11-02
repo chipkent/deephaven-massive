@@ -18,9 +18,9 @@ gate, and what to do when a refresh adds something new.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
   - `refresh/overrides.py`: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES`,
-    `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
-    `TRANSPORT_ONLY`, and `VENUES`;
-  - `refresh/exclusions.py`: `EXCLUSIONS` and `SAMPLE_ERRORS`.
+    `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
+    `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, and `VENUES`;
+  - `refresh/exclusions.py`: `EXCLUSIONS`, `SAMPLE_ERRORS`, and `IGNORED_KEYS`.
 - **The dataset reference**, `docs/datasets/`: an index, `README.md`, and one page per dataset,
   `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), each with Massive's plan tables for
   its pages, rendered by
@@ -60,6 +60,22 @@ uv run pytest tests/datasets/test_column_reference.py -q      # the column-refer
 
 Rerun `render_reference.py` too whenever a dataset, a namespace, a dataset summary, or the
 column-description rule changes; the parity test fails until you do.
+
+## When live data contradicts the specification
+
+A live run can show Massive sending what its specification does not say: a value in another
+form, a field it does not declare, a declared required field it omits, or a key that carries
+nothing. Each is answered by a hand entry whose reason quotes the live values and their date,
+never by editing a generated file:
+
+- a value in a form the declared type refuses: a `TYPE_FIXES` entry with
+  `observed_live=True` (no documented sample shows the form, so the stale check leaves it be);
+- a field the specification does not declare: an `UNDECLARED_FIELDS` entry, which the refresh
+  generates as if declared;
+- a required field Massive omits: an `OPTIONAL_FIELDS` entry;
+- a timestamp in another unit than documented: its `UNITS` entry, `ms|ns` when the two disagree;
+- an undocumented key that carries nothing: an `IGNORED_KEYS` entry, which the decoders drop
+  without reporting drift.
 
 ## When a refresh adds a source
 

@@ -45,6 +45,9 @@ _EMPTY = HandInput(
     projections={},
     transport_only={},
     venues={},
+    undeclared_fields={},
+    optional_fields={},
+    ignored_keys=(),
 )
 
 

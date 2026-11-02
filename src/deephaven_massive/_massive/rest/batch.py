@@ -33,7 +33,8 @@ row by row logs why at DEBUG.
 **Drift** is reported, not raised, in the returned `DriftReport`:
 
 - `extra`: keys a row had that the path does not declare (dropped). A nested object the path
-  does not reach into is reported by its own key, not by each of its leaves.
+  does not reach into is reported by its own key, not by each of its leaves. A key the path
+  lists as ignored (`Source.ignored_keys`) is dropped without being reported.
 - `missing`: the fields the vendor marks required (`Field.required`) that some row lacked or
   held as null. Every other absent field is a null, silently: JSON omits absent values and the
   vendor marks almost nothing required.
@@ -218,6 +219,11 @@ def to_batch(
         reading = _by_row(rows, rest_path, objects=objects, required=required)
     schema = pa.schema([pa.field(f.column, _ARROW[f.wire_type]) for f in fields])
     batch = pa.RecordBatch.from_arrays(reading.arrays, schema=schema)
+    ignored = sorted(rest_path.ignored_keys & reading.extra.keys())
+    if ignored:
+        _log.debug("%s: dropped the keys it ignores, %s", rest_path.template, ignored)
+        for key in ignored:
+            del reading.extra[key]
     odd = {**reading.extra, **reading.unconvertible}
     return batch, DriftReport(
         extra=frozenset(reading.extra),

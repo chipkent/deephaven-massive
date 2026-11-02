@@ -89,6 +89,9 @@ only "if available", and the underlying that only the options rows of a mixed sn
 _SORT_SUFFIXES: Final = frozenset({"asc", "desc"})
 """The direction suffixes a part of a comma-separated `sort` may carry."""
 
+_NOT_SORT_FIELDS: Final = frozenset({"limit", "sort", "order"})
+"""The query parameters of a path that shape its pages rather than filter its rows by a field."""
+
 _LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.LONG_ARRAY, WireType.STRING_ARRAY})
 """Wire types of a field that holds several values, such as a filing's list of tickers."""
 
@@ -1025,9 +1028,12 @@ class Catalog:
         `ex_dividend_date` and `pay_date` on the dividends), `sort` must be one of them.
         Where it documents `sort` as a comma-separated list of columns, each with an optional
         `.asc` or `.desc` suffix (a text `sort`, such as `period_end.desc` on the financial
-        statements), each part must name a field of the path's rows (`Field.wire_key`), as
-        every default Massive documents for such a `sort` does. A path without `sort` is left
-        alone: whether its dataset may send one is `build_query`'s concern.
+        statements), each part must name a field of the path's rows (`Field.wire_key`) or a
+        field the path filters on (the base name of a query parameter other than `limit`,
+        `sort`, and `order`), as every default Massive documents for such a `sort` does: the
+        futures snapshot sorts by `ticker`, which its rows nest as `details.ticker`. A path
+        without `sort` is left alone: whether its dataset may send one is `build_query`'s
+        concern.
 
         Args:
             spec: The dataset.
@@ -1056,7 +1062,14 @@ class Catalog:
                         f"{list(param.values)}"
                     )
                 continue
-            fields = sorted({field.wire_key for field in rest_path.fields})
+            fields = sorted(
+                {field.wire_key for field in rest_path.fields}
+                | {
+                    p.name.partition(".")[0]
+                    for p in rest_path.params
+                    if not p.in_path and p.name not in _NOT_SORT_FIELDS
+                }
+            )
             for part in sort.split(","):
                 if part != part.strip():
                     raise ValueError(

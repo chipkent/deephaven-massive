@@ -1,12 +1,12 @@
 """The hand input of the refresh, gathered into one value the generators and gates read.
 
 Everything the refresh does not read from the vendor's own files is hand input: the lexicons
-and identity keys (`lexicon`); the names, units, conversions, corrected wire keys, corrected
-descriptions, result keys, parameter units, dataset kinds and their projections,
-single-transport columns, and futures venues (`overrides`); and the excluded vendor items and
-disbelieved vendor samples (`exclusions`). Those modules hold the tables, each entry with its
-reason; this one only bundles them as `HandInput`, so a test can pass small tables of its own
-instead of the real ones.
+and identity keys (`lexicon`); the names, units, conversions, corrected wire keys, undeclared
+fields, optional fields, corrected descriptions, result keys, parameter units, dataset kinds
+and their projections, single-transport columns, and futures venues (`overrides`); and the
+excluded vendor items, disbelieved vendor samples, and ignored wire keys (`exclusions`). Those
+modules hold the tables, each entry with its reason; this one only bundles them as
+`HandInput`, so a test can pass small tables of its own instead of the real ones.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from deephaven_massive._massive.refresh import exclusions, lexicon, overrides
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from deephaven_massive._massive.refresh.exclusions import SampleError
+    from deephaven_massive._massive.refresh.exclusions import IgnoredKey, SampleError
 
 
 __all__ = ["HandInput"]
@@ -55,6 +55,10 @@ class HandInput:
             samples its declared type does not fit.
         key_fixes: `(source, declared key)` to the wire key of a field whose declared key
             every documented sample contradicts.
+        undeclared_fields: `(source, wire key)` to a field Massive sends that the specification
+            does not declare, with its schema.
+        optional_fields: `(source, wire key)` to why a field the specification marks required
+            is optional.
         description_fixes: `(source, wire key)` to the corrected description of a field whose
             vendor description is wrong for its source, quoting the vendor's text.
         result_keys: Path to where its rows sit, when that is not `results`.
@@ -71,6 +75,7 @@ class HandInput:
         transport_only: `(kind, group, column)` to why the column is on one transport only
             in that group.
         venues: The futures venues folded into a flat-file prefix's `{venue}` template.
+        ignored_keys: The undeclared keys the decoders drop without reporting drift.
     """
 
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
@@ -86,6 +91,12 @@ class HandInput:
     )
     key_fixes: Mapping[tuple[str, str], overrides.KeyFix] = field(
         default_factory=lambda: overrides.KEY_FIXES
+    )
+    undeclared_fields: Mapping[tuple[str, str], overrides.UndeclaredField] = field(
+        default_factory=lambda: overrides.UNDECLARED_FIELDS
+    )
+    optional_fields: Mapping[tuple[str, str], str] = field(
+        default_factory=lambda: overrides.OPTIONAL_FIELDS
     )
     description_fixes: Mapping[tuple[str, str], overrides.DescriptionFix] = field(
         default_factory=lambda: overrides.DESCRIPTION_FIXES
@@ -110,3 +121,4 @@ class HandInput:
         default_factory=lambda: overrides.TRANSPORT_ONLY
     )
     venues: Mapping[str, str] = field(default_factory=lambda: overrides.VENUES)
+    ignored_keys: Sequence[IgnoredKey] = field(default_factory=lambda: exclusions.IGNORED_KEYS)

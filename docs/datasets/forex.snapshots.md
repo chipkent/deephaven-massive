@@ -37,6 +37,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST |
 | `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST |
 | `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST |
+| `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST |
 | `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. | REST |
 | `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST |
@@ -47,6 +48,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST |
 | `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST |
 | `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST |
+| `LastMinuteVwap` | double | The volume weighted average price. From the `min` object: The most recent minute bar for this ticker. | REST |
 | `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST |
 | `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST |
 | `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST |
@@ -73,6 +75,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `DayLow` | `day.l` |
 | `DayClose` | `day.c` |
 | `DayVolume` | `day.v` |
+| `DayVwap` | `day.vw` |
 | `Fmv` | `fmv` |
 | `LastQuoteBidPrice` | `lastQuote.b` |
 | `LastQuoteAskPrice` | `lastQuote.a` |
@@ -83,6 +86,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `LastMinuteLow` | `min.l` |
 | `LastMinuteClose` | `min.c` |
 | `LastMinuteVolume` | `min.v` |
+| `LastMinuteVwap` | `min.vw` |
 | `LastMinuteTransactions` | `min.n` |
 | `LastMinuteWindowStart` | `min.t` |
 | `PrevDayOpen` | `prevDay.o` |

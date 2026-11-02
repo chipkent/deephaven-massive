@@ -241,6 +241,13 @@ def test_a_repeated_field_is_rejected(fields: tuple[Field, ...], message: str) -
         Source(key="T", transport=Transport.WS, fields=fields)
 
 
+def test_an_ignored_key_cannot_be_a_field() -> None:
+    with pytest.raises(ValueError, match=r"source 'T': ignored keys that are fields \['p'\]"):
+        Source(key="T", transport=Transport.WS, fields=(_price(),), ignored_keys=frozenset("pq"))
+    kept = Source(key="T", transport=Transport.WS, fields=(_price(),), ignored_keys=frozenset("q"))
+    assert kept.ignored_keys == {"q"}
+
+
 def test_a_repeated_membership_is_rejected() -> None:
     memberships = (
         Membership(kind="trades", group="stocks", position=0),

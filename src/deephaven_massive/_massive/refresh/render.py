@@ -7,7 +7,8 @@ leaves each file byte for byte as it was, and the parity test can compare the co
 with a fresh rendering. All are JSON with one line per field, parameter, and membership, so a
 refresh diff shows each changed field as one changed line. `rest.json` holds the REST paths
 with their result keys and parameters; `ws.json` the WebSocket channels and `flatfiles.json`
-the flat-file prefixes, each with only its key, fields, and memberships.
+the flat-file prefixes, each with only its key, fields, and memberships. A source whose
+undeclared keys the decoders drop without reporting (`Source.ignored_keys`) also lists them.
 
 The field descriptions go in `descriptions.json` alone, never in a schema file: they change
 far more often than the schema, and a refresh that only rewords them must leave the schema
@@ -271,10 +272,27 @@ def render_sources(sources: Sequence[Source]) -> str:
         sources: The generated sources of one transport.
 
     Returns:
-        The file's text, `{"generated_by", "sources": [{"key", "fields", "memberships"}]}`,
+        The file's text, `{"generated_by", "sources": [{"key", "fields", "memberships"}]}`, a
+        source with ignored keys also `"ignored_keys"`,
         ending in a newline.
     """
     return _render([[] for _ in sources], sources)
+
+
+def _ignored(source: Source) -> list[str]:
+    """Return the line of a source's ignored keys, or none when it has none.
+
+    Most sources ignore no key, so the member is written only where it says something.
+
+    Args:
+        source: The source.
+
+    Returns:
+        The `"ignored_keys"` line, its keys sorted, or an empty list.
+    """
+    if not source.ignored_keys:
+        return []
+    return [f'   "ignored_keys": {json.dumps(sorted(source.ignored_keys))},']
 
 
 def _render(extras: Sequence[Sequence[str]], sources: Sequence[Source]) -> str:
@@ -297,6 +315,7 @@ def _render(extras: Sequence[Sequence[str]], sources: Sequence[Source]) -> str:
             "  {",
             f'   "key": {json.dumps(source.key)},',
             *extra,
+            *_ignored(source),
             *_list("fields", [_line(_field_json(f)) for f in source.fields]),
             *_list(
                 "memberships", [_line(_membership_json(m)) for m in source.memberships], last=True

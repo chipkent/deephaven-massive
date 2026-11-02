@@ -67,11 +67,13 @@ class Gate(StrEnum):
     `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`."""
     STALE_ENTRY = "stale-entry"
     """A hand entry (a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-    `KEY_FIXES`, `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, or
-    `SAMPLE_ERRORS` entry) naming a path, field, parameter, or sample the snapshot no longer
-    has, or claiming what the snapshot contradicts (a `TYPE_FIXES` entry no documented sample
-    needs any more, a `KEY_FIXES` entry whose key the example no longer sends, or a
-    `DESCRIPTION_FIXES` entry quoting a description the vendor no longer gives, among them)."""
+    `KEY_FIXES`, `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
+    `PARAM_UNITS`, `EXCLUSIONS`, `SAMPLE_ERRORS`, or `IGNORED_KEYS` entry) naming a path,
+    field, parameter, or sample the snapshot no longer has, or claiming what the snapshot
+    contradicts (a `TYPE_FIXES` entry no documented sample needs any more, a `KEY_FIXES` entry
+    whose key the example no longer sends, an `UNDECLARED_FIELDS` or `IGNORED_KEYS` entry for a
+    key the source now declares, or a `DESCRIPTION_FIXES` entry quoting a description the
+    vendor no longer gives, among them)."""
     TYPE_AGREEMENT = "type-agreement"
     """Within one of `overrides.KINDS`, one column whose `WireType`s do not join: the type
     lattice joins `long` with `double` to `double`, `long` with `long-array` to `long-array`,
@@ -282,7 +284,8 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
 
     The entries checked here are those whose staleness shows only once every source of every
     transport has run: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES` (by the
-    declared key), `SAMPLE_ERRORS`, lexicon `SHAPES`, `PARAM_UNITS`, `IDENTITY`, and
+    declared key), `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `SAMPLE_ERRORS`, `IGNORED_KEYS`
+    (also when the source declares the key), lexicon `SHAPES`, `PARAM_UNITS`, `IDENTITY`, and
     `RESULT_KEYS`; `unused_description_fixes` checks `DESCRIPTION_FIXES`. An entry the
     snapshot contradicts on a field it does generate is reported by the generator that meets
     the field.
@@ -300,6 +303,8 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
         ("TAG_CONFLICTS", hand.tag_conflicts),
         ("TYPE_FIXES", hand.type_fixes),
         ("KEY_FIXES", hand.key_fixes),
+        ("UNDECLARED_FIELDS", hand.undeclared_fields),
+        ("OPTIONAL_FIELDS", hand.optional_fields),
         ("SAMPLE_ERRORS", [(e.path, e.wire_key) for e in hand.sample_errors]),
     ]
     for table, keys in field_tables:
@@ -312,6 +317,7 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
                     key=wire_key,
                     message=f"{table} entry for a field the snapshot does not generate",
                 )
+    yield from _stale_ignored_keys(hand, uses)
     for path, prefix in hand.shapes:
         use = uses.get(path)
         if use is None or prefix not in use.objects:
@@ -345,6 +351,28 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
                 source=path,
                 key="",
                 message="RESULT_KEYS entry for a path the snapshot does not generate",
+            )
+
+
+def _stale_ignored_keys(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
+    """Report the `IGNORED_KEYS` entries for a source not generated or a key it declares.
+
+    Args:
+        hand: The hand input.
+        uses: What each generated source consumed.
+
+    Yields:
+        One `stale-entry` problem per stale entry.
+    """
+    for entry in hand.ignored_keys:
+        use = uses.get(entry.source)
+        if use is None or entry.wire_key in use.wire_keys:
+            what = "a source the snapshot does not generate" if use is None else "a declared key"
+            yield Problem(
+                gate=Gate.STALE_ENTRY,
+                source=entry.source,
+                key=entry.wire_key,
+                message=f"IGNORED_KEYS entry for {what}",
             )
 
 
@@ -389,8 +417,10 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
     two fixes written separately are judged separately, however alike. A conversion that only
     retypes values its declared type accepts (`iso-text-instant`) is exempt: it is needed for
     as long as the specification declares the type, and the declared-type check retires it
-    once that changes. A field that was not generated with its conversion (it stopped on
-    another problem, or the entry is already stale) is left to the check that reported it.
+    once that changes. So is a fix whose evidence is a live response (`TypeFix.observed_live`):
+    no documented sample shows its form, so none can retire it. A field that was not generated
+    with its conversion (it stopped on another problem, or the entry is already stale) is left
+    to the check that reported it.
 
     Args:
         hand: The hand input.
@@ -403,7 +433,7 @@ def unneeded_type_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterato
     for key, fix in hand.type_fixes.items():
         decisions.setdefault(id(fix), (fix, []))[1].append(key)
     for fix, keys in decisions.values():
-        if not fix.conversion.widens:
+        if not fix.conversion.widens or fix.observed_live:
             continue
         generated = [(p, k) for p, k in keys if p in uses and k in uses[p].converted]
         if any(k in uses[p].needed_conversions for p, k in generated):

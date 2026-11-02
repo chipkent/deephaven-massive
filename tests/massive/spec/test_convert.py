@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
+from types import NoneType
 
 import pytest
 
@@ -184,6 +185,11 @@ _CONVERSIONS = [
     (Conversion.CHICAGO_MIDNIGHT_DATE, "2026-12-18", date(2026, 12, 18)),
     (Conversion.INTEGER_AS_NUMBER, 951.6112, 951.6112),  # a crypto volume
     (Conversion.INTEGER_AS_NUMBER, 91, 91.0),
+    (Conversion.DECIMAL_TEXT_NUMBER, "7676.5", 7676.5),  # a futures price sent as text
+    (Conversion.DECIMAL_TEXT_NUMBER, "7679", 7679.0),
+    (Conversion.DECIMAL_TEXT_NUMBER, "-0.25", -0.25),
+    (Conversion.DECIMAL_TEXT_NUMBER, 7676.5, 7676.5),  # the declared form
+    (Conversion.DECIMAL_TEXT_NUMBER, 91, 91.0),
 ]
 
 
@@ -205,6 +211,21 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.QUOTED_INTEGER, True),
         (Conversion.INTEGER_AS_NUMBER, "1.5"),
         (Conversion.INTEGER_AS_NUMBER, True),
+        # Text Python's `float` reads but that is no plain decimal.
+        (Conversion.DECIMAL_TEXT_NUMBER, "1e5"),
+        (Conversion.DECIMAL_TEXT_NUMBER, "NaN"),
+        (Conversion.DECIMAL_TEXT_NUMBER, "inf"),
+        (Conversion.DECIMAL_TEXT_NUMBER, " 1.5"),
+        (Conversion.DECIMAL_TEXT_NUMBER, "+1.5"),
+        (Conversion.DECIMAL_TEXT_NUMBER, "1_000"),
+        (Conversion.DECIMAL_TEXT_NUMBER, ".5"),
+        (Conversion.DECIMAL_TEXT_NUMBER, "5."),
+        (Conversion.DECIMAL_TEXT_NUMBER, "\u0667"),  # an Arabic-Indic digit seven
+        (Conversion.DECIMAL_TEXT_NUMBER, ""),
+        (Conversion.DECIMAL_TEXT_NUMBER, "9" * 400),  # beyond a finite double
+        (Conversion.DECIMAL_TEXT_NUMBER, 10**400),
+        (Conversion.DECIMAL_TEXT_NUMBER, True),
+        (Conversion.DECIMAL_TEXT_NUMBER, [1.5]),
         (Conversion.QUOTED_INTEGER, str(2**63)),
         (Conversion.TEXT_OR_INTEGER_ID, 7.5),
         (Conversion.TEXT_OR_INTEGER_ID, True),
@@ -256,6 +277,8 @@ _SAMPLES = {
     (Conversion.MIDNIGHT_UTC_DATE, WireType.DATE): "2023-03-10T00:00:00Z",
     (Conversion.CHICAGO_MIDNIGHT_DATE, WireType.DATE): 1_753_851_600_000_000_000,
     (Conversion.INTEGER_AS_NUMBER, WireType.LONG): 951.6112,
+    (Conversion.DECIMAL_TEXT_NUMBER, WireType.DOUBLE): "7676.5",
+    (Conversion.DECIMAL_TEXT_NUMBER, WireType.LONG): "7676.5",
 }
 
 
@@ -352,6 +375,9 @@ _POOL: tuple[object, ...] = (
     "AAPL",
     "48",
     "4.8",
+    "-7676.25",
+    "1e5",
+    "9" * 400,  # a decimal beyond a finite double
     "12,37",
     "2025-03-03",
     "2025-02-30",
@@ -424,3 +450,32 @@ def test_a_column_left_to_arrow_keeps_its_numbers_unchecked() -> None:
     lists: list[object] = [[1, 2**63], None]
     assert column_converter(codes, arrow_checks_numbers=True)(lists) is lists
     assert column_converter(codes)(lists) is None
+
+
+def test_a_column_of_decimal_texts_reads_in_one_pass() -> None:
+    # The futures stream's prices, as Massive sent them on 2026-11-02, with a null between.
+    price = _field(WireType.DOUBLE, Conversion.DECIMAL_TEXT_NUMBER)
+    read = column_converter(price)
+    assert _typed(read(["7676.5", None, "7679"])) == [
+        (float, 7676.5),
+        (NoneType, None),
+        (float, 7679.0),
+    ]
+    assert _typed(read(["7676.25", "7676.5"])) == [(float, 7676.25), (float, 7676.5)]
+    # One text that is no plain decimal, or too large, sends the column to the rows.
+    assert read(["7676.5", "1e5"]) is None
+    assert read(["7676.5", "9" * 400]) is None
+    # Numbers read as a `double` column reads them, kept when already floats.
+    floats: list[object] = [7676.5, None]
+    assert read(floats) is floats
+    assert _typed(read([7679, 1.5])) == [(float, 7679.0), (float, 1.5)]
+    # Text and numbers in one column are read value by value, to the same result.
+    assert _typed(read(["7676.5", 7679])) == [(float, 7676.5), (float, 7679.0)]
+
+
+def test_a_decimal_text_column_left_to_arrow_keeps_its_numbers() -> None:
+    price = _field(WireType.DOUBLE, Conversion.DECIMAL_TEXT_NUMBER)
+    mixed: list[object] = [7679, 1.5, None]
+    assert column_converter(price, arrow_checks_numbers=True)(mixed) is mixed
+    # Text still becomes floats here: Arrow would not read it as a double.
+    assert column_converter(price, arrow_checks_numbers=True)(["7676.5"]) == [7676.5]

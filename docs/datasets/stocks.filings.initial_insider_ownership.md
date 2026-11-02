@@ -64,6 +64,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Tickers` | String[] | A list of ticker symbols for the issuer company. Multiple symbols may indicate different share classes. | REST |
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative holdings. | REST |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative holdings. | REST |
+| `IssuerTradingSymbol` | String | The issuer's trading symbol, as the filing reports it. | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
 
 <details><summary>Massive fields</summary>
@@ -101,6 +102,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `Tickers` | `tickers` |
 | `UnderlyingSecurityShares` | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | `underlying_security_title` |
+| `IssuerTradingSymbol` | `issuer_trading_symbol` |
 | `TimestampInsert` |  |
 
 </details>
