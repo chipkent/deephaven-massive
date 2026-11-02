@@ -769,6 +769,22 @@ def test_an_anchor_and_an_alias_are_refused(tmp_path: Path) -> None:
     assert message == ", line 2, column 14: an alias (*name) is not allowed; write the value out"
 
 
+def test_deep_nesting_is_refused_at_its_line_instead_of_overflowing_the_stack(
+    tmp_path: Path,
+) -> None:
+    # Thousands of levels would exhaust Python's recursion limit inside PyYAML's composer.
+    flow = "max_outage: " + "[" * 5000 + "]" * 5000 + "\n"
+    assert _refused(tmp_path, flow) == (
+        ", line 1, column 22: lists and mappings nest more than 10 deep here; a setting needs "
+        "two levels at most"
+    )
+    block = "".join(f"{'  ' * level}k:\n" for level in range(3000))
+    assert _refused(tmp_path, block).startswith(", line 11, column 21: lists and mappings nest")
+    # Ten levels, the top mapping's included, are composed and refused by the setting itself.
+    shallow = "max_outage: " + "[" * 9 + "]" * 9 + "\n"
+    assert _refused(tmp_path, shallow).startswith(", line 1, column 13: max_outage must be")
+
+
 def test_a_duplicate_key_is_refused(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_outage: 300\nmax_concurrency: 2\nmax_outage: 600\n")
     assert message == (

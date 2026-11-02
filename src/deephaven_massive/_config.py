@@ -407,14 +407,14 @@ class MassiveConfig:
                 blank (or has surrounding whitespace); if the file is not UTF-8 or not valid
                 YAML; if it holds more than one document, a top level that is not a mapping
                 (an empty file included), a duplicate key, a tag (`!!python/...` or any
-                other), an anchor or alias, a credential (the message names the environment
-                variable to use and never shows the value), or an unknown setting (the
-                message suggests the closest name, and shows at most the key's first 40
-                characters); if a value is empty or cannot be converted; or if the constructor
-                refuses a value. Each message names the file, and the setting and its line and
-                column where known, except one about an environment variable (a credential
-                with surrounding whitespace, or one S3 credential without the other), which
-                names the variable instead.
+                other), an anchor or alias, lists and mappings nested more than 10 deep, a
+                credential (the message names the environment variable to use and never
+                shows the value), or an unknown setting (the message suggests the closest
+                name, and shows at most the key's first 40 characters); if a value is empty
+                or cannot be converted; or if the constructor refuses a value. Each message
+                names the file, and the setting and its line and column where known, except
+                one about an environment variable (a credential with surrounding whitespace,
+                or one S3 credential without the other), which names the variable instead.
             FileNotFoundError: If the file does not exist; the message names it, and the
                 environment variable when the path came from there.
             OSError: If the file exists but cannot be read.
@@ -874,15 +874,31 @@ def _place(file: Path, position: _Position | None) -> str:
     return f"settings file {file}, line {position.line + 1}, column {position.column + 1}"
 
 
+_NESTING_LIMIT: Final = 10
+"""The deepest a settings file's lists and mappings may nest. A setting needs two levels at
+most (the top-level mapping, and the `ws_hosts` mapping or a subscriptions list in it);
+PyYAML composes nested nodes by recursion, so a file nested hundreds deep would otherwise end
+in a `RecursionError` instead of a message naming the line."""
+
+
 class _SettingsLoader(yaml.BaseLoader):
-    """PyYAML's pure-Python base loader, refusing tags, anchors, and aliases.
+    """PyYAML's pure-Python base loader, refusing tags, anchors, aliases, and deep nesting.
 
     The base loader resolves no implicit types, so every scalar is text: `ON`, `NO`, `Y`,
     `off`, and `0700` stay as written instead of becoming booleans or numbers. It is pure
     Python, so it neither depends on libyaml nor builds any object a tag names. The settings
     file is read only as a node tree (`compose_document`), never constructed, so the nodes
-    keep their positions for messages.
+    keep their positions for messages. One loader reads one file, on the calling thread.
     """
+
+    def __init__(self, text: str) -> None:
+        """Prepare to read one file's text.
+
+        Args:
+            text: The file's content.
+        """
+        super().__init__(text)
+        self._depth = 0
 
     @override
     def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node | None:
@@ -897,10 +913,17 @@ class _SettingsLoader(yaml.BaseLoader):
 
         Raises:
             _SettingsFileError: If the node is an alias (`*name`), defines an anchor
-                (`&name`), or carries an explicit tag (`!name`, `!!python/object`, ...).
+                (`&name`), carries an explicit tag (`!name`, `!!python/object`, ...), or is
+                a list or mapping nested deeper than `_NESTING_LIMIT`.
         """
         peek: Callable[[], yaml.Event] = self.peek_event  # PyYAML's stubs leave it untyped
         event = peek()
+        if isinstance(event, yaml.CollectionStartEvent) and self._depth >= _NESTING_LIMIT:
+            raise _SettingsFileError(
+                f"lists and mappings nest more than {_NESTING_LIMIT} deep here; a setting "
+                "needs two levels at most",
+                event.start_mark,
+            )
         if isinstance(event, yaml.AliasEvent):
             raise _SettingsFileError(
                 "an alias (*name) is not allowed; write the value out", event.start_mark
@@ -914,7 +937,11 @@ class _SettingsLoader(yaml.BaseLoader):
             raise _SettingsFileError(
                 f"a tag ({event.tag}) is not allowed; write the plain value", event.start_mark
             )
-        return super().compose_node(parent, index)
+        self._depth += 1
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._depth -= 1
 
 
 def _compose(text: str) -> yaml.MappingNode:
