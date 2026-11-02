@@ -248,10 +248,10 @@ _CHAIN_PAGE: Final = 250
 
 
 def _contract_of(row: dict[str, Any]) -> str:
-    """Return the ticker of an option chain row, or `""` when it names none.
+    """Return the contract a snapshot row names, or `""` when it names none.
 
     Args:
-        row: A row of the chain snapshot.
+        row: A row of SPY's option chain or of the futures snapshot.
 
     Returns:
         Its `details.ticker`, or `""`.
@@ -344,32 +344,74 @@ def _currencies_plan(client: RestClient) -> str:
     return "business" if _has_fmv(rows) else "starter"
 
 
-def _futures_plan(client: RestClient) -> str:
-    """Probe the Futures plan: one ES contract's snapshot (Starter) and its trades (Developer).
+_FUTURES_PAGE: Final = 50
+"""How many ES contracts of the futures snapshot the probe reads to find the front one."""
 
-    Developer and Advanced both include trades and quotes, and Business per venue leaves no
-    mark a request can see, so every plan above Starter reads as Developer: the futures tests
-    need nothing above it.
+
+def _recency_labels(row: dict[str, Any]) -> set[str]:
+    """Return the recency labels a futures snapshot row carries.
+
+    Massive labels a contract's last trade, last quote, and last minute bar with the plan's
+    recency (`timeframe`: `REAL-TIME` or `DELAYED`); a contract that has not traded carries
+    none.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its labels, such as `{"DELAYED"}`; empty when it carries none.
+    """
+    parts = (row.get(key) for key in ("last_trade", "last_quote", "last_minute"))
+    return {
+        str(part["timeframe"]) for part in parts if isinstance(part, dict) and part.get("timeframe")
+    }
+
+
+def _session_volume(row: dict[str, Any]) -> float:
+    """Return the session's volume of a futures snapshot row, 0 when it has none.
+
+    Args:
+        row: A row of the futures snapshot.
+
+    Returns:
+        Its `session.volume`.
+    """
+    session = row.get("session")
+    volume = session.get("volume") if isinstance(session, dict) else None
+    return float(volume) if isinstance(volume, int | float) else 0.0
+
+
+def _futures_plan(client: RestClient) -> str:
+    """Probe the Futures plan: the ES snapshot (Starter), its front contract's trades and label.
+
+    The front contract is the labelled ES contract (`_recency_labels`) with the most volume
+    this session. Its trades answer from Developer up, and its recency label tells a delayed
+    plan (Developer) from a real-time one: `REAL-TIME` reads as Advanced. Futures Business,
+    sold per venue, leaves no other mark a request can see, so it reads as Advanced too.
 
     Args:
         client: The probe's REST client.
 
     Returns:
-        `"basic"`, `"starter"`, or `"developer"`.
+        `"basic"`, `"starter"`, `"developer"`, or `"advanced"`.
 
     Raises:
-        PlanProbeError: When the snapshot's row names no contract to ask for trades.
+        PlanProbeError: When no row of the snapshot names a contract with a recency label.
     """
-    rows = entitled(client, ("/futures/v1/snapshot", {}, {"product_code": "ES", "limit": 1}))
+    rows = entitled(
+        client, ("/futures/v1/snapshot", {}, {"product_code": "ES", "limit": _FUTURES_PAGE})
+    )
     if rows is None:
         return "basic"
-    tickers = [row.get("ticker") or (row.get("details") or {}).get("ticker") for row in rows]
-    contracts = [str(ticker) for ticker in tickers if ticker]
-    if not contracts:
-        msg = f"the ES snapshot names no contract: {rows}"
+    labelled = [row for row in rows if _contract_of(row) and _recency_labels(row)]
+    if not labelled:
+        msg = f"the ES snapshot names no contract with a recency label: {rows[:3]}"
         raise PlanProbeError(msg)
-    trades = ("/futures/v1/trades/{ticker}", {"ticker": contracts[0]}, {"limit": 1})
-    return "developer" if entitled(client, trades, rows_prove=False) is not None else "starter"
+    front = max(labelled, key=_session_volume)
+    trades = ("/futures/v1/trades/{ticker}", {"ticker": _contract_of(front)}, {"limit": 1})
+    if entitled(client, trades, rows_prove=False) is None:
+        return "starter"
+    return "advanced" if "REAL-TIME" in _recency_labels(front) else "developer"
 
 
 PLAN_PROBES: Final[Mapping[str, Callable[[RestClient], str]]] = {

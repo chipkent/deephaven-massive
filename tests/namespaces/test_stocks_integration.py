@@ -16,7 +16,7 @@ import os
 import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -476,6 +476,12 @@ def test_stock_day_bar_stamps_of_the_day_file(
     assert all(files.values()), f"the day file lacks a stamp day: {files}"
 
 
+_DIVIDEND_TRIES: Final = 3
+"""How many `stock_dividend` events the dividend check tries for one whose ticker has day
+bars: one request for the events, one per try, and one for the as-traded bars keep it within
+the five requests a minute of Stocks Basic."""
+
+
 def _days(
     session: dm.MassiveSession,
     symbol: str,
@@ -594,7 +600,7 @@ def test_cash_dividends_are_never_adjusted(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("56")
-@pytest.mark.requests(3)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_stock_dividend_events_and_the_adjustment(
     live_session: dm.MassiveSession,
@@ -605,10 +611,13 @@ def test_stock_dividend_events_and_the_adjustment(
 ) -> None:
     """Whether `adjusted=true` applies a `stock_dividend` event of the splits dataset.
 
-    Finds the most recent `stock_dividend` event of the year ending with the most recent whole
-    month and records its ticker's day bars on both bases across its execution date. Reading
-    it: prices before the date that differ by the event's factor mean such events are adjusted
-    like splits; equal prices mean they are not, and the README's recipe should skip them.
+    Walks the most recent `stock_dividend` events of the year ending with the most recent whole
+    month, newest first, until one's ticker has day bars around its execution date (many such
+    tickers are thinly traded or delisted), at most `_DIVIDEND_TRIES` of them, and records that
+    ticker's day bars on both bases across the date. Skips as not exercised when none has bars.
+    Reading it: prices before the date that differ by the event's factor mean such events are
+    adjusted like splits; equal prices mean they are not, and the README's recipe should skip
+    them.
     """
     start, end = _year_before(recent_month)
     events = table_rows(
@@ -618,24 +627,30 @@ def test_stock_dividend_events_and_the_adjustment(
             sort="execution_date",
             order=dm.Order.DESC,
             filters={"adjustment_type": "stock_dividend"},
-            limit=1,
+            limit=_DIVIDEND_TRIES,
         ).fetch()
     )
-    evidence(f"a stock_dividend event: {events[:1]}")
-    if not events:
-        pytest.skip(f"no stock_dividend event from {start} to {end}")
-    event = events[0]
-    day = date.fromisoformat(str(event["ExecutionDate"]))
-    first, last = day - timedelta(days=7), day + timedelta(days=3)
-    symbol = str(event["Symbol"])
-    adjusted = _days(live_session, symbol, span=(first, last), adjusted=True, table_rows=table_rows)
-    traded = _days(live_session, symbol, span=(first, last), adjusted=False, table_rows=table_rows)
+    evidence(f"stock_dividend events: {[(e['Symbol'], e['ExecutionDate']) for e in events]}")
+    for event in events:
+        day = date.fromisoformat(str(event["ExecutionDate"]))
+        span = (day - timedelta(days=7), day + timedelta(days=3))
+        symbol = str(event["Symbol"])
+        adjusted = _days(live_session, symbol, span=span, adjusted=True, table_rows=table_rows)
+        if adjusted:
+            break
+        evidence(f"{symbol} has no day bar from {span[0]} to {span[1]}")
+    else:
+        pytest.skip(
+            f"not exercised: none of {len(events)} stock_dividend events from {start} to {end} "
+            "has day bars around its date"
+        )
+    traded = _days(live_session, symbol, span=span, adjusted=False, table_rows=table_rows)
     for row_day in sorted(adjusted):
         evidence(
             f"{symbol} {row_day}: adjusted close={adjusted[row_day]['Close']} "
             f"traded close={traded.get(row_day, {}).get('Close')}"
         )
-    assert adjusted
+    assert traded, f"{symbol} has adjusted day bars but no as-traded ones"
 
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")

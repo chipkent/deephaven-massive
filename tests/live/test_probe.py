@@ -88,7 +88,10 @@ def _script(server: FakeRestServer, held: dict[str, str]) -> None:
         "/v2/snapshot/locale/global/markets/forex/tickers",
         snapshot("currencies", "tickers", {"ticker": "C:EURUSD"}),
     )
-    futures = Reply(envelope([{"details": {"ticker": "ESZ6"}}]))
+    timeframe = "REAL-TIME" if held["futures"] in {"advanced", "business"} else "DELAYED"
+    futures = Reply(
+        envelope([{"details": {"ticker": "ESZ6"}, "last_trade": {"timeframe": timeframe}}])
+    )
     server.reply("/futures/v1/snapshot", _REFUSED if held["futures"] == "basic" else futures)
     server.reply("/futures/v1/trades/ESZ6", answer("futures", 1))
 
@@ -102,8 +105,7 @@ def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
 
 
 _READ_AS = {
-    ("futures", "advanced"): "developer",
-    ("futures", "business"): "developer",
+    ("futures", "business"): "advanced",
     ("indices", "business"): "advanced",
     ("stocks", "business_expansion"): "business",
     ("options", "business_expansion"): "business",
@@ -332,3 +334,37 @@ def test_the_options_probe_asks_about_the_busiest_contract(
     assert probe.probe_tiers(client, now=_NOON)["options"] == "developer"
     asked = [r.target for r in fake_rest.requests if r.target.startswith("/v3/snapshot/options")]
     assert asked == ["/v3/snapshot/options/SPY?limit=250"]
+
+
+def test_the_futures_probe_reads_the_front_contracts_trades_and_label(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "basic"))
+    snapshot = [
+        {"details": {"ticker": "ESM7"}, "session": {"volume": 2_000_000}},
+        {"details": {"ticker": "ESH7"}, "last_quote": {"timeframe": "REAL-TIME"}, "session": {}},
+        {
+            "details": {"ticker": "ESZ6"},
+            "last_trade": {},
+            "last_minute": {"timeframe": "REAL-TIME"},
+            "session": {"volume": 1_500_000},
+        },
+        {"last_trade": {"timeframe": "REAL-TIME"}, "session": {"volume": 9_000_000}},
+    ]
+    fake_rest.reply_first("/futures/v1/snapshot", Reply(envelope(snapshot)))
+    # Only the front contract has trades scripted: asking about another one would answer 404.
+    fake_rest.reply_first("/futures/v1/trades/ESZ6", _OK)
+    assert probe.probe_tiers(client, now=_NOON)["futures"] == "advanced"
+    asked = [r.target for r in fake_rest.requests if r.target.startswith("/futures/v1/snapshot")]
+    assert asked == ["/futures/v1/snapshot?product_code=ES&limit=50"]
+
+
+def test_a_futures_snapshot_without_a_recency_label_stops_the_probe(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "starter"))
+    fake_rest.reply_first(
+        "/futures/v1/snapshot", Reply(envelope([{"details": {"ticker": "ESZ6"}, "session": {}}]))
+    )
+    with pytest.raises(probe.PlanProbeError, match="no contract with a recency label"):
+        probe.probe_tiers(client, now=_NOON)

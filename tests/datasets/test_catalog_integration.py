@@ -48,7 +48,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._enums import ClassFromPrefix
-from deephaven_massive._massive import RestClient, Transport, source
+from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
 from tests._live import streams
 
@@ -244,13 +244,16 @@ def _plan(name: str, spec: DatasetSpec, verb: str, *, flat_files: bool = False) 
         flat_files: Whether the refusal came from the S3 flat files rather than REST.
 
     Returns:
-        Such as `"a Stocks plan with WebSocket access"`, or `"a Stocks plan with flat-file
-        access"` for a `history()` the flat files refused.
+        Such as `"a Stocks plan with WebSocket access"`, `"a Stocks plan with flat-file
+        access"` for a `history()` the flat files refused, or `"the Imbalances Expansion
+        add-on"` for the imbalances stream, which no Stocks plan includes without it.
     """
     if name.startswith("partners."):
         return f"the {name.split('.')[1]} partner add-on"
     if name.endswith(".fmv"):
         return "a Business plan (FMV)"
+    if name == "stocks.imbalances":
+        return "the Imbalances Expansion add-on"
     subscription = _subscription(spec)
     plan = "a plan" if subscription is None else _PLAN_NAMES[subscription]
     if verb == "stream":
@@ -259,15 +262,16 @@ def _plan(name: str, spec: DatasetSpec, verb: str, *, flat_files: bool = False) 
 
 
 def _option(client: RestClient) -> str:
-    """Return the AAPL call nearest the money a month or more out, looked up once per run.
+    """Return the busiest AAPL option near the money at the front expiration, looked up once.
 
-    Reads AAPL's previous close (its `previous_day_bar`), then the listed calls expiring 30
-    days or more from now with a strike within 10% of that close, and takes, at the nearest of
-    those expirations, the strike nearest the close: the contract most likely to trade while
-    a stream case listens.
+    Reads AAPL's previous close (its `previous_day_bar`), then the chain snapshot of the
+    contracts expiring after today with a strike within 5% of that close, and takes, at the
+    nearest of those expirations, the contract with the most volume today: the one most
+    likely to trade while a stream case listens. A key whose Options plan has no snapshot
+    (Basic) gets the listed call at that expiration with the strike nearest the close instead.
 
     Returns:
-        Its OCC symbol, such as `"O:AAPL261218C00200000"`.
+        Its OCC symbol, such as `"O:AAPL261106C00270000"`.
     """
     if "options" not in _FOUND:
         bars = client.get(
@@ -278,29 +282,47 @@ def _option(client: RestClient) -> str:
         ).rows
         assert bars, "no previous AAPL bar"
         close = float(str(bars[0]["c"]))
-        later = datetime.now(UTC).date() + timedelta(days=30)
-        rows = client.get(
-            source(Transport.REST, "/v3/reference/options/contracts"),
-            {},
-            {
-                "underlying_ticker": "AAPL",
-                "contract_type": "call",
-                "expiration_date.gte": later,
-                "strike_price.gte": round(close * 0.9, 2),
-                "strike_price.lte": round(close * 1.1, 2),
-                "sort": "expiration_date",
-                "order": "asc",
-                "limit": 250,
-            },
-            bucket="options",
-        ).rows
-        assert rows, f"no listed AAPL call near {close}"
-        expiry = min(str(r["expiration_date"]) for r in rows)
-        nearest = min(
-            (r for r in rows if str(r["expiration_date"]) == expiry),
-            key=lambda r: abs(float(str(r["strike_price"])) - close),
-        )
-        _FOUND["options"] = str(nearest["ticker"])
+        window = {
+            "expiration_date.gt": datetime.now(UTC).date(),
+            "strike_price.gte": round(close * 0.95, 2),
+            "strike_price.lte": round(close * 1.05, 2),
+            "sort": "expiration_date",
+            "order": "asc",
+            "limit": 250,
+        }
+        try:
+            chain = client.get(
+                source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}"),
+                {"underlyingAsset": "AAPL"},
+                window,
+                bucket="options",
+            ).rows
+        except WireEntitlementError:
+            listed = client.get(
+                source(Transport.REST, "/v3/reference/options/contracts"),
+                {},
+                {**window, "underlying_ticker": "AAPL", "contract_type": "call"},
+                bucket="options",
+            ).rows
+            assert listed, f"no listed AAPL call near {close}"
+            expiry = min(str(r["expiration_date"]) for r in listed)
+            nearest = min(
+                (r for r in listed if str(r["expiration_date"]) == expiry),
+                key=lambda r: abs(float(str(r["strike_price"])) - close),
+            )
+            _FOUND["options"] = str(nearest["ticker"])
+        else:
+            assert chain, f"no AAPL option near {close} in the chain snapshot"
+            contracts = [
+                (cast("dict[str, Any]", r["details"]), cast("dict[str, Any]", r.get("day") or {}))
+                for r in chain
+            ]
+            expiry = min(str(details["expiration_date"]) for details, _ in contracts)
+            busiest, _ = max(
+                (c for c in contracts if str(c[0]["expiration_date"]) == expiry),
+                key=lambda c: float(c[1].get("volume") or 0),
+            )
+            _FOUND["options"] = str(busiest["ticker"])
     return _FOUND["options"]
 
 
