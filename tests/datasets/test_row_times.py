@@ -790,7 +790,7 @@ def test_known_stamps_move_to_the_days_start_and_log_nothing(
     assert not caplog.records
 
 
-def test_an_unexpected_stamp_is_kept_as_sent_with_one_warning_per_dataset(
+def test_an_unexpected_stamp_is_kept_as_sent_with_one_warning_per_form(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     log = session_warnings()
@@ -805,48 +805,72 @@ def test_an_unexpected_stamp_is_kept_as_sent_with_one_warning_per_dataset(
     saturday = datetime(2025, 3, 1, tzinfo=NEW_YORK)
     with caplog.at_level(logging.WARNING):
         moved = stamped(rule, [close, odd, None])
-        # The same dataset warns once per session, whatever the stamp, timespan, or source.
+        # The same time of day on another day, from another source, is the same form: no
+        # second WARNING.
         stamped(rule, [odd + timedelta(days=1)])
+        # A week on a Saturday is another form of the same dataset, and warns.
         assert stamped(week, [saturday]) == [saturday]
-        # Another dataset warns again: a Saturday is not the Sunday a week starts on.
+        # So does the same stamp of another dataset.
         assert stamped(week, [saturday], label="options.bars") == [saturday]
     assert moved == [datetime(2024, 11, 27, tzinfo=NEW_YORK), odd, None]
+    served = (
+        "The library cannot tell which day it covers, so the row is served as sent: "
+        "TimestampStart is Massive's stamp, TimestampEnd that stamp plus {period} (no earlier "
+        "than the end of any such period that holds the stamp), and Date is left empty; "
+        "history() returns such a row only when its range holds that whole window. Please "
+        f"report the stamp at {ISSUES_URL} so the day cut can be settled (logged once per "
+        "dataset, bar length, and time of day of the stamp per session)"
+    )
+    week_text = (
+        "a bar of AAPL from s is stamped 2025-03-01T05:00:00+00:00 (2025-03-01T00:00:00-05:00 "
+        "in America/New_York), which is not a stamp Massive is known to use for such a bar "
+        "(00:00:00.000 in America/New_York, on a Sunday). " + served.format(period="2 weeks")
+    )
     assert stamp_warnings(caplog) == [
-        (
-            "stocks.bars: a 1-day bar of AAPL from s is stamped 2024-11-29T19:30:00+00:00 "
-            "(2024-11-29T14:30:00-05:00 in America/New_York), which is not a stamp Massive is "
-            "known to use for such a bar (00:00:00.000, 13:00:00.000, 16:00:00.000 in "
-            "America/New_York). The library cannot tell which day it covers, so the row is "
-            "served as sent: TimestampStart is Massive's stamp, TimestampEnd that stamp plus 1 "
-            "day (no earlier than the end of any such period that holds the stamp), and Date "
-            "is left empty; history() returns such a row only when its range holds that whole "
-            f"window. Please report the stamp at {ISSUES_URL} so the day cut can be settled "
-            "(logged once per dataset per session)"
-        ),
-        (
-            "options.bars: a bar of AAPL from s is stamped 2025-03-01T05:00:00+00:00 "
-            "(2025-03-01T00:00:00-05:00 in America/New_York), which is not a stamp Massive is "
-            "known to use for such a bar (00:00:00.000 in America/New_York, on a Sunday). The "
-            "library cannot tell which day it covers, so the row is served as sent: "
-            "TimestampStart is Massive's stamp, TimestampEnd that stamp plus 2 weeks (no "
-            "earlier than the end of any such period that holds the stamp), and Date is left "
-            "empty; history() returns such a row only when its range holds that whole window. "
-            f"Please report the stamp at {ISSUES_URL} so the day cut can be settled (logged "
-            "once per dataset per session)"
-        ),
+        "stocks.bars: a 1-day bar of AAPL from s is stamped 2024-11-29T19:30:00+00:00 "
+        "(2024-11-29T14:30:00-05:00 in America/New_York), which is not a stamp Massive is "
+        "known to use for such a bar (00:00:00.000, 13:00:00.000, 16:00:00.000 in "
+        "America/New_York). " + served.format(period="1 day"),
+        f"stocks.bars: {week_text}",
+        f"options.bars: {week_text}",
     ]
 
 
-def test_a_utc_warning_names_the_stamp_once_and_an_indicator_value() -> None:
+def test_each_distinct_odd_stamp_of_a_batch_warns() -> None:
+    # A 22:00 day bar and a 14:30 one in the same batch are two forms: both warn, each naming
+    # its own symbol.
     log = Mock(spec=BoundedLog)
-    rule = StampRule(UTC, frozenset({LAST_MS}), "indicator value", T.DAY, 1, log)
-    stamped(rule, [MARCH_3 + 5 * HOUR_NS], label="indicators.sma")
-    key, message, *args = log.log.call_args.args
-    text = message % tuple(args)
-    assert key == "unexpected bar stamp indicators.sma"
-    assert text.startswith("indicators.sma: an indicator value of AAPL from s is stamped ")
-    assert "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp" in text
-    assert "(00:00:00.000, 23:59:59.999 in UTC)" in text
+    rule = StampRule(NEW_YORK, frozenset({CLOSE}), "1-day bar", T.DAY, 1, log)
+    late = instant_ns(datetime(2025, 3, 3, 22, tzinfo=NEW_YORK))
+    afternoon = instant_ns(datetime(2025, 3, 4, 14, 30, tzinfo=NEW_YORK))
+    rows = pa.RecordBatch.from_pydict(
+        {"Symbol": ["A", "B", "C"], START: pa.array([late, afternoon, late], INSTANT)}
+    )
+    rule.stamp("stocks.bars", rows, source="s")
+    keys = [call.args[0] for call in log.log.call_args_list]
+    assert keys == [
+        "unexpected bar stamp stocks.bars America/New_York 1 day 22:00:00.000",
+        "unexpected bar stamp stocks.bars America/New_York 1 day 14:30:00.000",
+    ]
+    symbols = [call.args[5] for call in log.log.call_args_list]
+    assert symbols == ["A", "B"]
+    # A week bar's form holds its weekday, a month bar's its day of the month.
+    week = StampRule(UTC, frozenset(), "bar", T.WEEK, 1, log, weekdays=frozenset({6}))
+    week.stamp(
+        "crypto.bars", rows.set_column(1, START, stamps(MARCH_3, MARCH_3, MARCH_3)), source="s"
+    )
+    assert (
+        log.log.call_args.args[0]
+        == "unexpected bar stamp crypto.bars UTC 1 week 00:00:00.000 Monday"
+    )
+    month = StampRule(UTC, frozenset(), "bar", T.MONTH, 2, log, months=frozenset({1}))
+    month.stamp(
+        "crypto.bars", rows.set_column(1, START, stamps(MARCH_3, MARCH_3, MARCH_3)), source="s"
+    )
+    assert (
+        log.log.call_args.args[0]
+        == "unexpected bar stamp crypto.bars UTC 2 month 00:00:00.000 day 3"
+    )
 
 
 def test_every_batch_with_a_kept_stamp_logs_its_count_at_debug(

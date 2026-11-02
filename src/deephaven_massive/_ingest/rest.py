@@ -30,8 +30,8 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
   are stamped at 00:00 of their day in the class day zone, and every bar is served: a stamp
-  Massive is not known to use is kept as sent and logs one WARNING per dataset per session
-  (`row_times.stamp_rule`, `StampRule.stamp`).
+  Massive is not known to use is kept as sent and logs one WARNING per form of stamp per
+  session (`row_times.stamp_rule`, `StampRule.stamp`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -738,7 +738,7 @@ class RestReader:
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None. Bars of a day or longer
                 move to 00:00 of their day in the class day zone, and a stamp Massive is not
-                known to use is kept as sent and logs one WARNING per dataset per session
+                known to use is kept as sent and logs one WARNING per form of stamp per session
                 (`row_times.stamp_rule`).
             current: True for a `fetch()` or `poll()` of current data (`_read_planned`), whose
                 pages are checked for a `DELAYED` label (`_check_recency`); False, the default,
@@ -861,7 +861,7 @@ class RestReader:
         Each page of current data is checked for a `DELAYED` label (`_check_recency`), each
         page against the requested adjustment basis (`_check_adjusted`), its bars of a day or
         longer are stamped (`StampRule.stamp`; a stamp Massive is not known to use is kept as
-        sent and logs one WARNING per dataset per session), its rows outside the
+        sent and logs one WARNING per form of stamp per session), its rows outside the
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
@@ -1993,12 +1993,11 @@ class RestEndpoints:
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`keep_window`), bars of a day or longer are stamped at 00:00 of their day in the
         class day zone (`StampRule.stamp`, `row_times.day_starts`; a stamp Massive is not known
-        to use is kept as sent and logs one WARNING per dataset per session), and every row gets
-        the library's
-        time columns. A symbol with no data adds no rows. Before the first request, one INFO
-        line announces a long download (`rate_limits.announce`): a grouped-daily or
-        per-session download of more than five requests, and any read whose paced requests
-        cannot all start within a minute, with the least time it takes. Logs
+        to use is kept as sent and logs one WARNING per form of stamp per session), and every
+        row gets the library's time columns. A symbol with no data adds no rows. Before the
+        first request, one INFO line announces a long download (`rate_limits.announce`): a
+        grouped-daily or per-session download of more than five requests, and any read whose
+        paced requests cannot all start within a minute, with the least time it takes. Logs
         `source=REST requests=<n>` at INFO.
 
         Args:

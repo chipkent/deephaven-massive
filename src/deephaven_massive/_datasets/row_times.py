@@ -79,9 +79,9 @@ is not known to use for the class and timespan is served as Massive sent it: whi
 covers would be a guess, and a wrong guess could end the window before the data closed, a
 look-ahead. So the row keeps the stamp as `TimestampStart`, has a null `Date`, and ends at the
 stamp plus its period, no earlier than the end of any period that starts on or before the stamp
-and contains it; it logs one WARNING per dataset per session that names the symbol and the stamp
-and asks for it to be reported. `stamp_rule` decides which stamps each class is known to use;
-the transports apply it through `StampRule.stamp`, and `TimeRule` asks it again
+and contains it; it logs one WARNING per form of stamp per session that names the symbol and
+the stamp and asks for it to be reported. `stamp_rule` decides which stamps each class is
+known to use; the transports apply it through `StampRule.stamp`, and `TimeRule` asks it again
 (`StampRule.expects`) which stamps were kept as sent.
 
 **Zones.** Day boundaries are computed with `zoneinfo`, once per distinct UTC day of a batch
@@ -1071,10 +1071,12 @@ class StampRule:
 
         A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
         or `months` rules out, is kept as Massive sent it (`TimeRule` then ends the bar at the
-        stamp plus its period and leaves its `Date` null), and logs one WARNING per dataset per
-        session through `warnings`. The WARNING names the dataset, the source, the first such
-        row's symbol and stamp, and the stamps expected; says how the row is served and that
-        its `Date` is left empty; and asks for the stamp to be reported at `ISSUES_URL`.
+        stamp plus its period and leaves its `Date` null), and logs one WARNING per form of
+        stamp per session through `warnings` (`_warn`). The WARNING names the dataset, the
+        source, the symbol and the stamp, and the stamps expected; says how the row is served
+        and that its `Date` is left empty; and asks for the stamp to be reported at
+        `ISSUES_URL`. Each batch with such a stamp logs one DEBUG line with how many rows it
+        kept so.
 
         Args:
             label: The dataset, for the WARNING, such as `"stocks.bars"`.
@@ -1091,13 +1093,9 @@ class StampRule:
             values, zone=self.zone, known=self.known, weekdays=self.weekdays, months=self.months
         )
         if pc.any(odd).as_py():
+            ns = _to_int(values)
+            symbols = _column(rows, "Symbol")
             first = pc.index(odd, True).as_py()
-            stamp = epoch_instant(_to_int(values)[first].as_py())
-            zone = self.zone
-            local = "" if zone is UTC else f" ({stamp.astimezone(zone).isoformat()} in {zone})"
-            article = "an" if self.what[:1] in "aeiou" else "a"
-            unit = self.timespan.value if self.multiplier == 1 else f"{self.timespan.value}s"
-            symbol = _column(rows, "Symbol")[first].as_py()
             logger.debug(
                 "%s: %d of %d rows from %s kept at Massive's stamp, which it is not known to use "
                 "for a %d-%s bar; the first, of %s, at %s",
@@ -1107,31 +1105,59 @@ class StampRule:
                 source,
                 self.multiplier,
                 self.timespan.value,
-                symbol,
-                stamp.isoformat(),
+                symbols[first].as_py(),
+                epoch_instant(ns[first].as_py()).isoformat(),
             )
-            self.warnings.log(
-                f"unexpected bar stamp {label}",
-                "%s: %s %s of %s from %s is stamped %s%s, which is not a stamp Massive is known "
-                "to use for such a bar (%s). The library cannot tell which day it covers, so "
-                "the row is served as sent: TimestampStart is Massive's stamp, TimestampEnd "
-                "that stamp plus %d %s (no earlier than the end of any such period that holds "
-                "the stamp), and Date is left empty; history() returns such a row only when its "
-                "range holds that whole window. Please report the stamp at %s so the day cut can "
-                "be settled (logged once per dataset per session)",
-                label,
-                article,
-                self.what,
-                symbol,
-                source,
-                stamp.isoformat(),
-                local,
-                _expected(zone, self.known, weekdays=self.weekdays, months=self.months),
-                self.multiplier,
-                unit,
-                ISSUES_URL,
-            )
+            for value in pc.unique(pc.filter(ns, odd)).to_pylist():
+                row = pc.index(ns, value).as_py()
+                self._warn(label, epoch_instant(value), symbols[row].as_py(), source=source)
         return _set(rows, START, starts)
+
+    def _warn(self, label: str, stamp: datetime, symbol: str | None, *, source: str) -> None:
+        """Log the WARNING of one stamp kept as sent, once per form of stamp per session.
+
+        A form is the dataset, the zone, the bar length, and the stamp's wall-clock time of day
+        in `zone`, with its weekday for week bars and its day of the month for month, quarter,
+        and year bars: each distinct odd stamp warns once, and a form Massive repeats every day
+        does not warn again.
+
+        Args:
+            label: The dataset, such as `"stocks.bars"`.
+            stamp: The stamp, an aware UTC `datetime`.
+            symbol: The symbol of the first row with that stamp, or None when it is unreadable.
+            source: Where the bars came from: a REST path template or a flat-file prefix.
+        """
+        zone = self.zone
+        local_stamp = stamp.astimezone(zone)
+        form = local_stamp.time().isoformat("milliseconds")
+        if self.weekdays:
+            form += f" {_WEEKDAY_NAMES[local_stamp.weekday()]}"
+        if self.months:
+            form += f" day {local_stamp.day}"
+        local = "" if zone is UTC else f" ({local_stamp.isoformat()} in {zone})"
+        article = "an" if self.what[:1] in "aeiou" else "a"
+        unit = self.timespan.value if self.multiplier == 1 else f"{self.timespan.value}s"
+        self.warnings.log(
+            f"unexpected bar stamp {label} {zone} {self.multiplier} {self.timespan.value} {form}",
+            "%s: %s %s of %s from %s is stamped %s%s, which is not a stamp Massive is known to "
+            "use for such a bar (%s). The library cannot tell which day it covers, so the row is "
+            "served as sent: TimestampStart is Massive's stamp, TimestampEnd that stamp plus %d "
+            "%s (no earlier than the end of any such period that holds the stamp), and Date is "
+            "left empty; history() returns such a row only when its range holds that whole "
+            "window. Please report the stamp at %s so the day cut can be settled (logged once "
+            "per dataset, bar length, and time of day of the stamp per session)",
+            label,
+            article,
+            self.what,
+            symbol,
+            source,
+            stamp.isoformat(),
+            local,
+            _expected(zone, self.known, weekdays=self.weekdays, months=self.months),
+            self.multiplier,
+            unit,
+            ISSUES_URL,
+        )
 
 
 _SESSION_CLOSE: Final = time(16)
@@ -1214,7 +1240,7 @@ def stamp_rule(
     midnight in Chicago; those stamps move to the day's start. Massive is known to stamp a
     week, month, quarter, or year bar on the day its period starts (a week's Sunday, a longer
     period's 1st). Every other stamp is served too, kept as Massive sent it, and logs one
-    WARNING per dataset per session (`StampRule.stamp`): such a bar may cover other days than
+    WARNING per form of stamp per session (`StampRule.stamp`): such a bar may cover other days than
     the one its stamp falls on (the documented crypto REST samples sit at midnight New York
     time, another day cut), so its row ends at the stamp plus its period and has no `Date`
     (`TimeRule`).

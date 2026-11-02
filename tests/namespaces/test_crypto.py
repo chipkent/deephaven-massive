@@ -724,7 +724,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
     )
     caplog.clear()
     # The grouped-daily samples sit at no day boundary at all: each bar ends a day after its
-    # stamp, after the range's one day, so the range holds neither; the first stamp warns.
+    # stamp, after the range's one day, so the range holds neither; each time of day warns.
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
     every = rows(
@@ -733,9 +733,10 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
         )
     )
     assert every == []
-    [warning] = stamp_warnings(caplog)
+    warnings = stamp_warnings(caplog)
+    assert len(warnings) == 2
     assert "/v2/aggs/grouped/locale/global/market/crypto/{date} is stamped 2020-02-02T20:48" in (
-        warning
+        "".join(warnings)
     )
 
 

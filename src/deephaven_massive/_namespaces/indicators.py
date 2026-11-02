@@ -256,7 +256,9 @@ class _Indicators(Namespace):
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
         See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
         value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`.
+        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
+        keeps the first unfinished value it sees and never receives the finished one, so the
+        filter drops that period for good; `poll()` in its default mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -327,7 +329,9 @@ class _Indicators(Namespace):
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
         See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
         value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`.
+        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
+        keeps the first unfinished value it sees and never receives the finished one, so the
+        filter drops that period for good; `poll()` in its default mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -397,7 +401,9 @@ class _Indicators(Namespace):
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
         See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
         value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`.
+        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
+        keeps the first unfinished value it sees and never receives the finished one, so the
+        filter drops that period for good; `poll()` in its default mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
@@ -471,7 +477,9 @@ class _Indicators(Namespace):
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
         See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
         value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`.
+        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
+        keeps the first unfinished value it sees and never receives the finished one, so the
+        filter drops that period for good; `poll()` in its default mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.

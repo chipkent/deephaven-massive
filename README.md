@@ -426,7 +426,11 @@ and the trade count. These rules hold for every `bars()` dataset.
   before its window ended (today's bar from `fetch()`, an indicator's latest value) has
   `TimestampInsert` before `TimestampEnd` and can still change:
   `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window
-  ended.
+  ended. Two cases need care. A futures bar of several sessions or longer, read before its
+  last session, passes once its latest session so far has ended, though later sessions can
+  still join it. A `poll(mode=dm.PollMode.APPEND)` table of indicators keeps the first
+  unfinished value it sees and never receives the finished one, so the filter drops that
+  period for good: `poll()` in its default mode holds the updated value.
 - **`Date`** is the bar's trading day. It is null for a bar that spans more than one date: a
   bar of several days, a week or longer, or an intraday bar across midnight.
 - **Which bars `history()` returns.** Only bars whose whole window lies inside the range and has
@@ -439,7 +443,7 @@ and the trade count. These rules hold for every `bars()` dataset.
   does not expect, such as a daily bar at 14:30, could cover that day or the next, so it is
   served as Massive stamped it: `TimestampStart` is the stamp, `TimestampEnd` one period later
   (no earlier than the end of any such period that holds the stamp), and `Date` is empty, with
-  one WARNING per dataset. `history()` returns such a bar only when the range holds that whole window, so it may need a
+  one WARNING for each time of day such stamps take. `history()` returns such a bar only when the range holds that whole window, so it may need a
   range one period longer. Please report the WARNING on the
   [issues page](https://github.com/chipkent/deephaven-massive/issues). A crypto
   `daily_open_close` row that Massive marks as not UTC keeps its `Date`, but its window is the

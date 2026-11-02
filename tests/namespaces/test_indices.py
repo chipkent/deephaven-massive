@@ -710,14 +710,20 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
     assert not stamp_warnings(caplog)
     # A week bar at the close, or a day bar at 02:00, may be another cut: each keeps its stamp
-    # and ends a period later, past these ranges, so neither range holds it; the dataset
-    # warns once per session, at the first.
+    # and ends a period later, past these ranges, so neither range holds it; each warns once.
     assert rows(week.history(first, last, source=dm.HistorySource.REST)) == []
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
     assert rows(q.history(day, day, source=dm.HistorySource.REST)) == []
-    [warning] = stamp_warnings(caplog)
-    assert warning.startswith("indices.bars: a bar of I:SPX from ")
-    assert " is stamped 2025-06-01T20:00:00+00:00 " in warning
+    week_warning, day_warning = stamp_warnings(caplog)
+    assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
+    assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
+    assert day_warning.startswith(
+        "indices.bars: a 1-day bar of I:SPX from /v2/aggs/ticker/{indicesTicker}/range/"
+    )
+    assert (
+        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T02:00:00-04:00 in America/New_York), "
+        "which is not a stamp Massive is known to use"
+    ) in day_warning
 
 
 @pytest.mark.parametrize(("minutes", "kept"), [(30, 0), (60, 1)], ids=["00:30", "01:00"])

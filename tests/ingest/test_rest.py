@@ -3191,11 +3191,14 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     ]
     assert not unexpected_stamps(caplog)
     # A week bar stamped on another day may cover another week: it keeps its stamp and ends
-    # a week later, after the range, so this range does not hold it; its WARNING is logged
-    # once per dataset per session, and the two-day bar above already logged it.
+    # a week later, after the range, so this range does not hold it; its form warns.
     out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     assert out == []
-    assert not unexpected_stamps(caplog)
+    [warning] = unexpected_stamps(caplog)
+    assert (
+        "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
+        "such a bar (00:00:00.000 in UTC, on a Sunday)"
+    ) in warning
     caplog.clear()
 
     # A month bar must be stamped on its 1st.
@@ -3216,6 +3219,9 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     # A month bar stamped on the 2nd ends on April 2, after the range.
     out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     assert out == []
+    [warning] = unexpected_stamps(caplog)
+    assert "is stamped 2025-03-02T00:00:00+00:00" in warning
+    assert "on the 1st of a month)" in warning
 
 
 def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(

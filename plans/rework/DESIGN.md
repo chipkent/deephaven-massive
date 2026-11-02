@@ -1778,8 +1778,8 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   [section 12](#12-timestamp-units-and-day-boundaries): `TimestampStart` at 00:00 of the day in
   the class day zone, whatever `/prev` stamps, `TimestampEnd` 00:00 of the next day (01:00 New
   York time for indices); a stamp at a time of day Massive is not known to use is served as
-  sent, with `TimestampEnd` a day later and a null `Date`, and logs one WARNING per dataset per
-  session (decision 81). Stock and
+  sent, with `TimestampEnd` a day later and a null `Date`, and logs one WARNING per form of
+  stamp per session (decision 81). Stock and
   option bars are split-adjusted unless `adjusted=False`, and every page's `adjusted` echo is
   checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, which
   the caller never passes, so the repr is the call alone: `m.stocks.previous_day_bar('AAPL')`.
@@ -2054,7 +2054,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `trades(symbols)` | StreamHistoryQuery | `XT` | history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `last_trade(symbols)` | Query | | `/v1/last/crypto/{from}/{to}` per pair | |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, kept at its stamp with a null `Date` and an end a period later, and logs one WARNING per dataset per session naming the symbol and the stamp (decision 81); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, kept at its stamp with a null `Date` and an end a period later, and logs one WARNING per form of stamp per session naming the symbol and the stamp (decision 81); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{X:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
@@ -2128,7 +2128,7 @@ for stocks and 01:00 for indices. So a value of a day or longer is checked by th
 for its symbols' class (`row_times.stamp_rule` with the class): 00:00 in the day zone, or
 the indices' 01:00, on its period's first day. A value at any other stamp is served too, as
 sent: it keeps the stamp, ends one period later, has a null `Date`, and logs one WARNING per
-dataset per session naming the dataset, the path, the symbol, and the stamp (decision 81);
+form of stamp per session naming the dataset, the path, the symbol, and the stamp (decision 81);
 [section 23](#23-open-verification-items) item 61 checks it live.
 
 `fetch()` and `poll()` return what Massive reports now, the current period's value included,
@@ -2920,8 +2920,10 @@ covers would be a guess, and a wrong guess could put `TimestampEnd` before the d
 look-ahead. The row keeps Massive's stamp as `TimestampStart`, has a null `Date`, and ends at
 the stamp plus its period on the zone's wall clock (`row_times._plus_period`; a month's 31st
 with no twin moves to the next month's 1st), which is no earlier than the end of any such
-period that starts at or before the stamp and holds it. It logs one WARNING per dataset per
-session (the session's once-per-session warnings) naming the dataset, the source, the symbol,
+period that starts at or before the stamp and holds it. It logs one WARNING per form of stamp
+per session (the session's once-per-session warnings; a form is the dataset, the zone, the bar
+length, and the stamp's time of day, with its weekday for week bars and its day of the month
+for longer ones, so each distinct odd stamp warns and a daily repeat does not) naming the dataset, the source, the symbol,
 the stamp, and the stamps expected, saying how the row is served and that `Date` is left empty,
 and pointing to the project's issues page. `history()` keeps such a row by the whole-window
 rule like any other, so a range must hold its whole conservative window: a 1-day bar stamped
@@ -2995,7 +2997,9 @@ first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `Timestam
   the bar, and Massive may correct a bar afterwards. Bars have no plain `Timestamp`. A row
   read before its window ended has `TimestampInsert` before `TimestampEnd` and can still
   change, so `t.where("TimestampEnd <= TimestampInsert")` keeps only rows read after their
-  window ended; every `TimestampEnd` description says so (decision 82). The test is exact by
+  window ended; every `TimestampEnd` description says so (decision 82). A
+  `poll(mode=APPEND)` table of indicators keeps the first unfinished value it sees and never
+  receives the finished one, so the filter drops that period for good. The test is exact by
   the library's windows except where it reads the local clock (which can be off), for a row
   read within moments of its end or from a delayed feed (Massive's value may still lack the
   window's last trades), and for a futures bar of several sessions or longer read before its
@@ -3972,7 +3976,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Day stamps.** Bars of a day or longer from `/prev`, the range, and grouped daily, of every
   class but futures, start at 00:00 of their day in the class day zone: every known stamp is
   moved there, and one Massive is not known to use for the class is kept as sent and logs one
-  WARNING per dataset per session naming the path, the symbol, and the stamp
+  WARNING per form of stamp per session naming the path, the symbol, and the stamp
   ([section 12](#12-timestamp-units-and-day-boundaries), decisions 70 and 81). Bars are stamped before
   `keep_window` drops the rows outside the window, so an unknown stamp outside it still warns.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
@@ -7397,8 +7401,12 @@ document already reflects them.
     moved to 00:00 of the day it falls on, which guessed the day and, when the guess was wrong,
     could end the window before the data closed, a look-ahead. It keeps the stamp as
     `TimestampStart`, has a null `Date`, and ends at the stamp plus its period, a conservative
-    end. One WARNING per dataset per session names the dataset, the source, the symbol, the raw
-    stamp, the known stamps, and that `Date` is left empty. A crypto `daily_open_close` row whose
+    end. One WARNING per form of stamp per session (the dataset, zone, bar length, and the
+    stamp's time of day, weekday, or day of the month) names the dataset, the source, the
+    symbol, the raw stamp, the known stamps, and that `Date` is left empty. Keeping such a stamp
+    fails and skips nothing: the row is supplied with Massive's stamp and a null `Date`, so it
+    is not a one-bad-row failure and needs no `OnError` setting; the WARNING is right. A crypto
+    summary not in UTC follows the same rule of keeping Massive's data rather than guessing. A crypto `daily_open_close` row whose
     `isUTC` is false keeps Massive's date and `IsUtc`, and its window is the widest its date has
     in any time zone, 00:00 at UTC+14 to 24:00 at UTC-12, with the same kind of WARNING. Known
     stamps still move to 00:00. The bars stay served (decision 70); `history()` keeps them by
@@ -7425,7 +7433,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, is served at its own stamp with a null `Date` and an end a period later, with one WARNING per dataset per session (decision 81). `AUTO` picks the source as for every dataset, so the stamp rule alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all warn, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time are served at their stamps with one WARNING | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
+| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, is served at its own stamp with a null `Date` and an end a period later, with one WARNING per form of stamp per session (decision 81). `AUTO` picks the source as for every dataset, so the stamp rule alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all warn, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time are served at their stamps with one WARNING | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; on a mismatch the overflow check and the [1990, 2100] bound drop every row and the page raises `RowDataError` | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path is masked | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | The magnitude rule (unit `MS_OR_NS`, written by the spec refresh), as for items 21 and 22; the unit found is logged once per column | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
