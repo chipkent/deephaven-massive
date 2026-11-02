@@ -1358,21 +1358,20 @@ class HistoryQuery(QueryBase):
 
         Dates (`"2025-03-03"`, a `date`, `dh_today()`) are whole days in the asset class's time
         zone, both ends included; aware datetimes and instants are exact, the end excluded
-        (README.md#start-and-end). A bar is returned only when its whole window lies in the
-        range and has ended (README.md#bars). Rows come from REST or the flat files; under
-        `AUTO`, the days whose flat files are missing, and files the plan lacks, are read
-        from REST, so the call fails only when no source can serve it
-        (README.md#history-sources). The table's description names the source and why. A
-        static symbol table is read once, now. A refreshing one is followed: the result is a
-        refreshing table that holds, for each symbol now in the table, the complete rows of
-        its latest read over this call's range (fixed now, so `end=None` means through this
-        instant), landing whole in one update; a symbol removed from the table leaves the
-        result in the same update. `AUTO` then reads REST whenever REST can serve the request.
-        A failure of one symbol leaves the others: a 404 gives it no rows, a failure that may
-        pass is retried 1, 5, and 15 minutes later, and any other fails it; `m.symbol_reads()`
-        shows each symbol's state. A bar with an unexpected stamp is served, with a WARNING,
-        never refused. History is past data, so `MassiveConfig.delayed_subscriptions` does not
-        affect it (README.md#real-time-or-delayed).
+        (README.md#start-and-end). A bar is returned only when its whole window lies in the range
+        and has ended (README.md#bars). Rows come from REST or the flat files; under `AUTO`, the
+        days whose flat files are missing, and files the plan lacks, are read from REST, so the call
+        fails only when no source can serve it (README.md#history-sources). The table's description
+        names the source and why. A static symbol table is read once, now. A refreshing one is
+        followed: the result is a refreshing table that holds, for each symbol now in the table, the
+        complete rows of its latest read over this call's range (fixed now, so `end=None` means
+        through this instant), landing whole in one update; a symbol removed from the table leaves
+        the result in the same update. `AUTO` then reads REST whenever REST can serve the request. A
+        failure of one symbol leaves the others: a 404 gives it no rows, a failure that may pass is
+        retried 1, 5, and 15 minutes later, and any other fails it; `m.symbol_reads()` shows each
+        symbol's state (README.md#history-of-a-watchlist). A bar with an unexpected stamp is served,
+        with a WARNING, never refused. History is past data, so
+        `MassiveConfig.delayed_subscriptions` does not affect it (README.md#real-time-or-delayed).
 
         Args:
             start: The first day, or the first instant included (`DateLike`).

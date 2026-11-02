@@ -57,9 +57,16 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher
 from deephaven_massive._tables.session_core import SessionCore
-from deephaven_massive._tables.transports import FlatFileRead
+from deephaven_massive._tables.transports import (
+    FailureKind,
+    FlatFileRead,
+    SymbolFailure,
+    SymbolOutcome,
+    SymbolRows,
+)
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.stream import FakeStreamTransport
 
 if TYPE_CHECKING:
@@ -184,6 +191,12 @@ class Recorder:
         self.call_ids: list[int] = []
         # The request checks a background read made on the calling thread.
         self.checks: list[tuple[str, DatasetSpec, Request]] = []
+        # Each read by symbol (a followed history()): its symbols, window, and thread.
+        self.by_symbol: list[tuple[tuple[str, ...], HistoryWindow, str]] = []
+        # The outcome of a symbol's read by symbol, by symbol; rows of none otherwise.
+        self.outcomes: dict[str, SymbolOutcome] = {}
+        # Raised by every read by symbol, when set: a failure of every symbol alike.
+        self.raises: BaseException | None = None
         self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
@@ -227,6 +240,24 @@ class Recorder:
         extra = {} if stop is None else {"stop": stop}
         return self._record("history", spec, request, window=window, dates=dates, **extra)
 
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        del request, stop
+        self.call_ids.append(call)
+        self.by_symbol.append((tuple(symbols), window, threading.current_thread().name))
+        if self.raises is not None:
+            raise self.raises
+        empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
+        return {name: self.outcomes.get(name, SymbolRows(empty)) for name in symbols}
+
 
 class FlatFiles:
     # Stands in for the flat-file transport: a recorder's table as one part, and the days the
@@ -254,6 +285,23 @@ class FlatFiles:
         self.inferred.append(infer_holidays)
         table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
         return FlatFileRead(((date.min, table),), table, self.unread)
+
+    def history_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        dates: Sequence[date],
+        call: int,
+        forced: bool,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        del dates, forced
+        return self.recorder.history_by_symbol(
+            spec, request, window, symbols=symbols, call=call, stop=stop
+        )
 
     def read_history(
         self,
@@ -1996,3 +2044,304 @@ def test_flat_files_are_a_history_source() -> None:
 def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
     # Every bars spec, whatever its transports; each call picks its own class.
     assert {query_class(STOCK_BARS), query_class(FUTURES_BARS)} == {HistoryQuery}
+
+
+# --- history() of a refreshing symbol table ---------------------------------------------------
+
+
+def live(*symbols: str) -> Table:
+    # A refreshing, keyed watchlist holding the symbols.
+    table = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    if symbols:
+        table.add(new_table([string_col("Symbol", list(symbols))]))
+    return table
+
+
+def follows(m: dm.MassiveSession) -> None:
+    # Waits until no followed read of the session is left: its coordinator has ended.
+    pause = threading.Event()
+    for _ in range(int(TIMEOUT / 0.01)):
+        if m._core.follows.thread is None:
+            return
+        pause.wait(0.01)
+    raise AssertionError("a followed read kept running")
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    pause = threading.Event()
+    for _ in range(int(TIMEOUT / 0.01)):
+        if condition():
+            return
+        pause.wait(0.01)
+    assert condition()
+
+
+def test_history_follows_a_refreshing_table_from_rest_under_auto(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(
+        s3_session._core, "flat_file_transport", lambda: FlatFiles(flat, s3_session._core)
+    )
+    many = [f"S{i:02d}" for i in range(60)]  # past the flat-file threshold of a static call
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=live(*many))
+    assert isinstance(q, HistoryQuery)
+    result = q.history("2025-03-03", "2025-03-03")
+    assert result.is_refreshing
+    assert flat.by_symbol == []
+    assert [names for names, _, _ in rest.by_symbol] == [tuple(many)]  # the call's own read
+    assert result.attributes()["TableDescription"].endswith(
+        "Follows its symbol table over 2025-03-03 through 2025-03-03. Read from REST: AUTO "
+        "reads a followed symbol table from REST, which can serve it."
+    )
+    s3_session.release(result)
+    few = make(s3_session, TRADES_FILES_SPEC, symbols=live("AAPL", "MSFT", "NVDA"))
+    assert isinstance(few, HistoryQuery)
+    s3_session.release(few.history("2025-03-03", "2025-03-03"))
+    assert [names for names, _, _ in rest.by_symbol][1] == ("AAPL", "MSFT", "NVDA")
+    assert flat.by_symbol == []
+    follows(s3_session)
+
+
+def test_history_follows_from_flat_files_when_rest_cannot_serve(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flat = Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(
+        s3_session._core, "flat_file_transport", lambda: FlatFiles(flat, s3_session._core)
+    )
+    q = make(s3_session, VALUES_SPEC, symbols=live("I:SPX"))
+    assert isinstance(q, HistoryQuery)
+    result = q.history("2025-03-03", "2025-03-03", wait=False)
+    _until(lambda: [names for names, _, _ in flat.by_symbol] == [("I:SPX",)])
+    assert result.attributes()["TableDescription"].endswith(
+        "Read from flat files: AUTO reads a followed symbol table from flat files, since "
+        "indices.values has no REST history."
+    )
+    s3_session.release(result)
+    follows(s3_session)
+
+
+def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flat = Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(
+        s3_session._core, "flat_file_transport", lambda: FlatFiles(flat, s3_session._core)
+    )
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=live("AAPL", "MSFT"))
+    assert isinstance(q, HistoryQuery)
+    result = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert [names for names, _, _ in flat.by_symbol] == [("AAPL", "MSFT")]
+    assert (
+        "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES."
+        in (result.attributes()["TableDescription"])
+    )
+    s3_session.release(result)
+    follows(s3_session)
+
+
+def test_history_forced_to_rest_follows_from_rest(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    result = trades(massive_session, live("AAPL")).history(
+        "2025-03-03", "2025-03-03", source=HistorySource.REST
+    )
+    assert (
+        "Read from REST: requested with source=dm.HistorySource.REST."
+        in (result.attributes()["TableDescription"])
+    )
+    assert rest.checks == [("history", TRADES_SPEC, rest.checks[0][2])]  # checked at the call
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_an_added_symbol_is_read_over_the_call_s_window(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    watchlist = live("AAPL")
+    result = trades(massive_session, watchlist).history("2025-03-03")  # through the call instant
+    cast("Any", watchlist).add(new_table([string_col("Symbol", ["MSFT"])]))
+    _until(lambda: len(rest.by_symbol) == 2)
+    (first, window, caller), (added, later, reader) = rest.by_symbol
+    assert (first, added) == (("AAPL",), ("MSFT",))
+    assert later is window  # the same window, fixed at the call: the same end and cutoff
+    assert caller == threading.current_thread().name
+    assert "follow-read" in reader
+    end = window.now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert f"over 2025-03-03 through {end}." in result.attributes()["TableDescription"]
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_an_instant_range_prints_its_instants(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    start = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
+    end = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    result = trades(massive_session, live("AAPL")).history(start, end, wait=False)
+    assert (
+        "over 2025-03-03T14:30:00Z through 2025-03-03T15:00:00Z."
+        in (result.attributes()["TableDescription"])
+    )
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_wait_false_returns_at_once_and_reads_in_the_background(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    result = trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03", wait=False)
+    assert result.is_refreshing
+    _until(lambda: len(rest.by_symbol) == 1)
+    assert "follow-read" in rest.by_symbol[0][2]
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_an_empty_refreshing_table_returns_an_empty_following_result(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    result = trades(massive_session, live()).history("2025-03-03", "2025-03-03")
+    assert result.is_refreshing
+    assert result.size == 0
+    assert rest.by_symbol == []
+    assert rest.checks == []  # with no symbol, the first read checks the parameters
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_wait_true_raises_when_every_call_time_symbol_fails(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    refusal = dm.EntitlementError("HTTP 403: not in the plan")
+    rest.outcomes = {
+        "AAPL": SymbolFailure(refusal, FailureKind.PERMANENT),
+        "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other"), FailureKind.PERMANENT),
+    }
+    with pytest.raises(dm.EntitlementError, match="not in the plan"):
+        trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
+    assert massive_session._core._workers == {}
+    rest.outcomes = {}
+    rest.raises = dm.AuthenticationError("HTTP 401: wrong key")  # the read fails as a unit
+    with pytest.raises(dm.AuthenticationError, match="wrong key"):
+        trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03")
+    follows(massive_session)
+
+
+def test_wait_true_warns_once_when_some_call_time_symbols_fail(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rest.outcomes = {
+        "MSFT": SymbolFailure(
+            dm.EntitlementError("HTTP 403: not in the plan"), FailureKind.PERMANENT
+        )
+    }
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+        result = trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
+    assert caplog.messages == [
+        (
+            "stocks.trades history: 1 of the 2 symbols of the call failed and are left out of the "
+            "result for now; m.symbol_reads() shows each one (retrying, or failed): "
+            "MSFT: HTTP 403: not in the plan"
+        )
+    ]
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_reread_is_ignored_for_a_static_symbol_table(
+    *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    static = new_table([string_col("Symbol", ["AAPL"])])
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+        result = trades(massive_session, static).history(
+            "2025-03-03", "2025-03-03", reread=dm.Reread.NEVER
+        )
+    assert not result.is_refreshing
+    assert rest.by_symbol == []
+    assert any(
+        "history('2025-03-03', '2025-03-03', source=<HistorySource.AUTO: 'auto'>, "
+        "reread=<Reread.NEVER: 'never'>)" in message
+        for message in caplog.messages
+    )
+
+
+def test_a_static_call_logs_its_start_as_before(
+    *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+        trades(massive_session).history("2025-03-03", "2025-03-03")
+    starts = [m for m in caplog.messages if " start: " in m]
+    assert len(starts) == 1
+    assert starts[0].endswith(
+        ".history('2025-03-03', '2025-03-03', source=<HistorySource.AUTO: 'auto'>)"
+    )
+
+
+def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    only_bad = live("msft")
+    with pytest.raises(ValueError, match="no row of the symbol table is a ticker"):
+        trades(massive_session, only_bad).history("2025-03-03", "2025-03-03")
+    strict(massive_session, monkeypatch)
+    with pytest.raises(ValueError, match="a symbol table holds 'msft'"):
+        trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03")
+    assert rest.by_symbol == []
+
+
+def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    drain: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Through the real REST transport: Massive has no data for AAPL (404), the plan lacks MSFT
+    # (403), and NVDA has one trade.
+    nanos = int(datetime(2025, 3, 3, 15, tzinfo=UTC).timestamp() * 1e9)
+    fake_rest.reply("/v3/trades/AAPL", Reply(envelope(status="NOT_FOUND"), status=404))
+    fake_rest.reply(
+        "/v3/trades/MSFT",
+        Reply(envelope(status="NOT_AUTHORIZED", message="not in your plan"), status=403),
+    )
+    fake_rest.reply(
+        "/v3/trades/NVDA",
+        Reply(envelope([{"sip_timestamp": nanos, "price": 1.0, "size": 10}])),
+    )
+    with caplog.at_level(logging.WARNING):
+        result = rest_session.stocks.trades(live("AAPL", "MSFT", "NVDA")).history(
+            "2025-03-03", "2025-03-03", wait=False
+        )
+        _until(lambda: [r["Symbol"] for r in dh_to_pylist(result)] == ["NVDA"])
+
+        def states() -> dict[str, tuple[str, int, str | None]]:
+            drain()
+            return {
+                r["Symbol"]: (r["State"], r["Rows"], r["Error"])
+                for r in dh_to_pylist(rest_session.symbol_reads())
+            }
+
+        _until(
+            lambda: (
+                {name: shown[0] for name, shown in states().items()}
+                == {"AAPL": "DONE", "MSFT": "FAILED", "NVDA": "DONE"}
+            )
+        )
+    found = states()
+    assert found["AAPL"] == ("DONE", 0, None)
+    assert found["NVDA"] == ("DONE", 1, None)
+    assert found["MSFT"][:2] == ("FAILED", 0)
+    assert "403" in (found["MSFT"][2] or "")
+    assert any("AAPL" in m for m in caplog.messages)  # the 404's WARNING is in the log only
+    rest_session.release(result)
+    follows(rest_session)

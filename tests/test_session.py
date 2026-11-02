@@ -548,6 +548,8 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.rate_limits()
     with pytest.raises(dm.MassiveError, match=message):
+        massive_session.symbol_reads()
+    with pytest.raises(dm.MassiveError, match=message):
         q.append_only()
     # Building queries and reaching namespaces never fail.
     assert isinstance(stream_query(massive_session), StreamQuery)
@@ -883,3 +885,22 @@ def test_rate_limits_show_one_ready_row_per_subscription_and_other(
         ("other", "READY", None),
         ("stocks", "READY", None),
     ]
+
+
+def test_the_symbol_reads_view_works_in_a_console_command_and_is_released(
+    *,
+    massive_session: dm.MassiveSession,
+    console_command: Callable[[Callable[[], None]], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    made: dict[str, Table] = {}
+
+    def command() -> None:
+        made["symbol_reads"] = massive_session.symbol_reads()
+
+    console_command(command)
+    view = made.pop("symbol_reads")
+    assert dh_to_pylist(view) == []
+    assert [column.name for column in view.columns][:2] == ["StreamId", "Symbol"]
+    massive_session.release(view)
+    massive_session.release(view)  # twice does nothing

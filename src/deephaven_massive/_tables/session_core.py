@@ -1421,9 +1421,9 @@ class SessionCore:
 
         The follow coordinator calls this for every change of a followed read's symbols. The
         rows are kept for the session's life, so `close()` can write every unfinished symbol
-        `CLOSED`; a row the close wrote `CLOSED` is never replaced, so a read that lands while
-        the session closes leaves it `CLOSED`, and after the close nothing is written. One
-        short critical section under `registry_lock`. No Deephaven call, no wait.
+        `CLOSED`. The close marks the rows and the session closed in one section under
+        `registry_lock`, and nothing is written after it, so a read that lands while the
+        session closes leaves its row `CLOSED`. No Deephaven call, no wait.
 
         Args:
             rows: The new rows, each the whole current state of its (read, symbol).
@@ -1432,11 +1432,7 @@ class SessionCore:
             if self._closed:
                 return
             for row in rows:
-                key = (row.stream_id, row.symbol)
-                current = self._symbol_reads.get(key)
-                if current is not None and current.state is SymbolReadState.CLOSED:
-                    continue
-                self._symbol_reads[key] = row
+                self._symbol_reads[row.stream_id, row.symbol] = row
                 self.diagnostics.write(row)
 
     def diagnostics_view(self, table: Table) -> Table:

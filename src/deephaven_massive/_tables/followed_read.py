@@ -410,11 +410,11 @@ def _shut_down(
     """
     stop.set()
     core = cast("SessionCore", core_ref())
-    read = read_ref()
-    if read is not None:
-        read.shut_down_event.set()
-        core.follows.stop(read)
-        core.defer(read.stop_watch)  # a Deephaven call: never here
+    # Alive: the session's record of the result holds it until `worker_shut_down` below.
+    read = cast("FollowedRead", read_ref())
+    read.shut_down_event.set()
+    core.follows.stop(read)
+    core.defer(read.stop_watch)  # a Deephaven call: never here
     core.worker_shut_down(call)
 
 

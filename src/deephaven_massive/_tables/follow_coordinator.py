@@ -41,6 +41,11 @@ the coordinator records the failure and publishes it, never the listener.
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
 with a virtual one and wake the coordinator (`wake`) after moving it.
+
+The module is one subject although it runs past 1,000 lines: every event of a followed read
+(a change of its symbol table, a read's start or outcome, a retry coming due, a stop) changes
+the same per-symbol state on the one coordinator thread, so the state machine and the rows it
+shows read whole only here.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import Reread
@@ -569,6 +574,12 @@ class FollowCoordinator:
         self._results[id(read)] = result
         first = message.first
         if first is not None:
+            # The call warned of its failed symbols already: once per result and cause.
+            result.warned.update(
+                _cause(outcome.error)
+                for outcome in first.outcomes.values()
+                if isinstance(outcome, SymbolFailure)
+            )
             for name, outcome in first.outcomes.items():
                 symbol = _Symbol(
                     state=SymbolReadState.LOADING,
@@ -614,7 +625,7 @@ class FollowCoordinator:
                 "no request",
                 result.read.call,
                 name,
-                _ns_text(symbol.read_at),
+                _ns_text(cast("int", symbol.read_at)),  # a kept download has begun
             )
             return
         symbol.state = SymbolReadState.QUEUED
@@ -669,10 +680,8 @@ class FollowCoordinator:
         """
         if result.read.plan.one_scan:
             result.scanning = False
-        for name, generation in message.generations.items():
-            symbol = result.symbols[name]
-            if symbol.reading == generation:
-                symbol.reading = None
+        for name in message.generations:
+            result.symbols[name].reading = None  # its only read in flight has ended
         if message.table_error is not None:
             self._fail(result, message.table_error)
             return
@@ -863,9 +872,8 @@ class FollowCoordinator:
             generations: The symbols to read, at their generations.
         """
         with self._lock:
-            pool = self._pool
-        if pool is not None:  # the coordinator thread runs only while its pool does
-            pool.submit(self._read, read, dict(generations))
+            pool = cast("ThreadPoolExecutor", self._pool)  # it lives as long as this thread
+        pool.submit(self._read, read, dict(generations))
 
     def _read(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
         """A pool task: read some symbols of one result and queue the outcome.
@@ -1071,12 +1079,11 @@ class FollowCoordinator:
             self._count -= 1
             if self._count:
                 return
-            worker, pool = self._worker, self._pool
+            worker = cast("QueueWorker[_Message]", self._worker)  # a result was counted
+            pool = cast("ThreadPoolExecutor", self._pool)
             self._worker = self._pool = None
-        if worker is not None:
-            worker.stop()
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        worker.stop()
+        pool.shutdown(wait=False, cancel_futures=True)
         logger.debug("%s follow: the coordinator ended: no followed read left", self._thread_prefix)
 
     def _died(self, death: BaseException) -> None:
@@ -1095,24 +1102,21 @@ class FollowCoordinator:
         self._results.clear()
         with self._lock:
             self._count = 0
-            pool = self._pool
+            pool = cast("ThreadPoolExecutor", self._pool)  # made with the dying thread
             self._worker = self._pool = None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)
         for result in results:
             result.ended = True
             result.read.fail_table(error)
 
 
-def _ns_text(value: int | None) -> str:
-    """Return an instant in epoch nanoseconds as UTC text for a log line, or `"none"`.
+def _ns_text(value: int) -> str:
+    """Return an instant in epoch nanoseconds as UTC text for a log line.
 
     Args:
-        value: The instant, or None.
+        value: The instant.
 
     Returns:
         Such as `"2026-11-02T14:05:12Z"`.
     """
-    if value is None:
-        return "none"
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1e9))

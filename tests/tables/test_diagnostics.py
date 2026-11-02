@@ -27,6 +27,7 @@ from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    FLAT_FILES_AND_REST,
     GAPS_SHOWN,
     QUERY_SHOWN,
     RATE_LIMITS,
@@ -46,6 +47,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
+    SymbolReadRow,
     SymbolReadState,
     as_row,
     describe_symbols,
@@ -1134,3 +1136,84 @@ def test_a_long_query_is_cut_like_the_symbol_list() -> None:
 )
 def test_pascal_case(path: str, expected: str) -> None:
     assert pascal_case(path) == expected
+
+
+# --- m.symbol_reads() -------------------------------------------------------------------------
+
+
+_SYMBOL_READ = SymbolReadRow(
+    stream_id=7,
+    symbol="AAPL",
+    dataset="stocks.bars",
+    state=SymbolReadState.QUEUED,
+    added_at=1_000,
+    updated_at=2_000,
+)
+
+
+def _symbol_read(symbol: str = "AAPL", **changes: object) -> SymbolReadRow:
+    return dataclasses.replace(_SYMBOL_READ, symbol=symbol, **cast("dict[str, Any]", changes))
+
+
+def test_symbol_read_rows_map_fields_to_columns() -> None:
+    shown = as_row(_symbol_read(state=SymbolReadState.DONE, transport=Transport.FLAT_FILES, rows=3))
+    assert list(shown) == list(SYMBOL_READS.column_names)
+    assert (shown["State"], shown["Transport"], shown["Rows"]) == ("DONE", "flat files", 3)
+    assert as_row(_symbol_read(transport=FLAT_FILES_AND_REST))["Transport"] == (
+        "flat files and REST"
+    )
+    assert as_row(_stream(loading=2))["Loading"] == 2
+    assert as_row(STREAM)["Loading"] is None
+
+
+def test_symbol_read_rows_replace_by_their_key(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics.write(_symbol_read())
+    diagnostics.write(_symbol_read("MSFT"))
+    diagnostics.write(_symbol_read(stream_id=8))
+    diagnostics.write(_symbol_read(state=SymbolReadState.LOADING, attempts=1))
+    assert diagnostics.barrier().wait(TIMEOUT)
+    rows = sorted(
+        (r["StreamId"], r["Symbol"], r["State"]) for r in dh_to_pylist(diagnostics.symbol_reads)
+    )
+    assert rows == [(7, "AAPL", "LOADING"), (7, "MSFT", "QUEUED"), (8, "AAPL", "QUEUED")]
+    diagnostics.release()
+
+
+def test_five_thousand_queued_symbols_go_in_one_add(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    counting = CountingTable(diagnostics.symbol_reads)
+    diagnostics._symbol_reads = cast("InputTable", counting)
+    diagnostics.write(_symbol_read("FIRST"))
+    assert counting.entered.wait(TIMEOUT)  # the writer holds this add; the rest queue behind
+    for n in range(5_000):
+        diagnostics.write(_symbol_read(f"S{n}"))
+    counting.gate.set()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert counting.adds == 2
+    assert len(dh_to_pylist(counting.table)) == 5_001
+    diagnostics.release()
+
+
+def test_a_malformed_symbol_read_row_is_logged_and_skipped(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
+        diagnostics.write(_symbol_read("BAD", rows=cast("int", "many")))
+        diagnostics.write(_symbol_read())
+        assert diagnostics.barrier().wait(TIMEOUT)
+    assert "failed to write a symbol_reads row" in caplog.text
+    assert [r["Symbol"] for r in dh_to_pylist(diagnostics.symbol_reads)] == ["AAPL"]
+    diagnostics.release()
+
+
+def test_a_followed_read_update_sets_its_loading_and_transport() -> None:
+    row = _stream(transport=Transport.REST)
+    updated = StreamUpdate(loading=3, transport=FLAT_FILES_AND_REST).apply(row)
+    assert (updated.loading, updated.transport) == (3, FLAT_FILES_AND_REST)
+    assert StreamUpdate().apply(updated) == updated

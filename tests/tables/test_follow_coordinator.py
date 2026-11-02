@@ -8,10 +8,12 @@ no test waits for real minutes.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import pytest
@@ -799,3 +801,122 @@ def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
         massive_session.release(result)
     del result
     until(lambda: massive_session._core.follows.thread is None)
+
+
+def test_sixteen_threads_editing_one_watchlist_while_four_results_follow_it(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+) -> None:
+    # The stress test the free-threaded build runs too: no lock but the library's own keeps
+    # the coordinator's state consistent.
+    pool = [f"S{n}" for n in range(12)]
+    wl = watchlist()
+    results = [
+        follow(massive_session, wl, Script(massive_session), reread=reread)
+        for reread in (Reread.ALWAYS, Reread.NEVER, Reread.ALWAYS, Reread.NEVER)
+    ]
+    start = threading.Barrier(16)
+
+    def edit(seed: int, rounds: int) -> None:
+        start.wait(TIMEOUT)
+        with entered(massive_session._core.exec_ctx):
+            for step in range(rounds):
+                symbol = pool[(seed * 7 + step * 5) % len(pool)]
+                if (seed + step) % 3:
+                    add(wl, symbol)
+                else:
+                    delete(wl, symbol)
+
+    def run_editors(rounds: int, during: Callable[[], None]) -> None:
+        editors = ThreadPoolExecutor(16, thread_name_prefix="editor")
+        try:
+            futures = [editors.submit(edit, seed, rounds) for seed in range(16)]
+            during()
+            for future in futures:
+                future.result(TIMEOUT)  # raises an editor's error
+        finally:
+            editors.shutdown(wait=False)
+
+    run_editors(6, lambda: massive_session.release(results.pop(0)))
+    held = sorted(row[0] for row in wl.iter_tuple(cols="Symbol"))
+
+    def converged(result: Table) -> bool:
+        # The result holds the table's symbols, two rows each.
+        rows = dh_to_pylist(result)
+        return sorted({r["Ticker"] for r in rows}) == held and len(rows) == 2 * len(held)
+
+    for result in results:
+        until(functools.partial(converged, result))
+    run_editors(4, massive_session.close)
+    until(lambda: all(bool(result.j_table.isFailed()) for result in results))
+    until(lambda: massive_session._core.follows.thread is None)
+    final = {SymbolReadState.CLOSED, SymbolReadState.REMOVED, SymbolReadState.STOPPED}
+    assert {row.state for row in reads(massive_session).values()} <= final
+
+
+def test_rows_from_rest_and_from_flat_files_show_both_sources(
+    massive_session: dm.MassiveSession, drain: Callable[[], None], dh_to_pylist: ToList
+) -> None:
+    # A flat-file read that S3 refused is read from REST: its rows say so.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [SymbolRows(rows_of(massive_session, "AAPL", 1), source="REST")]
+    script.answers["MSFT"] = [SymbolRows(rows_of(massive_session, "MSFT", 1), source="flat files")]
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script, one_scan=True)
+    assert wait_state(massive_session, "AAPL", SymbolReadState.DONE).transport == "REST"
+    assert wait_state(massive_session, "MSFT", SymbolReadState.DONE).transport == "flat files"
+    until(lambda: stream(massive_session, drain, dh_to_pylist)["Transport"] == FLAT_FILES_AND_REST)
+    massive_session.release(result)
+
+
+def test_a_late_outcome_of_a_stopped_result_is_dropped(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    script = Script(massive_session)
+    gate = script.gates["AAPL"] = threading.Event()
+    keeper = follow(massive_session, watchlist("MSFT"), Script(massive_session))
+    result = follow(massive_session, watchlist("AAPL"), script)
+    until(lambda: script.calls == [("AAPL",)])
+    massive_session.release(result)
+    del result
+    wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        gate.set()  # the coordinator still runs for `keeper`, and drops the outcome
+        until(lambda: "after it stopped: _Outcome" in caplog.text)
+    assert state(massive_session, "AAPL") is SymbolReadState.STOPPED
+    massive_session.release(keeper)
+
+
+def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: ToList,
+) -> None:
+    # As a read by symbol fails a table without the dataset's columns: a defect, ERROR.
+    defect = MassiveError(
+        "test.trades: AAPL's rows from REST lack Price", cause=dm.ErrorCause.LIBRARY_DEFECT
+    )
+    script = Script(massive_session)
+    script.answers["AAPL"] = [SymbolFailure(defect, FailureKind.PERMANENT)]
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+        wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+        wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    assert [r.levelno for r in caplog.records] == [logging.ERROR]
+    assert "This is a bug in deephaven-massive" in caplog.records[0].getMessage()
+    assert not result.j_table.isFailed()
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
+    massive_session.release(result)
+
+
+def test_two_bad_rows_fail_the_table_once(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = dataclasses.replace(
+        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
+    )
+    monkeypatch.setattr(massive_session._core, "config", config)
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, Script(massive_session))
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
+    until(lambda: bool(result.j_table.isFailed()))
+    wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
