@@ -10,6 +10,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.source_columns import (
     KEY_COLUMNS,
+    RoundedFields,
     SourceColumn,
     key_column,
     rename,
@@ -18,7 +19,15 @@ from deephaven_massive._datasets.source_columns import (
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
-from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
+from deephaven_massive._massive import (
+    DriftReport,
+    Field,
+    Source,
+    Transport,
+    WireType,
+    WireUnit,
+    source,
+)
 from deephaven_massive._namespaces import stocks
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -27,19 +36,41 @@ R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 MEMBERSHIP = type(source(W, "stocks/T").memberships[0])
 
 
-def test_widening_a_large_integer_to_a_double_rounds_it() -> None:
-    big = pa.array([2**53 + 1, None], pa.int64())
-    assert widen(big, pa.float64()).to_pylist() == [float(2**53), None]
+def test_widening_a_large_integer_to_a_double_rounds_it_and_says_which() -> None:
+    # The value is served as the cast left it; the first one it changed is returned as sent.
+    big = pa.array([2**53, None, 2**53 + 1, 2**63 - 1], pa.int64())
+    widened, rounded = widen(big, pa.float64())
+    assert widened.to_pylist() == [float(2**53), None, float(2**53), float(2**63)]
+    assert rounded == 2**53 + 1
+    exact = pa.array([2**53, -(2**53), None, 7], pa.int64())
+    assert widen(exact, pa.float64())[1] is None
+    assert widen(pa.array([2**63 - 1], pa.int64()), pa.float64())[1] == 2**63 - 1
+
+
+def test_rounded_fields_note_each_field_once_with_its_first_value() -> None:
+    rounded = RoundedFields()
+    assert rounded.drift() == DriftReport()
+    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key="s")
+    rounded.widen(pa.array([2**53 + 3], pa.int64()), pa.float64(), wire_key="s")
+    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key=None)
+    rounded.widen(pa.array([5], pa.int64()), pa.float64(), wire_key="v")
+    drift = rounded.drift()
+    assert drift.rounded == frozenset({"s"})
+    assert drift.fields_drifted
+    assert drift.samples["s"].value == str(2**53 + 1)
 
 
 def test_widening_gives_each_column_its_merged_arrow_type() -> None:
     # Checked on the arrays, before a batch is assembled, which on some pyarrow versions casts
     # by itself.
     longs = pa.array([100, None], pa.int64())
-    assert widen(longs, pa.float64()).type == pa.float64()
-    assert widen(longs, pa.list_(pa.int32())).to_pylist() == [[100], None]
+    assert widen(longs, pa.float64())[0].type == pa.float64()
+    assert widen(longs, pa.list_(pa.int32())) == (
+        pa.array([[100], None], pa.list_(pa.int32())),
+        None,
+    )
     lists = pa.array([[1], None], pa.list_(pa.int32()))
-    assert widen(lists, pa.list_(pa.int32())).to_pylist() == [[1], None]
+    assert widen(lists, pa.list_(pa.int32()))[0].to_pylist() == [[1], None]
 
 
 def spec(

@@ -19,7 +19,6 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
     RowDataError,
-    UnsupportedParameterError,
     cause_of,
     failure_text,
     from_wire,
@@ -486,7 +485,6 @@ def test_a_public_function_names_the_public_base_of_a_private_helper_error() -> 
         del helper.__globals__["_PrivateValueError"]
 
 
-def test_the_row_and_parameter_errors_are_permanent() -> None:
-    # A poll() table fails on them rather than retrying every cycle.
-    for error in (RowDataError, UnsupportedParameterError):
-        assert issubclass(error, PermanentError)
+def test_the_row_error_is_permanent() -> None:
+    # A poll() table fails on it rather than retrying every cycle.
+    assert issubclass(RowDataError, PermanentError)

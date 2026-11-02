@@ -855,8 +855,9 @@ class TimeRule:
 
         Massive's documented futures one-second sample spans 60 seconds from `s` to `e`;
         whichever is right, the later end never attaches a bar before its window closed. A
-        disagreement is logged once per process, at INFO: the later end is already the safe
-        choice, so there is nothing for the user to do.
+        disagreement is logged once per process, at WARNING, with both ends: the library
+        supplies Massive's data as sent, so a `TimestampEnd` that is not Massive's `e` must be
+        visible to whoever reads the table.
 
         Args:
             rows: The batch, whose `TimestampEnd` holds Massive's `e` where the source sends it.
@@ -869,13 +870,17 @@ class TimeRule:
         differs = pc.fill_null(pc.not_equal(sent, computed), fill_value=False)
         if pc.any(differs).as_py():
             first = pc.filter(sent, differs)[0].as_py()
+            plus_one = pc.filter(computed, differs)[0].as_py()
             log_once(
                 logger,
                 f"futures-second-end:{self.dataset}",
                 "%s: a one-second bar's end from Massive (%d ns) is not its start plus one "
-                "second; the later of the two is kept as TimestampEnd",
+                "second (%d ns); TimestampEnd holds the later of the two, so it can differ "
+                "from Massive's e",
                 self.dataset,
                 first,
+                plus_one,
+                level=logging.WARNING,
             )
         later = pc.if_else(pc.greater(sent, computed), sent, computed)
         return pc.coalesce(later, computed)

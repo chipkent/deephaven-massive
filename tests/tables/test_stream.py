@@ -253,6 +253,20 @@ def test_conversion_drops_rows_with_a_bad_time_and_nulls_other_bad_timestamps(
     assert batch.column("ParticipantTimestamp").to_pylist() == [None, None]  # 0 is absent
 
 
+def test_a_size_beyond_2_53_is_served_rounded_and_reported_as_drift(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The trade's size is a `long` on the channel but a `double` in the dataset.
+    catalog = massive_session._core.catalog
+    trades = catalog.by_name["stocks.trades"]
+    plan = ChannelPlan.build(catalog, trades, "T", unreadable_symbols=OnError.RAISE)
+    rows = [trade("AAPL", Size=2**53 + 1), trade("MSFT", Size=2**53)]
+    converted = plan.convert(frame(rows), {}, arrived=arrivals(rows))
+    assert converted.batch.column("Size").to_pylist() == [float(2**53), float(2**53)]
+    assert converted.drift == DriftReport(rounded=frozenset({"s"}))
+    assert converted.drift.samples["s"] == DriftSample(None, str(2**53 + 1))
+
+
 def test_rows_convert_as_the_same_rows_keyed_by_column(massive_session: dm.MassiveSession) -> None:
     # The rows a flush gathers, tuples of the source's fields, become the wire table Arrow
     # builds from the same rows keyed by column, however the rows were split into frames.
@@ -800,9 +814,9 @@ def test_a_futures_second_bar_ends_at_the_later_end(
         batch = plan.convert(frame(rows, "futures/A"), {}, arrived=[ARRIVED] * 2).batch
     ends = batch.column("TimestampEnd").cast(pa.int64()).to_pylist()
     assert ends == [(start + 60_000) * 10**6, (start + 1_000) * 10**6]
-    # The later end is already the safe choice: an INFO notice, nothing to act on.
+    # The later end differs from Massive's own `e`, which the library never changes unseen.
     [notice] = [r for r in caplog.records if "is not its start plus one second" in r.getMessage()]
-    assert notice.levelno == logging.INFO
+    assert notice.levelno == logging.WARNING
 
 
 def test_every_row_takes_the_arrival_of_its_frame(
@@ -997,7 +1011,8 @@ def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
         (
             "test.trades: dropped 1 WS row(s) whose key cannot be read, the first at test-flush "
             "channel T: timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 "
-            "to 2100; such rows are dropped and counted, and the running count is logged at DEBUG"
+            "to 2100; such rows are dropped and counted: the running count is logged at DEBUG "
+            "and shown in the SchemaDrift of each live table that lost them"
         ),
     ]
 
