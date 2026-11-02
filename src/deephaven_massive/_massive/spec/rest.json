@@ -1406,7 +1406,7 @@
     {"column": "LastMinuteLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.low"},
     {"column": "LastMinuteClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_minute.close"},
     {"column": "LastMinuteVolume", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "last_minute.volume"},
-    {"column": "LastMinuteLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "last_minute.last_updated"},
+    {"column": "LastMinuteLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ms|ns", "wire_key": "last_minute.last_updated"},
     {"column": "LastMinuteTimeframe", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "last_minute.timeframe"},
     {"column": "LastQuoteBid", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "last_quote.bid"},
     {"column": "LastQuoteBidSize", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "last_quote.bid_size"},

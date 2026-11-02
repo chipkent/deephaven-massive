@@ -614,9 +614,11 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ("/futures/v1/snapshot",),
             ("last_minute.last_updated",),
             Unit(
-                unit=WireUnit.MS,
+                unit=WireUnit.MS_OR_NS,
                 reason="The minute bar's update time; the documentation sample has 13 digits, "
-                "while the snapshot's other times have 19.",
+                "milliseconds, but the live run of 2026-11-02 received 19 digits, nanoseconds "
+                "(1793640180000000000, 2026-11-02 17:23 UTC), like the snapshot's other times. "
+                "Each value is read by its magnitude, so either unit reads.",
             ),
         ),
         **_for(

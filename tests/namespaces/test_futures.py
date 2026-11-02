@@ -11,6 +11,7 @@ import csv
 import inspect
 import io
 import json
+import logging
 import re
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
@@ -723,6 +724,22 @@ def test_snapshots_over_rest(
     assert row["LastTradeLastUpdated"] == 1746045242858242600  # sent in nanoseconds
     assert (row["LastTradePrice"], row["LastTradeSize"]) == (240.00000000000003, 5)
     assert row["SessionPreviousSettlement"] == 219.39
+
+
+def test_snapshot_minute_time_sent_in_nanoseconds(
+    *,
+    rest_session: dm.MassiveSession,
+    serve: Callable[[str, str], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # As Massive sent the snapshot on 2026-11-02: the minute bar's `last_updated` in
+    # nanoseconds, where the documented sample has milliseconds.
+    serve("/futures/v1/snapshot", "snapshot_nanosecond_minute.json")
+    with caplog.at_level(logging.WARNING):
+        out = rows(rest_session.futures.snapshots("CBN5").fetch())
+    minute = datetime(2026, 11, 2, 17, 23, tzinfo=UTC)
+    assert out[0]["LastMinuteLastUpdated"] == int(minute.timestamp()) * 10**9
+    assert "schema drift" not in caplog.text
 
 
 def test_every_contract_of_a_product(
