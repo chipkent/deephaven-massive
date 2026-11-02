@@ -19,6 +19,23 @@ _SETTLED = {
 _TITLES = {"1": "Whether one thing holds.", "5": "Whether another holds."}
 
 
+def test_a_question_takes_the_title_of_a_test_about_it() -> None:
+    tests = [
+        (("52", "60"), "How index bars are stamped.\n\nMore."),
+        (("7",), "Which labels the snapshot carries."),
+        ((), "Answers nothing."),
+        (("60",), "The index day zone."),
+        (("7", "69"), "Something else."),
+        (("70", "71"), "Whether a key is served."),
+    ]
+    assert summary.question_titles(tests) == {
+        "52": "How index bars are stamped.",
+        "60": "The index day zone.",
+        "7": "Which labels the snapshot carries.",
+        "70": "Whether a key is served.",
+    }
+
+
 def _lines(*, narrowed: bool = False, held: plans.LivePlans | None = None) -> list[str]:
     outcome = {
         "asserts": "passed",

@@ -762,9 +762,9 @@ _CRYPTO_TRADE_ID = TypeFix(
     conversion=Conversion.TEXT_OR_INTEGER_ID,
     reason="The trade ID is typed as text on the snapshots, but the full-market page's example "
     "and documentation sample send the integer 413131, while the movers page sends "
-    '"517478762"; the WebSocket trade types and samples it as the integer 14272084, and the '
-    "REST trades and the flat file keep it as text. All join one kind, so all keep text and "
-    "accept either form without loss.",
+    '"517478762"; the WebSocket trade types and samples it as the integer 14272084 but sends '
+    'the text "666025125" live, and the REST trades and the flat file keep it as text. All '
+    "join one kind, so all keep text and accept either form without loss.",
 )
 # The codes of a flat file's list columns, one decision for every file that writes them.
 _CODE_LIST = TypeFix(
@@ -838,8 +838,9 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("forex/C", "x"): TypeFix(
             conversion=Conversion.QUOTED_INTEGER,
             reason="The specification types the exchange ID as an integer, but its example sends "
-            'the text "44". Either form is read as the integer, until live data shows which '
-            "the stream sends; text that is not decimal digits is refused.",
+            'the text "44"; the stream sends the integer 48 live. Either form is read as the '
+            "integer, so the example's form also converts; text that is not decimal digits is "
+            "refused.",
         ),
         ("crypto/XT", "i"): _CRYPTO_TRADE_ID,
         **_for(

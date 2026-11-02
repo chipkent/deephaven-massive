@@ -216,10 +216,10 @@ class RestTransport(Protocol):
         """Return a crypto ticker's base and quote, looking them up in Massive if needed.
 
         Called by the WebSocket transport for each crypto ticker of a stream, before it starts
-        or on its lookup worker. The first such call of the session blocks while it reads
-        Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page, listed
-        and delisted pairs), which the session then keeps; a failed read is read again by the
-        next call.
+        or on its `symbol changes` worker. The first such call of the session blocks while it
+        reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page,
+        listed and delisted pairs), which the session then keeps; a failed read is read again by
+        the next call.
 
         Args:
             symbol: A canonical crypto ticker.
@@ -491,6 +491,31 @@ class StreamTransport(Protocol):
                 `MassiveConfig.delayed_subscriptions` and Massive labels its snapshot delayed.
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
+        """
+        ...
+
+    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the pairs of a static symbol table, read at the call, a stream can subscribe.
+
+        Called only for a crypto dataset. A pair that Massive's crypto ticker list does not
+        hold, or that a failed read of the list cannot split, follows
+        `MassiveConfig.unlisted_symbols`: left out (and logged once) under `LOG` and `IGNORE`,
+        raised under `RAISE`. Runs on the verb's thread, before the stream starts; may block for
+        one read of the list.
+
+        Args:
+            spec: A crypto dataset.
+            symbols: The table's canonical symbols, sorted.
+
+        Returns:
+            The symbols a stream can subscribe, in order.
+
+        Raises:
+            AuthenticationError: Under `RAISE`, if Massive rejects the key on the read of the
+                list.
+            EntitlementError: Under `RAISE`, if the plan does not include reference data.
+            MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
+                if no pair can, so the result would follow nothing.
         """
         ...
 

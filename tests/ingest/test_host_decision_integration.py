@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._massive import RestClient, Transport, source
+from deephaven_massive._massive import Page, RestClient, Transport, source
 from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ def _timeframe_fields(value: object, prefix: str = "") -> list[str]:
 
 
 @pytest.mark.needs("indices:starter")
-@pytest.mark.settles("5")
+@pytest.mark.verifies("5")
 @pytest.mark.timeout(160)
 def test_index_values_stream_on_the_resolved_host(
     live_session: dm.MassiveSession,
@@ -79,8 +79,8 @@ def test_index_values_stream_on_the_resolved_host(
     the hour. Values are required only once the S&P indices have been open longer than the plan's
     feed delay, counted from 09:30 New York time (15 minutes on Indices Starter, none on real-time
     plans); before that, and while they are closed, the test skips after the acknowledgement.
-    Reading it: the host the evidence names, with rows, is the host that serves index values; a
-    refusal names the host to use instead.
+    Passes when the class's own host acknowledges the topic and, once values are due, sends
+    them; a refusal names the host to use instead.
     """
     table = live_session.indices.values("I:SPX").append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
@@ -131,47 +131,99 @@ def test_minute_bars_of_a_business_key_on_the_real_time_host(
     assert acked, "Massive acknowledged no AM.AAPL topic on socket.massive.com"
 
 
-@pytest.mark.needs("futures:starter")
-@pytest.mark.settles("7", "69")
-def test_which_recency_labels_the_futures_snapshot_carries(
-    live_rest: RestClient, *, evidence: Evidence
-) -> None:
-    """Which recency labels the futures snapshot carries: its envelope status and timeframes.
+_FUTURES_SNAPSHOT_ROWS = 100
+"""ES contracts the futures snapshot checks read in one request: sorted by ticker, the first
+rows are far-dated contracts that never trade and carry no recency label, so a few rows can
+miss every traded one."""
 
-    The `timeframe` fields are in the OpenAPI specification and absent from the documentation
-    page, so a delayed futures plan is told by the envelope status alone (`DELAYED`). Records
-    the envelope status and every `timeframe` field of three ES rows. Reading it: on a delayed
-    plan (Futures Starter or Developer), a `DELAYED` status confirms that the stream verb and
-    `fetch()` refuse delayed futures data unless futures are listed in
-    `MassiveConfig.delayed_subscriptions`; `OK` means only Massive's refusal on the real-time
-    feed catches a delayed plan.
+
+def _futures_snapshot(live_rest: RestClient) -> Page:
+    """Read up to `_FUTURES_SNAPSHOT_ROWS` ES rows of the futures snapshot raw, in one request.
+
+    Returns:
+        The page: its envelope `status` and its `rows`.
     """
-    page = live_rest.get(
+    return live_rest.get(
         source(Transport.REST, "/futures/v1/snapshot"),
         {},
-        {"product_code": "ES", "limit": 3},
+        {"product_code": "ES", "limit": _FUTURES_SNAPSHOT_ROWS},
         bucket="futures",
     )
+
+
+def _futures_labels(page: Page, evidence: Evidence) -> int:
+    """Record the futures snapshot's envelope status and each labelled row's `timeframe` fields.
+
+    A row's ticker sits under `details`. Rows without a label are counted, not listed.
+
+    Returns:
+        How many rows carry at least one `timeframe` field.
+    """
     evidence(f"futures snapshot envelope status: {page.status!r}")
+    labelled = 0
     for row in page.rows:
-        evidence(f"futures snapshot {row.get('ticker')}: {_timeframe_fields(row) or 'none'}")
+        fields = _timeframe_fields(row)
+        if fields:
+            labelled += 1
+            details = row.get("details")
+            ticker = details.get("ticker") if isinstance(details, dict) else None
+            evidence(f"futures snapshot {ticker}: {fields}")
+    evidence(f"futures snapshot rows: {len(page.rows)}; with a timeframe: {labelled}")
+    return labelled
+
+
+@pytest.mark.needs("futures:starter")
+@pytest.mark.verifies("7")
+def test_the_futures_snapshot_carries_recency_labels(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the futures snapshot carries `timeframe` recency labels on its traded contracts.
+
+    The `timeframe` fields are in the OpenAPI specification and absent from the documentation
+    page; the stream host decision reads them. Reads up to 100 ES contracts in one request, as
+    the host probe does, and records the envelope status and the labels of every row that
+    carries one, by ticker. Passes when at least one row carries a `timeframe` field: only
+    traded contracts do, and the front ES contracts trade in every session.
+    """
+    page = _futures_snapshot(live_rest)
+    labelled = _futures_labels(page, evidence)
+    assert page.rows
+    assert labelled, "no futures snapshot row carries a timeframe field"
+
+
+@pytest.mark.needs("futures:delayed")
+@pytest.mark.settles("69")
+def test_which_envelope_status_a_delayed_futures_plan_gets(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Which envelope status a delayed futures plan's snapshot carries: `DELAYED` or `OK`.
+
+    Only a delayed plan (Futures Starter or Developer) can answer this, so a real-time plan
+    skips it. Records the envelope status and the labels of every labelled ES row. Reading it:
+    a `DELAYED` status confirms that the stream verb and `fetch()` refuse delayed futures data
+    unless futures are listed in `MassiveConfig.delayed_subscriptions`; `OK` means only
+    Massive's refusal on the real-time feed catches a delayed plan.
+    """
+    page = _futures_snapshot(live_rest)
+    _futures_labels(page, evidence)
     assert page.rows
 
 
-@pytest.mark.needs("options:starter")
+@pytest.mark.needs("options:delayed")
 @pytest.mark.settles("71")
-def test_which_recency_labels_an_option_chain_carries(
+def test_which_recency_labels_a_delayed_option_chain_carries(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
-    """Which recency labels the SPY option chain carries: its envelope status and timeframes.
+    """Which recency labels a delayed options plan's SPY chain carries: its status and timeframes.
 
     The chain is the options host check's snapshot, and `fetch()` and `poll()` of options
     snapshots refuse a `DELAYED` label unless options are listed in
-    `MassiveConfig.delayed_subscriptions`. Records the envelope status and every `timeframe`
-    field of three contracts. Reading it: on a delayed plan (Options Starter or Developer), a
-    `DELAYED` status or `last_trade.timeframe` confirms the refusal; neither means only
-    Massive's refusal on the real-time feed catches a delayed options plan, and the chain's
-    tables show `Recency` `UNKNOWN`.
+    `MassiveConfig.delayed_subscriptions`. Only a delayed plan (Options Starter or Developer)
+    can answer this, so a real-time plan skips it. Records the envelope status and every
+    `timeframe` field of three contracts. Reading it: a `DELAYED` status or
+    `last_trade.timeframe` confirms the refusal; neither means only Massive's refusal on the
+    real-time feed catches a delayed options plan, and the chain's tables show `Recency`
+    `UNKNOWN`.
     """
     page = live_rest.get(
         source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}"),

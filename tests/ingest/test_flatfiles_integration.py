@@ -17,6 +17,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.timestamps import MAGNITUDE_NS_THRESHOLD
+from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._massive import Transport, WireEntitlementError, WireError, sources
 from tests._live import calendar
 
@@ -42,10 +43,19 @@ _COMPARED_LAG = timedelta(minutes=16)
 """How far before the current minute the AUTO and REST comparison stops: one minute, so no
 bar is still forming, and the 15 minutes a delayed plan's REST bars lag."""
 _DAY_NS = 86_400 * 1_000_000_000
+_PREFIX_CLASSES = {
+    "global_crypto": dm.AssetClass.CRYPTO,
+    "global_forex": dm.AssetClass.FOREX,
+    "us_futures_{venue}": dm.AssetClass.FUTURES,
+    "us_indices": dm.AssetClass.INDICES,
+    "us_options_opra": dm.AssetClass.OPTIONS,
+    "us_stocks_sip": dm.AssetClass.STOCKS,
+}
+"""The asset class of each flat-file prefix's first path part, whose tickers it holds."""
 
 
 @pytest.mark.needs("futures:starter", "s3")
-@pytest.mark.settles("4")
+@pytest.mark.verifies("4")
 @pytest.mark.timeout(100)
 def test_futures_files_hold_only_the_session_of_their_key(
     live_session: dm.MassiveSession,
@@ -61,8 +71,9 @@ def test_futures_files_hold_only_the_session_of_their_key(
     read otherwise. Counts the `session_end_date` values of the whole `session_aggs_v1` file
     of the most recent published Monday for each venue, and of the whole CME `minute_aggs_v1` file
     (a Monday file, which holds the Sunday-evening rows), then reads the CME session bars through
-    the library. Reading it: only that Monday everywhere confirms the key; any other date means the
-    files are not keyed by session and the library's check would fail real reads.
+    the library. Passes when at least one file was read and every row of every file read holds
+    that Monday; any other date means the files are not keyed by session and the library's
+    check would fail real reads.
 
     Raises:
         WireEntitlementError: When a file is refused although Futures Starter and S3 are
@@ -70,6 +81,7 @@ def test_futures_files_hold_only_the_session_of_their_key(
         EntitlementError: When the library's read is refused, likewise.
     """
     read = 0
+    other_sessions: dict[str, list[str | None]] = {}
     files = [("us_futures_{venue}/session_aggs_v1", venue) for venue in _VENUES]
     files.append(("us_futures_{venue}/minute_aggs_v1", "cme"))
     for prefix, venue in files:
@@ -85,6 +97,9 @@ def test_futures_files_hold_only_the_session_of_their_key(
             continue
         read += 1
         evidence(f"{prefix} {venue} {recent_monday}: session_end_date counts {dict(counts)}")
+        others = [day for day in counts if day != recent_monday.isoformat()]
+        if others:
+            other_sessions[f"{prefix} {venue}"] = others
     try:
         bars = live_session.futures.bars(
             dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
@@ -95,6 +110,7 @@ def test_futures_files_hold_only_the_session_of_their_key(
     except dm.MassiveError as error:
         evidence(f"library CME session bars of {recent_monday}: {type(error).__name__}: {error}")
     assert read
+    assert not other_sessions, f"rows of sessions other than {recent_monday}: {other_sessions}"
 
 
 @pytest.mark.needs("indices:starter", "s3")
@@ -139,7 +155,7 @@ def _day_ns(day: date) -> int:
 
 
 @pytest.mark.needs("s3")
-@pytest.mark.settles("28")
+@pytest.mark.verifies("28")
 @pytest.mark.timeout(100)
 def test_ticker_spellings_of_every_flat_file(
     flat_file_head: FlatFileHead,
@@ -152,12 +168,14 @@ def test_ticker_spellings_of_every_flat_file(
 
     Reads the first block of every flat-file prefix for the most recent published Monday (futures
     from `cme`) and records the first tickers of each, any header the generated schema lacks, and
-    each prefix the credentials are refused. Reading it: every file spelling tickers as REST does
-    (`C:EURUSD`, `X:BTCUSD`, `I:SPX`, `O:...`, `ESH6`) confirms that symbol filters match file rows;
-    a file spelling them otherwise (the forex quotes sample shows `X:EUR-USD`) needs that spelling
-    among the symbol's wire spellings.
+    each prefix the credentials are refused. The crypto and forex files spell pairs with a dash
+    (`X:BTC-USD`, `C:EUR-USD`) and the library reads each row's ticker into its canonical form.
+    Passes when at least one file was read and the library reads every recorded ticker of each
+    file (futures as written); a spelling it cannot read must join the symbol's wire spellings
+    before symbol filters match those rows.
     """
     read = 0
+    unreadable: dict[str, list[str]] = {}
     for prefix in sources(Transport.FLAT_FILES):
         venue = "cme" if "{venue}" in prefix else None
         if not flat_files_reached(prefix):
@@ -178,7 +196,13 @@ def test_ticker_spellings_of_every_flat_file(
         read += 1
         tickers = list(dict.fromkeys(str(row["ticker"]) for row in rows))
         evidence(f"{prefix}: tickers {tickers[:8]}; undocumented headers {sorted(extra)}")
+        asset_class = _PREFIX_CLASSES[prefix.partition("/")[0]]
+        refused = [t for t in tickers if canonical_from_wire(asset_class, t) is None]
+        if refused:
+            evidence(f"{prefix}: tickers the library cannot read {refused[:8]}")
+            unreadable[prefix] = refused
     assert read
+    assert not unreadable, f"tickers the library cannot read: {unreadable}"
 
 
 @pytest.mark.needs("stocks:starter", "s3")

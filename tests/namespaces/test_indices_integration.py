@@ -137,7 +137,7 @@ def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
 
 
 @pytest.mark.needs("indices:basic")
-@pytest.mark.settles("44")
+@pytest.mark.verifies("44")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(
@@ -159,9 +159,9 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     then the library's `Symbol` for the same datasets. The two snapshots need Indices
     Starter. With Indices on Basic, which allows 5 requests a minute, it leaves them out and
     reads the library's `daily_open_close` only, 5 requests in all: the library's `/prev` is
-    checked by the encoded-path test, and its indicator line is left out. Reading it: an
-    endpoint whose rows drop `I:` is one the library must read back with the prefix; the
-    library's `Symbol` column shows whether it already does.
+    checked by the encoded-path test, and its indicator line is left out. Passes when every
+    row the library returns carries the index with its `I:` prefix in `Symbol`, whichever
+    spelling the endpoint sent; the raw lines show which endpoints drop the prefix.
     """
     answered = 0
     basic = "indices" in classes_on_basic
@@ -199,16 +199,21 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         "snapshots (unified) fetch()": live_session.snapshots(index_symbol).fetch,
         "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
     }
+    misspelled: dict[str, list[object]] = {}
     for name, call in queries.items():
         if basic and name != _BASIC_LIBRARY_CALL:
             continue
         try:
-            evidence(f"library {name}: Symbol {[r['Symbol'] for r in table_rows(call())]}")
+            symbols = [r["Symbol"] for r in table_rows(call())]
+            evidence(f"library {name}: Symbol {symbols}")
+            if any(symbol != index_symbol for symbol in symbols):
+                misspelled[name] = symbols
         except dm.EntitlementError as error:
             evidence(f"library {name}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
     assert answered
+    assert not misspelled, f"library rows without {index_symbol} in Symbol: {misspelled}"
 
 
 _STAMP_INDICES = ("I:SPX", "I:AAVE100")
