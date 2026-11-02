@@ -95,7 +95,7 @@ flowchart LR
     finish_rework & live_integration_suite --> plan_retirement["plan-retirement"]
     finish_rework -.-> release_workflow["release-workflow<br/>(owner go-ahead only)"]
     plan_retirement & release_workflow -.-> release_0_1_0["release-0.1.0<br/>(owner go-ahead only)"]
-    release_0_1_0 -.-> release_tag["release-tag<br/>(owner pushes v0.1.0)"]
+    release_0_1_0 -.-> release_tag["release-tag<br/>(owner runs the v0.1.0 release)"]
 ```
 
 The release planned PRs (dashed) start only on the owner's go-ahead; nothing else depends on
@@ -695,7 +695,7 @@ not repeat:
 | [plan-retirement](#plan-retirement) | `docs: retire verified notes and the rework plan` | finish-rework, live-integration-suite |
 | [release-workflow](#release-workflow) | `ci: publish to PyPI from a version tag` (on the owner's go-ahead only) | finish-rework |
 | [release-0.1.0](#release-0.1.0) | `chore: release 0.1.0` (on the owner's go-ahead only) | plan-retirement, release-workflow |
-| [release-tag](#release-tag) | Owner: push the tag `v0.1.0` (on the owner's go-ahead only) | release-0.1.0 |
+| [release-tag](#release-tag) | Owner: run the release of `v0.1.0` (on the owner's go-ahead only) | release-0.1.0 |
 | [upstream-sdk-issues](#upstream-sdk-issues) | Upstream SDK issues (owner-gated, issues only, off the path) | none |
 
 ---
@@ -2579,12 +2579,13 @@ git grep -n "UNVERIFIED\|plans/rework"
 | **Base** | `origin/main` after `git fetch` |
 | **Issue** | #87 |
 
-**Started on the owner's request (2026-11-02):** a release workflow that releases a version tag
-on GitHub once the tests pass, with generated notes. Publishing to PyPI is in the workflow but
-off: its job runs only when the repository variable `PUBLISH_TO_PYPI` is `true`, which the
-owner sets after configuring the PyPI trusted publisher.
+**Started on the owner's request (2026-11-02):** a release workflow, started by hand on `main`,
+that tests the newest commit and only then tags it and releases it on GitHub, with generated
+notes. Publishing to PyPI is in the workflow but off: its job runs only when the repository
+variable `PUBLISH_TO_PYPI` is `true`, which the owner sets after configuring the PyPI trusted
+publisher.
 
-**Goal.** Release reproducibly from a version tag, with no long-lived token.
+**Goal.** Release reproducibly in one manual run, with no long-lived token.
 
 **DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration) (release).
 
@@ -2596,12 +2597,14 @@ plan-retirement.
 version to `0.1.0rc1`.
 
 **Tasks.**
-- [ ] On a version tag: check that the tag equals `project.version` and names a commit on
-      `main`, run the whole CI workflow on it, and create a GitHub Release with generated notes
-      and the CI build's wheel and sdist; a candidate is a pre-release.
+- [ ] One manual run on `main`: refuse a malformed version or one whose tag exists, run the
+      whole CI workflow on `main`'s newest commit, then tag that commit `v<version>` and create
+      a GitHub Release with generated notes and the CI build's wheel and sdist; a candidate is
+      a pre-release. A `dry_run` input stops before tagging.
 - [ ] A PyPI job through trusted publishing (`id-token: write`), off until the owner sets
       `PUBLISH_TO_PYPI`. The owner configures the PyPI project and the trusted publisher.
-- [ ] The rehearsal: the owner pushes `v0.1.0rc1`, which releases on GitHub only.
+- [ ] The rehearsal: the owner runs the workflow on `main` (a dry run first, then a real one),
+      which releases `v0.1.0rc1` on GitHub only.
 
 **Acceptance criteria.**
 - [ ] `v0.1.0rc1` becomes a GitHub pre-release with notes and both distributions, and nothing
@@ -2654,16 +2657,17 @@ notes are generated from the pull request titles.
 
 **Pitfalls.** None.
 
-**Out of scope.** Pushing the tag (release-tag).
+**Out of scope.** Running the release (release-tag).
 
 **Approval gates.** Opening the PR.
 
 ---
 
 <a id="release-tag"></a>
-## release-tag — owner: push the tag `v0.1.0`
+## release-tag — owner: run the release of `v0.1.0`
 
-Only on the owner's go-ahead: the owner pushes `v0.1.0` after release-0.1.0 merges. Acceptance:
+Only on the owner's go-ahead: the owner runs the Release workflow on `main` after
+release-0.1.0 merges. Acceptance:
 `pip install deephaven-massive==0.1.0` imports inside a Deephaven server.
 
 ---

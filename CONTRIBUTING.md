@@ -26,8 +26,8 @@ title wording, and the pull request description follow [`AGENTS.md`](AGENTS.md) 
 [`docs/dev/pull-requests.md`](docs/dev/pull-requests.md). The full check must pass, with 100%
 coverage of statements and branches.
 
-Releases are cut by pushing a version tag; [`docs/dev/releasing.md`](docs/dev/releasing.md)
-gives the steps.
+A release is one manual run of the Release workflow on `main`;
+[`docs/dev/releasing.md`](docs/dev/releasing.md) gives the steps.
 
 ## Documentation
 

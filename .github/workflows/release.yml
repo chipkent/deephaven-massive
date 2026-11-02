@@ -1,121 +1,81 @@
 name: Release
 
-# Pushing a version tag, such as v0.1.0 or v0.1.0rc1, releases the commit it names. The tag is
-# checked first: it must name a commit on main and equal the version in pyproject.toml. Then
-# the whole CI workflow runs on that commit, every test job included, and builds the wheel and
-# the sdist once. Only when all of it passes does the next job create the GitHub Release, with
-# notes generated from the pull request titles since the previous release and both
-# distributions attached. Publishing to PyPI is a separate last job that stays off until the
-# repository variable PUBLISH_TO_PYPI is set to true. docs/dev/releasing.md explains how to cut
-# a release and how to turn publishing on.
+# Run by hand, on main: from the Actions tab (Release, Run workflow) or with
+# `gh workflow run release.yml`. One run does the whole release of the version in
+# pyproject.toml, in order: it checks that the version is new and well formed, runs the same
+# tests as every pull request on main's newest commit and builds the wheel and the sdist once,
+# and only when all of that passes tags that commit v<version> and creates the GitHub Release,
+# with generated notes and both distributions attached. Publishing to PyPI is a separate last
+# job that stays off until the repository variable PUBLISH_TO_PYPI is set to true. The version
+# itself changes in an ordinary pull request beforehand, since main accepts changes only
+# through pull requests. docs/dev/releasing.md explains the steps.
 
 on:
-  push:
-    tags:
-      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Dry run: check the version, run the tests, build, and write the release notes, but
+          create no tag and no release, and publish nothing.
+        type: boolean
+        default: false
 
 concurrency:
-  # One run per tag, never cancelled: a release half made is worse than a slow one. The group
-  # must differ from the one the CI workflow sets for itself, which, called from here, would be
-  # "Release-push-<the tag's ref>"; two equal groups would wait on each other forever.
-  group: release-${{ github.ref }}
+  # One release at a time, never cancelled: a release half made is worse than a slow one. The
+  # name must differ from the group the CI workflow sets for itself, which, called from here,
+  # would be "Release-workflow_dispatch-refs/heads/main"; two equal groups would wait on each
+  # other forever.
+  group: release
   cancel-in-progress: false
 
 # Each job asks for what it needs and nothing more.
 permissions: {}
 
 jobs:
-  check-tag:
-    # Runs before the tests, so a mistyped tag fails in seconds instead of after the test jobs.
-    name: check the tag
+  prepare:
+    # Runs before the tests, so a version that cannot be released fails in seconds.
+    name: check the version and write the notes
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
       prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Every branch, so the check below can see whether main contains the tagged commit.
+          # Every tag, to refuse a version already released and to find the previous release.
           fetch-depth: 0
-      - name: Check that the tag is a version on main that equals the project's version
+      - name: Check that the version in pyproject.toml is well formed and not yet released
         id: check
-        env:
-          TAG: ${{ github.ref_name }}
         # The version in pyproject.toml is the one source of the package's version: the wheel,
-        # the sdist, and deephaven_massive.__version__ all take it from there. The tag must
-        # spell it exactly, with a leading v, so the tag, the files, and the release agree.
-        # A version is X.Y.Z, optionally followed by aN, bN or rcN for an alpha, beta or
-        # release candidate, which is released as a GitHub pre-release. The runner's own
-        # Python reads the file: it needs only the standard library.
+        # the sdist, and deephaven_massive.__version__ all take it from there, and the tag is
+        # v followed by it. A version is X.Y.Z, optionally followed by aN, bN or rcN for an
+        # alpha, beta or release candidate, which is released as a GitHub pre-release. The
+        # runner's own Python reads the file: it needs only the standard library.
         run: |
           set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::a release is made only from main, not $GITHUB_REF: run the workflow on main"
+            exit 1
+          fi
           version=$(python3 -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          echo "tag: $TAG; pyproject.toml version: $version"
+          tag="v$version"
+          echo "commit: $GITHUB_SHA; pyproject.toml version: $version"
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
             echo "::error::the version in pyproject.toml, '$version', is not X.Y.Z, X.Y.ZaN, X.Y.ZbN or X.Y.ZrcN"
             exit 1
           fi
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::the tag '$TAG' does not equal 'v$version', the version in pyproject.toml at the tagged commit"
-            exit 1
-          fi
-          # A release is made only from reviewed, merged work.
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::the tag names $GITHUB_SHA, which is not on main: merge the version change first, then tag the merged commit"
+          if git rev-parse --verify --quiet "refs/tags/$tag" > /dev/null; then
+            echo "::error::the tag $tag already exists: merge a pull request that sets the next version in pyproject.toml, then run the release again"
             exit 1
           fi
           if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then prerelease=true; else prerelease=false; fi
-          echo "pre-release: $prerelease"
-          printf 'version=%s\nprerelease=%s\n' "$version" "$prerelease" >> "$GITHUB_OUTPUT"
-
-  ci:
-    # The same workflow every pull request and push to main runs: lint, every test job
-    # (Python 3.11 to 3.14, the free-threaded 3.14t with the GIL off, and the lowest declared
-    # dependency versions), and the build, which checks the wheel in a clean environment and
-    # keeps the wheel and the sdist as the run's "dist" artifact. A tag push is not a pull
-    # request, so every job runs. If any fails, nothing below runs.
-    name: CI
-    needs: check-tag
-    permissions:
-      contents: read
-    uses: ./.github/workflows/ci.yml
-
-  github-release:
-    name: create the GitHub Release
-    needs: [check-tag, ci]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      # Creating a release and uploading its files.
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # The whole history and every tag, to find the previous release and the pull
-          # requests merged since.
-          fetch-depth: 0
-      - name: Download the wheel and the sdist the CI build checked
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: dist
-          path: dist
-      - name: Check that the distributions are exactly this version's wheel and sdist
-        env:
-          VERSION: ${{ needs.check-tag.outputs.version }}
-        run: |
-          set -euo pipefail
-          expected=$(printf '%s\n' "deephaven_massive-$VERSION-py3-none-any.whl" "deephaven_massive-$VERSION.tar.gz" | sort)
-          actual=$(find dist -mindepth 1 -printf '%f\n' | sort)
-          echo "distributions: $(paste -sd ' ' - <<< "$actual")"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::expected exactly $(paste -sd ' ' - <<< "$expected") in the build's artifact"
-            exit 1
-          fi
+          echo "tag to create: $tag; pre-release: $prerelease"
+          printf 'version=%s\ntag=%s\nprerelease=%s\n' "$version" "$tag" "$prerelease" >> "$GITHUB_OUTPUT"
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
@@ -123,8 +83,8 @@ jobs:
           enable-cache: false
       - name: Write the release notes from the pull request titles
         env:
-          TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ needs.check-tag.outputs.prerelease }}
+          TAG: ${{ steps.check.outputs.tag }}
+          PRERELEASE: ${{ steps.check.outputs.prerelease }}
         # git-cliff, configured by .github/cliff.toml, lists the commits since the previous
         # release under the headings of their Conventional Commits types. Every pull request
         # is squash-merged, so each commit is one pull request, titled as it was merged, with
@@ -132,59 +92,138 @@ jobs:
         # rc2's notes show what rc1 lacked; a final release lists everything since the
         # previous final release, its own candidates included. The first release lists the
         # whole history. Only final versions count as releases inside git-cliff, so the
-        # candidates between two final releases do not split the notes into sections.
+        # candidates between two final releases do not split the notes into sections. The
+        # notes are written here, in a job that cannot write to the repository, and handed on;
+        # the run's summary page shows them, which is how a dry run previews them.
         run: |
           set -euo pipefail
-          # The tag must resolve, so the only way git describe below can fail is that no
-          # earlier tag matches.
-          git rev-parse --verify --quiet "$TAG^{commit}" > /dev/null
           if [ "$PRERELEASE" = true ]; then
-            previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$TAG^" 2>/dev/null || true)
+            previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
           else
-            previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*[a-z]*' "$TAG^" 2>/dev/null || true)
+            previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*[a-z]*' HEAD 2>/dev/null || true)
           fi
           range=()
           if [ -n "$previous" ]; then
-            echo "notes cover $previous..$TAG"
-            range=("$previous..$TAG")
+            echo "notes cover $previous..$GITHUB_SHA"
+            range=("$previous..$GITHUB_SHA")
           else
-            echo "no earlier release: notes cover the whole history up to $TAG"
+            echo "no earlier release: notes cover the whole history up to $GITHUB_SHA"
           fi
+          mkdir -p "$RUNNER_TEMP/notes"
           uvx git-cliff@2.14.2 --config .github/cliff.toml \
             --tag-pattern '^v[0-9]+\.[0-9]+\.[0-9]+$' --tag "$TAG" \
-            --output "$RUNNER_TEMP/notes.md" -- "${range[@]}"
-          cat "$RUNNER_TEMP/notes.md"
+            --output "$RUNNER_TEMP/notes/notes.md" -- "${range[@]}"
+          {
+            echo "## Release notes for $TAG"
+            echo
+            cat "$RUNNER_TEMP/notes/notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the notes for the release job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes/notes.md
+
+  ci:
+    # The same tests as every pull request: this runs the CI workflow itself on the commit
+    # being released, with every job (Python 3.11 to 3.14, the free-threaded 3.14t with the
+    # GIL off, and the lowest declared dependency versions). Its build job builds the wheel and
+    # the sdist, checks the wheel in a clean environment, and keeps both as the run's "dist"
+    # artifact. A run that is not a pull request runs every job. If any fails, nothing below
+    # runs.
+    name: CI
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: tag and create the GitHub Release
+    needs: [prepare, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Pushing the tag and creating the release, with this run's own GITHUB_TOKEN. A tag
+      # pushed with that token starts no other workflow run, by GitHub's design.
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      # The commit the tests ran on. This job alone keeps the token in its checkout, for the
+      # tag push below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the wheel and the sdist the CI build checked
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+      - name: Download the release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+      - name: Check that the distributions are exactly this version's wheel and sdist
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' "deephaven_massive-$VERSION-py3-none-any.whl" "deephaven_massive-$VERSION.tar.gz" | sort)
+          actual=$(find "$RUNNER_TEMP/dist" -mindepth 1 -printf '%f\n' | sort)
+          echo "distributions: $(paste -sd ' ' - <<< "$actual")"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::expected exactly $(paste -sd ' ' - <<< "$expected") in the build's artifact"
+            exit 1
+          fi
+      - name: Tag the tested commit
+        if: ${{ !inputs.dry_run }}
+        # An annotated tag on the exact commit the tests ran on, even if main has moved on
+        # since the run started. The push fails rather than move a tag that already exists.
+        # A re-run of this job after the tag was pushed, such as when creating the release
+        # failed, finds the tag on this commit and goes on.
+        run: |
+          set -euo pipefail
+          tagged=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
+          if [ "$tagged" = "$GITHUB_SHA" ]; then
+            echo "$TAG already names $GITHUB_SHA"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
       - name: Create the release with both distributions attached
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ needs.check-tag.outputs.prerelease }}
         # A pre-release is marked as one, so GitHub never shows it as the latest release.
         run: |
           set -euo pipefail
           flags=()
           if [ "$PRERELEASE" = true ]; then flags=(--prerelease); fi
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+          gh release create "$TAG" "$RUNNER_TEMP"/dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file "$RUNNER_TEMP/notes/notes.md" "${flags[@]}"
+      - name: Report the dry run
+        if: ${{ inputs.dry_run }}
+        run: echo "Dry run passed every check; $TAG was not tagged, released, or published."
 
   pypi:
     # Off until the owner turns it on. The job runs only when the repository variable
     # PUBLISH_TO_PYPI is exactly "true" (Settings, Secrets and variables, Actions, Variables);
-    # unset, or any other value, skips it. Publishing also needs a trusted publisher for this
-    # repository, this workflow file, and the environment below, configured on PyPI: with
-    # trusted publishing, PyPI accepts a short-lived token that GitHub signs for this job, so
-    # no PyPI token is stored anywhere. It runs last because a version published to PyPI can
-    # never be uploaded again: a failure anywhere earlier publishes nothing.
+    # unset, or any other value, skips it, as does a dry run. Publishing also needs a trusted
+    # publisher for this repository, this workflow file, and the environment below, configured
+    # on PyPI: with trusted publishing, PyPI accepts a short-lived token that GitHub signs for
+    # this job, so no PyPI token is stored anywhere. It runs last because a version published
+    # to PyPI can never be uploaded again: a failure anywhere earlier publishes nothing.
     name: publish to PyPI
-    needs: [check-tag, github-release]
-    if: vars.PUBLISH_TO_PYPI == 'true'
+    needs: [prepare, release]
+    if: ${{ !inputs.dry_run && vars.PUBLISH_TO_PYPI == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
       # An environment can require an approval before the job starts, under Settings,
       # Environments, pypi.
       name: pypi
-      url: https://pypi.org/project/deephaven-massive/${{ needs.check-tag.outputs.version }}/
+      url: https://pypi.org/project/deephaven-massive/${{ needs.prepare.outputs.version }}/
     permissions:
       # The token GitHub signs for trusted publishing; nothing else.
       id-token: write

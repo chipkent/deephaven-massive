@@ -17,8 +17,9 @@ on:
     # release that breaks the library is caught within a week even when nothing reaches main
     # and the open pull requests skip the tests.
     - cron: "23 7 * * 1"
-  # The release workflow runs this workflow on the commit a version tag names, and releases it
-  # only when every job passes. The run takes the tag push as its event, so every job runs.
+  # The release workflow runs this workflow on the commit it releases, and tags and releases
+  # that commit only when every job passes. The run takes the release's manual start as its
+  # event, so every job runs.
   workflow_call:
 
 concurrency:
