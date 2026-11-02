@@ -1,9 +1,10 @@
 name: CI
 
 # A pull request into main runs only the jobs its changes can affect. Every other run, a push to
-# main, the weekly run, and a pull request into another branch, runs every job. The lint job
-# decides, from the files the pull request changes, and the ci-ok job, the single required
-# check, passes only when every job the change selected passed and every other job was skipped.
+# main, the weekly run, a release, and a pull request into another branch, runs every job. The
+# lint job decides, from the files the pull request changes, and the ci-ok job, the single
+# required check, passes only when every job the change selected passed and every other job was
+# skipped.
 # Requiring the jobs themselves would not work: a skipped matrix job reports no status under
 # its entries' names, so a pull request that skips the tests would wait forever.
 
@@ -16,6 +17,9 @@ on:
     # release that breaks the library is caught within a week even when nothing reaches main
     # and the open pull requests skip the tests.
     - cron: "23 7 * * 1"
+  # The release workflow runs this workflow on the commit a version tag names, and releases it
+  # only when every job passes. The run takes the tag push as its event, so every job runs.
+  workflow_call:
 
 concurrency:
   # One run per pull request, and one per event kind on main: a new push cancels the run it
@@ -75,9 +79,10 @@ jobs:
           # check compares the installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
           # Files no job reads: the plans, the developer and live-test guides, the agent
-          # instructions and skills, the pull request and issue templates, and the settings of
-          # Dependabot and of the local git hooks, which CI does not run.
-          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.pre-commit-config\.yaml$)'
+          # instructions and skills, the pull request and issue templates, the settings of
+          # Dependabot and of the local git hooks, which CI does not run, and the release notes
+          # settings, which only the release workflow reads.
+          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)'
           # A change to a workflow or a composite action runs everything.
           workflows='^\.github/(workflows|actions)/'
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An

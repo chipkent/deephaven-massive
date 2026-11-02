@@ -2579,35 +2579,40 @@ git grep -n "UNVERIFIED\|plans/rework"
 | **Base** | `origin/main` after `git fetch` |
 | **Issue** | #87 |
 
-**Starts only on the owner's go-ahead.** Publishing is not turned on. Until the owner says so,
-no release workflow, GitHub environment, or pending trusted publisher is created, and no other
-planned PR depends on this one.
+**Started on the owner's request (2026-11-02):** a release workflow that releases a version tag
+on GitHub once the tests pass, with generated notes. Publishing to PyPI is in the workflow but
+off: its job runs only when the repository variable `PUBLISH_TO_PYPI` is `true`, which the
+owner sets after configuring the PyPI trusted publisher.
 
-**Goal.** Publish to PyPI reproducibly, with no long-lived token.
+**Goal.** Release reproducibly from a version tag, with no long-lived token.
 
 **DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration) (release).
 
 **Depends on.** finish-rework and the owner's go-ahead. **Parallel with.** live-integration-suite,
 plan-retirement.
 
-**Files.** Create `.github/workflows/release.yml`.
+**Files.** Create `.github/workflows/release.yml`, `.github/cliff.toml`, and
+`docs/dev/releasing.md`; let `.github/workflows/ci.yml` be called by another workflow; set the
+version to `0.1.0rc1`.
 
 **Tasks.**
-- [ ] On a `v*` tag: build the sdist and the wheel, check that the tag equals
-      `project.version`, publish through PyPI trusted publishing (`id-token: write`). The owner
-      configures the PyPI project and the trusted publisher.
-- [ ] The rehearsal, in the method the owner chooses at the go-ahead.
+- [ ] On a version tag: check that the tag equals `project.version` and names a commit on
+      `main`, run the whole CI workflow on it, and create a GitHub Release with generated notes
+      and the CI build's wheel and sdist; a candidate is a pre-release.
+- [ ] A PyPI job through trusted publishing (`id-token: write`), off until the owner sets
+      `PUBLISH_TO_PYPI`. The owner configures the PyPI project and the trusted publisher.
+- [ ] The rehearsal: the owner pushes `v0.1.0rc1`, which releases on GitHub only.
 
 **Acceptance criteria.**
-- [ ] The chosen rehearsal succeeds without publishing `0.1.0` to PyPI.
+- [ ] `v0.1.0rc1` becomes a GitHub pre-release with notes and both distributions, and nothing
+      reaches PyPI.
 
-**Verification.** The chosen rehearsal.
+**Verification.** The rehearsal.
 
-**Pitfalls.** No token in secrets. No rehearsal may push a tag that matches `project.version`:
-the version is already `0.1.0`, the only tag that passes the check is `v0.1.0`, and pushing it
-publishes to PyPI, where a version can never be re-uploaded.
+**Pitfalls.** No token in secrets. Once `PUBLISH_TO_PYPI` is on, every tag publishes to PyPI,
+where a version can never be re-uploaded.
 
-**Out of scope.** The version bump (release-0.1.0).
+**Out of scope.** The final version bump (release-0.1.0).
 
 **Approval gates.** Opening the PR; the owner's PyPI configuration.
 
@@ -2632,8 +2637,9 @@ planned PR depends on this one.
 
 **Depends on.** plan-retirement, release-workflow. **Parallel with.** nothing.
 
-**Files.** Modify `README.md` (the install line becomes `pip install deephaven-massive`).
-`pyproject.toml` already says `version = "0.1.0"`, so there is no version diff.
+**Files.** Modify `README.md` (the install line becomes `pip install deephaven-massive`) and
+`pyproject.toml` (the version goes from `0.1.0rc1` to `0.1.0`). No changelog file: the release
+notes are generated from the pull request titles.
 
 **Tasks.**
 - [ ] The README edit.

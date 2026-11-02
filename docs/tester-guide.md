@@ -285,7 +285,7 @@ uv venv --seed --python 3.12 ~/massive-test/dh-venv
 ```
 
 This downloads about 400 MB and takes a few minutes. It should end with a line that starts
-`Successfully installed` and names `deephaven-server-42` and `deephaven-massive-0.1.0`.
+`Successfully installed` and names `deephaven-server-42` and `deephaven-massive-0.1.0rc1`.
 **Record** how long it took and every line that says `ERROR` or `WARNING`.
 
 **If it fails:** if it asks for a username or says `Repository not found`, repeat step 2 of
@@ -314,7 +314,7 @@ OK   java: Java 21
 OK   uv: uv 0.9.5
 OK   commit: 1a2b3c..., tree clean
 OK   version: the checkout is on v0.1.0rc1
-OK   console: deephaven-massive 0.1.0, deephaven-core 42.7, in /Users/you/massive-test/dh-venv/bin/python
+OK   console: deephaven-massive 0.1.0rc1, deephaven-core 42.7, in /Users/you/massive-test/dh-venv/bin/python
 OK   same commit: both are 1a2b3c...
 OK   key: Massive accepted the API key
 OK   plan stocks: basic, history from 2024-10-30
@@ -410,7 +410,7 @@ long it took, and anything unclear.
 
 ```python
 # Turns on the debug log and opens a session on your Massive key. You should see the
-# library's version, such as 0.1.0, then <MassiveSession #1 open>.
+# library's version, such as 0.1.0rc1, then <MassiveSession #1 open>.
 import os
 
 import deephaven_massive as dm
@@ -426,8 +426,9 @@ print(dm.__version__)
 print(m)
 ```
 
-**You should see** `0.1.0` and `<MassiveSession #1 open>`. Creating the session sends nothing
-to Massive. `rest_basic_subscriptions=set(dm.Subscription)` tells the library that all five
+**You should see** the version without its leading `v`, such as `0.1.0rc1`, and
+`<MassiveSession #1 open>`. Creating the session sends nothing to Massive.
+`rest_basic_subscriptions=set(dm.Subscription)` tells the library that all five
 of your subscriptions are on the free Basic plan, so it spaces your requests to 5 a minute per
 subscription from the start rather than waiting for Massive to refuse the sixth. The debug
 log, `~/massive-test/massive-debug.log`, records every decision and request of the library,

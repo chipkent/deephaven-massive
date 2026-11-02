@@ -6425,13 +6425,19 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Banned import.** `[tool.ruff.lint.flake8-tidy-imports.banned-api]` bans `massive` with the
   message "The library has its own clients; see deephaven_massive._massive". A ban is not an
   ignore, so it needs no approval.
-- **Release, on the owner's go-ahead only.** Publishing is not turned on. When the owner gives
-  the go-ahead, `.github/workflows/release.yml` runs on a `v*` tag: it builds the sdist and the
-  wheel, checks that the tag equals `project.version`, and publishes to PyPI through trusted
-  publishing (`id-token: write`, no long-lived token). The first version is 0.1.0. Until then
-  no publishing workflow, GitHub environment, or pending publisher exists. **Hazard:** a PyPI
-  version can never be re-uploaded, so no rehearsal may push a tag that matches the project
-  version; the rehearsal method is chosen at the go-ahead.
+- **Release from a version tag; PyPI publishing off until the owner turns it on.**
+  `.github/workflows/release.yml` runs on a tag `vX.Y.Z`, or `vX.Y.ZaN`, `bN`, `rcN` for a
+  pre-release. It checks that the tag equals `v` plus `project.version`, a static version in
+  `pyproject.toml` (no version derived from git), and names a commit on `main`; runs the whole
+  CI workflow on that commit through `workflow_call`; and creates a GitHub Release, marked as a
+  pre-release for a candidate, with the CI build's wheel and sdist attached and notes that
+  git-cliff (`.github/cliff.toml`) generates from the squash-merged pull request titles, grouped
+  by Conventional Commits type. There is no hand-written changelog: the generated notes are the
+  history. Publishing to PyPI through trusted publishing (`id-token: write`, no long-lived
+  token) is the last job and runs only when the repository variable `PUBLISH_TO_PYPI` is
+  `true`; until the owner sets it, no tag publishes. The first release candidate is 0.1.0rc1.
+  **Hazard:** a PyPI version can never be re-uploaded, so a tag pushed after the switch is on
+  is final. `docs/dev/releasing.md` gives the steps.
 - **Metadata.** `authors = [{ name = "Chip Kent", email = "chipkent@illumon.com" }]`; repository
   `https://github.com/chipkent/deephaven-massive`.
 
@@ -6728,12 +6734,13 @@ document already reflects them.
 43. **Module names:** `_namespaces/` (plain modules of namespace classes), `_ingest/flatfiles.py`,
     `_datasets/history_source.py`, and the wire package `_massive/flatfiles/` (PEP 8 forbids the
     underscore in a package name, and the library module follows the wire package's spelling).
-44. **Release through trusted publishing, on the owner's go-ahead.** When the owner turns
-    publishing on, `.github/workflows/release.yml` publishes to PyPI with trusted publishing
-    (no long-lived token), and the first version is 0.1.0. Until then no publishing workflow,
-    GitHub environment, or pending publisher exists. No rehearsal may push a tag that matches
-    the project version, because a PyPI version can never be re-uploaded; the rehearsal method
-    is chosen at the go-ahead ([section 20.1](#201-tooling-configuration)).
+44. **Release from a version tag after CI passes; PyPI through trusted publishing, off until
+    the owner turns it on** (2026-11-02). `.github/workflows/release.yml` releases a tag on
+    GitHub, with generated notes and the wheel and sdist, once the full CI workflow passes on
+    the tagged commit; its PyPI job (trusted publishing, no long-lived token) runs only when
+    the repository variable `PUBLISH_TO_PYPI` is `true`. The version is static in
+    `pyproject.toml` and the tag must equal it. No hand-written changelog. The first release
+    candidate is 0.1.0rc1 ([section 20.1](#201-tooling-configuration)).
 45. **`columns()` on every query** (2026-10-26). A public method, not a verb, returning a
     static table `Name`, `Type`, `Description`, `SuppliedBy` built from the dataset schema with
     no network call, so console and notebook users can read what each column means without the
