@@ -731,9 +731,11 @@ def _midnight(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=UTC)
 
 
-_BUCKET_PRODUCTS = ("ES", "ZC", "LE")
+_BUCKET_PRODUCTS = ("ES", "ZC", "LE", "MBT")
 """Products whose sessions open at different hours: ES at 17:00 Chicago time, corn at 19:00
-(after midnight UTC), and live cattle at 08:30, a day session."""
+(after midnight UTC), and live cattle at 08:30, a day session; and Micro Bitcoin, whose market
+trades a cryptocurrency that never closes, to show whether any session opens on a Friday
+evening or a Saturday."""
 
 _ALL_ROWS = 50_000
 """The largest page Massive serves; `rest_rows` follows the pages beyond it."""
@@ -853,6 +855,14 @@ def _bucket_verdicts(
     for line in lines:
         evidence(f"{contract} {line}")
     verdicts = [f"1session placement: {placement}"]
+    # The library judges a bucket finished on the assumption that no session opens on a Friday
+    # evening or a Saturday: such a session would start on a Friday or Saturday UTC day (ES
+    # hours) or carry a Saturday or Sunday label.
+    opens = Counter(f"{futures_bar_buckets.utc_day(bar.start_ns):%a}" for bar in inputs.sessions)
+    labels = Counter(
+        f"{date.fromisoformat(bar.label):%a}" for bar in inputs.sessions if bar.label is not None
+    )
+    verdicts.append(f"1session bars start on (UTC day) {dict(opens)}, labelled {dict(labels)}")
     verdicts.extend(_grid(rest_rows, contract, inputs, first=first, end=end, evidence=evidence))
     for resolution in ("1week", "1month"):
         bars = _bars(rest_rows, contract, resolution, since=_midnight(first), end=end)
@@ -927,22 +937,24 @@ def test_futures_bar_buckets_against_the_bars_inside_them(
     A simpler rule for the library's futures bar windows needs Massive to put each whole session in
     the bucket of the UTC day of its first minute, with buckets of whole UTC days on a fixed grid
     from `window_start` (N days for N sessions, 7N for weeks, calendar months), each labelled with
-    its last session. For the contract of ES, corn (ZC), and live cattle (LE) that was front at the
-    end of the most recent whole month, it reads that month's minute bars (from a week before to a
-    week after) and 1-session bars (from two months before), and records: each 1-session bar's
-    `window_start` beside its session's first minute bar; 2-session bars read from an even and from
-    an odd epoch day, and whether the two reads share their windows (a fixed grid) or each starts at
-    its `{from}`; the UTC weekday 1-week bars start on; and each 2-session, week, month, and 2-month
-    bar against its bucket's candidate contents (the whole sessions starting in its UTC days, the
-    next N sessions, the minute bars of its UTC days, and the sessions from `{from}` when `{from}`
-    falls inside it), with each one's relative error and whether its last session is the bar's
-    label; and one 2-month bucket read from before it and from a month into it, the same bar or
+    its last session. For the contract of ES, corn (ZC), live cattle (LE), and Micro Bitcoin (MBT)
+    that was front at the end of the most recent whole month, it reads that month's minute bars
+    (from a week before to a week after) and 1-session bars (from two months before), and records:
+    each 1-session bar's `window_start` beside its session's first minute bar; 2-session bars read
+    from an even and from an odd epoch day, and whether the two reads share their windows (a fixed
+    grid) or each starts at its `{from}`; the UTC weekday 1-week bars start on; and each 2-session,
+    week, month, and 2-month bar against its bucket's candidate contents (the whole sessions
+    starting in its UTC days, the next N sessions, the minute bars of its UTC days, and the
+    sessions from `{from}` when `{from}` falls inside it), with each one's relative error and
+    whether its last session is the bar's label; the UTC days 1-session bars start on and the
+    weekdays of their labels, which show whether any session opens on a Friday evening or a
+    Saturday; and one 2-month bucket read from before it and from a month into it, the same bar or
     clipped at `{from}`. It ends with a verdict line per question and contract. Reading it: whole
     sessions in its UTC days matching every bar, a fixed grid, and the same 2-month bar from both
     reads confirm the model; anything else says where it breaks.
 
     It asserts only that each contract has 1-session and minute bars. Cost: about 10 REST
-    requests per contract (the minute bars take two or three pages), some 30 in all, so it
+    requests per contract (the minute bars take two or three pages), some 40 in all, so it
     needs Futures Starter, which has no request limit.
     """
     found = {}

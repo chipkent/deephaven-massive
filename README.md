@@ -446,8 +446,13 @@ and the trade count. These rules hold for every `bars()` dataset.
   on the bar's last session, Massive's `session_end_date`. So a month bar holds the sessions
   that open in that month: September 2026's runs from the session of September 2 to that of
   October 1. An n-session bar covers n calendar days, so over a weekend it holds fewer than n
-  sessions. With dates, `history()` returns a bar only when all its sessions lie in the range,
-  so a month bar needs the range to reach the session that opens on the month's last day:
+  sessions. With datetimes, `history()` returns a bar only when its `TimestampStart` is at or
+  after `start`, so a range that starts at a session's 17:00 Chicago open leaves out that
+  session's 1-session bar, which starts at 00:00 UTC on the UTC day the session opens. Start the
+  range at that midnight instead, such as `datetime(2026, 9, 13, tzinfo=UTC)` for the session
+  that opens on Sunday, September 13, or pass dates. With dates, `history()` returns a bar only
+  when all its sessions lie in the range, so a month bar needs the range to reach the session
+  that opens on the month's last day:
 
   | Call | Returns |
   |---|---|

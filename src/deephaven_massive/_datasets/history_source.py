@@ -284,8 +284,10 @@ def _futures_sessions(
       last session. It is kept when the first weekday on or after its bucket's first day (the
       UTC date of `TimestampStart`) is on or after the first date, so no session of the bucket
       lies before the range; when its label is no later than the last date; when its
-      `TimestampStart` is no earlier than the `{from}` sent, so a bucket Massive cut short at
-      `{from}` is left out; and when it has certainly ended (`bar_periods.futures_bar_ended`).
+      `TimestampStart` is no earlier than the `{from}` sent, so its whole window lies in the
+      request; and when it has certainly ended (`bar_periods.futures_bar_ended`). These checks
+      select whole windows by their stamps: a bucket Massive cut short and stamped at `{from}`
+      looks whole to them and would be kept.
       So a month bar needs the range to reach the session that opens on the month's last
       day: September 2026 needs `2026-09-01` to `2026-10-01`.
 

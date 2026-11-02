@@ -1277,15 +1277,39 @@ def test_bars_of_several_sessions_by_instants_keep_the_buckets_at_the_range_s_ed
     assert [r["TimestampStart"] for r in out] == [utc_ns(day) for day, _ in TWO_SESSIONS[:6]]
 
 
+def test_a_range_of_instants_from_a_session_s_open_leaves_out_its_session_bar(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The session of 09-14 opens on Sunday 09-13 at 17:00 Chicago, but its 1-session bar starts
+    # at 00:00 UTC that Sunday: a range from the open leaves it out, one from midnight keeps it.
+    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    serve_buckets(fake_rest, [("2026-09-13", "2026-09-14"), ("2026-09-14", "2026-09-15")])
+    q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION)
+    end = datetime(2026, 9, 16, tzinfo=UTC)
+    session_open = datetime(2026, 9, 13, 17, tzinfo=CHICAGO)
+    from_open = rows(q.history(session_open, end, source=dm.HistorySource.REST))
+    assert [r["TimestampStart"] for r in from_open] == [utc_ns("2026-09-14")]
+    midnight = datetime(2026, 9, 13, tzinfo=UTC)
+    from_midnight = rows(q.history(midnight, end, source=dm.HistorySource.REST))
+    assert [r["TimestampStart"] for r in from_midnight] == [
+        utc_ns("2026-09-13"),
+        utc_ns("2026-09-14"),
+    ]
+
+
 def test_a_bar_whose_bucket_is_still_open_is_left_out(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The 2-month bars of ESZ6 on 2026-11-02: November and December's bucket has seen only
-    # the session of 11-02 so far, so it is left out until no later session can join it.
-    monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
+    # The 2-month bars of ESZ6 as read on 2026-11-02: November and December's bucket holds only
+    # the session of 11-02. A day later that session has closed, so the bar's own end has
+    # passed and only the completion judgment can leave it out: later sessions may still join.
+    monkeypatch.setattr(history_source, "_now", lambda: datetime(2026, 11, 3, 12, tzinfo=CHICAGO))
     buckets = [
         ("2026-07-01", "2026-09-01"),
         ("2026-09-01", "2026-10-30"),
