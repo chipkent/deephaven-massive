@@ -630,6 +630,43 @@ def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
     )
 
 
+def test_malformed_lines_are_skipped_with_one_warning_per_file(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A line with too few fields and one with too many lose only themselves; the warning
+    # names the first one's row and field count, never its text.
+    rows = trade(1, 1741012200000000001) + "SECRET,7\n" + trade(2, 1741012200000000002)
+    rows += "12,,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with caplog.at_level(logging.WARNING, logger=flatfiles.__name__):
+        t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    assert pick(t, "Id") == [("1",), ("2",)]
+    [warning] = [r.getMessage() for r in caplog.records if r.name == flatfiles.__name__]
+    assert warning == (
+        f"stocks.trades: skipped 2 malformed line(s) of {LOCATION.format(TRADES_0303)} that do "
+        "not split into the header's fields, the first: row 2 after the header has 2 fields "
+        "where the header has 13; the file's other rows are kept"
+    )
+    assert "SECRET" not in caplog.text
+
+
+def test_a_file_whose_every_line_is_malformed_fails_the_call(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + "AAPL,1\nAAPL,2\n"))
+    with pytest.raises(
+        dm.MassiveError,
+        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of its 2 "
+        r"lines is malformed, so the file's format may have changed; the first: row 1 after the "
+        r"header has 2 fields where the header has 13$",
+    ):
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+
+
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:

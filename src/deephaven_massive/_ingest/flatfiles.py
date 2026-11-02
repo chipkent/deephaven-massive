@@ -80,9 +80,12 @@ its type, or an `Instant` other than the time column that fails the routine, is 
 logs one WARNING per (dataset, transport, header) through the session's `DriftRegistry`. A row
 whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
 fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
-WARNING per dataset with the running count). A file that lacks a key header fails the call
-with `MassiveError`, and so does a file whose every row of the requested symbols was dropped,
-the sign of a change in the file's format rather than of one odd row.
+WARNING per dataset with the running count). A line that does not split into the header's
+fields (too few or too many, or a quote that does not close) is skipped, and each file that
+had one logs one WARNING with the count and the first one's row number, never its text. A file
+that lacks a key header fails the call with `MassiveError`, and so does a file whose every row
+is malformed or whose every row of the requested symbols was dropped, the sign of a change in
+the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
 the placeholder `{venue}`, `venues` (all four by default) picks the venues read, and HTTP 403 on any
@@ -1365,10 +1368,12 @@ class FlatFileHistory:
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once. Then logs one DEBUG line with the rows after each step:
-        read, of the requested symbols, kept by the window (and a readable key), and kept as
-        whole bars of the requested sessions, so an empty table can be traced to the step
-        that emptied it.
+        read again is counted once. A file with lines that do not split into the header's
+        fields logs one WARNING with their count and the first one's row number and field
+        count (`FlatFile.malformed_reason`). Then logs one DEBUG line with the rows after each
+        step: read, of the requested symbols, kept by the window (and a readable key), and
+        kept as whole bars of the requested sessions, so an empty table can be traced to the
+        step that emptied it.
 
         Args:
             batches: The file's batches, one per block, each with its drift.
@@ -1408,6 +1413,16 @@ class FlatFileHistory:
             if pending:
                 tables.append(_convert(pending, transform))
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
+        if file.malformed_lines:
+            # The reason gives the row's number and field count, never the line's text.
+            logger.warning(
+                "%s: skipped %d malformed line(s) of %s that do not split into the header's "
+                "fields, the first: %s; the file's other rows are kept",
+                transform.dataset,
+                file.malformed_lines,
+                file.location,
+                file.malformed_reason,
+            )
         logger.debug(
             "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
             "whole bars",

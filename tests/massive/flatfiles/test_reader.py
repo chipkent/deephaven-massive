@@ -813,28 +813,71 @@ def test_a_value_that_does_not_convert_is_null_and_reported_by_its_header(
     assert report.samples["price"] == DriftSample(None, "x" + "y" * 199)  # cut to 200
 
 
-def test_a_row_of_the_wrong_width_keeps_arrows_message(
+def test_a_malformed_line_is_skipped_and_counted(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError) as info:
-        table(opened(KEY, TRADE_HEADER + "AAPL,1\n"), plan())
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: CSV parse error: "
+    # Too few fields, too many, and a quote that never closes, which takes the line after it
+    # into the same bad row: each is skipped, every other row is read.
+    rows = (
+        ",,4,1,1,1.5,1,1741012200000000001,10,1,AAPL,,\n"
+        "SECRET,1\n"
+        ",,4,2,1,1.5,2,1741012200000000002,10,1,AAPL,,\n"
+        ",,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
+        "\n"
+        ",,4,4,1,1.5,4,1741012200000000004,10,1,AAPL,,\n"
+        '"SECRET,,4,5,1,1.5,5,1741012200000000005,10,1,AAPL,,\n'
+        ",,4,6,1,1.5,6,1741012200000000006,10,1,AAPL,,\n"
     )
-    assert "Expected 13 columns, got 2" in info.value.message
+    file = opened(KEY, TRADE_HEADER + rows)
+    assert (file.malformed_lines, file.malformed_reason) == (0, "")
+    result = table(file, plan())
+    assert result["Id"].to_pylist() == ["1", "2", "4"]
+    assert file.rows_read == 3
+    assert file.malformed_lines == 4
+    assert file.malformed_reason == "row 2 after the header has 2 fields where the header has 13"
 
 
-def test_quoted_row_text_never_names_a_column(
+def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    # Arrow quotes a malformed row in its parse error; text in that row that looks like
-    # Arrow's own column position must not be taken for one.
+    text = TRADE_HEADER + "SECRET,1\n\nIn CSV column #999: x,1\n"
     with pytest.raises(WireError) as info:
-        table(opened(KEY, TRADE_HEADER + "In CSV column #999: x,1\n"), plan())
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: CSV parse error: "
+        table(opened(KEY, text), plan())
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
+        "lines is malformed, so the file's format may have changed; the first: row 1 after "
+        "the header has 2 fields where the header has 13"
     )
-    assert "In CSV column #999: x,1" in info.value.message
+    assert info.value.unreadable
+
+
+def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # Bad lines spread over many chunks: the rows read are those of the file without them,
+    # and the first one's row number counts the rows of every chunk before its own.
+    clean = _odd_trades(3_000)
+    header, *lines = clean.split("\n")
+    spoiled = []
+    for n, line in enumerate(lines):
+        spoiled.append(line)
+        if n % 500 == 499:
+            spoiled.append(f"S{n % 10},{n}")
+    first = 1 + sum(1 for line in spoiled[: spoiled.index("S9,499")] if line)
+    data = make_csv_gz("\n".join([header, *spoiled]))
+    expected = _streamed(make_csv_gz(clean), plan(block_size=4096))
+    assert not isinstance(expected, str)
+    for chunk_blocks in (1, 5):
+        for threads in (1, 3):
+            read = plan(block_size=4096, chunk_blocks=chunk_blocks, parse_threads=threads)
+            file, _ = flat_file(KEY, data)
+            with file:
+                rows = [batch for batch, _ in file.batches(read)]
+            assert pa.Table.from_batches(rows).equals(expected[0]), (chunk_blocks, threads)
+            assert file.malformed_lines == 6
+            assert file.malformed_reason == (
+                f"row {first} after the header has 2 fields where the header has 13"
+            )
 
 
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(

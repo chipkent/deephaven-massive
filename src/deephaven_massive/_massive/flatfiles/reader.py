@@ -17,6 +17,11 @@ key headers (`ReadPlan.required`) fails before its first block. Every block's ba
 with a `DriftReport` of those headers and of its own odd values; what to log and show is the
 library's decision.
 
+A line Arrow cannot split into the header's fields (too few or too many, or a quote that does
+not close) is skipped and counted (`FlatFile.malformed_lines`, with the first one's row number
+and field count in `FlatFile.malformed_reason`), never its text; the rest of its block is read.
+A file whose every row is malformed raises after its last block.
+
 Arrow reads every header as text, so one value that does not parse never fails a block. Each
 block then goes through pure Arrow operations, in this order:
 
@@ -57,7 +62,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, TypeAlias, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -224,8 +229,18 @@ class FlatFile:
         rows_of_symbols: Of those, the rows of the plan's symbols (all of them when the plan
             names none).
         rows_kept: Of those, the rows `batches()` yielded: a readable key, inside the plan's
-            window. The three tell a caller which step emptied a file; they are written by
-            the reader thread as it iterates and are final once `batches()` ends.
+            window. The three tell a caller which step emptied a file.
+        malformed_lines: The lines `batches()` skipped because Arrow could not split them into
+            the header's fields: too few or too many, or a quote that does not close (which
+            takes the lines after it, up to the next quote or the end of its block, into the
+            same bad row; those lines are counted too). Not part of `rows_read`.
+        malformed_reason: Where the first skipped line is and what is wrong with it, such as
+            `"row 1234 after the header has 5 fields where the header has 9"`; rows are
+            counted from the line after the header, blank lines left out. Never quotes the
+            line, which a caller could log. `""` when no line was skipped.
+
+        Every count is written by the reader thread as it iterates, and is final once
+        `batches()` ends.
     """
 
     __slots__ = (
@@ -234,6 +249,8 @@ class FlatFile:
         "_host",
         "_key",
         "_location",
+        "malformed_lines",
+        "malformed_reason",
         "rows_kept",
         "rows_of_symbols",
         "rows_read",
@@ -256,6 +273,8 @@ class FlatFile:
         self.rows_read = 0
         self.rows_of_symbols = 0
         self.rows_kept = 0
+        self.malformed_lines = 0
+        self.malformed_reason = ""
 
     @property
     def dropped(self) -> bool:
@@ -312,7 +331,9 @@ class FlatFile:
     def batches(self, plan: ReadPlan) -> Generator[tuple[pa.RecordBatch, DriftReport], None, None]:
         """Decode the file block by block, keeping the rows the plan asks for.
 
-        Reads the header line first and matches columns by name. Yields one batch per block,
+        Reads the header line first and matches columns by name. A line Arrow cannot split
+        into the header's fields is skipped and counted (`malformed_lines`, `malformed_reason`).
+        Yields one batch per block,
         possibly empty, so the consumer can check for cancellation after every block; a file
         with a header and no rows yields one empty batch, so its drift is still reported.
         Each batch has one column per `plan.columns`, named by `ReadColumn.column`, typed by
@@ -338,8 +359,9 @@ class FlatFile:
                 header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
                 the header names a column twice or lacks a key header of `plan.required`
                 (before the first block, naming the headers); or, after its last block, if
-                the file held rows of the requested symbols and every one of them was dropped
-                for a key, naming the first one's reason. Every message names the file.
+                every row of the file was malformed, or the file held rows of the requested
+                symbols and every one of them was dropped for a key, naming the first one's
+                reason. Every message names the file.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
@@ -387,6 +409,11 @@ class FlatFile:
                 dropped += drift.dropped_rows
                 reason = reason or drift.dropped_reason
                 yield rows, headers.merge(drift)
+            if self.malformed_lines and not self.rows_read:
+                raise self._error(
+                    f"every one of its {self.malformed_lines} lines is malformed, so the file's "
+                    f"format may have changed; the first: {self.malformed_reason}"
+                )
             if held and dropped == held:
                 raise self._error(
                     f"every one of the {held} rows of the requested symbols was dropped, so the "
@@ -419,7 +446,9 @@ class FlatFile:
         The calling thread decompresses the file and cuts the text after a line end into
         chunks of about `plan.chunk_size` bytes (`_chunk`); `plan.parse_threads` threads of
         the pool each parse a chunk (`pyarrow.csv.read_csv`, in blocks of `plan.block_size`)
-        and run `_apply` on its blocks. At most `plan.parse_threads + 1` chunks are read
+        and run `_apply` on its blocks, skipping the lines Arrow cannot split into the header's
+        fields (`_Malformed`), which are added to `malformed_lines` and `malformed_reason` as
+        each chunk is handed on. At most `plan.parse_threads + 1` chunks are read
         ahead of the consumer, so a reader holds about that many chunks of text and their
         rows whatever the file's length. The pool's threads are named after the calling
         thread, and end before this generator does, however it ends.
@@ -441,14 +470,30 @@ class FlatFile:
         """
         read_options, convert_options = options
 
-        def parse(chunk: bytes) -> list[tuple[pa.RecordBatch, DriftReport, int, int]]:
+        def parse(chunk: bytes) -> _Parsed:
+            malformed = _Malformed()
             table = pacsv.read_csv(
-                pa.py_buffer(chunk), read_options=read_options, convert_options=convert_options
+                pa.py_buffer(chunk),
+                read_options=read_options,
+                parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
+                convert_options=convert_options,
             )
-            return [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
+            blocks = [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
+            return blocks, table.num_rows, malformed
+
+        rows_before = 0  # rows read in the chunks handed on, for the first skipped row's number
+
+        def handed(parsed: _Parsed) -> list[tuple[pa.RecordBatch, DriftReport, int, int]]:
+            nonlocal rows_before
+            blocks, rows, malformed = parsed
+            if malformed.rows:
+                self.malformed_lines += malformed.lines
+                self.malformed_reason = self.malformed_reason or malformed.reason(rows_before)
+            rows_before += rows  # read only up to the chunk of the first skipped row
+            return blocks
 
         name = f"{threading.current_thread().name} parse"
-        pending: deque[Future[list[tuple[pa.RecordBatch, DriftReport, int, int]]]] = deque()
+        pending: deque[Future[_Parsed]] = deque()
         failed: Exception | None = None
         with ThreadPoolExecutor(plan.parse_threads, name) as pool:
             try:
@@ -462,9 +507,9 @@ class FlatFile:
                         break
                     pending.append(pool.submit(parse, chunk))
                     if len(pending) > plan.parse_threads:
-                        yield from pending.popleft().result()
+                        yield from handed(pending.popleft().result())
                 while pending:
-                    yield from pending.popleft().result()
+                    yield from handed(pending.popleft().result())
             finally:
                 for future in pending:  # ended early: drop the chunks not yet parsed
                     future.cancel()
@@ -599,11 +644,71 @@ class FlatFile:
         return block, dropped, None if nanos is None else nanos.filter(keep)
 
 
+class _Malformed:
+    """The rows of one chunk that Arrow could not split into the header's fields, skipped.
+
+    `FlatFile._blocks` makes one per chunk and passes `skip` to Arrow as the chunk's
+    `invalid_row_handler`. Arrow calls it on the parse thread reading that chunk; the reader
+    thread reads the counts only once that parse has ended, so no lock is needed.
+
+    Attributes:
+        rows: The rows skipped, as Arrow counts rows (a quote that does not close makes one row
+            of several lines).
+        lines: The lines those rows spanned.
+    """
+
+    __slots__ = ("_first", "lines", "rows")
+
+    def __init__(self) -> None:
+        """Start with nothing skipped."""
+        self.rows = 0
+        self.lines = 0
+        self._first = (0, 0, 0)
+
+    def skip(self, row: pacsv.InvalidRow) -> str:
+        """Count a row Arrow cannot read and tell Arrow to skip it.
+
+        Args:
+            row: Arrow's description of the row: its number in the chunk (from 1, blank lines
+                left out), its field count, the header's, and its text, which is only counted.
+
+        Returns:
+            `"skip"`, Arrow's word for leaving the row out and reading on.
+        """
+        if not self.rows:
+            self._first = (row.number, row.actual_columns, row.expected_columns)
+        self.rows += 1
+        self.lines += row.text.count("\n") + 1
+        return "skip"
+
+    def reason(self, rows_before: int) -> str:
+        """Return where the chunk's first skipped row is in the file, and what is wrong with it.
+
+        Args:
+            rows_before: The rows Arrow read in the file's earlier chunks, which skipped none:
+                only the file's first skipped row is reported.
+
+        Returns:
+            Such as `"row 1234 after the header has 5 fields where the header has 9"`.
+        """
+        number, fields, expected = self._first
+        return (
+            f"row {rows_before + number} after the header has {fields} fields where the "
+            f"header has {expected}"
+        )
+
+
+_Parsed: TypeAlias = tuple[list[tuple[pa.RecordBatch, DriftReport, int, int]], int, _Malformed]
+"""One parsed chunk: what `_apply` returns for each block with the block's row count, the
+chunk's rows Arrow read, and the rows it skipped."""
+
+
 def _chunk(text: gzip.GzipFile, *, size: int, line_limit: int) -> bytes:
     """Read the next chunk of the decompressed file: about `size` bytes, cut after a line end.
 
-    Arrow reads the files with `newlines_in_values` off, so it ends a row at every line end,
-    even inside quotes: cutting after one never splits a row it would read whole.
+    Massive writes no line end inside a value, so cutting after one never splits a row of a
+    good file. A quote that does not close is a malformed row however the text is cut: Arrow
+    skips it, with the lines it takes in up to the next quote or the end of its block.
 
     Args:
         text: The decompressed file.
