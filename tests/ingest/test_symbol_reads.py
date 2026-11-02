@@ -27,12 +27,15 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     RowDataError,
-    UnsupportedParameterError,
 )
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import UnlistedPairError
-from deephaven_massive._ingest.symbol_reads import failure_kind, read_flat_files_by_symbol
+from deephaven_massive._ingest.symbol_reads import (
+    UnsupportedParameterError,
+    failure_kind,
+    read_flat_files_by_symbol,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered

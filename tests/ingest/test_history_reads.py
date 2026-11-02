@@ -93,7 +93,7 @@ def _read(
     start: date | datetime = MONDAY,
     end: date | datetime = TUESDAY,
     forced: bool = False,
-) -> tuple[Table, str | None]:
+) -> tuple[Table, str | None, str | None]:
     symbols = ("I:SPX",) if spec is VALUES else ("AAPL",)
     request = Request(symbols=symbols, start=start, end=end)
     window = history_window(spec, request, start=start, end=end)
@@ -117,18 +117,19 @@ def _files(
     unread: tuple[date, ...] = (),
     uncertain: tuple[date, ...] = (),
     absent: tuple[date, ...] = (),
+    skipped: tuple[date, ...] = (),
 ) -> _Files:
     # Monday's file read; the days given were not.
     empty = _empty(session, spec)
-    return _Files(FlatFileRead(((MONDAY, empty),), empty, unread, uncertain, absent))
+    return _Files(FlatFileRead(((MONDAY, empty),), empty, unread, uncertain, absent, skipped))
 
 
 def test_files_that_serve_the_whole_range_need_no_rest(
     massive_session: dm.MassiveSession, rest: _Rest
 ) -> None:
     files = _files(massive_session)
-    _, served = _read(massive_session, files)
-    assert served is None
+    _, served, lacks = _read(massive_session, files)
+    assert (served, lacks) == (None, None)
     assert files.inferred == [False]  # REST could serve a missing day: nothing is inferred
     assert rest.calls == []
 
@@ -138,7 +139,7 @@ def test_the_days_the_files_lack_are_read_from_rest_one_by_one(
 ) -> None:
     files = _files(massive_session, unread=(TUESDAY,))
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.history_reads"):
-        _, served = _read(massive_session, files)
+        _, served, _ = _read(massive_session, files)
     assert rest.calls == [(TUESDAY, TUESDAY, None)]
     assert served == "Read from flat files, and from REST for 2025-03-04, whose files are missing."
     (message,) = caplog.messages
@@ -229,8 +230,8 @@ def test_a_refusal_under_auto_reads_the_whole_call_from_rest(
     massive_session: dm.MassiveSession, rest: _Rest
 ) -> None:
     refused = dm.EntitlementError("no files", status=403)
-    _, served = _read(massive_session, _Files(refused))
-    assert served == "Read from REST: AUTO chose flat files, which S3 refused."
+    _, served, lacks = _read(massive_session, _Files(refused))
+    assert (served, lacks) == ("Read from REST: AUTO chose flat files, which S3 refused.", None)
     assert rest.calls == [(MONDAY, TUESDAY, None)]
 
 
@@ -239,7 +240,31 @@ def test_sessions_a_futures_read_may_miss_are_named(
 ) -> None:
     files = _files(massive_session, uncertain=(MONDAY,))
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.history_reads"):
-        _, served = _read(massive_session, files)
-    assert served is not None
-    assert served.startswith("Session(s) 2025-03-03 may be incomplete")
+        _, served, lacks = _read(massive_session, files)
+    assert served is None
+    assert lacks is not None
+    assert lacks.startswith("Session(s) 2025-03-03 may be incomplete")
     assert "rows of session(s) 2025-03-03 may sit in a file outside the range" in caplog.text
+
+
+def test_days_taken_for_holidays_are_named_on_the_table(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # A missing day's file with a later file is taken for a holiday: the table says so, since
+    # Massive's file may simply be missing and the library never hides a gap in its data.
+    files = _files(massive_session, skipped=(TUESDAY,))
+    _, served, lacks = _read(massive_session, files, forced=True)
+    assert served is None
+    assert lacks == (
+        "No flat file exists for 2025-03-04, though a later day's does, so that day was taken "
+        "for a day without trading (a holiday?) and has no rows here."
+    )
+    both = _files(massive_session, skipped=(MONDAY, TUESDAY), uncertain=(MONDAY,))
+    _, _, lacks = _read(massive_session, both, forced=True)
+    assert lacks is not None
+    assert lacks.startswith(
+        "No flat file exists for 2025-03-03, 2025-03-04, though a later day's does, so those "
+        "days were taken for days without trading (a holiday?) and have no rows here. "
+        "Session(s) 2025-03-03 may be incomplete"
+    )
+    assert rest.calls == []

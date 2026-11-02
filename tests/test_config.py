@@ -132,6 +132,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.s3_bucket == "flatfiles"
     assert base.noncanonical_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
+    assert base.unavailable_symbols is dm.OnError.LOG
 
 
 def test_defaults_live_in_exactly_one_place() -> None:
@@ -394,7 +395,7 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     assert cfg.ws_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
-_SYMBOL_SETTINGS = ["noncanonical_symbols", "unreadable_symbols"]
+_SYMBOL_SETTINGS = ["noncanonical_symbols", "unreadable_symbols", "unavailable_symbols"]
 
 
 @pytest.mark.parametrize("setting", _SYMBOL_SETTINGS)
@@ -569,6 +570,7 @@ s3_endpoint_url: "https://files.example.com"
 s3_bucket: 'bucket'
 noncanonical_symbols: raise
 unreadable_symbols: ignore
+unavailable_symbols: raise
 """,
     )
     expected = MassiveConfig(
@@ -591,6 +593,7 @@ unreadable_symbols: ignore
         s3_bucket="bucket",
         noncanonical_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
+        unavailable_symbols=OnError.RAISE,
     )
     config = MassiveConfig.from_file(file)
     assert config == expected

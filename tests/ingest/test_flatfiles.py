@@ -587,6 +587,31 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     assert transform.plan.required == frozenset({"ticker", "sip_timestamp"})
 
 
+def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported() -> None:
+    transform = flatfiles._Transform.build(
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        request=request(dm.ALL),
+        window=whole_days(SYNTHETIC, "2025-03-03"),
+        unreadable_symbols=dm.OnError.RAISE,
+        warnings=WARNINGS,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL", "MSFT"],
+            "Timestamp": [1741012200000000123, 1741012200000000124],
+            "ParticipantTimestamp": [1741012199999, 1741012199999],
+            "Size": [2**53 + 1, 100],
+            "Conditions": [12, 12],
+        }
+    )
+    converted, drift = transform.apply(batch, received=7, key=STOCK_KEY)
+    assert converted.column("Size").to_pylist() == [float(2**53), 100.0]
+    assert drift == DriftReport(rounded=frozenset({"size"}))
+    assert drift.samples["size"].value == str(2**53 + 1)
+
+
 def test_milliseconds_in_a_nanosecond_column_read_as_null_with_a_warning(
     *,
     session: dm.MassiveSession,
@@ -626,7 +651,8 @@ def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
         f"stocks.trades: dropped 2 FLAT_FILES row(s) whose key cannot be read, the first at "
         f"{LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
         "stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100; such rows are "
-        "dropped and counted, and the running count is logged at DEBUG"
+        "dropped and counted: the running count is logged at DEBUG and shown in the "
+        "SchemaDrift of each live table that lost them"
     )
 
 
@@ -2367,8 +2393,14 @@ def test_one_missing_trading_day_is_only_a_holiday(
     put(TRADES_0304, "us_stocks_sip_trades_v1_2025-03-05.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
+        table = q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert caplog.messages == [holiday_warning("stocks.trades", TRADES_0303, "2025-03-03")]
+    # The table says so too: the file may simply be missing, and its rows with it.
+    assert table.attributes()["TableDescription"].endswith(
+        "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES. No flat file "
+        "exists for 2025-03-03, though a later day's does, so that day was taken for a day "
+        "without trading (a holiday?) and has no rows here."
+    )
 
 
 def test_a_crypto_weekend_without_files_warns_about_the_address(

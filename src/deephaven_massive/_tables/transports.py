@@ -517,6 +517,10 @@ class FlatFileRead:
             before the current day: Massive publishes a file the day after its day, so these
             have no file at all, rather than one not published yet. Oldest first; empty for
             none.
+        skipped: When the read inferred holidays, the trading days whose file is missing
+            though a later day's file exists, which the read took for days without trading
+            and skipped, oldest first; empty for none. The table's description names them,
+            since the inference may be wrong and Massive's file may simply be missing.
     """
 
     parts: tuple[tuple[date, Table], ...]
@@ -524,6 +528,7 @@ class FlatFileRead:
     unread: tuple[date, ...]
     uncertain: tuple[date, ...] = ()
     absent: tuple[date, ...] = ()
+    skipped: tuple[date, ...] = ()
 
 
 class FlatFileTransport(Protocol):
@@ -544,7 +549,7 @@ class FlatFileTransport(Protocol):
         call: int,
         forced: bool,
         stop: threading.Event | None = None,
-    ) -> tuple[Table, str | None]:
+    ) -> tuple[Table, str | None, str | None]:
         """Return a `history()` call's rows from the flat files, and from REST what they lack.
 
         Under `AUTO`, when REST can serve the request, the trading days whose files are
@@ -562,8 +567,10 @@ class FlatFileTransport(Protocol):
             stop: A background read's stop token, or None for a blocking read.
 
         Returns:
-            The static table, and the description's source sentence when REST served any of
-            it or a session may be incomplete; None when only the flat files did, in full.
+            The static table; the description's source sentence when REST served any of it,
+            which replaces the sentence of the source choice (None when only the flat files
+            did); and the sentences the description adds on what the files may lack: the days
+            taken for holidays and the sessions that may be incomplete (None for neither).
 
         Raises:
             AuthenticationError: If S3 rejects the credentials and REST may not serve the call.

@@ -42,8 +42,8 @@ one (its publisher's `publish_failure`), so the failure shows where Deephaven us
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported; two of its subclasses, `RowDataError` and
-`UnsupportedParameterError`, which the ingest layer raises and the tables layer names;
+fix, which is not exported; its subclass `RowDataError`, which the ingest layer raises and
+the tables layer names;
 `LIBRARY_BUG`, the sentence that ends every message about a
 defect of the library itself; and `raises_through`, the declaration that lets a test check
 the `Raises:` section of a function whose errors come from the helpers it calls. The
@@ -72,7 +72,6 @@ __all__ = [
     "MassiveError",
     "PermanentError",
     "RowDataError",
-    "UnsupportedParameterError",
     "cause_of",
     "failure_text",
     "from_wire",
@@ -254,12 +253,13 @@ class PermanentError(MassiveError):
 
     Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
     errors whose cause is settled for the session or the request: a row that breaks its
-    dataset's schema (`RowDataError`), a parameter the chosen path does not take
-    (`UnsupportedParameterError`), a symbol table's row that is not Massive's ticker
-    (`SymbolRowError`), and a crypto pair missing from the session's ticker list
-    (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
-    `RowDataError` and `UnsupportedParameterError` are defined here, since the REST transport
-    raises them and the tables layer names them; `SymbolRowError` is the poll module's
+    dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
+    (`SymbolRowError`), a crypto pair missing from the session's ticker list
+    (`UnlistedPairError`), and, in a read by symbol, a parameter a symbol's path does not take
+    (`UnsupportedParameterError`, `_ingest/symbol_reads.py`). A `poll()` table fails with one
+    rather than retrying it every cycle.
+    `RowDataError` is defined here, since the REST transport raises it and the tables layer
+    names it; `SymbolRowError` is the poll module's
     (`_tables/poll.py`) and `UnlistedPairError` the REST transport's (`_ingest/rest.py`). The
     fatal set of `poll()` names only this base, so a subclass defined in a module the poll
     module cannot import (the ingest layer) still fails the table.
@@ -446,14 +446,3 @@ class RowDataError(PermanentError):
     """
 
     default_cause = ErrorCause.LIBRARY_DEFECT
-
-
-class UnsupportedParameterError(PermanentError):
-    """A parameter the caller set that the path a `poll()` cycle chose does not take.
-
-    A reactive symbol table can route a new symbol to a path that lacks a parameter
-    (`adjusted=False` on the crypto indicators). Retrying cannot fix it, so the table fails
-    with it. The parameter is the caller's, so its cause is `ErrorCause.USER_DEFECT`.
-    """
-
-    default_cause = ErrorCause.USER_DEFECT

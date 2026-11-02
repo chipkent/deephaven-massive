@@ -55,7 +55,6 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
-    UnsupportedParameterError,
     library_bug,
 )
 from deephaven_massive._ingest.rest_requests import (
@@ -87,6 +86,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "RestUnit",
+    "UnsupportedParameterError",
     "failure_kind",
     "fetch_units",
     "history_units",
@@ -98,6 +98,19 @@ logger = logging.getLogger(__name__)
 
 RestUnit: TypeAlias = "tuple[RestPath, Call]"
 """One planned request of a read by symbol, with the path it reads."""
+
+
+class UnsupportedParameterError(PermanentError):
+    """A parameter the call set that a symbol's path does not take, in a read by symbol.
+
+    A dataset with a path per symbol class can route one symbol to a path that lacks a
+    parameter the call set (`adjusted=False` on the crypto indicators). That symbol's read
+    fails with this error before any request, and the other symbols are read. The parameter is
+    the caller's, so its cause is `ErrorCause.USER_DEFECT`.
+    """
+
+    default_cause = ErrorCause.USER_DEFECT
+
 
 _SYMBOL = "Symbol"
 """The column that names each row's symbol, by which a request of several symbols is split."""

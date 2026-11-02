@@ -146,3 +146,24 @@ def test_a_page_whose_every_row_is_dropped_raises() -> None:
 def test_an_empty_page_is_no_error() -> None:
     batches, drift, flagged = trades_converter().convert([], "AAPL")
     assert (batches, drift, flagged) == ([], DriftReport(), [])
+
+
+def test_a_size_beyond_2_53_is_served_rounded_and_reported() -> None:
+    # The quote's sizes are `long` on this path but `double` in the dataset: a size beyond
+    # 2**53 cannot be held exactly, so it is served rounded and named in the drift.
+    path = "/v2/last/nbbo/{stocksTicker}"
+    converter = rest_rows.RowConverter.build(
+        CATALOG,
+        CATALOG.by_name["stocks.last_quote"],
+        source(Transport.REST, path),
+        unreadable_symbols=OnError.LOG,
+    )
+    rows: list[dict[str, object]] = [
+        {"T": "AAPL", "t": WHEN, "s": 2**53 + 1, "S": 100},
+        {"T": "AAPL", "t": WHEN + 1, "s": 2**53 + 3, "S": 2**53},
+    ]
+    [batch], drift, _ = converter.convert(rows, "AAPL")
+    assert batch.column("BidSize").to_pylist() == [float(2**53), float(2**53 + 4)]
+    assert batch.column("AskSize").to_pylist() == [100.0, float(2**53)]
+    assert drift.rounded == frozenset({"s"})
+    assert drift.samples["s"] == DriftSample(None, str(2**53 + 1))

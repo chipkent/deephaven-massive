@@ -13,7 +13,9 @@ and decides what the call returns when they cannot serve all of it:
   that the flat files fill, and the table's description says so.
 - Under `FLAT_FILES`, or when REST cannot serve the request, the flat-file read infers
   holidays (a missing trading day with a later file), a day whose file is not out yet raises,
-  and so do the days at the range's end that have no file a week or more later. A refusal
+  and so do the days at the range's end that have no file a week or more later. The table's
+  description names each day taken for a holiday, since Massive's file for a trading day may
+  simply be missing, and the library never fills or hides a gap in Massive's data. A refusal
   names REST when REST could serve the read.
 - A futures read by dates whose files held rows of other sessions warns that the range's
   first or last session may be incomplete, and says so on the table.
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._ingest.flatfiles import FlatFileHistory
     from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import FlatFileRead
 
 __all__ = ["read_history"]
 
@@ -77,7 +80,7 @@ def read_history(
     call: int,
     stop: threading.Event | None,
     forced: bool,
-) -> tuple[Table, str | None]:
+) -> tuple[Table, str | None, str | None]:
     """Read `history()` from the flat files, and from REST what they cannot serve.
 
     See the module docstring for the rules.
@@ -94,8 +97,10 @@ def read_history(
         forced: True for `source=FLAT_FILES`, which never reads REST.
 
     Returns:
-        The static table, and the description's source sentence when REST served any of it
-        or a session may be incomplete (None when only the flat files did, in full).
+        The static table; the description's source sentence when REST served any of it,
+        which replaces the sentence of the source choice (None when only the flat files did);
+        and the sentences the description adds on what the files may lack (`_files_lack_note`:
+        the days taken for holidays, the sessions that may be incomplete), or None.
 
     Raises:
         AuthenticationError: When S3 rejects the S3 credentials under `FLAT_FILES` or when
@@ -122,7 +127,7 @@ def read_history(
             raise
         _warn_rest_served(core, spec, f"S3 refused the flat files ({error})")
         rows = core.rest_transport().history(spec, request, window, call=call, stop=stop)
-        return rows, "Read from REST: AUTO chose flat files, which S3 refused."
+        return rows, "Read from REST: AUTO chose flat files, which S3 refused.", None
     if read.absent:
         days = ", ".join(day.isoformat() for day in read.absent)
         remedy = (
@@ -146,10 +151,10 @@ def read_history(
             f"{spec.name}: the flat file for {first} is not published yet. "
             f"{PUBLICATION_NOTE}. {remedy}"
         )
-    doubt = _uncertain_sessions(spec, read.uncertain)
+    lacks = _files_lack_note(spec, read)
     if not read.unread:
         with entered(core.exec_ctx):
-            return merge([read.empty, *(part for _, part in read.parts)]), doubt
+            return merge([read.empty, *(part for _, part in read.parts)]), None, lacks
     rest = _rest_days(spec, request, window, core=core, days=read.unread, call=call, stop=stop)
     with entered(core.exec_ctx):
         # The files' days and REST's tile (the files are trimmed to their own days), so
@@ -161,7 +166,48 @@ def read_history(
     _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
     flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
     served = f"Read from {flat}, and from REST for {days}, whose files are missing."
-    return table, served if doubt is None else f"{served} {doubt}"
+    return table, served, lacks
+
+
+def _files_lack_note(spec: DatasetSpec, read: FlatFileRead) -> str | None:
+    """Return the description's sentences on what the flat files may lack, or None.
+
+    Args:
+        spec: The dataset.
+        read: The flat-file read.
+
+    Returns:
+        The sentence on the days taken for holidays (`_skipped_days`), then the one on the
+        sessions that may be incomplete (`_uncertain_sessions`), joined by a space; None when
+        neither applies.
+    """
+    notes = [_skipped_days(read.skipped), _uncertain_sessions(spec, read.uncertain)]
+    return " ".join(note for note in notes if note is not None) or None
+
+
+def _skipped_days(days: Sequence[date]) -> str | None:
+    """Name the days a flat-file read took for holidays, for the table's description.
+
+    A trading day's missing file with a later day's file after it is taken for a day without
+    trading and skipped (`FlatFileRead.skipped`); the read has logged one WARNING per file.
+    The inference may be wrong, so the table says which days hold no rows and why.
+
+    Args:
+        days: The skipped days, oldest first; empty for none.
+
+    Returns:
+        The description's sentence, or None when no day was skipped.
+    """
+    if not days:
+        return None
+    named = ", ".join(day.isoformat() for day in days)
+    one = len(days) == 1
+    return (
+        f"No flat file exists for {named}, though a later day's does, so "
+        f"{'that day was' if one else 'those days were'} taken for "
+        f"{'a day' if one else 'days'} without trading (a holiday?) and "
+        f"{'has' if one else 'have'} no rows here."
+    )
 
 
 def _uncertain_sessions(spec: DatasetSpec, sessions: Sequence[date]) -> str | None:
