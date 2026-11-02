@@ -1791,11 +1791,17 @@ def test_a_futures_watchlist_removal_never_overtakes_a_waiting_addition(
     ws_session.session.release(result)
 
 
+@pytest.mark.parametrize("step", ["_symbols_changed", "_change_contracts"])
 def test_a_futures_watchlist_change_during_a_close_is_dropped(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ws_session: WsSession,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
 ) -> None:
-    # The session closes after the change found the stream's connection: the change is dropped
-    # quietly, never raised into the watchlist's listener, which would fail the stream.
+    # The session closes after the change found the stream's connection, as the listener starts
+    # its lookups or as the worker waits: the change is dropped quietly, never raised into the
+    # watchlist's listener or lost on the worker, either of which would fail the stream.
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
     result = ws_session.query(FUTURES, watchlist).blink()
@@ -1807,7 +1813,7 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-        ws_session.connections._change_contracts(stream_id, frozenset({"NQZ5"}), frozenset())
+        getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
         "is closing (MassiveSession #1 is closed)"
