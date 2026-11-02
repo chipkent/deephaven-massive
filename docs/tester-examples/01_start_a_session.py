@@ -1,5 +1,5 @@
 # Turns on the debug log and opens a session on your Massive key. You should see the
-# library's version, such as 0.1.0, then <MassiveSession #1 open>.
+# library's version, such as 0.1.0rc1, then <MassiveSession #1 open>.
 import os
 
 import deephaven_massive as dm

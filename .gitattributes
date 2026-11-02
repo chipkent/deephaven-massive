@@ -5,3 +5,7 @@ src/deephaven_massive/_massive/spec/*.json linguist-generated=true
 # The generated dataset reference: collapsed in diffs like the other generated files, and always
 # LF, since its parity test compares the committed bytes with the rendered pages.
 docs/datasets/*.md linguist-generated=true eol=lf
+# `git archive` fills in this file's placeholders with the commit and the nearest version tag,
+# so a build from an export with no .git, such as the tester's Docker image, still gets the
+# version from git.
+.git_archival.txt export-subst
