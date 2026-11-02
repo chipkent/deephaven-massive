@@ -17,9 +17,13 @@ Every method takes only that form (`check_symbol` in `_datasets/symbols.py`), an
 `dm.canonical_symbol_option` converts the bare or space-padded OCC forms. Every options dataset
 also has `OptionRoot`, the OCC root read from the symbol (`SPXW`, `AAPL1`). The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
-contract to as `Underlying`, exactly as Massive sends it: it names the linked instrument, not
-the deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100
-shares of it. Neither column is ever mapped to the other.
+contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
+deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
+of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
+too. The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes
+it bare (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
+(`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
+their CFI code (`wire_symbols.index_underlyings`).
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -310,7 +314,8 @@ def _underlying(value: object) -> str:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
 
     Returns:
-        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted.
+        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted. The REST
+        transport sends an index bare to the contracts list (`contracts_underlying`).
 
     Raises:
         TypeError: If `value` is not a `str`.
@@ -767,7 +772,8 @@ class _Options(Namespace):
         Args:
             symbols: Contracts to describe, as Massive's tickers; None, the default, lists
                 contracts. `dm.ALL` is refused. See README.md#symbols.
-            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`.
+            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
+                the rows' `Underlying` is the same canonical ticker.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
             as_of: The day whose contracts to list; None for today. See README.md#as-of.
             expired: True lists expired contracts only; False, the default, those still trading.

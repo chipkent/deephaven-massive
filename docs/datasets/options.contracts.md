@@ -46,7 +46,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. | REST |
 | `SharesPerContract` | double | The number of shares per contract for this contract. | REST |
 | `StrikePrice` | double | The strike price of the option contract. | REST |
-| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST |
+| `Underlying` | String | The instrument Massive links the row to, in the library's canonical symbol form; for an option, the linked instrument, not what the contract delivers. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |
 
 <details><summary>Massive fields</summary>

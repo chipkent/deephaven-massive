@@ -102,6 +102,11 @@ uv build                                 # sdist and wheel
     planned-PR names, or decision numbers. State the behavior or the reason directly.
 22. **Every change logs its decisions and failures, with their values, and never a secret**:
     the rules and their checks are in the `src/deephaven_massive/_debug_log.py` docstring.
+23. **Supply Massive's data; never repair it.** The library returns what Massive sends,
+    converted faithfully: units, types, column names, and canonical symbols. It never fills,
+    corrects, filters out, re-stamps, or replaces values to make wrong or missing vendor data
+    look right. When Massive's data is wrong, record the evidence and draft a report to Massive
+    for the owner to review, instead of adding a workaround.
 
 ## Documentation standard
 

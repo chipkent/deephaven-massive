@@ -73,8 +73,8 @@ KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
     TIMESTAMP: "The row's primary time, as an Instant.",
     "Underlying": (
-        "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
-        "the linked instrument, not what the contract delivers."
+        "The instrument Massive links the row to, in the library's canonical symbol form; for "
+        "an option, the linked instrument, not what the contract delivers."
     ),
 }
 """The library's own sentence for each renamed key column of every dataset; its description
@@ -280,10 +280,10 @@ def _end_sentence(spec: DatasetSpec) -> str:
     if spec.asset_class is AssetClass.FUTURES:
         return (
             f"{_WINDOW_END} An intraday bar ends its length after its start (a one-second "
-            "WebSocket bar at the later of that and Massive's `e`); a session bar at 17:00 "
-            "Chicago time on its session date; a bar of several sessions, or of a week or "
-            "longer, at the latest end its label allows, since whether Massive labels it with "
-            "its first or its last session is not verified."
+            "WebSocket bar at the later of that and Massive's `e`); a bar of a session or "
+            "longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is "
+            "its last session. history() returns a bar of several sessions, or of a week or "
+            "longer, only once no later session can still join it."
         )
     where = (
         f"00:00 {_ZONE_CLOCKS[zone]}"
