@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import gc
 import logging
 import threading
 import weakref
@@ -838,7 +839,8 @@ def test_a_session_freed_while_following_needs_no_close(dh_to_pylist: ToList) ->
     del result, m
     # Once nothing uses the result it stops, and nothing keeps the session: it is freed, and
     # its collection ends the coordinator thread.
-    until(lambda: core() is None)
+    # A free-threaded build merges references dropped on other threads at a collection.
+    until(lambda: gc.collect() >= 0 and core() is None)
     thread.join(TIMEOUT)
     assert not thread.is_alive()
 
