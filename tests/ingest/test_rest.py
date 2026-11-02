@@ -1690,18 +1690,21 @@ def test_a_row_two_named_symbols_return_under_a_limit_is_kept_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # A statement lists every ticker of its company, so GOOG's and GOOGL's requests both
-    # return it. A null in a key whose null is a value merges like any other value; a null
-    # in another key never merges.
-    shared = {"cik": "1652044", "fiscal_quarter": None, "tickers": ["GOOG", "GOOGL"]}
-    unkeyed = {"cik": None, "fiscal_quarter": 1, "tickers": ["GOOG", "GOOGL"]}
-    fake_rest.reply(STATEMENTS_PATH, Reply(envelope([shared, unkeyed])))
+    # return it: GOOGL's copy goes. GOOG's own rows all stay, though the restatement shares
+    # the original's poll keys and the repeat equals it in every column: Massive sent them.
+    original = {"cik": "1652044", "fiscal_quarter": 1, "total_assets": 100.0, "tickers": ["GOOG"]}
+    restated = {**original, "total_assets": 90.0}
+    other = {**original, "fiscal_quarter": 2}
+    target = f"{STATEMENTS_PATH}?limit=5&tickers.any_of="
+    fake_rest.reply(f"{target}GOOG", Reply(envelope([original, restated, original])))
+    fake_rest.reply(f"{target}GOOGL", Reply(envelope([original, other])))
     out = fetch(session, STATEMENTS, symbols=["GOOG", "GOOGL"], limit=5)
-    assert [(row["Cik"], row["FiscalQuarter"]) for row in out] == [
-        ("1652044", None),
-        (None, 1),
-        (None, 1),
+    assert [(row["FiscalQuarter"], row["TotalAssets"]) for row in out] == [
+        (1, 100.0),
+        (1, 90.0),
+        (1, 100.0),
+        (2, 100.0),
     ]
-    assert sorted(q["tickers.any_of"][0] for _, q in fake_rest.get_queries()) == ["GOOG", "GOOGL"]
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -2745,7 +2748,7 @@ def test_a_read_fans_out_on_the_callers_pool(
         CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
-        table, requests = reader.read(
+        table, requests, _ = reader.read(
             CRYPTO_LAST,
             path,
             calls,

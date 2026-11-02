@@ -1890,8 +1890,9 @@ Notation:
   The split changes only how requests are made, never a value. Where one row can answer
   several tickers' requests (`DatasetSpec.symbols_overlap`: news, financial statements, the
   insider and 8-K disclosure filings, Benzinga news, each of whose rows lists its tickers), a
-  row several requests return is kept once, at its first copy, by its `poll_keys`, a null in
-  a `nullable_poll_keys` column counting as a value; the catalog's `overlapping symbols`
+  row of a later request is dropped when an earlier request returned a row equal to it in
+  every column but `TimestampInsert`; rows of one request are never merged, so a restatement
+  Massive sends beside the original stays. The catalog's `overlapping symbols`
   gate requires the flag on every dataset whose symbol parameter filters such a list. The
   extra requests count against the rate governor, run at most `max_concurrency` at a time,
   and appear in the slow-poll WARNING's request count. Page size is internal. The README states the rule once, and each dataset's docstring says so. The cap is
@@ -2083,7 +2084,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy: a later request's article equal to an earlier one in every column but `TimestampInsert` is dropped (`symbols_overlap`); a `poll()` table, keyed by `Id`, fails on an article without one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -7386,7 +7387,8 @@ document already reflects them.
     `limit` nothing changes; datasets that already sent one symbol per request are unchanged.
     The requests respect `max_concurrency` and the rate governor, the slow-poll WARNING counts
     them all, and only how requests are made changes, never Massive's values. A row that
-    several tickers' requests return is kept once ([section 8](#8-namespace-tree)).
+    several tickers' requests return whole is kept once, and rows of one request are never
+    merged ([section 8](#8-namespace-tree)).
 
 ## 23. Open verification items
 

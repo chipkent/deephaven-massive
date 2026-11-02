@@ -25,7 +25,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   capped on its own, and the client stops paging there. Without named symbols (`dm.ALL`, or
   none) it caps the total rows. Where one row can answer several symbols' requests (the news
   of a watchlist, a financial statement listing every ticker of its company), a row several
-  requests return is kept once (`_first_copies`).
+  requests return is kept once, at its first request (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -127,7 +127,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches_now
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
-from deephaven_massive._datasets.row_times import stamp_rule, time_rule
+from deephaven_massive._datasets.row_times import INSERT, stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
@@ -184,7 +184,7 @@ from deephaven_massive._tables.poll import Pollers
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from datetime import date, timedelta
 
@@ -210,9 +210,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-_ROW_NUMBER: Final = "__row_number"
-"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
 
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
@@ -285,31 +282,49 @@ def _bare_index(request: Request, call: Call) -> str | None:
     return None
 
 
-def _first_copies(rows: pa.Table, keys: Sequence[str], nullable: Collection[str] = ()) -> pa.Table:
-    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+def _frozen(value: object) -> object:
+    """Return a value as a hashable equal of itself, for comparing whole rows.
 
-    A row is identified by `keys` alone. A null in a key of `nullable` is a value, so two rows
-    whose nulls fall in the same such keys are the same row. A row with a null in any other
-    key is never merged with another: that null cannot tell two rows apart, so every such row
-    is kept, in place.
+    Args:
+        value: One cell as `pa.Table.to_pylist` gives it: a scalar, a list, or a dict.
+
+    Returns:
+        The value, with each list as a tuple and each dict as a tuple of its items, inside out.
+    """
+    if isinstance(value, list):
+        return tuple(_frozen(item) for item in value)
+    if isinstance(value, dict):
+        return tuple((key, _frozen(item)) for key, item in value.items())
+    return value
+
+
+def _first_copies(rows: pa.Table, call_rows: Sequence[int]) -> pa.Table:
+    """Drop the copies of a row that an earlier symbol's request already returned.
+
+    Only the copies the split into one request per symbol creates are dropped: a row of a
+    later request goes when an earlier request returned a row equal to it in every column but
+    `TimestampInsert` (when its page arrived). Rows of one request are never merged, so two
+    rows Massive sent together stay, even when every column is equal. A float NaN equals no
+    other value, so a row holding one is always kept.
 
     Args:
         rows: The rows of every request, in request order.
-        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
-        nullable: The keys whose null is a value (`DatasetSpec.nullable_poll_keys`); at least
-            one key is outside them, as the catalog requires.
+        call_rows: How many rows each request returned, in request order; they sum to
+            `rows.num_rows`.
 
     Returns:
-        The rows, each identity once, in the order of their first copies.
+        The rows, in order, without the later copies.
     """
-    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
-    required = [key for key in keys if key not in nullable]
-    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in required))
-    identified = numbered.filter(keyed)
-    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
-    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
-    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
-    return rows.take(kept.sort())
+    values = [tuple(map(_frozen, row.values())) for row in rows.drop_columns([INSERT]).to_pylist()]
+    seen: set[object] = set()
+    kept: list[int] = []
+    start = 0
+    for count in call_rows:
+        own = values[start : start + count]
+        kept.extend(start + i for i, value in enumerate(own) if value not in seen)
+        seen.update(own)
+        start += count
+    return rows.take(pa.array(kept, pa.int64()))
 
 
 def _cut(text: str) -> str:
@@ -724,7 +739,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
         patience: Patience,
-    ) -> tuple[pa.Table, int]:
+    ) -> tuple[pa.Table, int, tuple[int, ...]]:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
         One call runs on this thread; several run on `executor`, or on a pool of
@@ -763,7 +778,8 @@ class RestReader:
                 by every path of a read that spans several.
 
         Returns:
-            The rows, in call order and then page order, and the number of requests made.
+            The rows, in call order and then page order, the number of requests made, and how
+            many of the rows each call returned, in call order.
 
         Errors: the public error of each `WireError` (`public_error`), `RowDataError` for a page
         whose every row was dropped, and the `MassiveError` of `_call` for a page on another
@@ -804,7 +820,8 @@ class RestReader:
             )
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
-        return table, sum(outcome.requests for outcome in outcomes)
+        call_rows = tuple(sum(batch.num_rows for batch in o.batches) for o in outcomes)
+        return table, sum(outcome.requests for outcome in outcomes), call_rows
 
     def _fan_out(
         self,
@@ -1648,8 +1665,9 @@ class RestReader:
         Without named symbols (`symbols=None`, `dm.ALL`) the cap is on the total rows. Where
         one row can answer several symbols' requests (`DatasetSpec.symbols_overlap`, such as
         the news of a watchlist, or a financial statement that lists every ticker of its
-        company), a row several requests returned is kept once, at its first copy
-        (`_first_copies`), so the split never repeats a row.
+        company), a row an earlier request already returned, equal in every column but its
+        arrival time, is dropped (`_first_copies`), so the split never repeats a row; rows of
+        one request are never merged.
 
         Args:
             spec: The dataset.
@@ -1672,8 +1690,9 @@ class RestReader:
         """
         tables = []
         requests = 0
+        call_rows: list[int] = []
         for rest_path, calls in planned:
-            table, made = self.read(
+            table, made, rows_each = self.read(
                 spec,
                 rest_path,
                 calls,
@@ -1688,6 +1707,7 @@ class RestReader:
             )
             tables.append(table)
             requests += made
+            call_rows.extend(rows_each)
         if not tables:
             schema = self.catalog.dataset_schema(
                 spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
@@ -1697,15 +1717,14 @@ class RestReader:
         calls = [call for _, path_calls in planned for call in path_calls]
         if len(calls) > 1 and spec.symbols_overlap:
             # Each request was capped on its own, so one symbol's rows never crowd out another's.
-            kept = _first_copies(rows, spec.poll_keys, spec.nullable_poll_keys)
+            kept = _first_copies(rows, call_rows)
             logger.debug(
-                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
-                "request",
+                "%s: kept %d of %d rows from %d requests, dropping the rows an earlier "
+                "request returned whole; limit=%s per request",
                 spec.name,
                 kept.num_rows,
                 rows.num_rows,
                 requests,
-                ", ".join(spec.poll_keys),
                 request.limit,
             )
             return kept, requests
@@ -2046,7 +2065,7 @@ class RestEndpoints:
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         patience = reader.patience()
-        table, requests = reader.read(
+        table, requests, _ = reader.read(
             spec,
             rest_path,
             calls,
