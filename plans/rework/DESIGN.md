@@ -1889,7 +1889,7 @@ Notation:
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
 - `limit` caps each named symbol's rows wherever symbols are named (a list, or a static or
-  live table), and the total rows with `symbols=None` or `dm.ALL` (decisions 74 and 82).
+  live table), and the total rows with `symbols=None` or `dm.ALL` (decisions 74 and 85).
   Under a `limit`, every request names one symbol: a per-symbol path (the indicators), a
   symbol parameter that takes one ticker (`reference.tickers`, `stocks.ipos`,
   `reference.news`), and a list parameter (`ticker.any_of`, `tickers`), which then carries
@@ -7379,7 +7379,7 @@ document already reflects them.
     ([section 7](#7-query-classes-and-verbs)).
 74. **`limit` caps each symbol's rows where a request names one symbol** (2026-10-30, owner),
     so a few symbols with many rows never crowd out the rest; elsewhere it stays a total cap.
-    Decision 82 extends it to every dataset with named symbols.
+    Decision 85 extends it to every dataset with named symbols.
 75. **Price columns lead every table** (2026-10-30, owner): the naming policy's rule 6b,
     applied at refresh time by `naming.lead_order`.
 76. **The debug log says what it needs to** (2026-10-30, owner). A rate-limit pause logs its
@@ -7449,7 +7449,7 @@ document already reflects them.
     pairs present at the call and added later; a temporary failure to read the list is retried,
     bounded, and then treated the same way, with an `Error` that says the list could not be
     read ([section 10](#10-symbols-and-all)).
-82. **`limit` means N rows per symbol wherever symbols are named** (owner decision D3(a),
+85. **`limit` means N rows per symbol wherever symbols are named** (owner decision D3(a),
     2026-11-02). On the datasets that sent many tickers in one request (dividends, splits,
     short interest, short volume, share float, financials, filings, partners, the snapshots,
     and the options and futures snapshots and contracts), `limit` was one total cap across
