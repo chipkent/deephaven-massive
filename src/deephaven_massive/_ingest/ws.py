@@ -34,8 +34,9 @@ everything else belongs here:
   after `PAIR_RETRY_DELAYS`, follows `MassiveConfig.unlisted_symbols`: under `LOG` and
   `IGNORE` it is skipped and listed in the stream's `Error`, and the stream keeps its other
   pairs; under `RAISE` it fails the stream. A symbol table's pairs present at the call follow
-  the same setting (`tradable_pairs`). Any unexpected exception of a change is logged with its
-  trace and fails the stream.
+  the same setting (`tradable_pairs`). A lookup that meets a defect of the library is never
+  retried or skipped: it fails the stream, or raises at the call. Any unexpected exception of
+  a change is logged with its trace and fails the stream.
 - **Sharing.** Sessions in one process with the same API key and equal connection settings
   (`CONNECTION_SETTINGS`, and the same Deephaven update graph) share one `ConnectionGroup`, so
   their streams ride the same connections: individual plans allow one connection per cluster,
@@ -335,7 +336,7 @@ class WsConnections:
         # schedule and a pair's split are waited for off the update-graph thread, and no change
         # of a stream overtakes another.
         self._changes: Final = ThreadPoolExecutor(1, f"{core.thread_prefix} symbol changes")
-        # Set by close(), so a worker waiting to retry a pair stops waiting.
+        # Set by close(), so a worker waiting to retry a pair, or for schedules, stops waiting.
         self._closing: Final = threading.Event()
         # The crypto pairs each stream skips, with why, by stream; guarded by the group's lock.
         self._skipped_pairs: dict[int, dict[str, tuple[_SkipReason, str]]] = {}
@@ -452,19 +453,26 @@ class WsConnections:
         console command holding the update graph's lock may run it; such a caller waits
         `SCHEDULE_WAIT_HOLDING_LOCK`, since no live table updates meanwhile, and any other
         `SCHEDULE_WAIT`. A lookup that does not end in time is logged at WARNING once; its rows
-        get a null `Date` until it ends. A failed lookup logs its own WARNING.
+        get a null `Date` until it ends. A failed lookup logs its own WARNING. `close()` ends the
+        wait at once (`FuturesCalendar.wake`), so the worker never delays the session's close
+        or the interpreter's exit.
 
         Args:
             contracts: Canonical futures symbols; spreads are never looked up.
             stream_id: The stream, for the log.
             holding_lock: Whether the calling thread holds the update graph's lock.
 
-        A closed session raises the `MassiveError` of `futures_calendar`.
+        Raises:
+            MassiveError: If the session is closed (`futures_calendar`), or closes during the
+                wait.
         """
         wait = SCHEDULE_WAIT_HOLDING_LOCK if holding_lock else SCHEDULE_WAIT
         calendar = self.futures_calendar()
         calendar.watch(contracts)
-        if not calendar.wait_loaded(contracts, wait):
+        loaded = calendar.wait_loaded(contracts, wait, stop=self._closing)
+        if self._closing.is_set():  # close() ended the wait: the stream goes with the session
+            raise MassiveError(f"{self._label} is closed")
+        if not loaded:
             logger.warning(
                 "futures stream %d: the schedules of %s did not load within %.0f s%s; their "
                 "rows get a null Date until they do",
@@ -784,7 +792,10 @@ class WsConnections:
 
         Nothing reads the worker's futures, so an exception that escaped here would vanish.
         Any exception of the change is a defect of the library: it is logged at ERROR with its
-        trace, and it fails the stream (`Flusher.fail`), if the stream still exists.
+        trace, and it fails the stream (`Flusher.fail`), if the stream still exists. A
+        `MassiveError` that already names itself a defect (`ErrorCause.LIBRARY_DEFECT`, such as
+        one from the crypto pair lookup) fails the stream as it is; any other exception is
+        wrapped in a `MassiveError` that names the change.
 
         Args:
             change: `_change_contracts` or `_change_pairs`.
@@ -795,14 +806,17 @@ class WsConnections:
         try:
             change(stream_id, added, removed)
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
-            failure = MassiveError(
-                library_bug(
-                    f"the watchlist change of stream {stream_id} (added "
-                    f"{bounded_list(sorted(added))}, removed {bounded_list(sorted(removed))}) "
-                    f"failed: {error!r}"
-                ),
-                cause=ErrorCause.LIBRARY_DEFECT,
-            )
+            if isinstance(error, MassiveError) and error.cause is ErrorCause.LIBRARY_DEFECT:
+                failure = error  # already a defect, with its own message: never wrapped twice
+            else:
+                failure = MassiveError(
+                    library_bug(
+                        f"the watchlist change of stream {stream_id} (added "
+                        f"{bounded_list(sorted(added))}, removed "
+                        f"{bounded_list(sorted(removed))}) failed: {error!r}"
+                    ),
+                    cause=ErrorCause.LIBRARY_DEFECT,
+                )
             # Logged here, with the trace; the stream's failure then logs it at DEBUG only.
             mark_failure_logged(failure)
             logger.exception("%s: %s", self._label, failure)
@@ -907,7 +921,10 @@ class WsConnections:
         reference data) skips every pair not yet split. Any other failure to read the list ends
         the try: the thread waits each of `delays` in turn, logged at INFO, and tries again with
         only the pairs not yet split, so each try reads the list at most once. After the last,
-        or when a close interrupts the wait, the pairs not yet split are skipped.
+        or when a close interrupts the wait, the pairs not yet split are skipped. A
+        `MassiveError` whose cause is `ErrorCause.LIBRARY_DEFECT` is a defect of the library,
+        not a pair Massive does not list: it propagates at once, untried again, so the worker
+        fails the stream (`_run_change`) and a verb raises it.
 
         Args:
             symbols: Canonical crypto tickers.
@@ -917,6 +934,9 @@ class WsConnections:
 
         Returns:
             The skipped pairs, each with why: its `_SkipReason` and the error's text.
+
+        Raises:
+            MassiveError: The lookup's own error, when its cause is `ErrorCause.LIBRARY_DEFECT`.
         """
         skipped: dict[str, tuple[_SkipReason, str]] = {}
         pending = sorted(symbols)
@@ -926,9 +946,12 @@ class WsConnections:
             for index, symbol in enumerate(pending):
                 try:
                     self.resolve_pairs((symbol,))
-                except PermanentError as error:
-                    skipped[symbol] = (_SkipReason.UNLISTED, str(error))
                 except MassiveError as error:
+                    if error.cause is ErrorCause.LIBRARY_DEFECT:
+                        raise  # a defect is never retried or shown as a skipped pair
+                    if isinstance(error, PermanentError):
+                        skipped[symbol] = (_SkipReason.UNLISTED, str(error))
+                        continue
                     failure, pending = error, pending[index:]
                     break
             else:
@@ -972,7 +995,8 @@ class WsConnections:
                 list.
             EntitlementError: Under `RAISE`, if the plan does not include reference data.
             MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
-                if no pair can, so the result would follow nothing.
+                if no pair can, so the result would follow nothing, or if the lookup meets a
+                defect of the library (`ErrorCause.LIBRARY_DEFECT`), which is never skipped.
         """
         if self._unlisted is OnError.RAISE:
             self.resolve_pairs(symbols)
@@ -1146,6 +1170,7 @@ class WsConnections:
             self._closed = True
             mine, closing = self._leave()
         self._closing.set()
+        self.group.wake_schedule_waiters()  # a worker waiting for schedules sees the close
         self._changes.shutdown(wait=False, cancel_futures=True)
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)

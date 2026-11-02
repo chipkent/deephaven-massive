@@ -970,10 +970,37 @@ A large live result costs memory and time downstream: every table you derive fro
 when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.
 Derive from `snapshot()` of it when you need a fixed copy.
 
-In a live table, `last_by()` by `Symbol` (the default) drops the row of a symbol that leaves
-the watchlist, and shows nothing for a symbol added back until it trades again; with keys that
+In a live table, `last_by()` by `Symbol` (the default) shows a symbol's row once the row
+reaches the table in or after the update cycle in which the symbol joined the watchlist, so each
+symbol's first trade shows as soon as it arrives. It drops the row of a symbol that leaves the
+watchlist, and shows nothing for a symbol added back until it trades again; with keys that
 span symbols, such as `last_by("Exchange")`, a group keeps its row after the symbol behind it
-leaves. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
+leaves. To replace the list, add the new list first, then delete only the symbols that left: a
+symbol on both lists never leaves the watchlist, so its row stays, while one deleted and added
+back waits for its next trade.
+
+```python
+watchlist.add(new_table([string_col("Symbol", ["AAPL", "AMD"])]))  # the new list: AAPL, AMD
+watchlist.delete(new_table([string_col("Symbol", ["NVDA"])]))  # only the symbol that left
+```
+
+To show every symbol before it trades, put a snapshot under the stream, as in
+[seed a live board](#seed-a-live-board), with a snapshot poll that follows the same watchlist:
+
+```python
+from deephaven import merge
+
+seed = (
+    m.stocks.snapshots(watchlist)
+    .poll(60)
+    .view(["Symbol", "Price = LastTradePrice", "Timestamp = LastTradeSipTimestamp"])
+)
+trades = m.stocks.trades(watchlist).last_by().view(["Symbol", "Price", "Timestamp"])
+live_board = merge([seed, trades]).last_by("Symbol")
+```
+
+The stream's rows come after the snapshot's in the merge, so `last_by("Symbol")` shows a
+symbol's latest trade once it has one, and its snapshot until then. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
 watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
 stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
 bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.

@@ -702,6 +702,13 @@ class SessionCore:
         own steps is covered, and the windows that remain are inside the cleanup code itself (an
         interrupt while a hold or a scope is being released).
 
+        The stream subscribes before its first result exists, so a new stream holds the rows it
+        receives meanwhile, and this call adds them right after it built the result
+        (`StreamHandle.publish_held`, also when the build failed, for a result another verb
+        built on the stream meanwhile): an aggregation such as `last_by` sees only rows that
+        reach the blink table after it exists, and these reach it in a later update cycle. A
+        reused stream holds nothing; its new result starts from the rows that arrive next.
+
         A stream that failed while it was opening, or between the claim and the build, serves no
         result: every shape, `blink()` included, raises `MassiveError` naming the stream's
         failure, with the hold released. A failure that lands while the shape is being derived
@@ -740,12 +747,16 @@ class SessionCore:
                 closed"`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
+        handle, opened = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         scope: LivenessScope | None = None
         try:
-            self._require_unfailed(spec, handle.stream_id)
             with entered(self.exec_ctx):
-                result, scope = make_result(self.exec_ctx, lambda: build(handle))
+                try:
+                    self._require_unfailed(spec, handle.stream_id)
+                    result, scope = make_result(self.exec_ctx, lambda: build(handle))
+                finally:
+                    if opened:  # the rows received while the stream opened, after the result
+                        handle.publish_held()
             self.results.track(
                 result,
                 scope,
@@ -817,7 +828,7 @@ class SessionCore:
         channel: str,
         query: str,
         verb: str,
-    ) -> StreamHandle:
+    ) -> tuple[StreamHandle, bool]:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
         Every hold `_claim` takes is reported in `holds` right after it is stored, and the claim,
@@ -852,7 +863,9 @@ class SessionCore:
         was reused.
 
         Returns:
-            The stream's handle, with one hold taken for the caller.
+            The stream's handle, with one hold taken for the caller, and whether this call
+            opened the stream (so the caller must call its `publish_held` once it has built its
+            result).
 
         A closed session, or one that closes while the stream opens, raises the `MassiveError`
         of `_claim` or `_open`.
@@ -865,6 +878,7 @@ class SessionCore:
                 if isinstance(claim, threading.Event):
                     claim.wait()  # another thread is opening the stream; never under a lock
                     continue
+                opened = isinstance(claim, int)
                 if isinstance(claim, int):
                     claim = self._open(spec, request, channel=channel, stream_id=claim)
                     symbols = request.symbol_key()
@@ -905,7 +919,7 @@ class SessionCore:
                         if ready is not None:
                             ready.set()  # waiters must wake whatever happens
                 raise
-            return claim  # no checkpoint between the try and the caller's own cleanup
+            return claim, opened  # no checkpoint between the try and the caller's own cleanup
 
     def _claim(
         self,

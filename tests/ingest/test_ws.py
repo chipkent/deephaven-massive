@@ -40,7 +40,7 @@ from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
-from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.execution_context import entered, update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
@@ -537,6 +537,74 @@ def test_a_symbol_added_again_shows_no_stale_last_by_row(
     shown = rows_when(result, lambda rows: len(rows) == 2)
     assert sorted((r["Symbol"], r["Price"]) for r in shown) == [("AAPL", 2.0), ("MSFT", 5.0)]
     ws_session.session.release(result)
+
+
+def test_a_second_last_by_shows_a_row_received_before_it(
+    ws_session: WsSession, *, rows_when: RowsWhen
+) -> None:
+    # The stream is open and its row was received, but it reaches the table only after the new
+    # result exists: the result shows it, whatever time the library received it.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    query = ws_session.query(TRADES, watchlist)
+    first = query.append_only()
+    ws_session.subscribed("T.AAPL")
+    ws_session.send(trade("AAPL", 1.0))  # received and held by the connection, not flushed
+    latest = query.last_by()
+    ws_session.flush()
+    rows_when(latest, lambda rows: [(r["Symbol"], r["Price"]) for r in rows] == [("AAPL", 1.0)])
+    ws_session.session.release(latest)
+    ws_session.session.release(first)
+
+
+def test_a_row_received_before_its_symbol_joins_shows_once_it_reaches_the_table(
+    ws_session: WsSession, *, rows_when: RowsWhen
+) -> None:
+    # Another stream already carries AAPL, so its row is received before AAPL joins the
+    # watchlist; it reaches the watchlist's stream after the join, so it shows.
+    carrier = ws_session.query(TRADES, ["AAPL"]).append_only()
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    latest = ws_session.query(TRADES, watchlist).last_by()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    ws_session.send(trade("AAPL", 2.0))  # held by the connection, not flushed
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    cycle_ended(ws_session)
+    ws_session.on_loop(ws_session.connection(), lambda: None)  # the stream now takes AAPL
+    ws_session.flush()
+    rows_when(latest, lambda rows: [(r["Symbol"], r["Price"]) for r in rows] == [("AAPL", 2.0)])
+    ws_session.session.release(latest)
+    ws_session.session.release(carrier)
+
+
+def cycles_passed(ws_session: WsSession, count: int) -> None:
+    # Wait until `count` more update cycles have started, so a row added before has reached
+    # every table that existed then.
+    exec_ctx = ws_session.session._core.exec_ctx
+    start = update_cycle(exec_ctx)
+    wait_for(lambda: update_cycle(exec_ctx) >= start + count)
+
+
+def test_a_row_received_while_a_stream_opens_reaches_its_first_result(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, *, rows_when: RowsWhen
+) -> None:
+    # The stream subscribes before the verb builds its result. A row flushed in between, and
+    # a few update cycles after it, must still reach `last_by`, which sees only the rows that
+    # arrive after it exists. This test thread holds no update-graph lock, as a script's does
+    # not, so the cycles run.
+    core = ws_session.session._core
+    check = core._require_unfailed
+
+    def row_first(spec: DatasetSpec, stream_id: int) -> None:
+        ws_session.subscribed("T.AAPL")
+        ws_session.publish(trade("AAPL", 3.0))
+        cycles_passed(ws_session, 2)
+        check(spec, stream_id)
+
+    monkeypatch.setattr(core, "_require_unfailed", row_first)
+    latest = ws_session.query(TRADES, ["AAPL"]).last_by()
+    rows_when(latest, lambda rows: [(r["Symbol"], r["Price"]) for r in rows] == [("AAPL", 3.0)])
+    ws_session.session.release(latest)
 
 
 def failed_after_flush(ws_session: WsSession, table: Table) -> bool:
@@ -1591,7 +1659,7 @@ def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSessi
     looked_up(ws_session, "ESZ5")
     calendar = ws_session.connections.futures_calendar()
     assert calendar is ws_session.connections.futures_calendar()
-    assert calendar.wait_loaded(["ESZ5", "GCQ6-GCJ7"], 15.0)
+    assert calendar.wait_loaded(["ESZ5", "GCQ6-GCJ7"], 15.0, stop=threading.Event())
     # A spread is not a contract: it is never looked up.
     sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
     assert sent == [("ESZ5",)]
@@ -1611,7 +1679,9 @@ def test_a_futures_stream_loads_its_schedules_before_it_subscribes(
         }
     ]
     result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    assert ws_session.connections.futures_calendar().wait_loaded(["ESZ5"], 0)
+    assert ws_session.connections.futures_calendar().wait_loaded(
+        ["ESZ5"], 0, stop=threading.Event()
+    )
     ws_session.session.release(result)
 
 
@@ -1619,7 +1689,9 @@ def _slow_schedules(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     # Schedules that never load in time; returns the seconds each verb waited for them.
     waits: list[float] = []
 
-    def wait_loaded(_calendar: object, _contracts: object, timeout: float) -> bool:
+    def wait_loaded(
+        _calendar: object, _contracts: object, timeout: float, *, stop: threading.Event
+    ) -> bool:
         waits.append(timeout)
         return False
 
@@ -1711,7 +1783,9 @@ class GatedSchedules:
         self.waits: list[tuple[list[str], float, str]] = []
         lock = threading.Lock()
 
-        def wait_loaded(_calendar: object, contracts: Iterable[str], timeout: float) -> bool:
+        def wait_loaded(
+            _calendar: object, contracts: Iterable[str], timeout: float, *, stop: threading.Event
+        ) -> bool:
             with lock:
                 self.waits.append((sorted(contracts), timeout, threading.current_thread().name))
             self.waiting.set()
@@ -2124,6 +2198,90 @@ def test_a_change_defect_after_its_stream_ended_fails_nothing(
     # The defect is logged once, with its trace; no stream is left to fail.
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
     assert ws_session.urls == []
+
+
+def test_a_defect_in_a_pair_lookup_is_never_retried_or_skipped(ws_session: WsSession) -> None:
+    defect = dm.MassiveError("the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT)
+    ws_session.pair_answers["X:DOTUSD"] = defect
+    with pytest.raises(dm.MassiveError, match="the split broke") as raised:
+        ws_session.connections._split_pairs(
+            {"X:DOTUSD"},
+            reader="crypto stream 1",
+            delays=(3600.0,),  # would hang
+        )
+    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
+
+
+def test_a_defect_in_a_pair_lookup_at_the_call_raises_to_the_verb(ws_session: WsSession) -> None:
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
+        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+    )
+    watchlist = crypto_watchlist(["X:BTCUSD", "X:DOTUSD"], reactive=False)
+    with pytest.raises(dm.MassiveError, match="the split broke") as raised:
+        ws_session.query(CRYPTO, watchlist).append_only()
+    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+
+
+def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Not a skipped pair: the stream fails with the defect itself, wrapped once, and the
+    # lookup is not tried again.
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
+        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+    )
+    watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True)
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"] == "cannot stream 'X:DOTUSD': the split broke"
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
+        (f"{ws_session.session._core.label}: cannot stream 'X:DOTUSD': the split broke", True)
+    ]
+    assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
+
+
+def test_a_close_ends_the_workers_wait_for_futures_schedules(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A second session keeps the group, and its schedule calendar, open after this one
+    # closes; the lookup never answers, so only the close can end the worker's wait.
+    other = join(ws_session)
+    answer = threading.Event()
+    asked = threading.Event()
+
+    def unanswered(
+        _template: str, _query: Mapping[str, object], *, bucket: str, cancel: object
+    ) -> list[dict[str, object]]:
+        asked.set()
+        answer.wait(TIMEOUT)
+        return []
+
+    monkeypatch.setattr(ws_session.connections, "fetch_rows", unanswered)
+    monkeypatch.setattr(cast("Any", other._core._ports)._streams, "fetch_rows", unanswered)
+    try:
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
+        ws_session.query(FUTURES, watchlist).blink()
+        assert asked.wait(TIMEOUT)
+        workers = list(ws_session.connections._changes._threads)
+        assert workers
+        with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+            ws_session.session.close()
+            for worker in workers:
+                worker.join(2.0)
+                assert not worker.is_alive()
+        assert any("was dropped; the session is closing" in r.getMessage() for r in caplog.records)
+    finally:
+        answer.set()
+        other.close()
 
 
 def test_closing_the_transport_stops_the_lookup_worker(ws_session: WsSession) -> None:

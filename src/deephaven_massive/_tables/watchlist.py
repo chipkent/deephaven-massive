@@ -27,9 +27,10 @@ Two pieces apply that rule:
 
 A third piece, `watched_rows`, keeps the rows of a live table whose symbol a watchlist holds,
 as `last_by()` with keys that span symbols does before its aggregation; a fourth,
-`rows_since_added`, keeps a symbol's row only while the watchlist holds the symbol and only if
-the row arrived after the symbol last joined it, as `last_by()` keyed by `Symbol` does after its
-aggregation, so a symbol deleted and added again shows no stale row.
+`latest_rows_since_added`, builds `last_by()` keyed by `Symbol`: each key's latest row, shown
+only while the watchlist holds its symbol and only if the row reached the table in or after the
+update cycle in which the symbol last joined, so a symbol deleted and added again shows no stale
+row.
 
 A table in other spellings is converted by `canonicalize_symbols` in `_tables/symbols.py`, the
 table form of the symbol converters.
@@ -50,7 +51,7 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven.table_listener import TableListener, TableListenerHandle
 
-from deephaven_massive._datasets.row_times import INSERT, ISSUES_URL
+from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
     canonical_symbol,
     check_symbol,
@@ -62,7 +63,7 @@ from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven.table import Table
     from deephaven.table_listener import TableUpdate
@@ -75,8 +76,8 @@ __all__ = [
     "SymbolRows",
     "SymbolWatch",
     "invalid_row_message",
+    "latest_rows_since_added",
     "read_symbols",
-    "rows_since_added",
     "skipped_rows_text",
     "watched_rows",
 ]
@@ -89,9 +90,19 @@ _SHOWN: Final = 5
 _WATCHED: Final = "__MassiveWatched"
 """The hidden column `watched_rows` joins on and drops. Dataset columns are PascalCase wire names,
 so none can take this name."""
-_ADDED_AT: Final = "__MassiveAddedAt"
-"""The hidden column `rows_since_added` joins on and drops: when a symbol last joined the
-watchlist."""
+_ADDED_STEP: Final = "__MassiveAddedStep"
+"""The hidden column `latest_rows_since_added` joins on and drops: the update cycle in which a
+symbol last joined the watchlist."""
+_ROW_STEP: Final = "__MassiveRowStep"
+"""The hidden column `latest_rows_since_added` stamps and drops: the update cycle in which a row
+reached the blink table."""
+_CURRENT_STEP: Final = (
+    "io.deephaven.engine.context.ExecutionContext.getContext().getUpdateGraph().clock()"
+    ".currentStep()"
+)
+"""A formula for the update graph's current cycle number (its logical clock's step), computed
+where the formula runs. It grows by one with each cycle and does not change while a thread
+holds the update graph's lock."""
 _SKIPPED_LIMIT: Final = 100
 """The most skipped values logged per process under each of `LOG` and `IGNORE`."""
 _logged_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.WARNING)
@@ -619,35 +630,56 @@ def watched_rows(table: Table, watchlist: Table) -> Table:
     return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)
 
 
-def rows_since_added(table: Table, watchlist: Table) -> Table:
-    """Keep each row whose symbol the watchlist holds and that arrived since the symbol joined.
+def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str]) -> Table:
+    """Return each key's latest row, while the watchlist holds its symbol and since it joined.
 
-    A row is kept while the watchlist holds its `Symbol` and its `TimestampInsert`, when the
-    library received it, is no earlier than the time the symbol last joined the watchlist. The
-    engine computes that time in the update cycle in which the symbol appears in the watchlist
-    (`select_distinct`, then `update` with `now()`), so it never lags the watchlist, and the
-    subscription a new symbol starts follows that same change, so every row received for it
-    comes later. A symbol deleted and added again is a new row of the distinct table, with a new
-    time, so the row it showed before it left stays hidden until a new one arrives. A row
-    received before its symbol joined, from a stream that already carried the symbol, is hidden
-    too, until the symbol's next row.
+    The result is `blink.last_by(keys)`, keyed by columns that include `Symbol`, filtered so a
+    row shows only while the watchlist holds its symbol and only if the row reached the table
+    in or after the update cycle in which the symbol last joined the watchlist. A symbol the
+    watchlist holds when this is called joins now, so the latest row of each shows at once,
+    including a row the blink table holds from the cycle that just ran. A symbol deleted and
+    added again is a new row of the distinct watchlist, stamped with a new cycle, so a row that
+    entered the table before the cycle in which its symbol last joined stays hidden until the
+    symbol's next row. The rule compares only the update graph's own cycle numbers, never a
+    wall clock, so neither a row's `TimestampInsert` nor a clock running behind can hide it.
 
-    Meant for `last_by()` keyed by `Symbol`: applied after the aggregation, which remembers every
-    symbol it has seen, it hides what the aggregation remembers from before a symbol's latest
-    join. It is built from a join, for the reason `watched_rows` gives.
+    Meant for `last_by()` keyed by `Symbol`: the aggregation remembers every key it has seen,
+    and the filter after it hides what it remembers from before a symbol's latest join. Keys
+    that span symbols filter first instead (`watched_rows`). It is built from a join, for the
+    reason `watched_rows` gives.
 
     Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
-    result's liveness scope, which then manages the tables it creates.
+    result's liveness scope, which then manages the tables it creates. It holds the update
+    graph's shared lock while it creates the two stamped tables, so it blocks while an update
+    cycle runs; a caller that already holds either lock (a console command) takes it again at
+    once. Never call it on an update-graph thread or under a library lock.
 
     Args:
-        table: A live table with `Symbol` and `TimestampInsert` columns, such as a stream's
-            `last_by`.
+        blink: A stream's blink table, with a `Symbol` column.
         watchlist: The user's symbol table; only its `Symbol` column is read.
+        keys: The `last_by` key columns, `Symbol` among them.
 
     Returns:
-        The kept rows, with the table's columns.
+        The latest row of each key that passes the filter, with the blink table's columns.
     """
-    joined_at = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_AT} = now()")
-    joined = table.natural_join(joined_at, on=_SYMBOL, joins=_ADDED_AT)
-    kept = joined.where(f"!isNull({_ADDED_AT}) && {INSERT} >= {_ADDED_AT}")
-    return kept.drop_columns(_ADDED_AT)
+    # The Java lock itself, as `release_scope` takes it: Deephaven's `shared_lock` would wrap
+    # an error of the table operations in a second `DHError`.
+    lock = blink.update_graph.j_update_graph.sharedLock()
+    lock.lock()
+    try:
+        # The watchlist side is created first, so a symbol's added step is never later than
+        # the step of any row the aggregation will hold, even if a cycle ran between the two
+        # creations (were this lock ever dropped): the step only grows. The lock additionally
+        # keeps every cycle out until both sides exist, so the symbols and rows present now get
+        # equal steps. `update`, never `update_view`, on both sides: a view would compute the
+        # step when a row is read, not in the cycle the row changed.
+        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {_CURRENT_STEP}")
+        # Stamped before the aggregation: a formula that reads no column is not computed again
+        # when a row is modified, so after `last_by` it would keep the step of each key's first
+        # row.
+        latest = blink.update(f"{_ROW_STEP} = {_CURRENT_STEP}").last_by(list(keys))
+    finally:
+        lock.unlock()
+    joined = latest.natural_join(added, on=_SYMBOL, joins=_ADDED_STEP)
+    kept = joined.where(f"!isNull({_ADDED_STEP}) && {_ROW_STEP} >= {_ADDED_STEP}")
+    return kept.drop_columns([_ADDED_STEP, _ROW_STEP])
