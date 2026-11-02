@@ -85,6 +85,7 @@ __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
     "DROPPED_COUNT_INTERVAL",
+    "GAPS_SHOWN",
     "QUERY_SHOWN",
     "RATE_LIMITS",
     "RATE_LIMIT_KEYS",
@@ -106,6 +107,7 @@ __all__ = [
     "StreamUpdate",
     "as_row",
     "describe_symbols",
+    "gaps_text",
     "pascal_case",
     "shown_query",
     "utc_text",
@@ -121,6 +123,9 @@ QUERY_SHOWN: Final = 200
 
 SCHEMA_DRIFT_SHOWN: Final = 200
 """The longest `SchemaDrift` text, in characters; a longer one is cut and ends in `…`."""
+
+GAPS_SHOWN: Final = 5
+"""How many of a live table's latest gaps the `Gaps` column lists; it counts the earlier ones."""
 
 DROPPED_COUNT_INTERVAL: Final = 60.0
 """The fewest seconds between two DEBUG lines of one dataset's running count of rows dropped
@@ -182,7 +187,9 @@ class NotePart(StrEnum):
     dropped), and a `poll()` table's poller (a failed cycle). Each sets or clears only its own
     part with `StreamUpdate.notes`, so no source replaces or clears another's warning, and the
     `Error` column joins the current parts in this order, with the skipped symbol-table values
-    last. A stopped stream's `Error` shows only why it stopped.
+    last. A stopped stream's `Error` shows only why it stopped. A note goes once its warning
+    ends, so a warning about rows that may be missing also leaves a lasting record in the row's
+    `Gaps` (`StreamUpdate.gap`).
     """
 
     OUTAGE = "outage"
@@ -197,6 +204,9 @@ class NotePart(StrEnum):
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
     POLL_CYCLE = "poll_cycle"
     """A `poll()` cycle failed; the next one runs as scheduled."""
+    LEFT_OUT = "left_out"
+    """Symbols the latest good `poll()` cycle left out: no path of theirs takes a parameter the
+    poll sends, or Massive answered HTTP 404 for them."""
 
 
 _NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
@@ -288,6 +298,7 @@ STREAMS: Final = Schema(
             ("RequestsPerCycle", _I),
             ("State", _S),
             ("Error", _S),
+            ("Gaps", _S),
             ("CreatedAt", _T),
             ("SchemaDrift", _S),
         )
@@ -422,6 +433,14 @@ class StreamRow:
             stream runs (`as_row`).
         notes: The current warnings that leave the stream running, each a named part, in
             `NotePart` order. Not a column of its own: the `Error` column joins them.
+        gaps: Every time span over which the stream's rows may be missing, oldest first: a
+            WebSocket outage it recovered from (from the last frame before the drop to the
+            data's return), or a run of failed `poll()` cycles before a good one (from the
+            start of the run's first failed cycle, which published nothing, to the good
+            cycle's start). Each is a pair of epoch
+            nanoseconds. Not a column of its own: the `Gaps` column shows them (`gaps_text`),
+            on a stopped stream too, so the record outlasts the `Error` note that announced
+            each one.
     """
 
     stream_id: int
@@ -444,6 +463,9 @@ class StreamRow:
     schema_drift: str | None = None
     skipped: str | None = dataclasses.field(default=None, metadata={_NOT_A_COLUMN: True})
     notes: tuple[tuple[NotePart, str], ...] = dataclasses.field(
+        default=(), metadata={_NOT_A_COLUMN: True}
+    )
+    gaps: tuple[tuple[int, int], ...] = dataclasses.field(
         default=(), metadata={_NOT_A_COLUMN: True}
     )
 
@@ -471,6 +493,8 @@ class StreamUpdate:
             it leaves out keep their text.
         skipped: The skipped symbol-table values' text (`StreamRow.skipped`).
         clear_skipped: True to set that text back to null; takes precedence over `skipped`.
+        gap: A gap that has just ended, `(start, end)` in epoch nanoseconds, appended to the
+            row's `gaps`; None for none. A gap is recorded on a stopped row too: it is history.
 
     `SchemaDrift` is not set here: `SessionCore.record_stream_drift` records a stream's drift
     and writes its row in one step, so concurrent reports cannot leave an older text behind.
@@ -485,6 +509,7 @@ class StreamUpdate:
     notes: Mapping[NotePart, str | None] | None = None
     skipped: str | None = None
     clear_skipped: bool = False
+    gap: tuple[int, int] | None = None
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
@@ -514,6 +539,7 @@ class StreamUpdate:
             skipped=None
             if self.clear_skipped
             else (row.skipped if self.skipped is None else self.skipped),
+            gaps=row.gaps if self.gap is None else (*row.gaps, self.gap),
         )
 
     def _notes(self, row: StreamRow) -> tuple[tuple[NotePart, str], ...]:
@@ -582,6 +608,7 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     transports as `columns()` does: `Transport.WS` is shown as `WebSocket`. A running stream's
     `Error` joins its warning parts (`StreamRow.notes`) and then the skipped symbol-table values,
     with `"; "`, or is null when there is none; a stopped stream's shows only why it stopped.
+    A stream's `Gaps` is its `gaps` as `gaps_text` writes them, whatever its state.
 
     Args:
         row: A connection, stream, or rate-limit row.
@@ -594,12 +621,15 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
         for f in fields(row)
         if not f.metadata.get(_NOT_A_COLUMN)
     }
-    if isinstance(row, StreamRow) and row.state not in _STOPPED:
+    if not isinstance(row, StreamRow):
+        return shown
+    shown["Gaps"] = gaps_text(row.gaps)
+    if row.state not in _STOPPED:
         texts = [text for _, text in row.notes]
         if row.skipped is not None:
             texts.append(row.skipped)
         shown["Error"] = "; ".join(texts) if texts else row.error
-    return shown
+    return {name: shown[name] for name in STREAMS.column_names}  # `Gaps` in its place
 
 
 def _shown(value: object) -> object:
@@ -624,6 +654,27 @@ def shown_query(query: str) -> str:
         The text, or its first `QUERY_SHOWN - 1` characters and `…` when it is longer.
     """
     return query if len(query) <= QUERY_SHOWN else query[: QUERY_SHOWN - 1] + "…"
+
+
+def gaps_text(gaps: Sequence[tuple[int, int]]) -> str | None:
+    """Return a live table's gaps as its `Gaps` column shows them.
+
+    Args:
+        gaps: Each gap's start and end, epoch nanoseconds, oldest first (`StreamRow.gaps`).
+
+    Returns:
+        None for no gap. Otherwise each of the latest `GAPS_SHOWN` gaps as `<start> to <end>`
+        in UTC to the second, joined by `"; "`, after `"<n> earlier gaps; "` when there are
+        more, such as `"2026-11-02T14:03:05Z to 2026-11-02T14:05:10Z"`.
+    """
+    if not gaps:
+        return None
+    shown = [f"{utc_text(start / 1e9)} to {utc_text(end / 1e9)}" for start, end in gaps]
+    earlier = len(shown) - GAPS_SHOWN
+    text = "; ".join(shown[-GAPS_SHOWN:])
+    if earlier <= 0:
+        return text
+    return f"{earlier} earlier {'gap' if earlier == 1 else 'gaps'}; {text}"
 
 
 def utc_text(seconds: float) -> str:
@@ -664,6 +715,22 @@ _MISSING: Final = "is missing; it reads as null"
 """What a drift WARNING says of a vendor-required field a payload lacked."""
 _UNCONVERTIBLE: Final = "held a value that does not fit its type; it reads as null"
 """What a drift WARNING says of a field that held a value its type cannot hold."""
+_ROUNDED: Final = (
+    "held a whole number beyond 2**53, which its double column holds only rounded; it reads rounded"
+)
+"""What a drift WARNING says of a `long` field whose widening to a `double` rounded a value."""
+
+
+def _rows(count: int) -> str:
+    """Return `"row"` for one and `"rows"` for any other count, for a `SchemaDrift` entry.
+
+    Args:
+        count: The number of rows.
+
+    Returns:
+        The noun.
+    """
+    return "row" if count == 1 else "rows"
 
 
 def _drift_context(drift: DriftReport, field: str, *, where: str, symbol: str | None) -> str:
@@ -697,8 +764,9 @@ class DriftRegistry:
     regenerated. The wire decoders, and the timestamp routine after them, report each
     payload's differences as a `DriftReport`: the fields it had that the schema does not
     declare (dropped), the declared fields it lacked (null), the fields that held a value that
-    does not fit their type (null), and the rows dropped because a key could not be read. Every
-    transport routes those reports here:
+    does not fit their type (null), the `long` fields whose widening into a `double` column
+    rounded a whole number beyond 2**53 (served rounded), and the rows dropped because a key
+    could not be read. Every transport routes those reports here:
 
     - `report` logs one WARNING per (dataset, transport, field) for the life of the session,
       and one WARNING per dataset the first time a row of it is dropped, with the running count
@@ -708,7 +776,9 @@ class DriftRegistry:
       outside the documented ones; the page's rows are kept.
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
       the owner's new `SchemaDrift` text when it changed, for the caller to write into the
-      owner's diagnostics row. `forget` drops an owner once it has left its registry.
+      owner's diagnostics row: its drifted fields, and how many of its rows were dropped. So
+      a dropped row stays visible after its one WARNING. `forget` drops an owner once it has
+      left its registry.
 
     Drift is never a failure: one odd value or row never costs the rest of a payload. Only a
     payload whose every row was dropped fails where it is found, before it reaches the
@@ -740,9 +810,19 @@ class DriftRegistry:
             registry.report("stocks.trades", Transport.REST, drift, where=where)  # no log
             registry.record(7, "REST", drift)  # "REST:halted+, REST:x?"
             registry.record(7, "REST", drift)  # unchanged: None
+            registry.record(7, "REST", DriftReport(dropped_rows=2))
+            # "REST:2 rows dropped, REST:halted+, REST:x?"
     """
 
-    __slots__ = ("_dropped", "_dropped_logged", "_lock", "_owners", "_statuses", "_warned")
+    __slots__ = (
+        "_dropped",
+        "_dropped_logged",
+        "_lock",
+        "_owner_dropped",
+        "_owners",
+        "_statuses",
+        "_warned",
+    )
 
     def __init__(self) -> None:
         """Start with no drift seen."""
@@ -750,6 +830,8 @@ class DriftRegistry:
         self._warned: set[tuple[str, Transport, str]] = set()
         self._statuses: set[tuple[str, str]] = set()
         self._owners: dict[Hashable, frozenset[str]] = {}
+        # Per owner, the rows dropped so far on each of its prefixes (transports or channels).
+        self._owner_dropped: dict[Hashable, dict[str, int]] = {}
         self._dropped: dict[str, int] = {}
         # Per dataset, when its dropped rows were last logged (monotonic seconds), and the
         # running count that line showed.
@@ -791,6 +873,7 @@ class DriftRegistry:
         changes = [(field, _EXTRA) for field in drift.extra]
         changes += [(field, _MISSING) for field in drift.missing]
         changes += [(field, _UNCONVERTIBLE) for field in drift.unconvertible]
+        changes += [(field, _ROUNDED) for field in drift.rounded]
         now = time.monotonic()
         with self._lock:
             new = [(f, kind) for f, kind in changes if (dataset, transport, f) not in self._warned]
@@ -818,7 +901,8 @@ class DriftRegistry:
         if drift.dropped_rows and not before:
             logger.warning(
                 "%s: dropped %d %s row(s) whose key cannot be read, the first at %s: %s; such "
-                "rows are dropped and counted, and the running count is logged at DEBUG",
+                "rows are dropped and counted: the running count is logged at DEBUG and shown "
+                "in the SchemaDrift of each live table that lost them",
                 dataset,
                 drift.dropped_rows,
                 transport.value,
@@ -859,9 +943,12 @@ class DriftRegistry:
         """Add a report to one owner's drift and return its new `SchemaDrift` text, if changed.
 
         Each extra field becomes the entry `<prefix>:<field>+`, each missing one
-        `<prefix>:<field>-`, and each field that held a value that does not fit
-        `<prefix>:<field>?`. An owner's entries only accumulate: drift seen once stays shown.
-        Dropped rows are logged by `report` and add no entry.
+        `<prefix>:<field>-`, each field that held a value that does not fit
+        `<prefix>:<field>?`, and each `long` field whose widening to a `double` rounded a value
+        `<prefix>:<field>~`. An owner's entries only accumulate: drift seen once stays shown.
+        Dropped rows add one entry per prefix with the owner's running count,
+        `<prefix>:<n> rows dropped`, which sorts before the prefix's fields, so a long text cut
+        at `SCHEMA_DRIFT_SHOWN` keeps it.
 
         Args:
             owner: The stream's id, or the connection's key (a tuple), whose row shows the
@@ -877,14 +964,19 @@ class DriftRegistry:
         entries = {f"{prefix}:{field}+" for field in drift.extra}
         entries |= {f"{prefix}:{field}-" for field in drift.missing}
         entries |= {f"{prefix}:{field}?" for field in drift.unconvertible}
+        entries |= {f"{prefix}:{field}~" for field in drift.rounded}
         with self._lock:
             seen = self._owners.get(owner, frozenset())
-            if entries <= seen:
+            if entries <= seen and not drift.dropped_rows:
                 return None
             seen |= entries
             self._owners[owner] = seen
+            dropped = self._owner_dropped.setdefault(owner, {})
+            if drift.dropped_rows:
+                dropped[prefix] = dropped.get(prefix, 0) + drift.dropped_rows
+            counts = {f"{name}:{count} {_rows(count)} dropped" for name, count in dropped.items()}
             # Built under the lock, so the text is the owner's entries at this moment.
-            text = ", ".join(sorted(seen))
+            text = ", ".join(sorted(seen | counts))
         if len(text) > SCHEMA_DRIFT_SHOWN:
             text = text[: SCHEMA_DRIFT_SHOWN - 1] + "…"
         return text
@@ -897,6 +989,7 @@ class DriftRegistry:
         """
         with self._lock:
             self._owners.pop(owner, None)
+            self._owner_dropped.pop(owner, None)
 
 
 RateLimitPull: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | None]]"

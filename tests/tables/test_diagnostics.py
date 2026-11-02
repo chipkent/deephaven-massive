@@ -27,6 +27,7 @@ from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    GAPS_SHOWN,
     QUERY_SHOWN,
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
@@ -45,6 +46,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    gaps_text,
     pascal_case,
     shown_query,
 )
@@ -110,6 +112,7 @@ def test_column_sets() -> None:
         "RequestsPerCycle",
         "State",
         "Error",
+        "Gaps",
         "CreatedAt",
         "SchemaDrift",
     )
@@ -512,6 +515,35 @@ def test_connection_rows_replace_by_their_key(
     diagnostics.release()
 
 
+def test_gaps_accumulate_and_outlast_the_note_that_announced_them() -> None:
+    # 2026-11-02T14:00:00Z, in epoch nanoseconds, and one minute.
+    start, minute = 1_793_628_000 * 10**9, 60 * 10**9
+    row = _stream()
+    assert as_row(row)["Gaps"] is None
+    down = StreamUpdate(notes={NotePart.OUTAGE: "connection down since 2026-11-02T14:00:00Z"})
+    row = down.apply(row)
+    row = StreamUpdate(notes={NotePart.OUTAGE: None}, gap=(start, start + minute)).apply(row)
+    assert as_row(row)["Error"] is None
+    assert as_row(row)["Gaps"] == "2026-11-02T14:00:00Z to 2026-11-02T14:01:00Z"
+    # A stopped stream still shows its gaps: they are history, not a warning.
+    failed = dataclasses.replace(row, state=StreamState.FAILED, error="boom")
+    assert as_row(failed)["Gaps"] == "2026-11-02T14:00:00Z to 2026-11-02T14:01:00Z"
+
+
+def test_gaps_text_shows_the_latest_and_counts_the_earlier_ones() -> None:
+    minute = 60 * 10**9
+    start = 1_793_628_000 * 10**9
+    gaps = [(start + 2 * n * minute, start + (2 * n + 1) * minute) for n in range(GAPS_SHOWN + 2)]
+    text = gaps_text(gaps)
+    assert text is not None
+    assert text.startswith("2 earlier gaps; 2026-11-02T14:04:00Z to 2026-11-02T14:05:00Z; ")
+    assert text.count(" to ") == GAPS_SHOWN
+    one_more = gaps_text(gaps[1:])
+    assert one_more is not None
+    assert one_more.startswith("1 earlier gap; 2026-11-02T14:04:00Z")
+    assert gaps_text([]) is None
+
+
 def test_stream_updates_keep_schema_drift() -> None:
     row = _stream(schema_drift="WS:x+")
     assert StreamUpdate(rows_published=1).apply(row).schema_drift == "WS:x+"
@@ -679,16 +711,18 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
             logging.WARNING,
             (
                 f"stocks.trades: dropped 2 REST row(s) whose key cannot be read, the first at "
-                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted, and the running "
-                "count is logged at DEBUG"
+                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted: the running "
+                "count is logged at DEBUG and shown in the SchemaDrift of each live table that "
+                "lost them"
             ),
         ),
         (
             logging.WARNING,
             (
                 f"stocks.quotes: dropped 2 REST row(s) whose key cannot be read, the first at "
-                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted, and the running "
-                "count is logged at DEBUG"
+                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted: the running "
+                "count is logged at DEBUG and shown in the SchemaDrift of each live table that "
+                "lost them"
             ),
         ),
     ]
@@ -700,8 +734,42 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
         r"\(8 so far\); the latest WS at wss://h/stocks channel T: row 4: no Ticker",
         counted.getMessage(),
     )
-    # Dropped rows add no entry to a row's drift: the log counts them.
-    assert registry.record(1, "REST", first) is None
+
+
+def test_dropped_rows_are_counted_in_the_owners_schema_drift() -> None:
+    # After its one WARNING, a dropped row stays visible: each owner's row counts its drops,
+    # per prefix, before its fields, so a text cut at its limit keeps the count.
+    registry = DriftRegistry()
+    first = DriftReport(dropped_rows=2, dropped_reason="row 0: no Ticker")
+    assert registry.record(1, "REST", first) == "REST:2 rows dropped"
+    assert registry.record(1, "REST", DriftReport()) is None
+    halted = DriftReport(extra=frozenset({"halted"}), dropped_rows=1)
+    assert registry.record(1, "REST", halted) == "REST:3 rows dropped, REST:halted+"
+    assert registry.record(1, "WebSocket", DriftReport(dropped_rows=1)) == (
+        "REST:3 rows dropped, REST:halted+, WebSocket:1 row dropped"
+    )
+    assert registry.record(2, "T", DriftReport(dropped_rows=1)) == "T:1 row dropped"
+    registry.forget(1)
+    assert registry.record(1, "REST", DriftReport(dropped_rows=1)) == "REST:1 row dropped"
+
+
+def test_a_rounded_whole_number_warns_once_and_shows_with_a_tilde(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = DriftRegistry()
+    big = str(2**53 + 1)
+    drift = DriftReport(rounded=frozenset({"s"}), samples={"s": DriftSample(None, big)})
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        registry.report("stocks.last_quote", Transport.REST, drift, where=WHERE)
+        registry.report("stocks.last_quote", Transport.REST, drift, where=WHERE)
+    assert drift_warnings(caplog) == [
+        (
+            "stocks.last_quote: REST field 's' held a whole number beyond 2**53, which its "
+            "double column holds only rounded; it reads rounded (schema drift) at "
+            f"{WHERE}; first value {big}"
+        )
+    ]
+    assert registry.record(3, "REST", drift) == "REST:s~"
 
 
 def test_schema_drift_text_is_cut_at_its_limit() -> None:
