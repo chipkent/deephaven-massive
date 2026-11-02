@@ -47,23 +47,20 @@ become `Date`.
   options; for indices, which can update around the clock, the period's last calendar day and
   one hour more); a bar of several days spans that many calendar days, weekends included, as
   Massive counts them; `Date` is null.
-- **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
-  `Date` is that date.
-- **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day
-  its sessions can end on, counted with the same holiday allowance (`bar_periods.last_trading_day`)
-  from the session date of its start plus one more session (a folded first session opens on
-  the evening before its holiday), or on its label if that is later; `Date` is null.
-- **Futures week or longer.** `window_start` to 17:00 Chicago time on the last weekday of the
-  latest period its label allows; `Date` is null.
+- **Futures bar of a session or longer.** Massive's `window_start` (00:00 UTC on the first
+  day of the bar's bucket of UTC days, `bar_periods`) to 17:00 Chicago time on its label,
+  Massive's `session_end_date`, the bucket's last session. `Date` is the label for a
+  1-session bar and null for a longer one. Since a session opens the evening before its date,
+  consecutive bars overlap by about 22 hours.
 - **Daily open-close.** As a 1-day bar of its date. A crypto summary whose `isUTC` is false
   is served too, with the UTC day's window; its day boundary differs from the other crypto
   tables', so it logs one WARNING per dataset per session.
 
 The indices' extra hour is conservative: an index day bar is stamped at midnight in Chicago,
 and whether it covers the New York or the Chicago day is not verified, so its end is the later
-of the two. The futures ends of bars of several sessions, weeks, or longer are conservative for
-the same reason: Massive does not document whether such a bar is labelled with its first or its
-last session, so the end is the later of the two readings. The next midnight is always the
+of the two. A futures bar longer than one session whose label may not yet be its bucket's last
+session has a `TimestampEnd` that can still move, so `history()` returns it only once it has
+certainly ended (`within`, `bar_periods.futures_bar_ended`). The next midnight is always the
 calendar's next midnight in the zone, never 24 hours later, so a day across a daylight-saving
 change keeps its true length.
 
@@ -107,9 +104,8 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.bar_periods import (
     bar_days,
-    futures_period_last,
+    futures_bar_ended,
     intraday,
-    last_trading_day,
     unit_ns,
 )
 from deephaven_massive._datasets.dates import (
@@ -121,7 +117,6 @@ from deephaven_massive._datasets.dates import (
 from deephaven_massive._datasets.epoch import DAY_NS, epoch_instant, epoch_ns
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
-    futures_session,
     futures_session_end,
     session_days,
     weekday_sessions,
@@ -146,6 +141,7 @@ __all__ = [
     "START",
     "TIMESTAMP",
     "BarBounds",
+    "FuturesBarCompletion",
     "RowTimes",
     "SessionDates",
     "StampRule",
@@ -397,8 +393,30 @@ class StartRule(StrEnum):
     RANGE = "range"
     """A bar's `TimestampStart` must be no earlier than the range's start."""
     LABEL = "label"
-    """Bars are kept by their session label, not their start: futures named by session dates,
-    whose bar may open before its first session's date when a holiday folds it."""
+    """Bars are kept by their session label, not their start: futures intraday and 1-session bars
+    named by session dates, whose bar may open before its session's date when a holiday folds
+    it."""
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesBarCompletion:
+    """When a futures bar of a session or longer has certainly ended.
+
+    Carried by `BarBounds.futures_completion`. A bar longer than one session is labelled with
+    the last session Massive has seen in its bucket, so its `TimestampEnd` can still move while
+    the bucket is open; `bar_periods.futures_bar_ended` says from when it cannot. Frozen, so
+    reader threads may share it.
+
+    Attributes:
+        timespan: The bar unit: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        multiplier: How many units one bar spans, at least 1.
+        now: The current instant of the `history()` call: a bar is kept only when it has
+            certainly ended by then.
+    """
+
+    timespan: Timespan
+    multiplier: int
+    now: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,17 +427,22 @@ class BarBounds:
     threads of a call may share it.
 
     Attributes:
-        earliest: The range's start: the earliest `TimestampStart` a kept bar may have under
-            `StartRule.RANGE`.
+        earliest: The earliest `TimestampStart` a kept bar may have under `StartRule.RANGE`:
+            the range's start, or for futures bars of several sessions or longer named by
+            dates, the first bucket day that holds no session before the range.
         latest: The latest `TimestampEnd` a kept bar may have: the earlier of now and the
             range's end, which for dates is the last day's end (`dates.day_end`; for futures,
             17:00 Chicago on the last session's date).
         start_rule: Whether `earliest` bounds the bars' starts.
+        futures_completion: For futures bars of a session or longer, when such a bar has
+            certainly ended; None for every other bar, which has ended once its
+            `TimestampEnd` has passed.
     """
 
     earliest: datetime
     latest: datetime
     start_rule: StartRule
+    futures_completion: FuturesBarCompletion | None = None
 
 
 def within(rows: _Rows, bounds: BarBounds) -> _Rows:
@@ -428,9 +451,10 @@ def within(rows: _Rows, bounds: BarBounds) -> _Rows:
     `history()` keeps a bar only when its window has ended by the end of the range and by
     now, judged by the same `TimestampEnd` a join on the end uses, so a bar a join would not
     yet attach is never returned; and, under `StartRule.RANGE`, only when its `TimestampStart`
-    is no earlier than the range's start, so a bar whose conservative start reaches before the
-    range (an index week stamped on its weekend) is left out. A row whose start or end is
-    unknown (a futures bar sent without its start) is kept, the column null.
+    is no earlier than `BarBounds.earliest`, so a bar whose start reaches before the range (an
+    index week stamped on its weekend) is left out. A futures bar of a session or longer is
+    kept only once it has certainly ended (`_futures_ended`). A row whose start or end is
+    unknown (a futures bar sent without its label) is kept, the column null.
 
     Args:
         rows: Rows with their time columns filled (`TimeRule.fill`).
@@ -449,7 +473,62 @@ def within(rows: _Rows, bounds: BarBounds) -> _Rows:
         starts = rows.column(START)
         late = pc.greater_equal(starts, pa.scalar(epoch_ns(bounds.earliest), starts.type))
         keep = pc.and_(keep, pc.fill_null(late, fill_value=True))
+    if bounds.futures_completion is not None and START in names:
+        keep = pc.and_(keep, _futures_ended(rows, bounds.futures_completion))
     return rows.filter(keep)
+
+
+def _futures_ended(rows: _Rows, completion: FuturesBarCompletion) -> pa.Array:
+    """Tell which futures bars of a session or longer have certainly ended.
+
+    The judgment reads only the visible columns: a bar's bucket starts on the UTC date of its
+    `TimestampStart`, and its label is the Chicago date of its `TimestampEnd` (17:00 Chicago on
+    the label). Each distinct pair is judged once (`bar_periods.futures_bar_ended`). The bars
+    left out log one DEBUG line per batch with how many there were and the first one's window.
+
+    Args:
+        rows: Futures bars with their time columns filled.
+        completion: The bars' unit and the call's current instant.
+
+    Returns:
+        One boolean per row: True where the bar has ended, or its start or end is unknown.
+    """
+    starts = _to_int(rows.column(START)).to_pylist()
+    ends = _to_int(rows.column(END)).to_pylist()
+    now = epoch_ns(completion.now)
+    certain: dict[tuple[int, int], int] = {}
+    keep: list[bool] = []
+    open_bars: list[tuple[int, int]] = []
+    for start, end in zip(starts, ends, strict=True):
+        if start is None or end is None:
+            keep.append(True)
+            continue
+        if (start, end) not in certain:
+            label = epoch_instant(end).astimezone(CHICAGO).date()
+            ended = futures_bar_ended(
+                epoch_instant(start).date(),
+                label,
+                timespan=completion.timespan,
+                multiplier=completion.multiplier,
+            )
+            certain[start, end] = epoch_ns(ended)
+        keep.append(certain[start, end] <= now)
+        if not keep[-1]:
+            open_bars.append((start, end))
+    if open_bars:
+        start, end = open_bars[0]
+        logger.debug(
+            "%d futures %d-%s bars left out: not certainly ended at %s; the first starts %s, "
+            "ends %s, and has certainly ended only at %s",
+            len(open_bars),
+            completion.multiplier,
+            completion.timespan.value,
+            completion.now.isoformat(),
+            epoch_instant(start).isoformat(),
+            epoch_instant(end).isoformat(),
+            epoch_instant(certain[start, end]).isoformat(),
+        )
+    return pa.array(keep, pa.bool_())
 
 
 def _instants(values: list[int | None]) -> pa.Array:
@@ -776,64 +855,32 @@ class TimeRule:
         return _set(rows, DATE, pa.array(dates, pa.string()).take(index))
 
     def _futures_long(self, rows: _Rows, timespan: Timespan) -> _Rows:
-        """Fill a futures bar of a session or longer from its start and its session label.
+        """Fill a futures bar of a session or longer from its session label.
 
-        One session: it ends at 17:00 Chicago time on its date, which is its `Date`. Several
-        sessions: 17:00 Chicago on the latest day its sessions can end on, or on its label when
-        that is later. The sessions are counted with the holiday allowance
-        (`bar_periods.last_trading_day`) from the session date of its start, plus one: a bar whose
-        first session a holiday folded opens on the evening before the holiday, whose date is
-        the holiday itself. A week or longer: 17:00 Chicago on the last weekday of the
-        latest period its label allows (`bar_periods.futures_period_last`). Only a one-session bar
-        keeps its `Date`.
+        Its `TimestampStart` stays Massive's `window_start`, and it ends at 17:00 Chicago time
+        on its label, Massive's `session_end_date`, which is the bar's last session. Only a
+        1-session bar keeps its `Date`. Whether a longer bar has certainly ended is judged
+        apart (`within`), since its label can still move while its bucket is open.
 
         Args:
             rows: The batch, whose `Date` holds the bars' `session_end_date`.
             timespan: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
 
         Returns:
-            The batch with `Date` and `TimestampEnd`.
+            The batch with `Date` and `TimestampEnd`; a row without a label has no end.
         """
         single = timespan is Timespan.SESSION and self.multiplier == 1
-        starts = _to_int(rows.column(START)).to_pylist()
-        labels = _column(rows, DATE).to_pylist()
-        ends: dict[tuple[int | None, str | None], int | None] = {}
-        column: list[int | None] = []
-        for start, label in zip(starts, labels, strict=True):
-            key = (start, label)
-            if key not in ends:
-                ends[key] = self._futures_end(start, label, timespan)
-            column.append(ends[key])
-        rows = _set(rows, END, _instants(column))
+        labels = _column(rows, DATE)
+        distinct = pc.unique(labels)
+        ends = [
+            None if text is None else epoch_ns(futures_session_end(date.fromisoformat(text)))
+            for text in distinct.to_pylist()
+        ]
+        index = pc.index_in(labels, value_set=distinct)
+        rows = _set(rows, END, _instants(ends).take(index))
         if single:
             return rows
         return _set(rows, DATE, pa.nulls(rows.num_rows, pa.string()))
-
-    def _futures_end(self, start: int | None, label: str | None, timespan: Timespan) -> int | None:
-        """Return the end of one futures bar of a session or longer.
-
-        Args:
-            start: Its `window_start`, epoch nanoseconds, or None.
-            label: Its `session_end_date`, ISO text, or None.
-            timespan: The bar unit.
-
-        Returns:
-            The end, epoch nanoseconds; None without a label.
-        """
-        if label is None:
-            return None
-        session = date.fromisoformat(label)
-        if timespan is not Timespan.SESSION:
-            last = futures_period_last(session, timespan=timespan, multiplier=self.multiplier)
-            return epoch_ns(futures_session_end(last))
-        if self.multiplier == 1:
-            return epoch_ns(futures_session_end(session))
-        if start is None:
-            return None
-        # A session a holiday folded opens on the evening before the holiday, so the date its
-        # `window_start` falls in can be the holiday itself: count one session more.
-        last = last_trading_day(futures_session(epoch_instant(start)), self.multiplier + 1)
-        return epoch_ns(futures_session_end(max(session, last)))
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:

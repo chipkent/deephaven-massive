@@ -280,10 +280,10 @@ def _end_sentence(spec: DatasetSpec) -> str:
     if spec.asset_class is AssetClass.FUTURES:
         return (
             f"{_WINDOW_END} An intraday bar ends its length after its start (a one-second "
-            "WebSocket bar at the later of that and Massive's `e`); a session bar at 17:00 "
-            "Chicago time on its session date; a bar of several sessions, or of a week or "
-            "longer, at the latest end its label allows, since whether Massive labels it with "
-            "its first or its last session is not verified."
+            "WebSocket bar at the later of that and Massive's `e`); a bar of a session or "
+            "longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is "
+            "its last session. history() returns a bar of several sessions, or of a week or "
+            "longer, only once no later session can still join it."
         )
     where = (
         f"00:00 {_ZONE_CLOCKS[zone]}"

@@ -25,6 +25,7 @@ from deephaven_massive._datasets.row_times import (
     START,
     TIMESTAMP,
     BarBounds,
+    FuturesBarCompletion,
     RowTimes,
     StampRule,
     StartRule,
@@ -429,106 +430,98 @@ def test_a_futures_session_bar_ends_at_17_chicago_on_its_date() -> None:
     }
 
 
-def test_a_futures_bar_of_several_sessions_ends_at_its_latest_possible_close() -> None:
-    rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 2)
-    # Labelled Thursday 2024-03-28 before Good Friday: counted as weekdays it ends with
-    # Friday's session, but the holiday moved that trading to Monday 04-01. The count allows
-    # one session more for a fold and one weekday for a holiday, so it ends on Tuesday.
-    sent = bars(["2024-03-27T22:00:00"], dates=["2024-03-28"])
-    end = datetime(2024, 4, 2, 17, tzinfo=CHICAGO).astimezone(UTC)
-    assert fill(rule, sent) == {
-        DATE: [None],
-        START: ["2024-03-27T22:00:00+00:00"],
-        END: [end.isoformat()],
+def test_a_longer_futures_bar_ends_at_17_chicago_on_its_label() -> None:
+    # The live ESZ6 bars of 2026: Massive's window start is kept, and the bar ends at 17:00
+    # Chicago (22:00 UTC in summer) on its label, its bucket's last session.
+    two = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 2)
+    sent = bars(
+        ["2026-08-01T00:00:00", "2026-08-13T00:00:00", "2026-08-15T00:00:00"],
+        dates=["2026-08-03", "2026-08-14", None],
+    )
+    assert fill(two, sent) == {
+        DATE: [None, None, None],
+        START: [
+            "2026-08-01T00:00:00+00:00",
+            "2026-08-13T00:00:00+00:00",
+            "2026-08-15T00:00:00+00:00",
+        ],
+        END: ["2026-08-03T22:00:00+00:00", "2026-08-14T22:00:00+00:00", None],
     }
-    # A label later than the counted sessions and their allowance is the end.
-    late = bars(["2024-03-27T22:00:00"], dates=["2024-04-08"])
-    assert fill(rule, late)[END] == [
-        datetime(2024, 4, 8, 17, tzinfo=CHICAGO).astimezone(UTC).isoformat()
+    month = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.MONTH, 1)
+    september = bars(["2026-09-01T00:00:00"], dates=["2026-10-01"])
+    assert fill(month, september)[END] == ["2026-10-01T22:00:00+00:00"]
+    # In winter, 17:00 Chicago is 23:00 UTC.
+    year = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.YEAR, 1)
+    assert fill(year, bars(["2025-01-01T00:00:00"], dates=["2025-12-31"]))[END] == [
+        "2025-12-31T23:00:00+00:00"
     ]
-    # Without a start, the sessions cannot be counted, so there is no end.
-    no_start = bars([None], dates=["2024-03-28"])
-    assert fill(rule, no_start)[END] == [None]
 
 
-# Weekdays on which the CME equity and interest-rate futures hold no session of their own,
-# 2024 to 2026: their trading folds into the next session, which opens the evening before.
-CME_FOLDED = frozenset(
-    {
-        date(2024, 1, 1), date(2024, 1, 15), date(2024, 2, 19), date(2024, 3, 29),
-        date(2024, 5, 27), date(2024, 6, 19), date(2024, 7, 4), date(2024, 9, 2),
-        date(2024, 11, 28), date(2024, 12, 25),
-        date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
-        date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4), date(2025, 9, 1),
-        date(2025, 11, 27), date(2025, 12, 25),
-        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
-        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
-        date(2026, 11, 26), date(2026, 12, 25),
-    }
-)  # fmt: skip
+def futures_bars(pairs: Sequence[tuple[str, str | None]], timespan: Timespan, n: int) -> pa.Table:
+    # Filled futures bars from (window start, label) pairs.
+    starts = [start for start, _ in pairs]
+    labels = [label for _, label in pairs]
+    rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, timespan, n)
+    return pa.Table.from_batches([rule.fill(bars(starts, dates=labels), received=0)])
 
 
-def _cme_sessions() -> list[date]:
-    day, sessions = date(2023, 12, 27), []
-    while day.year < 2027:
-        if day.weekday() < 5 and day not in CME_FOLDED:
-            sessions.append(day)
-        day += timedelta(days=1)
-    return sessions
+def completion(timespan: Timespan, n: int, now: datetime) -> BarBounds:
+    # Bounds that keep every bar but the ones that have not certainly ended by `now`.
+    early, late = datetime(2000, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC)
+    return BarBounds(early, late, StartRule.RANGE, FuturesBarCompletion(timespan, n, now))
 
 
-def _opens(sessions: list[date], index: int) -> datetime:
-    # A session opens at 17:00 Chicago on the day the one before it closed (Sunday after a
-    # Friday), so a session after a folded holiday opens on the evening before the holiday.
-    before = sessions[index - 1]
-    opens = datetime.combine(before, time(17), CHICAGO)
-    return opens + timedelta(days=2) if before.weekday() == 4 else opens
+def test_a_longer_futures_bar_is_kept_once_it_has_certainly_ended(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # On Monday 2026-11-02 at noon Chicago, the live 2-month bars of ESZ6: July and August
+    # ended with the session of 09-01; September and October with that of 10-30; the bucket of
+    # November and December is open, labelled 11-02 so far, so it is left out.
+    rows = futures_bars(
+        [
+            ("2026-07-01T00:00:00", "2026-09-01"),
+            ("2026-09-01T00:00:00", "2026-10-30"),
+            ("2026-11-01T00:00:00", "2026-11-02"),
+        ],
+        T.MONTH,
+        2,
+    )
+    now = datetime(2026, 11, 2, 12, tzinfo=CHICAGO)
+    with caplog.at_level(logging.DEBUG, logger=row_times.__name__):
+        kept = within(rows, completion(T.MONTH, 2, now))
+    assert iso(kept.column(START)) == [
+        "2026-07-01T00:00:00+00:00",
+        "2026-09-01T00:00:00+00:00",
+    ]
+    # The open bar would end with the session after 2027-01-01, the latest its bucket can
+    # hold: Monday 2027-01-04 at 17:00 Chicago, 23:00 UTC.
+    [record] = [r for r in caplog.records if "not certainly ended" in r.getMessage()]
+    assert "1 futures 2-month bars left out" in record.getMessage()
+    assert "2027-01-04T23:00:00+00:00" in record.getMessage()
+    later = datetime(2027, 1, 4, 17, tzinfo=CHICAGO)
+    assert within(rows, completion(T.MONTH, 2, later)).num_rows == 3
 
 
-def test_a_futures_bar_of_several_sessions_never_ends_before_its_last_session() -> None:
-    # Every 2- to 40-session bar of the CME calendar of 2024 to 2026, counted from its real
-    # open, Sunday and folded opens included, under both readings of its label.
-    sessions = _cme_sessions()
-    for count in range(2, 41):
-        rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, count)
-        firsts = range(1, len(sessions) - count)
-        starts = [
-            _opens(sessions, i).astimezone(UTC).replace(tzinfo=None).isoformat() for i in firsts
-        ]
-        lasts = [sessions[i + count - 1] for i in firsts]
-        for labels in ([sessions[i] for i in firsts], lasts):
-            ends = fill(rule, bars(starts, dates=[d.isoformat() for d in labels]))[END]
-            for end, last in zip(ends, lasts, strict=True):
-                closes = datetime.combine(last, time(17), CHICAGO).astimezone(UTC)
-                assert datetime.fromisoformat(cast("str", end)) >= closes, (count, last, end)
-
-
-def test_a_five_session_bar_from_after_christmas_ends_with_its_fifth_session() -> None:
-    # Its first session, 12-26, opened on Christmas Eve, whose session date is the holiday.
-    rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 5)
-    for opens, fifth in (
-        (date(2024, 12, 24), date(2025, 1, 2)),
-        (date(2025, 12, 24), date(2026, 1, 2)),
-    ):
-        start = datetime.combine(opens, time(17), CHICAGO).astimezone(UTC).replace(tzinfo=None)
-        (end,) = fill(
-            rule, bars([start.isoformat()], dates=[(opens + timedelta(days=2)).isoformat()])
-        )[END]
-        closes = datetime.combine(fifth, time(17), CHICAGO).astimezone(UTC)
-        assert datetime.fromisoformat(cast("str", end)) >= closes
-
-
-def test_a_futures_week_or_month_ends_with_the_latest_period_its_label_allows() -> None:
-    week = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.WEEK, 1)
-    sent = bars(["2024-03-24T22:00:00", "2024-03-24T22:00:00"], dates=["2024-03-25", "2024-03-25"])
-    assert fill(week, sent) == {
-        DATE: [None, None],
-        START: ["2024-03-24T22:00:00+00:00", "2024-03-24T22:00:00+00:00"],
-        END: [datetime(2024, 3, 29, 17, tzinfo=CHICAGO).astimezone(UTC).isoformat()] * 2,
-    }
-    months = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.MONTH, 2)
-    end = fill(months, bars(["2024-02-29T23:00:00"], dates=["2024-03-01"]))[END]
-    assert end == [datetime(2024, 4, 30, 17, tzinfo=CHICAGO).astimezone(UTC).isoformat()]
+def test_a_futures_bar_whose_label_may_still_move_waits_a_session_more() -> None:
+    # A 2-session bucket of Monday and Tuesday 2026-08-03 that so far holds only the session
+    # of 08-04 (labelled 08-04): the session of 08-05 opens on Tuesday and may still join, so
+    # the bar is kept only after the session of Thursday 08-06 has closed.
+    # The bar comes twice (two venues, say) and is judged once.
+    rows = futures_bars([("2026-08-03T00:00:00", "2026-08-04")] * 2, T.SESSION, 2)
+    assert within(rows, completion(T.SESSION, 2, datetime(2026, 8, 6, 12, tzinfo=CHICAGO))) == (
+        rows.slice(0, 0)
+    )
+    assert within(rows, completion(T.SESSION, 2, datetime(2026, 8, 6, 17, tzinfo=CHICAGO))) == rows
+    # A complete bar of the same bucket ends with its label.
+    whole = futures_bars([("2026-08-03T00:00:00", "2026-08-05")], T.SESSION, 2)
+    assert within(whole, completion(T.SESSION, 2, datetime(2026, 8, 5, 17, tzinfo=CHICAGO))) == (
+        whole
+    )
+    # A bar without its label or start has no window to judge and is kept.
+    unknown = futures_bars([("2026-08-03T00:00:00", None)], T.SESSION, 2)
+    assert within(unknown, completion(T.SESSION, 2, datetime(2026, 8, 3, tzinfo=CHICAGO))) == (
+        unknown
+    )
 
 
 # --- Daily summaries ------------------------------------------------------------------------

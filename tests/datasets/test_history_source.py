@@ -31,6 +31,7 @@ from deephaven_massive._datasets.history_source import (
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import (
     BarBounds,
+    FuturesBarCompletion,
     RowTimes,
     StartRule,
 )
@@ -301,7 +302,7 @@ def test_futures_bars_by_date() -> None:
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
     minute = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.MINUTE)
     assert minute.sessions == span
-    assert minute.requested == futures_bar_request(span)
+    assert minute.requested == futures_bar_request(span, timespan=Timespan.MINUTE, multiplier=1)
     assert minute.times is not None
     assert minute.times.start == minute.requested.start
     # A session bar of a session still trading is left out: the session of 03-10 opened at
@@ -315,8 +316,6 @@ def test_futures_bars_by_date() -> None:
     live = window(FUTURES_BARS, "2025-03-10", None, timespan=Timespan.MINUTE)
     assert live.times is not None
     assert live.times.end == NOW
-    weeks = window(FUTURES_BARS, "2025-03-04", "2025-03-07", timespan=Timespan.WEEK)
-    assert weeks.empty
 
 
 def test_futures_bars_by_instants_request_them_exactly() -> None:
@@ -580,27 +579,75 @@ def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
         assert choose(spec, request(many(60), timespan=Timespan.DAY)) is (HistorySource.FLAT_FILES)
 
 
-def test_futures_bars_of_several_sessions_by_date_fit_under_both_label_readings() -> None:
-    # Whether Massive labels such a bar with its first or last session is not documented, so
-    # the dates keep the labels whose bar fits either way.
-    sessions = window(
-        FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.SESSION, multiplier=2
+def test_longer_futures_bars_by_date_need_every_session_in_the_range() -> None:
+    # Dates name sessions. A month bar's sessions are those that open in the month, so
+    # September 2026's last session is that of 10-01: the range must reach it.
+    now = datetime(2026, 11, 2, 12, tzinfo=CHICAGO)
+    september = window(FUTURES_BARS, "2026-09-01", "2026-10-01", now=now, timespan=Timespan.MONTH)
+    assert september.requested == TimeRange(
+        datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 10, 1, 18, tzinfo=CHICAGO)
     )
-    assert sessions.sessions == DaySpan(date(2025, 3, 4), date(2025, 3, 6))
-    assert sessions.times is None
-    months = window(FUTURES_BARS, "2024-11-01", "2025-01-31", timespan=Timespan.MONTH, multiplier=2)
-    assert months.sessions == DaySpan(date(2024, 12, 1), date(2024, 12, 31))
-    weeks = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.WEEK, multiplier=2)
-    assert weeks.empty
-    # Datetimes, multiplier 1, and intraday multiples are fine.
-    start = datetime(2025, 3, 2, 17, tzinfo=CHICAGO)
-    assert not window(
-        FUTURES_BARS, start, start + timedelta(days=7), timespan=Timespan.SESSION, multiplier=2
-    ).empty
-    assert window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.SESSION).sessions
-    assert window(
-        FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.MINUTE, multiplier=5
-    ).sessions
+    assert september.sessions == DaySpan(date(2026, 9, 1), date(2026, 10, 1))
+    assert september.times is None
+    assert september.bars == BarBounds(
+        datetime(2026, 9, 1, tzinfo=UTC),
+        datetime(2026, 10, 1, 17, tzinfo=CHICAGO),
+        StartRule.RANGE,
+        FuturesBarCompletion(Timespan.MONTH, 1, now),
+    )
+    # Two sessions from Monday 2026-08-03: the bucket of Saturday and Sunday holds only
+    # Monday's session, so it may start there.
+    two = window(
+        FUTURES_BARS,
+        "2026-08-03",
+        "2026-08-07",
+        now=now,
+        timespan=Timespan.SESSION,
+        multiplier=2,
+    )
+    assert two.requested is not None
+    assert two.requested.start == datetime(2026, 8, 1, tzinfo=UTC)
+    assert two.bars is not None
+    assert two.bars.earliest == datetime(2026, 8, 1, tzinfo=UTC)
+    # From a Wednesday, a bucket that starts on Tuesday holds Wednesday's session, which opens
+    # on Tuesday evening, and maybe Tuesday's, which opens on Monday: it is left out.
+    wednesday = window(
+        FUTURES_BARS,
+        "2026-08-05",
+        "2026-08-07",
+        now=now,
+        timespan=Timespan.SESSION,
+        multiplier=2,
+    )
+    assert wednesday.bars is not None
+    assert wednesday.bars.earliest == datetime(2026, 8, 5, tzinfo=UTC)
+    # A week's request starts on the Sunday of the first date's week, but its bars must
+    # still start no earlier than the first date's own first bucket day.
+    weeks = window(FUTURES_BARS, "2026-08-05", "2026-08-21", now=now, timespan=Timespan.WEEK)
+    assert weeks.requested is not None
+    assert weeks.requested.start == datetime(2026, 8, 2, tzinfo=UTC)
+    assert weeks.bars is not None
+    assert weeks.bars.earliest == datetime(2026, 8, 5, tzinfo=UTC)
+    # From a Monday, a bucket may start on the Saturday before, but the week's request starts
+    # on Sunday: a bucket Massive cut short at that `{from}` is left out.
+    monday = window(FUTURES_BARS, "2026-08-03", "2026-08-21", now=now, timespan=Timespan.WEEK)
+    assert monday.bars is not None
+    assert monday.bars.earliest == datetime(2026, 8, 2, tzinfo=UTC)
+
+
+def test_longer_futures_bars_by_instants_are_kept_by_their_own_window() -> None:
+    # A futures bucket starts at 00:00 UTC, before its first session's 17:00 Chicago open, so
+    # a range from 00:00 UTC keeps the bar that starts there: the times bound the start
+    # exactly, not at a session's open.
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = datetime(2026, 9, 1, tzinfo=UTC)
+    now = datetime(2026, 11, 2, 12, tzinfo=CHICAGO)
+    monthly = window(FUTURES_BARS, start, end, now=now, timespan=Timespan.SESSION, multiplier=2)
+    assert monthly.requested == TimeRange(start, end)
+    assert monthly.times == TimeRange(start, end)
+    assert monthly.bars == BarBounds(
+        start, end, StartRule.RANGE, FuturesBarCompletion(Timespan.SESSION, 2, now)
+    )
 
 
 @pytest.mark.parametrize("key", ["session_end_date", "session_end_date_gte", "session_end_date_lt"])

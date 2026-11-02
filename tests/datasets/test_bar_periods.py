@@ -6,12 +6,12 @@ import pytest
 
 from deephaven_massive._datasets.bar_periods import (
     bar_days,
-    bar_sessions,
     bar_starts,
+    futures_bar_ended,
     futures_bar_request,
-    futures_period_last,
+    futures_bucket_end,
+    futures_first_bucket_day,
     intraday,
-    last_trading_day,
     unit_ns,
 )
 from deephaven_massive._datasets.dates import (
@@ -22,30 +22,123 @@ from deephaven_massive._datasets.dates import (
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     FUTURES_HOLIDAY_MARGIN,
-    futures_session_open,
 )
 from deephaven_massive._enums import AssetClass, Timespan
+
+S, W, M, Q, Y = Timespan.SESSION, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR
+
+
+def session_request(first: date, last: date) -> TimeRange:
+    return futures_bar_request(DaySpan(first, last), timespan=S, multiplier=1)
 
 
 def test_futures_bar_request_reaches_a_session_a_holiday_opened_early() -> None:
     # From the first session's 17:00 Chicago open (UTC-6 before March 9) less the four-day
     # holiday margin, to 18:00 Chicago on the last session date.
     assert timedelta(days=4) == FUTURES_HOLIDAY_MARGIN
-    requested = futures_bar_request(DaySpan(date(2025, 3, 3), date(2025, 3, 5)))
+    requested = session_request(date(2025, 3, 3), date(2025, 3, 5))
     assert requested.start == datetime(2025, 2, 26, 23, tzinfo=UTC)
     assert requested.end == datetime(2025, 3, 5, 18, tzinfo=CHICAGO)
     # Good Friday 2024: the session of Monday 2024-04-01 opened on Thursday at 17:00 Chicago.
-    good_friday = futures_bar_request(DaySpan(date(2024, 4, 1), date(2024, 4, 1)))
+    good_friday = session_request(date(2024, 4, 1), date(2024, 4, 1))
     assert good_friday.start < datetime(2024, 3, 28, 17, tzinfo=CHICAGO)
     # Martin Luther King Day 2025: the session of 2025-01-21 opened on Sunday 17:00.
-    mlk = futures_bar_request(DaySpan(date(2025, 1, 21), date(2025, 1, 21)))
+    mlk = session_request(date(2025, 1, 21), date(2025, 1, 21))
     assert mlk.start <= datetime(2025, 1, 19, 17, tzinfo=CHICAGO) < mlk.end
+    # Intraday bars take the same margin.
+    minutes = futures_bar_request(
+        DaySpan(date(2025, 3, 3), date(2025, 3, 5)), timespan=Timespan.MINUTE, multiplier=5
+    )
+    assert minutes == requested
 
 
 def test_futures_bar_request_across_the_spring_dst_change() -> None:
-    requested = futures_bar_request(DaySpan(date(2025, 3, 8), date(2025, 3, 10)))
+    requested = session_request(date(2025, 3, 8), date(2025, 3, 10))
     assert requested.start == datetime(2025, 3, 3, 23, tzinfo=UTC)  # CST, UTC-6
     assert requested.end == datetime(2025, 3, 10, 23, tzinfo=UTC)  # 18:00 CDT, UTC-5
+
+
+def test_longer_futures_bars_are_requested_from_the_first_bucket_that_can_start_the_range() -> None:
+    def start(first: date, timespan: Timespan, multiplier: int = 1) -> datetime:
+        span = DaySpan(first, date(2026, 10, 30))
+        return futures_bar_request(span, timespan=timespan, multiplier=multiplier).start
+
+    # Bars of several sessions: 00:00 UTC on the first date, or on the Saturday before a
+    # Monday, since Monday's session opens on Sunday evening.
+    assert start(date(2026, 9, 1), S, 2) == datetime(2026, 9, 1, tzinfo=UTC)
+    assert start(date(2026, 8, 3), S, 2) == datetime(2026, 8, 1, tzinfo=UTC)
+    # Weeks and longer: 00:00 UTC on the first day of the period that holds the first date.
+    assert start(date(2026, 9, 1), M) == datetime(2026, 9, 1, tzinfo=UTC)
+    assert start(date(2026, 9, 15), M, 2) == datetime(2026, 9, 1, tzinfo=UTC)
+    assert start(date(2026, 8, 5), W) == datetime(2026, 8, 2, tzinfo=UTC)  # its Sunday
+    assert start(date(2026, 8, 15), Q) == datetime(2026, 7, 1, tzinfo=UTC)
+    assert start(date(2026, 8, 15), Y) == datetime(2026, 1, 1, tzinfo=UTC)
+    # Every request ends at 18:00 Chicago on the last session date.
+    span = DaySpan(date(2026, 9, 1), date(2026, 10, 1))
+    assert futures_bar_request(span, timespan=M, multiplier=1).end == datetime(
+        2026, 10, 1, 18, tzinfo=CHICAGO
+    )
+
+
+def test_the_first_bucket_day_holds_no_session_before_the_first_date() -> None:
+    # A Tuesday to Friday is its own first day; a Saturday, Sunday, or Monday reaches back to
+    # the Saturday, whose bucket's first session is Monday's.
+    assert futures_first_bucket_day(date(2026, 9, 1)) == date(2026, 9, 1)  # Tuesday
+    assert futures_first_bucket_day(date(2026, 8, 7)) == date(2026, 8, 7)  # Friday
+    assert futures_first_bucket_day(date(2026, 8, 3)) == date(2026, 8, 1)  # Monday
+    assert futures_first_bucket_day(date(2026, 8, 2)) == date(2026, 8, 1)  # Sunday
+    assert futures_first_bucket_day(date(2026, 8, 1)) == date(2026, 8, 1)  # Saturday
+
+
+def test_futures_buckets_follow_massive_s_grid() -> None:
+    # The live ESZ6 bars of 2026: the next bucket starts where each one ends.
+    assert futures_bucket_end(date(2026, 8, 1), timespan=S, multiplier=2) == date(2026, 8, 3)
+    assert futures_bucket_end(date(2026, 8, 13), timespan=S, multiplier=2) == date(2026, 8, 15)
+    assert futures_bucket_end(date(2026, 8, 2), timespan=S, multiplier=1) == date(2026, 8, 3)
+    assert futures_bucket_end(date(2026, 8, 2), timespan=W, multiplier=2) == date(2026, 8, 16)
+    assert futures_bucket_end(date(2026, 9, 1), timespan=M, multiplier=1) == date(2026, 10, 1)
+    assert futures_bucket_end(date(2026, 7, 1), timespan=M, multiplier=2) == date(2026, 9, 1)
+    assert futures_bucket_end(date(2026, 10, 1), timespan=Q, multiplier=1) == date(2027, 1, 1)
+    assert futures_bucket_end(date(2025, 1, 1), timespan=Y, multiplier=1) == date(2026, 1, 1)
+
+
+def close(day: date) -> datetime:
+    # 17:00 Chicago on a session date: the session's close and the next one's open.
+    return datetime(day.year, day.month, day.day, 17, tzinfo=CHICAGO)
+
+
+@pytest.mark.parametrize(
+    ("first_day", "label", "timespan", "multiplier", "ended"),
+    [
+        # The live ESZ6 bars whose label is their bucket's last possible session end at it.
+        pytest.param(date(2026, 8, 2), date(2026, 8, 3), S, 1, date(2026, 8, 3), id="1-session"),
+        pytest.param(date(2026, 8, 1), date(2026, 8, 3), S, 2, date(2026, 8, 3), id="sat-sun"),
+        pytest.param(date(2026, 8, 3), date(2026, 8, 5), S, 2, date(2026, 8, 5), id="mon-tue"),
+        # Thursday and Friday hold only Friday's session, which opens on Thursday.
+        pytest.param(date(2026, 8, 13), date(2026, 8, 14), S, 2, date(2026, 8, 14), id="thu-fri"),
+        # Labor Day 2026: the session of 09-08 opened on Sunday 09-06.
+        pytest.param(date(2026, 9, 6), date(2026, 9, 8), S, 2, date(2026, 9, 8), id="labor-day"),
+        pytest.param(date(2026, 9, 1), date(2026, 10, 1), M, 1, date(2026, 10, 1), id="sept"),
+        pytest.param(date(2026, 10, 1), date(2026, 10, 30), M, 1, date(2026, 10, 30), id="oct"),
+        pytest.param(date(2026, 7, 1), date(2026, 9, 1), M, 2, date(2026, 9, 1), id="2-month"),
+        # A livestock session trades by day and ends on the Friday it opens.
+        pytest.param(date(2026, 8, 7), date(2026, 8, 7), S, 2, date(2026, 8, 7), id="fri-sat"),
+        # A label before the bucket's latest possible session may not be final: the bar ends
+        # a weekday after that session. The 2-month bar of 2026-11-02 runs to 2027-01-01, a
+        # Friday, so to 17:00 Chicago on Monday 2027-01-04.
+        pytest.param(date(2026, 11, 1), date(2026, 11, 2), M, 2, date(2027, 1, 4), id="open"),
+        pytest.param(date(2026, 8, 3), date(2026, 8, 4), S, 2, date(2026, 8, 6), id="one-seen"),
+        # A year whose last session, 2025-12-31, opens on its last day: the session of
+        # 2026-01-01 could still open on 12-31, so the bar ends after 2026-01-02's session.
+        pytest.param(date(2025, 1, 1), date(2025, 12, 31), Y, 1, date(2026, 1, 2), id="year"),
+    ],
+)
+def test_a_futures_bar_has_certainly_ended_once_no_session_can_join_it(
+    *, first_day: date, label: date, timespan: Timespan, multiplier: int, ended: date
+) -> None:
+    assert futures_bar_ended(first_day, label, timespan=timespan, multiplier=multiplier) == close(
+        ended
+    )
 
 
 def ny(day: date) -> datetime:
@@ -233,142 +326,6 @@ def test_an_unfinished_period_ends_after_now() -> None:
     assert not kept(day, ny(date(2025, 6, 18)))
 
 
-def test_futures_bars_by_instants_use_sessions() -> None:
-    # The session of 2025-03-04 runs from 17:00 Chicago on 03-03 to 17:00 on 03-04.
-    span = TimeRange(
-        datetime(2025, 3, 3, 17, tzinfo=CHICAGO).astimezone(UTC),
-        datetime(2025, 3, 4, 17, tzinfo=CHICAGO).astimezone(UTC),
-    )
-    starts = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=1)
-    assert starts == span
-    assert starts.start == span.start
-    late = TimeRange(span.start + timedelta(minutes=1), span.end)
-    assert bar_starts(AssetClass.FUTURES, late, timespan=Timespan.SESSION, multiplier=1).empty
-    # A week of sessions opens on Sunday evening and ends at Friday's 17:00.
-    week = TimeRange(
-        datetime(2025, 3, 2, 17, tzinfo=CHICAGO).astimezone(UTC),
-        datetime(2025, 3, 7, 17, tzinfo=CHICAGO).astimezone(UTC),
-    )
-    weeks = bar_starts(AssetClass.FUTURES, week, timespan=Timespan.WEEK, multiplier=1)
-    assert kept(weeks, datetime(2025, 3, 2, 17, tzinfo=CHICAGO))
-    shorter = TimeRange(week.start, week.end - timedelta(hours=1))
-    assert bar_starts(AssetClass.FUTURES, shorter, timespan=Timespan.WEEK, multiplier=1).empty
-
-
-def test_futures_bar_sessions_keep_whole_periods_of_session_dates() -> None:
-    week = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
-    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=1) == week
-    # A week bar is labelled with a session date of its week; Saturday and Sunday belong to
-    # the next week.
-    assert bar_sessions(week, timespan=Timespan.WEEK, multiplier=1) == DaySpan(
-        date(2025, 3, 1), date(2025, 3, 7)
-    )
-    assert bar_sessions(
-        DaySpan(date(2025, 3, 4), date(2025, 3, 7)), timespan=Timespan.WEEK, multiplier=1
-    ).empty
-    # Good Friday 2024 had no session; the week of 03-25 is still Monday to Friday.
-    good_friday = DaySpan(date(2024, 3, 25), date(2024, 3, 28))
-    assert bar_sessions(good_friday, timespan=Timespan.WEEK, multiplier=1).empty
-    # A two-month bar labelled with a February session covers January and February if the
-    # label is its last session, February and March if it is its first: both fit only for
-    # February labels.
-    months = bar_sessions(
-        DaySpan(date(2025, 1, 1), date(2025, 3, 31)), timespan=Timespan.MONTH, multiplier=2
-    )
-    assert months == DaySpan(date(2025, 2, 1), date(2025, 2, 28))
-
-
-def test_futures_bars_of_several_sessions_fit_under_both_readings_of_their_label() -> None:
-    week = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
-    # Two sessions: a Monday label could cover the Friday before; a Friday label the Monday
-    # after. Sessions count as weekdays, so Tuesday to Thursday fit either way.
-    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=2) == DaySpan(
-        date(2025, 3, 4), date(2025, 3, 6)
-    )
-    # Over a weekend: Friday and the Monday after are consecutive sessions.
-    across = DaySpan(date(2025, 3, 6), date(2025, 3, 10))
-    assert bar_sessions(across, timespan=Timespan.SESSION, multiplier=2) == DaySpan(
-        date(2025, 3, 7), date(2025, 3, 7)
-    )
-    # A range that starts and ends on a weekend holds the weekdays between.
-    weekend = DaySpan(date(2025, 3, 1), date(2025, 3, 9))
-    assert bar_sessions(weekend, timespan=Timespan.SESSION, multiplier=1) == week
-    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=5) == DaySpan(
-        date(2025, 3, 7), date(2025, 3, 3)
-    )
-    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=5).empty
-    two_weeks = DaySpan(date(2025, 3, 3), date(2025, 3, 21))
-    assert bar_sessions(two_weeks, timespan=Timespan.WEEK, multiplier=2) == DaySpan(
-        date(2025, 3, 8), date(2025, 3, 14)
-    )
-
-
-def test_futures_session_bar_starts_count_weekdays() -> None:
-    # A three-session bar that ends on Monday's session starts in Thursday's.
-    span = TimeRange(
-        futures_session_open(date(2025, 3, 3)).astimezone(UTC),
-        datetime(2025, 3, 10, 17, tzinfo=CHICAGO).astimezone(UTC),
-    )
-    starts = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=3)
-    assert starts.start == futures_session_open(date(2025, 3, 3)).astimezone(UTC)
-    assert starts.end == futures_session_open(date(2025, 3, 7)).astimezone(UTC)
-    # Ending on a Saturday keeps the bars that end with Friday's session.
-    saturday = TimeRange(span.start, datetime(2025, 3, 8, 12, tzinfo=CHICAGO).astimezone(UTC))
-    starts = bar_starts(AssetClass.FUTURES, saturday, timespan=Timespan.SESSION, multiplier=2)
-    assert starts.end == futures_session_open(date(2025, 3, 7)).astimezone(UTC)
-
-
-# Weekday closures of the New York Stock Exchange, 2024 to 2026, including the national day of
-# mourning on 2025-01-09.
-NYSE_CLOSED = frozenset(
-    {
-        date(2024, 1, 1), date(2024, 1, 15), date(2024, 2, 19), date(2024, 3, 29),
-        date(2024, 5, 27), date(2024, 6, 19), date(2024, 7, 4), date(2024, 9, 2),
-        date(2024, 11, 28), date(2024, 12, 25),
-        date(2025, 1, 1), date(2025, 1, 9), date(2025, 1, 20), date(2025, 2, 17),
-        date(2025, 4, 18), date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4),
-        date(2025, 9, 1), date(2025, 11, 27), date(2025, 12, 25),
-        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
-        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
-        date(2026, 11, 26), date(2026, 12, 25),
-    }
-)  # fmt: skip
-
-# Weekdays on which the CME equity and interest-rate futures hold no session of their own: the
-# trading folds into the next session's date.
-CME_FOLDED = NYSE_CLOSED - {date(2025, 1, 9)}
-
-
-@pytest.mark.parametrize("closed", [NYSE_CLOSED, CME_FOLDED], ids=["nyse", "cme"])
-def test_the_last_trading_day_bounds_every_window_of_the_calendar(closed: frozenset[date]) -> None:
-    # Every start date from 2024 to 2026 and every count up to a quarter of sessions: the day
-    # the n-th session falls on is never after the bound.
-    day, trading = date(2024, 1, 1), []
-    while day.year < 2027:
-        if day.weekday() < 5 and day not in closed:
-            trading.append(day)
-        day += timedelta(days=1)
-    for first in range(len(trading)):
-        for n in range(1, 64):
-            if first + n > len(trading):
-                break
-            assert trading[first + n - 1] <= last_trading_day(trading[first], n), (
-                trading[first],
-                n,
-            )
-
-
-def test_the_last_trading_day_allows_a_weekday_more_and_one_per_five_sessions() -> None:
-    thursday = date(2025, 3, 6)
-    assert last_trading_day(thursday, 1) == date(2025, 3, 7)
-    assert last_trading_day(thursday, 2) == date(2025, 3, 10)
-    assert last_trading_day(thursday, 6) == date(2025, 3, 17)
-    # From 2024-12-24 the New York exchange is shut on 12-25, 01-01, and 01-09: the sixth and
-    # eleventh sessions fall on the bound itself.
-    assert last_trading_day(date(2024, 12, 24), 6) == date(2025, 1, 2)
-    assert last_trading_day(date(2024, 12, 24), 11) == date(2025, 1, 10)
-
-
 def test_bar_days_cover_each_period_s_window() -> None:
     sunday, monday = date(2025, 3, 2), date(2025, 3, 3)
     # A stock week stamped on its Sunday covers its Monday to Friday; a crypto or index week
@@ -442,14 +399,6 @@ def test_bars_of_several_days_span_calendar_days_weekends_included(asset_class: 
     assert [kept(starts, ny(day)) for day in stamps] == [True, True, False]
 
 
-def test_futures_period_last_takes_the_later_reading() -> None:
-    label = date(2024, 3, 25)
-    assert futures_period_last(label, timespan=Timespan.WEEK, multiplier=1) == date(2024, 3, 29)
-    assert futures_period_last(label, timespan=Timespan.WEEK, multiplier=2) == date(2024, 4, 5)
-    assert futures_period_last(label, timespan=Timespan.MONTH, multiplier=1) == date(2024, 3, 29)
-    assert futures_period_last(label, timespan=Timespan.QUARTER, multiplier=1) == date(2024, 3, 29)
-
-
 def test_unit_ns_is_one_intraday_unit() -> None:
     assert unit_ns(Timespan.SECOND) == 10**9
     assert unit_ns(Timespan.MINUTE) == 60 * 10**9
@@ -466,11 +415,6 @@ def test_months_leave_out_their_leading_and_trailing_weekend_days() -> None:
     span = DaySpan(date(2025, 6, 2), date(2025, 6, 30)).instants(UTC)
     crypto = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.MONTH, multiplier=1)
     assert crypto.empty
-    # Futures months are months of session dates, which are weekdays.
-    march = bar_sessions(
-        DaySpan(date(2024, 3, 1), date(2024, 3, 29)), timespan=Timespan.MONTH, multiplier=1
-    )
-    assert march == DaySpan(date(2024, 3, 1), date(2024, 3, 31))
 
 
 def forex_bars(first: date, last: date, timespan: Timespan) -> TimeRange:
