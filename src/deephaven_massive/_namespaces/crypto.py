@@ -384,7 +384,8 @@ class _Crypto(Namespace):
         Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
         stream from the WebSocket; every other length is history only. Days are UTC days and weeks
         run Sunday to Saturday. A 1-day bar that Massive stamps elsewhere than its UTC day's first
-        or last millisecond is served on the day it falls on, with a WARNING. Crypto has no
+        or last millisecond keeps its stamp, ends a day later, and has no `Date`, with a WARNING.
+        Crypto has no
         corporate actions, so there is no `adjusted`. Bar windows, stamps, and which bars
         `history()` returns follow README.md#bars. A pair missing from Massive's crypto ticker list
         (read once per session, delisted pairs included) is refused when the verb runs, since
@@ -427,9 +428,10 @@ class _Crypto(Namespace):
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
         One row per pair, from one REST request per pair: the 1-day bar of the previous completed
-        UTC day. A bar stamped elsewhere than its UTC day's first or last millisecond is served on
-        the day it falls on, with a WARNING (README.md#bars). An explicit `mode=dm.PollMode.APPEND`
-        appends each new day's bar. A pair with no bar (HTTP 404) is left out, with a WARNING.
+        UTC day. A bar stamped elsewhere than its UTC day's first or last millisecond keeps its
+        stamp, ends a day later, and has no `Date`, with a WARNING (README.md#bars). An explicit
+        `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404) is
+        left out, with a WARNING.
 
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
@@ -551,8 +553,9 @@ class _Crypto(Namespace):
 
         One row per pair, from one REST request per pair: the day's open and close, and its first
         and last trades (`OpenTrades` and `ClosingTrades`, JSON text). The window is the UTC day. A
-        row Massive marks as not UTC (`IsUtc` false) is still served with the UTC day's window and
-        logs one WARNING per session, since its dates may not line up with the other crypto tables'.
+        row Massive marks as not UTC (`IsUtc` false) keeps its `Date`, but its window is that
+        date's widest in any time zone, since Massive does not say which zone's day it is, and it
+        logs one WARNING per session.
         A pair missing from Massive's crypto ticker list (read once per session, delisted pairs
         included) is refused when the verb runs, since Massive spells it as two currencies; delisted
         pairs still resolve for past dates.

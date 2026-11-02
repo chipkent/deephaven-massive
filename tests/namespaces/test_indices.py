@@ -709,20 +709,16 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
     assert not stamp_warnings(caplog)
-    # A week bar at the close, or a day bar at 02:00, may be another cut: each is served,
-    # labelled by the day its stamp falls on, with one WARNING per timespan.
-    odd_week = rows(week.history(first, last, source=dm.HistorySource.REST))
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd_week] == [
-        (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
-    ]
+    # A week bar at the close, or a day bar at 02:00, may be another cut: each keeps its stamp
+    # and ends a period later, past these ranges, so neither range holds it; each warns once.
+    assert rows(week.history(first, last, source=dm.HistorySource.REST)) == []
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    odd_day = rows(q.history(day, day, source=dm.HistorySource.REST))
-    assert [(r["Date"], r["TimestampStart"]) for r in odd_day] == [("2025-06-02", MIDNIGHT_MS * MS)]
+    assert rows(q.history(day, day, source=dm.HistorySource.REST)) == []
     week_warning, day_warning = stamp_warnings(caplog)
-    assert week_warning.startswith("indices.bars: a bar from ")
+    assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
     assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
     assert day_warning.startswith(
-        "indices.bars: a 1-day bar from /v2/aggs/ticker/{indicesTicker}/range/"
+        "indices.bars: a 1-day bar of I:SPX from /v2/aggs/ticker/{indicesTicker}/range/"
     )
     assert (
         " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T02:00:00-04:00 in America/New_York), "
@@ -993,14 +989,17 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_served_with_a_war
     text = f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\n"
     fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-02.csv.gz", make_csv_gz(text))
     q = s3_session.indices.bars(dm.ALL, dm.Timespan.DAY)
-    out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
-    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Close"]) for r in out] == [
-        ("I:SPX", "2025-06-02", MIDNIGHT_MS * MS, 2.0)
+    empty = "ticker,open,close,high,low,window_start\n"
+    fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-03.csv.gz", make_csv_gz(empty))
+    out = rows(q.history("2025-06-02", "2025-06-03", source=dm.HistorySource.FLAT_FILES))
+    # The bar keeps its stamp, ends a day later, and has no Date; the range holds that window.
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        ("I:SPX", None, odd, odd + 86_400 * 10**9)
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "indices.bars: a 1-day bar from the flat files us_indices/day_aggs_v1 is stamped "
-        "2025-06-02T06:00:00+00:00"
+        "indices.bars: a 1-day bar of I:SPX from the flat files us_indices/day_aggs_v1 is "
+        "stamped 2025-06-02T06:00:00+00:00"
     )
 
 
