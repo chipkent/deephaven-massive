@@ -1225,9 +1225,10 @@ servers that answer as Massive's documentation says Massive does, and the live t
 against Massive on a mix of paid and free plans. Some questions remain open because those plans
 cannot settle them, such as how index daily bars and futures sessions are stamped and parts of
 the flat files; on those, the library follows its best reading of Massive's documentation and
-warns when what Massive sends differs. Following a live symbol table in `history()` and
-`fetch()`, with `reread` and `m.symbol_reads()`, is specified but not built yet: until it is,
-both read a live table once, when called. The library is not on PyPI yet. Outside testers start
+warns when what Massive sends differs. `history()` follows a live symbol table, with `reread`
+and `m.symbol_reads()`. Following one in `fetch()`, and in `underlying=` and `product_code=`, is
+specified but not built yet: until it is, those read a live table once, when called. The
+library is not on PyPI yet. Outside testers start
 with the [tester guide](docs/tester-guide.md).
 
 <a id="contributing"></a>
