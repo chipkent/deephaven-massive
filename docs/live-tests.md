@@ -321,10 +321,12 @@ uv run pytest -m integration tests/namespaces/test_indices_integration.py -k min
   (`test_index_day_windows_and_files_across_many_indices`, in the main run; it needs Indices
   Starter and `s3`): which day (New York or Chicago) each index day source covers, and whether
   the index day and minute files match REST, for about ten indices over four or five recent
-  days. It sends about 100 REST requests and reads two flat files a day. Its last three
+  days. It sends about 110 REST requests and reads two flat files a day. Its last three
   evidence lines answer: (a) whether REST day bars cover the Chicago day for most indices that
-  update outside the stock session; (b) whether the files match REST for most indices or only
-  the regular-hours ones; (c) whether `I:AAVE100`'s mismatch is an isolated case.
+  update outside the stock session; (b) for regular-hours and around-the-clock indices apart,
+  which day files cover another window than the range bar, which match no window, and which
+  minute files have gaps or other prices; (c) whether `I:AAVE100`'s wrong values (a day file
+  in no window, or other minute prices) are an isolated case.
 - **Futures bar buckets** (`test_futures_bar_buckets_against_the_bars_inside_them`, in the main
   run; it needs Futures Starter): for ES, corn, and live cattle over the most recent whole
   month, where each 1-session bar's `window_start` falls against its first minute bar, whether

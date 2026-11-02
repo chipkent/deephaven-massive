@@ -705,14 +705,7 @@ def _record_day(
         evidence: Records one evidence line.
     """
     index, (day_file, minute_file) = tally.index, files
-    rebuilds = {
-        name: index_day_sources.rebuilt(minutes, *index_day_sources.day_window_ms(day, zone))
-        for name, zone in index_day_sources.WINDOWS
-    }
-    if index_day_sources.windows_differ(minutes, day):
-        tally.windows_differ_days.add(day)
-    differ = "differ" if day in tally.windows_differ_days else "hold the same minutes"
-    evidence(f"{index} {day}: the New York and Chicago days {differ}; rebuilds {rebuilds}")
+    rebuilds = _rebuilds(tally, day, minutes, evidence=evidence)
     bars = {
         name: None if row is None else index_day_sources.prices(row)
         for name, row in sources.items()
@@ -723,20 +716,66 @@ def _record_day(
         bars[index_day_sources.FILE_SOURCE] = (
             index_day_sources.prices(day_file[0]) if day_file else None
         )
-    for name, values in bars.items():
-        verdict, error = index_day_sources.window_verdict(values, rebuilds)
-        tally.add_verdict(name, verdict, error)
-        shown = "" if error is None else f" (closest {error:.2e})"
-        evidence(f"{index} {day} {name}: {values}: {verdict}{shown}")
+    verdicts = {
+        name: _judge_source(tally, day, name, values=values, rebuilds=rebuilds, evidence=evidence)
+        for name, values in bars.items()
+    }
     ranged = bars.get(index_day_sources.RANGE_SOURCE)
     filed = bars.get(index_day_sources.FILE_SOURCE)
-    day_file_agrees = None
     if ranged is not None and filed is not None:
         error = index_day_sources.relative_error(ranged, filed)
-        day_file_agrees = error <= index_day_sources.MATCH
         evidence(f"{index} {day} day file against the range bar: {error:.2e}")
     compared = _record_minute_file(index, day, minute_file, minutes=minutes, evidence=evidence)
-    tally.add_files(day, day_file=day_file_agrees, minute_file=compared)
+    tally.add_files(
+        day,
+        range_verdict=verdicts[index_day_sources.RANGE_SOURCE],
+        day_file=verdicts.get(index_day_sources.FILE_SOURCE),
+        minute_file=compared,
+    )
+
+
+def _rebuilds(
+    tally: index_day_sources.IndexTally,
+    day: date,
+    minutes: list[dict[str, Any]],
+    *,
+    evidence: Evidence,
+) -> dict[str, index_day_sources.Prices | None]:
+    """Rebuild one index day over each window, and record whether the two windows differ.
+
+    Returns:
+        Each window's rebuilt bar, by window name; None where no minute bar fell inside.
+    """
+    rebuilds = {
+        name: index_day_sources.rebuilt(minutes, *index_day_sources.day_window_ms(day, zone))
+        for name, zone in index_day_sources.WINDOWS
+    }
+    if index_day_sources.windows_differ(minutes, day):
+        tally.windows_differ_days.add(day)
+    differ = "differ" if day in tally.windows_differ_days else "hold the same minutes"
+    evidence(f"{tally.index} {day}: the New York and Chicago days {differ}; rebuilds {rebuilds}")
+    return rebuilds
+
+
+def _judge_source(
+    tally: index_day_sources.IndexTally,
+    day: date,
+    name: str,
+    *,
+    values: index_day_sources.Prices | None,
+    rebuilds: Mapping[str, index_day_sources.Prices | None],
+    evidence: Evidence,
+) -> str:
+    """Judge which window one source's bar of a day covers; count and record the verdict.
+
+    Returns:
+        The verdict (`window_verdict`).
+    """
+    verdict, error = index_day_sources.window_verdict(values, rebuilds)
+    tally.add_verdict(name, verdict, error)
+    shown = "" if error is None else f" (closest {error:.2e})"
+    evidence(f"{tally.index} {day} {name}: {values}: {verdict}{shown}")
+    return verdict
 
 
 def _read_index(
@@ -767,7 +806,10 @@ def _read_index(
     prev = _optional_row(rest_rows, _PREV, {"indicesTicker": index}, evidence=evidence)
     prev_day = None if prev is None else _new_york_day(int(prev["t"]))
     evidence(f"{index} /prev: {prev}; its New York day {prev_day}")
-    spans = index_day_sources.minute_read_spans(days)
+    # A crypto index's /prev serves the calendar day before the run (a Sunday on a Monday run),
+    # which is not among the trading days: its minutes are read too, so /prev is still judged.
+    extra = () if prev_day is None or prev_day in days else (prev_day,)
+    spans = index_day_sources.minute_read_spans((*days, *extra))
     minutes = [m for span in spans for m in range_bars(index, "minute", span)]
     minutes.sort(key=lambda m: int(m["t"]))
     evidence(f"{index}: {len(ranged)} range day bars, {len(minutes)} REST minute bars")
@@ -789,6 +831,10 @@ def _read_index(
             files=(_file_rows(day_file, index), _file_rows(minute_file, index)),
             evidence=evidence,
         )
+    if extra and prev is not None:
+        rebuilds = _rebuilds(tally, extra[0], minutes, evidence=evidence)
+        values = index_day_sources.prices(prev)
+        _judge_source(tally, extra[0], "/prev", values=values, rebuilds=rebuilds, evidence=evidence)
     return tally, bool(ranged and minutes)
 
 
@@ -805,28 +851,30 @@ def test_index_day_windows_and_files_across_many_indices(
 ) -> None:
     """Which day each index day source covers, and whether the index files match REST, broadly.
 
-    One odd index on two days must not drive a library change, so this measures about ten
-    indices over four or five recent trading days (the three before the run, the most recent
-    Monday, and the day after the most recent holiday): `I:SPX`, `I:NDX`, `I:DJI`, and `I:RUT`,
-    computed during the stock session; `I:VIX`, computed in extended hours too; `I:AAVE100`;
-    and up to two indices each of AAVE, BTC, and ETH found in Massive's index ticker list (the
-    `100` index first). For each index and day it records the range's 1-day bar, `/prev` (on
-    its own day), the daily open and close, and the `us_indices/day_aggs_v1` row, each with the
-    window it matches: the day rebuilt from REST minute bars over the New York day or over the
-    Chicago day (an hour later), both when they hold the same minutes, or neither; then the
-    `us_indices/minute_aggs_v1` rows against REST's minutes: count, first and last stamp, the
-    REST minutes it lacks, the minutes it adds or holds outside its New York day, and the
-    minutes whose prices differ. It ends with a line per index (each source's windows, its
-    largest relative error to the closest window, and the days its files disagree with REST)
-    and a verdict line per question: (a) do REST day bars of indices cover the Chicago day,
-    generally; (b) do the files match REST for most indices or only the regular-hours ones;
-    (c) is `I:AAVE100`'s mismatch an isolated case.
+    One odd index on two days must not drive a library change, so this measures about ten indices
+    over four or five recent trading days (the three before the run, the most recent Monday, and the
+    day after the most recent holiday): `I:SPX`, `I:NDX`, `I:DJI`, and `I:RUT`, computed during the
+    stock session; `I:VIX`, computed in extended hours too; `I:AAVE100`; and up to two indices each
+    of AAVE, BTC, and ETH found in Massive's index ticker list (the `100` index first). For each
+    index and day it records the range's 1-day bar, the daily open and close, and the
+    `us_indices/day_aggs_v1` row, each with the window it matches: the day rebuilt from REST minute
+    bars over the New York day or over the Chicago day (an hour later), both when they hold the same
+    minutes, or neither. `/prev` is judged the same way on its own day, which for a crypto index is
+    the calendar day before the run, read for it alone. Then it records the
+    `us_indices/minute_aggs_v1` rows against REST's minutes: count, first and last stamp, the REST
+    minutes it lacks, the minutes it adds or holds outside its New York day, and the minutes whose
+    prices differ. It ends with a line per index (each source's windows, its largest relative error
+    to the closest window, and its file findings by kind) and a verdict line per question: (a) do
+    REST day bars of indices cover the Chicago day, generally; (b) for regular-hours and
+    around-the-clock indices apart, which day files cover another window than the range bar, which
+    match no window, and which minute files have gaps or other prices; (c) are `I:AAVE100`'s wrong
+    values (a day file in no window, or other minute prices) isolated.
 
-    It asserts only that each index has REST day and minute bars and that at least one day
-    file and one minute file were read; everything else is evidence. Cost: 3 ticker-list
-    searches, then per index one 1-day range, one `/prev`, one open-close per day, and one
-    minute range per run of adjacent days (two for the usual days): at most about 100 REST
-    requests, on Indices Starter, which has no request limit, and 2 flat files per day.
+    It asserts only that each index has REST day and minute bars and that at least one day file and
+    one minute file were read; everything else is evidence. Cost: 3 ticker-list searches, then per
+    index one 1-day range, one `/prev`, one open-close per day, and one minute range per run of
+    adjacent days (two or three for the usual days): at most about 110 REST requests, on Indices
+    Starter, which has no request limit, and 2 flat files per day.
     """
     days = index_check_days
     found = {

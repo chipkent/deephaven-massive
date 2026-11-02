@@ -28,9 +28,7 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 Its subpackage `live_run` holds the live-run program, which a tester runs with their own keys
 through `scripts/live_run.py` to run every live check the key allows, unattended, for days.
 
-`tests/conftest.py` turns the modules above into fixtures, which the live test modules use. The
-two comparison modules, `index_day_sources` and `futures_bar_buckets`, are the exception: their
-pure functions and types serve one check each, so those checks import them directly. Otherwise
-only the unit tests of this package, under `tests/live/` (one per module, against the fakes),
-and the program import it.
+`tests/conftest.py` turns the modules above into fixtures, which the live test modules use; a
+live test module may also import a module's pure functions and types directly. The unit tests
+of this package are under `tests/live/`, one per module, against the fakes.
 """

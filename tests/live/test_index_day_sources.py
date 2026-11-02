@@ -66,6 +66,7 @@ def test_prices_read_rest_bars_and_file_text() -> None:
     row = {"open": "1", "high": "2", "low": "0", "close": "1.5"}
     assert sources.prices(row) == (1.0, 2.0, 0.0, 1.5)
     assert sources.prices({"open": "1", "high": "2", "low": None, "close": "1"}) is None
+    assert sources.prices({"open": "1", "high": "", "low": "0", "close": "1"}) is None
 
 
 def test_a_rebuild_takes_the_minutes_of_its_window() -> None:
@@ -100,32 +101,48 @@ def test_windows_differ_only_with_a_minute_in_the_hour_between_them() -> None:
     assert not sources.windows_differ([_MIDDLE], _DAY)
 
 
-def test_a_minute_file_holding_rest_s_minutes_agrees() -> None:
+def test_a_minute_file_holding_rest_s_minutes_has_no_gap() -> None:
     found = sources.compare_minute_file(
         [_file_row(_EARLY), _file_row(_MIDDLE)], _ROUND_THE_CLOCK, _DAY
     )
-    assert found.agrees
+    assert not found.has_gaps
+    assert not found.values_differ
     assert (found.rows, found.first_ms, found.last_ms) == (2, _EARLY["t"], _MIDDLE["t"])
 
 
-def test_a_minute_file_s_gaps_extras_and_other_prices_disagree() -> None:
+def test_a_minute_file_s_gaps_extras_and_other_prices_are_found() -> None:
     extra = _minute(_NEW_YORK[0] + _MINUTE, 11.0)
     found = sources.compare_minute_file(
         [_file_row(_MIDDLE, shift=1.0), _file_row(_LATE), _file_row(extra)],
         _ROUND_THE_CLOCK,
         _DAY,
     )
-    assert not found.agrees
+    assert found.has_gaps
+    assert found.values_differ
     assert found.lacks == (_EARLY["t"],)
     assert found.adds == (extra["t"],)
     assert found.outside == (_LATE["t"],)
     assert [stamp for stamp, _, _ in found.differing] == [_MIDDLE["t"]]
 
 
-def test_an_empty_minute_file_does_not_agree() -> None:
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [_file_row(_EARLY)],  # lacks the middle minute
+        [_file_row(_EARLY), _file_row(_MIDDLE), _file_row(_minute(_NEW_YORK[0] + 1, 1.0))],
+        [_file_row(_EARLY), _file_row(_MIDDLE), _file_row(_LATE)],  # outside its day
+    ],
+)
+def test_each_kind_of_gap_alone_is_a_gap(rows: list[dict[str, str]]) -> None:
+    found = sources.compare_minute_file(rows, _ROUND_THE_CLOCK, _DAY)
+    assert found.has_gaps
+    assert not found.values_differ
+
+
+def test_an_empty_minute_file_has_a_gap() -> None:
     found = sources.compare_minute_file([], _ROUND_THE_CLOCK, _DAY)
-    assert not found.agrees
-    assert not sources.compare_minute_file([], [], _DAY).agrees  # nothing to compare
+    assert found.has_gaps
+    assert sources.compare_minute_file([], [], _DAY).has_gaps  # nothing to compare
     assert (found.rows, found.first_ms, found.last_ms) == (0, None, None)
 
 
@@ -134,74 +151,97 @@ def test_a_file_row_without_prices_is_not_compared() -> None:
     assert sources.compare_minute_file([row], _ROUND_THE_CLOCK, _DAY).differing == ()
 
 
-def _tally(index: str, *, window: str, differ: bool, disagree: bool) -> sources.IndexTally:
+_CLEAN = sources.compare_minute_file([_file_row(_MIDDLE)], [_MIDDLE], _DAY)
+_GAP = sources.compare_minute_file([_file_row(_MIDDLE)], [_EARLY, _MIDDLE], _DAY)
+_OTHER_PRICES = sources.compare_minute_file([_file_row(_MIDDLE, shift=1.0)], [_MIDDLE], _DAY)
+_EMPTY = sources.compare_minute_file([], [_MIDDLE], _DAY)
+
+
+def _tally(
+    index: str,
+    *,
+    window: str,
+    differ: bool,
+    day_file: str,
+    minute_file: sources.MinuteFileComparison = _CLEAN,
+) -> sources.IndexTally:
     tally = sources.IndexTally(index)
     tally.add_verdict(sources.RANGE_SOURCE, window, 0.0)
     tally.add_verdict("/prev", "no bar", None)
     if differ:
         tally.windows_differ_days.add(_DAY)
-    tally.add_files(_DAY, day_file=not disagree, minute_file=None)
+    tally.add_files(_DAY, range_verdict=window, day_file=day_file, minute_file=minute_file)
     return tally
 
 
-def test_a_tally_counts_verdicts_errors_and_file_days() -> None:
+def test_a_tally_counts_each_kind_of_file_finding_apart() -> None:
     tally = sources.IndexTally("I:VIX")
     tally.add_verdict("range", "Chicago day", 1e-9)
     tally.add_verdict("range", "Chicago day", 1e-7)
     tally.add_verdict("range", "both days", None)
-    tally.add_files(date(2026, 10, 26), day_file=None, minute_file=None)
-    agreeing = sources.compare_minute_file([_file_row(_MIDDLE)], [_MIDDLE], _DAY)
-    tally.add_files(date(2026, 10, 27), day_file=True, minute_file=agreeing)
-    gap = sources.compare_minute_file([_file_row(_MIDDLE)], [_EARLY, _MIDDLE], _DAY)
-    tally.add_files(date(2026, 10, 28), day_file=None, minute_file=gap)
-    tally.add_files(date(2026, 10, 29), day_file=False, minute_file=None)
-    missing = sources.compare_minute_file([], [_MIDDLE], _DAY)
-    tally.add_files(date(2026, 10, 30), day_file=None, minute_file=missing)
+    chicago = "Chicago day"
+    days = [date(2026, 10, d) for d in range(24, 32)]
+    tally.add_files(days[0], range_verdict=chicago, day_file=None, minute_file=None)
+    tally.add_files(days[1], range_verdict=chicago, day_file=chicago, minute_file=_CLEAN)
+    tally.add_files(days[2], range_verdict=chicago, day_file="New York day", minute_file=None)
+    tally.add_files(days[3], range_verdict=chicago, day_file="neither day", minute_file=None)
+    tally.add_files(days[4], range_verdict=chicago, day_file=None, minute_file=_GAP)
+    tally.add_files(days[5], range_verdict=chicago, day_file=None, minute_file=_OTHER_PRICES)
+    tally.add_files(days[6], range_verdict=chicago, day_file="no bar", minute_file=_EMPTY)
+    tally.add_files(days[7], range_verdict="both days", day_file="New York day", minute_file=None)
     tally.windows_differ_days.add(_DAY)
     assert tally.verdicts["range"] == {"Chicago day": 2, "both days": 1}
     assert tally.largest == {"range": 1e-7}
-    assert tally.compared_days == {date(2026, 10, d) for d in (27, 28, 29)}
-    assert tally.disagreeing_days == {date(2026, 10, 28), date(2026, 10, 29)}
-    assert tally.absent_days == {date(2026, 10, 30)}
+    assert tally.compared_days == set(days[1:6]) | {days[7]}
+    assert tally.other_window_days == {days[2]}
+    assert tally.no_window_days == {days[3]}
+    assert tally.minute_gap_days == {days[4]}
+    assert tally.minute_value_days == {days[5]}
+    assert tally.wrong_value_days == {days[3], days[5]}
+    assert tally.absent_days == {days[6]}
     assert tally.range_window() == "Chicago day"
     assert tally.line() == (
         "I:VIX (around the clock): range: Chicago day 2, both days 1; largest relative error "
-        "to the closest window: range 1.00e-07; file and REST disagree on 2 of 3 days; absent "
-        "from the files on 1"
+        "to the closest window: range 1.00e-07; of 6 days with files: day file in another "
+        "window than the range 1, in no window 1, minute gaps 1, minute values differ 1; "
+        "absent from the files on 1"
     )
 
 
 def test_a_regular_hours_tally_cannot_tell_the_windows_apart() -> None:
-    tally = _tally("I:SPX", window="both days", differ=False, disagree=False)
+    tally = _tally("I:SPX", window="both days", differ=False, day_file="both days")
     assert tally.range_window() == "no day tells"
     assert tally.line().startswith("I:SPX (regular hours): range: both days 1; /prev: no bar 1")
     assert (
         sources.IndexTally("I:DJI")
         .line()
         .endswith(
-            "largest relative error to the closest window: none; file and REST disagree on 0 of 0 "
-            "days; absent from the files on 0"
+            "largest relative error to the closest window: none; of 0 days with files: day file in "
+            "another window than the range 0, in no window 0, minute gaps 0, minute values differ "
+            "0; absent from the files on 0"
         )
     )
 
 
 def test_a_tally_of_both_windows_is_mixed() -> None:
-    tally = _tally("I:BTC100", window="New York day", differ=True, disagree=False)
+    tally = _tally("I:BTC100", window="New York day", differ=True, day_file="New York day")
     assert tally.range_window() == "New York day"
     tally.add_verdict(sources.RANGE_SOURCE, "neither day", 0.1)
     assert tally.range_window() == "mixed or neither"
 
 
 def test_the_summary_answers_each_question() -> None:
+    chicago, new_york = "Chicago day", "New York day"
     tallies = [
-        _tally("I:SPX", window="both days", differ=False, disagree=False),
-        _tally("I:RUT", window="both days", differ=False, disagree=True),
-        _tally("I:AAVE100", window="Chicago day", differ=True, disagree=True),
-        _tally("I:BTC100", window="Chicago day", differ=True, disagree=False),
-        _tally("I:VIX", window="New York day", differ=True, disagree=False),
+        _tally("I:SPX", window="both days", differ=False, day_file="both days"),
+        _tally("I:RUT", window="both days", differ=False, day_file="both days", minute_file=_GAP),
+        _tally("I:AAVE100", window=chicago, differ=True, day_file="neither day", minute_file=_GAP),
+        # A day file of the New York day beside a Chicago range bar is a window, not bad data.
+        _tally("I:BTC100", window=chicago, differ=True, day_file=new_york),
+        _tally("I:VIX", window=new_york, differ=True, day_file=new_york),
     ]
     absent = sources.IndexTally("I:ETH100")
-    absent.add_files(_DAY, day_file=None, minute_file=sources.compare_minute_file([], [], _DAY))
+    absent.add_files(_DAY, range_verdict=chicago, day_file="no bar", minute_file=_EMPTY)
     tallies.append(absent)
     lines = sources.summary_lines(tallies)
     assert len(lines) == 9
@@ -211,25 +251,44 @@ def test_the_summary_answers_each_question() -> None:
         "the two apart"
     )
     assert lines[7] == (
-        "(b) the files disagree with REST on some day for 1 of 3 regular-hours indices "
-        "['I:RUT'] and 1 of 3 around-the-clock ones ['I:AAVE100']; absent from the files on "
-        "some day: ['I:ETH100']"
+        "(b) day file in another window than the range: regular hours [] of 3, around the clock "
+        "['I:BTC100'] of 3; day file in no window: regular hours [] of 3, around the clock "
+        "['I:AAVE100'] of 3; minute-file gaps: regular hours ['I:RUT'] of 3, around the clock "
+        "['I:AAVE100'] of 3; minute-file prices differ: regular hours [] of 3, around the clock "
+        "[] of 3; absent from the files: ['I:ETH100']"
     )
-    assert (
-        lines[8] == "(c) I:AAVE100's mismatch: isolated: no other around-the-clock index disagrees"
+    assert lines[8] == (
+        "(c) I:AAVE100's mismatch: isolated: no other around-the-clock index has wrong values; "
+        "its minute files have gaps on 1 days"
     )
 
 
 @pytest.mark.parametrize(
     ("aave", "bitcoin", "verdict"),
     [
-        (None, False, "not read: I:AAVE100 was not among the indices"),
-        (False, False, "no mismatch seen on these days"),
-        (True, True, "not isolated: other around-the-clock indices disagree too ['I:BTC100']"),
+        (None, _CLEAN, "not read: I:AAVE100 was not among the indices"),
+        (_GAP, _CLEAN, "no wrong values seen on these days; its minute files have gaps on 1 days"),
+        (
+            _OTHER_PRICES,
+            _OTHER_PRICES,
+            (
+                "not isolated: other around-the-clock indices have wrong values too "
+                "['I:BTC100']; its minute files have gaps on 0 days"
+            ),
+        ),
     ],
 )
-def test_the_aave_verdicts(aave: bool | None, bitcoin: bool, verdict: str) -> None:
-    tallies = [_tally("I:BTC100", window="Chicago day", differ=True, disagree=bitcoin)]
+def test_the_aave_verdicts(
+    aave: sources.MinuteFileComparison | None,
+    bitcoin: sources.MinuteFileComparison,
+    verdict: str,
+) -> None:
+    chicago = "Chicago day"
+    tallies = [
+        _tally("I:BTC100", window=chicago, differ=True, day_file=chicago, minute_file=bitcoin)
+    ]
     if aave is not None:
-        tallies.append(_tally("I:AAVE100", window="Chicago day", differ=True, disagree=aave))
+        tallies.append(
+            _tally("I:AAVE100", window=chicago, differ=True, day_file=chicago, minute_file=aave)
+        )
     assert sources.summary_lines(tallies)[-1] == f"(c) I:AAVE100's mismatch: {verdict}"

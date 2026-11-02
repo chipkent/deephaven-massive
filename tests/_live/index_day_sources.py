@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 from tests._live.calendar import NEW_YORK
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 CHICAGO: Final = ZoneInfo("America/Chicago")
 """The zone whose calendar day may be an index day's: midnight there is 01:00 New York time."""
@@ -49,7 +49,7 @@ ROUND_THE_CLOCK: Final = "I:AAVE100"
 Prices = tuple[float, float, float, float]
 """A bar's open, high, low, and close; an index has no volume."""
 
-_MS: Final = 1_000_000
+_NS_PER_MS: Final = 1_000_000
 """Nanoseconds per millisecond."""
 
 
@@ -128,11 +128,11 @@ def prices(row: Mapping[str, Any]) -> Prices | None:
             text (`open`, `high`, `low`, `close`).
 
     Returns:
-        The open, high, low, and close, or None when one is missing.
+        The open, high, low, and close, or None when one is missing or an empty field.
     """
     keys = ("o", "h", "l", "c") if "o" in row else ("open", "high", "low", "close")
     values = [row.get(key) for key in keys]
-    if any(value is None for value in values):
+    if any(value is None or value == "" for value in values):
         return None
     opened, high, low, closed = (float(str(value)) for value in values)
     return opened, high, low, closed
@@ -250,9 +250,18 @@ class MinuteFileComparison:
     differing: tuple[tuple[int, Prices, Prices], ...]
 
     @property
-    def agrees(self) -> bool:
-        """Whether the file holds exactly REST's minutes of the New York day, at REST's prices."""
-        return self.rows > 0 and not (self.lacks or self.adds or self.outside or self.differing)
+    def has_gaps(self) -> bool:
+        """Whether the file's minutes are not exactly REST's minutes of the New York day.
+
+        True when it holds no row, lacks a REST minute, adds one REST lacks, or holds one
+        outside the New York day.
+        """
+        return not self.rows or bool(self.lacks or self.adds or self.outside)
+
+    @property
+    def values_differ(self) -> bool:
+        """Whether a minute the file and REST both hold has other prices in the file."""
+        return bool(self.differing)
 
 
 def compare_minute_file(
@@ -273,7 +282,7 @@ def compare_minute_file(
     start, end = day_window_ms(day, NEW_YORK)
     rest = {int(m["t"]): m for m in minutes}
     filed: dict[int, Prices | None] = {
-        int(str(row["window_start"])) // _MS: prices(row) for row in file_rows
+        int(str(row["window_start"])) // _NS_PER_MS: prices(row) for row in file_rows
     }
     stamps = sorted(filed)
     differing = []
@@ -293,9 +302,18 @@ def compare_minute_file(
     )
 
 
+WINDOW_VERDICTS: Final = frozenset({"New York day", "Chicago day"})
+"""The verdicts that name one window (`window_verdict`)."""
+
+
 @dataclass
 class IndexTally:
     """One index's verdicts over the days read, summed for its summary line.
+
+    The files can depart from REST in three ways, counted apart because they mean different
+    things: a day-file row that covers another window than the range bar is a question of
+    windows, not of data; a day-file row that matches neither window, or minute-file prices that
+    differ from REST's, are wrong values; and minutes the file lacks or adds are gaps.
 
     Attributes:
         index: The index ticker.
@@ -303,21 +321,26 @@ class IndexTally:
         largest: Each source's largest relative error to its closest window over the days.
         windows_differ_days: The days whose New York and Chicago windows held different
             minutes (`windows_differ`); an index with none is a regular-hours index.
-        disagreeing_days: The days on which the day file or the minute file disagreed with
-            REST.
         compared_days: The days on which at least one file was read and held the index.
-        absent_days: The days whose minute file was read but held no row of the index, and
-            whose day file held none either: the files lack the index, which is not a
-            disagreement of values.
+        absent_days: The days on which no file read held a row of the index: the files lack
+            it, which is neither a window question nor wrong values.
+        other_window_days: The days whose day-file row matched one window and the range bar
+            the other.
+        no_window_days: The days whose day-file row matched neither window.
+        minute_gap_days: The days whose minute file had gaps (`MinuteFileComparison.has_gaps`).
+        minute_value_days: The days whose minute file had prices other than REST's.
     """
 
     index: str
     verdicts: dict[str, Counter[str]] = field(default_factory=dict)
     largest: dict[str, float] = field(default_factory=dict)
     windows_differ_days: set[date] = field(default_factory=set)
-    disagreeing_days: set[date] = field(default_factory=set)
     compared_days: set[date] = field(default_factory=set)
     absent_days: set[date] = field(default_factory=set)
+    other_window_days: set[date] = field(default_factory=set)
+    no_window_days: set[date] = field(default_factory=set)
+    minute_gap_days: set[date] = field(default_factory=set)
+    minute_value_days: set[date] = field(default_factory=set)
 
     def add_verdict(self, source: str, verdict: str, error: float | None) -> None:
         """Count one day's verdict of one source and keep its largest error.
@@ -332,24 +355,41 @@ class IndexTally:
             self.largest[source] = max(error, self.largest.get(source, 0.0))
 
     def add_files(
-        self, day: date, *, day_file: bool | None, minute_file: MinuteFileComparison | None
+        self,
+        day: date,
+        *,
+        range_verdict: str,
+        day_file: str | None,
+        minute_file: MinuteFileComparison | None,
     ) -> None:
-        """Count one day's file comparisons.
+        """Count one day's file findings.
 
         Args:
             day: The day.
-            day_file: Whether the day file's row matched the range bar; None when either was
-                missing (a file not published yet, or an index the file lacks).
+            range_verdict: The range bar's verdict that day (`window_verdict`).
+            day_file: The day-file row's verdict (`window_verdict`; `"no bar"` when the file
+                lacks the index); None when the file was not published.
             minute_file: The minute file's comparison; None when the file was not published.
         """
         if day_file is None and minute_file is None:
             return
-        if day_file is None and minute_file is not None and not minute_file.rows:
+        if day_file in (None, "no bar") and (minute_file is None or not minute_file.rows):
             self.absent_days.add(day)
             return
         self.compared_days.add(day)
-        if day_file is False or (minute_file is not None and not minute_file.agrees):
-            self.disagreeing_days.add(day)
+        if day_file == "neither day":
+            self.no_window_days.add(day)
+        elif {day_file, range_verdict} <= WINDOW_VERDICTS and day_file != range_verdict:
+            self.other_window_days.add(day)
+        if minute_file is not None and minute_file.has_gaps:
+            self.minute_gap_days.add(day)
+        if minute_file is not None and minute_file.values_differ:
+            self.minute_value_days.add(day)
+
+    @property
+    def wrong_value_days(self) -> set[date]:
+        """The days a file held values no REST window has: no window, or other minute prices."""
+        return self.no_window_days | self.minute_value_days
 
     @property
     def around_the_clock(self) -> bool:
@@ -380,8 +420,9 @@ class IndexTally:
 
         Returns:
             Such as `"I:VIX (around the clock): range: Chicago day 5; ...; largest relative
-            error to the closest window: range 0.00e+00, ...; file and REST disagree on 1 of 5
-            days; absent from the files on 0"`.
+            error to the closest window: range 0.00e+00, ...; of 5 days with files: day file
+            in another window than the range 0, in no window 0, minute gaps 1, minute values
+            differ 0; absent from the files on 0"`.
         """
         kind = "around the clock" if self.around_the_clock else "regular hours"
         sources = "; ".join(
@@ -391,9 +432,21 @@ class IndexTally:
         errors = ", ".join(f"{source} {error:.2e}" for source, error in self.largest.items())
         return (
             f"{self.index} ({kind}): {sources}; largest relative error to the closest window: "
-            f"{errors or 'none'}; file and REST disagree on {len(self.disagreeing_days)} of "
-            f"{len(self.compared_days)} days; absent from the files on {len(self.absent_days)}"
+            f"{errors or 'none'}; of {len(self.compared_days)} days with files: day file in "
+            f"another window than the range {len(self.other_window_days)}, in no window "
+            f"{len(self.no_window_days)}, minute gaps {len(self.minute_gap_days)}, minute values "
+            f"differ {len(self.minute_value_days)}; absent from the files on "
+            f"{len(self.absent_days)}"
         )
+
+
+def _named(tallies: Sequence[IndexTally], days: Callable[[IndexTally], set[date]]) -> list[str]:
+    """Return the indices whose tally has any day in one of its day sets.
+
+    Returns:
+        The index tickers, in order.
+    """
+    return [t.index for t in tallies if days(t)]
 
 
 def summary_lines(tallies: Sequence[IndexTally]) -> list[str]:
@@ -404,9 +457,11 @@ def summary_lines(tallies: Sequence[IndexTally]) -> list[str]:
 
     Returns:
         A line per index, then three verdict lines: (a) whether REST day bars cover the Chicago
-        day, among the indices whose windows differ; (b) whether the files match REST for most
-        indices or only the regular-hours ones, and which indices the files lack; (c) whether
-        `I:AAVE100`'s mismatch is isolated.
+        day, among the indices whose windows differ; (b) for the regular-hours and the
+        around-the-clock indices apart, which day files cover another window than the range,
+        which match no window, which minute files have gaps, and which have other prices, then
+        the indices the files lack; (c) whether `I:AAVE100`'s wrong values (a day file in no
+        window, or other minute prices) are isolated.
     """
     lines = [tally.line() for tally in tallies]
     telling = [t for t in tallies if t.around_the_clock]
@@ -418,26 +473,34 @@ def summary_lines(tallies: Sequence[IndexTally]) -> list[str]:
         f"mixed or neither {windows['mixed or neither']}); {len(regular)} regular-hours "
         "indices cannot tell the two apart"
     )
-
-    def disagreeing(group: Sequence[IndexTally]) -> list[str]:
-        return [t.index for t in group if t.disagreeing_days]
-
+    kinds = (
+        ("day file in another window than the range", lambda t: t.other_window_days),
+        ("day file in no window", lambda t: t.no_window_days),
+        ("minute-file gaps", lambda t: t.minute_gap_days),
+        ("minute-file prices differ", lambda t: t.minute_value_days),
+    )
+    parts = [
+        f"{name}: regular hours {_named(regular, days)} of {len(regular)}, around the clock "
+        f"{_named(telling, days)} of {len(telling)}"
+        for name, days in kinds
+    ]
     lines.append(
-        f"(b) the files disagree with REST on some day for {len(disagreeing(regular))} of "
-        f"{len(regular)} regular-hours indices {disagreeing(regular)} and "
-        f"{len(disagreeing(telling))} of {len(telling)} around-the-clock ones "
-        f"{disagreeing(telling)}; absent from the files on some day: "
-        f"{[t.index for t in tallies if t.absent_days]}"
+        f"(b) {'; '.join(parts)}; absent from the files: {_named(tallies, lambda t: t.absent_days)}"
     )
     target = next((t for t in tallies if t.index == ROUND_THE_CLOCK), None)
-    others = [i for i in disagreeing(telling) if i != ROUND_THE_CLOCK]
+    others = [t.index for t in telling if t.wrong_value_days and t.index != ROUND_THE_CLOCK]
     if target is None:
         verdict = f"not read: {ROUND_THE_CLOCK} was not among the indices"
-    elif not target.disagreeing_days:
-        verdict = "no mismatch seen on these days"
+    elif not target.wrong_value_days:
+        verdict = "no wrong values seen on these days"
     elif others:
-        verdict = f"not isolated: other around-the-clock indices disagree too {others}"
+        verdict = f"not isolated: other around-the-clock indices have wrong values too {others}"
     else:
-        verdict = "isolated: no other around-the-clock index disagrees"
-    lines.append(f"(c) {ROUND_THE_CLOCK}'s mismatch: {verdict}")
+        verdict = "isolated: no other around-the-clock index has wrong values"
+    gaps = (
+        ""
+        if target is None
+        else f"; its minute files have gaps on {len(target.minute_gap_days)} days"
+    )
+    lines.append(f"(c) {ROUND_THE_CLOCK}'s mismatch: {verdict}{gaps}")
     return lines
