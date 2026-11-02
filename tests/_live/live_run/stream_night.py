@@ -3,9 +3,11 @@
 A stream day ends at 20:30 New York time, so it never holds a stream through the hours only
 24-hour markets trade, when the library dates rows across two boundaries: crypto's `Date` is
 the UTC date, which flips at 00:00 UTC, and a futures row's `Date` is its session, which the
-library takes from Massive's futures schedules and which flips at the 17:00 Chicago session
-roll. A stream night holds, from 16:30 New York time on a planned evening to 09:30 the next
-morning (`timetable.night_start`, `timetable.night_end`), through the library's public verbs:
+library takes from Massive's futures schedules and which flips when the evening's session closes
+at 16:00 Chicago time: a row between that close and the next session's 17:00 open belongs to
+the next session. A stream night holds, from 16:30 New York time on a planned evening to
+09:30 the next morning (`timetable.night_start`, `timetable.night_end`), through the library's
+public verbs:
 
 - **Crypto** (`crypto` unit, the Currencies subscription): trades, quotes, and minute bars of
   `X:BTCUSD` and `X:ETHUSD`, which trade around the clock.
@@ -75,12 +77,14 @@ CHICAGO: Final = ZoneInfo("America/Chicago")
 
 FUTURES_PAUSE: Final = time(16, 0)
 FUTURES_ROLL: Final = time(17, 0)
-"""The daily pause of the index futures, Chicago time: they stop at 16:00 and open the next
-session at 17:00, where a row's `Date` moves to that session."""
+"""The daily pause of the index futures, Chicago time: the evening's session closes at 16:00
+and the next one opens at 17:00. A row from the close on, the pause's pre-open included, gets
+the next session's `Date` (`deephaven_massive._ingest.futures_calendar`)."""
 
 BOUNDARY_WINDOW: Final = timedelta(minutes=90)
-"""How far on each side of a boundary its rows are read: from the night's 16:30 New York start
-to the 17:00 Chicago roll is 90 minutes, so the ending futures session's last rows count."""
+"""How far on each side of a boundary its rows are read: after the 16:00 Chicago close it covers
+the pause and the next session's first half hour; before it, the ending session's last half hour
+from the night's 16:30 New York start."""
 
 FILE_SLACK: Final = timedelta(hours=2)
 """How far beyond a boundary's window the `rows/` files are read, whose hours are those of the
@@ -96,7 +100,7 @@ class Boundary:
     """One instant of a night at which a unit's rows change `Date`.
 
     Attributes:
-        name: What it is, such as `"17:00 Chicago"` or `"00:00 UTC"`.
+        name: What it is, such as `"16:00 Chicago close"` or `"00:00 UTC"`.
         at: The instant.
         before: The `Date` of the rows just before it, ISO; `""` when the market is closed
             just before (futures on a Sunday), so the side is recorded but not judged.
@@ -109,8 +113,8 @@ class Boundary:
     after: str
 
 
-def futures_roll(night: date) -> datetime:
-    """Return the night's futures session roll.
+def futures_open(night: date) -> datetime:
+    """Return when the night's next futures session opens.
 
     Args:
         night: The night's evening, its New York date.
@@ -129,13 +133,15 @@ def boundaries(unit: str, night: date) -> list[Boundary]:
         night: The night's evening.
 
     Returns:
-        For futures, the 17:00 Chicago roll, from the evening's session (none on a Sunday) to
-        the morning's; for crypto, 00:00 UTC, from the evening's UTC date to the next.
+        For futures, the 16:00 Chicago close, from the evening's session (none on a Sunday) to
+        the morning's, which the pause from the close to the 17:00 open belongs to; for crypto,
+        00:00 UTC, from the evening's UTC date to the next.
     """
     evening, morning = night.isoformat(), (night + timedelta(days=1)).isoformat()
     if unit.startswith("futures"):
         before = "" if night.weekday() == timetable.SUNDAY else evening
-        return [Boundary("17:00 Chicago", futures_roll(night), before, morning)]
+        close = datetime.combine(night, FUTURES_PAUSE, CHICAGO)
+        return [Boundary("16:00 Chicago close", close, before, morning)]
     midnight = datetime.combine(night + timedelta(days=1), time(0), UTC)
     return [Boundary("00:00 UTC", midnight, evening, morning)]
 
@@ -148,13 +154,13 @@ def open_hours(unit: str, night: date) -> list[tuple[datetime, datetime]]:
         night: The night's evening.
 
     Returns:
-        Crypto: the whole night. Futures: the night from the 17:00 Chicago roll, and before
+        Crypto: the whole night. Futures: the night from the 17:00 Chicago open, and before
         it, on an evening other than Sunday's, the night's start to the 16:00 Chicago pause.
     """
     start, end = timetable.night_start(night), timetable.night_end(night)
     if not unit.startswith("futures"):
         return [(start, end)]
-    after = (futures_roll(night), end)
+    after = (futures_open(night), end)
     if night.weekday() == timetable.SUNDAY:
         return [after]
     return [(start, datetime.combine(night, FUTURES_PAUSE, CHICAGO)), after]

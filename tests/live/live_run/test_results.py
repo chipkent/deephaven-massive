@@ -196,7 +196,7 @@ def test_the_report_gives_each_nights_findings(tmp_path: Path) -> None:
     boundary = {
         "unit": "futures delayed",
         "stream": "futures-minute-bars",
-        "boundary": "17:00 Chicago",
+        "boundary": "16:00 Chicago close",
         "at": "2026-11-04T23:00:00+00:00",
         "side": "after",
         "rows": 90,
@@ -219,7 +219,7 @@ def test_the_report_gives_each_nights_findings(tmp_path: Path) -> None:
     assert "- futures delayed: quiet hours (UTC): none." in report
     assert "- crypto real-time: quiet hours (UTC): 2026-11-05T03:00:00+00:00." in report
     assert (
-        "| futures-minute-bars | 17:00 Chicago | after | 90 | 2026-11-04=1 2026-11-05=89 "
+        "| futures-minute-bars | 16:00 Chicago close | after | 90 | 2026-11-04=1 2026-11-05=89 "
         "| 2026-11-05 | 1 |" in report
     )
     summary["reconnects"] = {}

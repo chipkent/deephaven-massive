@@ -1,8 +1,9 @@
 """Tests of the live run's `stream-night` group (`tests/_live/live_run/stream_night.py`).
 
 The night of Wednesday 4 November 2026 serves as the example: New York is on EST, so the night
-runs from 21:30 UTC to 14:30 UTC the next morning, the futures pause from 22:00 to 23:00 UTC,
-and their session rolls at 23:00 UTC. The boundaries, the quiet hours, and the verdict are
+runs from 21:30 UTC to 14:30 UTC the next morning, and the futures pause from the 16:00
+Chicago close, 22:00 UTC, to the 17:00 open, 23:00 UTC; from the close on, a futures row belongs
+to the next session. The boundaries, the quiet hours, and the verdict are
 pure and tested on files written by hand, as the recorder writes them; one night runs end to
 end in a real `MassiveSession` on the fake WebSocket server, its streams swapped for a stock
 bars stream the fake server serves, so it records rows, samples, and its summary in a few steps.
@@ -38,7 +39,8 @@ NIGHT = date(2026, 11, 4)
 SUNDAY = date(2026, 11, 8)
 START = datetime(2026, 11, 4, 21, 30, tzinfo=UTC)
 END = datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
-ROLL = datetime(2026, 11, 4, 23, tzinfo=UTC)
+CLOSE = datetime(2026, 11, 4, 22, tzinfo=UTC)
+OPEN = datetime(2026, 11, 4, 23, tzinfo=UTC)
 MIDNIGHT = datetime(2026, 11, 5, tzinfo=UTC)
 
 
@@ -75,9 +77,9 @@ def _write_rows(
 
 def test_each_unit_crosses_its_own_boundary() -> None:
     assert stream_night.boundaries("futures delayed", NIGHT) == [
-        Boundary("17:00 Chicago", ROLL, "2026-11-04", "2026-11-05")
+        Boundary("16:00 Chicago close", CLOSE, "2026-11-04", "2026-11-05")
     ]
-    # On a Sunday futures open at the roll: nothing trades before it to be judged.
+    # On a Sunday futures open for the week at 17:00: nothing trades before the close's hour.
     [sunday] = stream_night.boundaries("futures real-time", SUNDAY)
     assert (sunday.before, sunday.after) == ("", "2026-11-09")
     assert stream_night.boundaries("crypto real-time", NIGHT) == [
@@ -89,7 +91,7 @@ def test_futures_are_open_but_for_their_pause_and_crypto_all_night() -> None:
     assert stream_night.open_hours("crypto real-time", NIGHT) == [(START, END)]
     assert stream_night.open_hours("futures delayed", NIGHT) == [
         (START, _utc(22)),
-        (ROLL, END),
+        (OPEN, END),
     ]
     [(opens, _)] = stream_night.open_hours("futures delayed", SUNDAY)
     assert opens == datetime(2026, 11, 8, 23, tzinfo=UTC)
@@ -141,7 +143,7 @@ def test_futures_hours_touched_by_their_pause_or_delay_are_not_judged() -> None:
     # 22:00 and 23:00 UTC arrive rows of the pause, delayed 10 minutes: judged from 00:00.
     assert delayed == [_utc(h, day=5) for h in range(14)]
     real = stream_night.quiet_hours("futures real-time", NIGHT, rows=nothing, gaps=[], end=END)
-    assert real[0] == ROLL
+    assert real[0] == OPEN
 
 
 # --- the boundaries -------------------------------------------------------------------------
@@ -170,8 +172,8 @@ def test_rows_near_a_boundary_are_counted_by_side_and_date(tmp_path: Path) -> No
     assert before == {
         "unit": "futures delayed",
         "stream": "futures-trades",
-        "boundary": "17:00 Chicago",
-        "at": "2026-11-04T23:00:00+00:00",
+        "boundary": "16:00 Chicago close",
+        "at": "2026-11-04T22:00:00+00:00",
         "side": "before",
         "rows": 2,  # the 20:00 row is outside the 90 minutes
         "dates": "2026-11-04=2",
@@ -185,15 +187,28 @@ def test_rows_near_a_boundary_are_counted_by_side_and_date(tmp_path: Path) -> No
     )
 
 
+def test_a_row_of_the_pause_belongs_to_the_next_session(tmp_path: Path) -> None:
+    """A quote at 16:45 Chicago time, in the pause before the open, is the morning's."""
+    stream = Stream("futures-quotes", "futures real-time", lambda _m: None, "Timestamp", held=False)
+    [boundary] = stream_night.boundaries("futures real-time", NIGHT)
+    pause = _utc(22, 45)
+    _write_rows(tmp_path, "futures-quotes-2026-11-04T22.parquet", [(pause, "2026-11-05")])
+    _, after = stream_night.boundary_rows(tmp_path, stream, boundary, unreadable=[])
+    assert (after["rows"], after["wrong"]) == (1, 0)
+    _write_rows(tmp_path, "futures-quotes-2026-11-04T22.parquet", [(pause, "2026-11-04")])
+    _, after = stream_night.boundary_rows(tmp_path, stream, boundary, unreadable=[])
+    assert (after["rows"], after["wrong"]) == (1, 1)
+
+
 def test_bars_take_their_side_from_their_start_and_a_closed_side_is_not_judged(
     tmp_path: Path,
 ) -> None:
     stream = Stream("futures-minute-bars", "futures real-time", lambda _m: None)
-    roll = datetime(2026, 11, 8, 23, tzinfo=UTC)
+    close = datetime(2026, 11, 8, 22, tzinfo=UTC)
     _write_rows(
         tmp_path,
         "futures-minute-bars-2026-11-08T22.parquet",
-        [(roll - timedelta(minutes=1), "2026-11-07"), (roll, "2026-11-09")],
+        [(close - timedelta(minutes=1), "2026-11-07"), (close, "2026-11-09")],
         column="TimestampStart",
     )
     [boundary] = stream_night.boundaries("futures real-time", SUNDAY)
@@ -249,7 +264,7 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
         "stream": "futures-trades",
         "wrong": 2,
         "side": "after",
-        "boundary": "17:00 Chicago",
+        "boundary": "16:00 Chicago close",
         "dates": "2026-11-04=2",
         "expected": "2026-11-05",
     }
@@ -264,7 +279,7 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
     )
     assert verdict(wrong=(wrong,)) == (
         "failed",
-        "futures-trades: 2 rows after 17:00 Chicago dated 2026-11-04=2, not 2026-11-05",
+        "futures-trades: 2 rows after 16:00 Chicago close dated 2026-11-04=2, not 2026-11-05",
     )
 
 

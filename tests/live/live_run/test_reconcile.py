@@ -319,8 +319,8 @@ def test_a_nights_bars_are_compared_over_the_night_and_at_its_boundaries(
     assert crypto["00:00 UTC after"]["bars_on_both_sides"] == 2
     assert set(summary["streams"]["futures-minute-bars"]) == {
         "night",
-        "17:00 Chicago before",
-        "17:00 Chicago after",
+        "16:00 Chicago close before",
+        "16:00 Chicago close after",
     }
     with (tmp_path / "reconcile" / "reconciliation.csv").open(encoding="utf-8") as file:
         night = next(r for r in csv.DictReader(file) if r["window"] == "night")

@@ -364,8 +364,9 @@ uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-resu
 **The stream night.** A stream day stops at 20:30, so it never holds a stream through the hours
 only 24-hour markets trade, when the library dates rows across two boundaries: crypto's `Date`
 is the UTC date, which changes at 00:00 UTC, and a futures row's `Date` is its trading session,
-which the library takes from Massive's futures schedules and which changes at the 17:00 Chicago
-session roll. When the key streams crypto (a paid Currencies plan) or futures, the program
+which the library takes from Massive's futures schedules and which changes when the evening's
+session closes at 16:00 Chicago time: a row in the pause before the 17:00 open already belongs
+to the next session. When the key streams crypto (a paid Currencies plan) or futures, the program
 plans a *stream night* and holds, from 16:30 New York time to 09:30 the next morning:
 
 - crypto: the trades, quotes, and minute bars of `X:BTCUSD` and `X:ETHUSD`;
@@ -382,10 +383,10 @@ started again, up to five times, until 09:00. The night writes what a stream day
 by hour, per-minute counts, latency, samples, gaps), and at its end:
 
 - `hours.csv`, the rows of each stream per UTC hour;
-- `boundaries.csv`, the rows within 90 minutes before and after 17:00 Chicago (futures) and
-  00:00 UTC (crypto), with their `Date` values: futures rows must move from the evening's
-  session to the morning's (on a Sunday nothing trades before the roll, so only the side after
-  is judged), crypto rows from one UTC date to the next;
+- `boundaries.csv`, the rows within 90 minutes before and after the 16:00 Chicago close
+  (futures) and 00:00 UTC (crypto), with their `Date` values: futures rows must move from the
+  evening's session to the morning's, the pause's included (on a Sunday nothing trades before
+  the close, so only the side after is judged), crypto rows from one UTC date to the next;
 - `summary.json`, with the gaps, the most reconnects of each connection, and the quiet hours.
 
 A unit fails when one of its streams failed, the night's gaps passed 30 minutes, an hour its

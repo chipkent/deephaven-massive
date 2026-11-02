@@ -1003,8 +1003,8 @@ running for days or weeks.
   morning, it streams Bitcoin and Ether, and the main stock-index futures, through the hours
   only those markets trade. A night falls on a Sunday to Thursday evening before a normal
   trading day, never around a holiday, and never on a stream day. It checks that each row is
-  dated to the right day as the futures session changes at 17:00 Chicago time (18:00 New York)
-  and the crypto day changes at midnight UTC (19:00 or 20:00 New York); the next day it compares
+  dated to the right day as the futures session changes at the 16:00 Chicago close (17:00 New
+  York) and the crypto day changes at midnight UTC (19:00 or 20:00 New York); the next day it compares
   the night's prices with Massive's history. Leave the computer on and awake that night.
 
 ## 3.2 Before you start

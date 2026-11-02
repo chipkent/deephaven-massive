@@ -21,7 +21,7 @@ evening to 09:30 the next morning, the hours only crypto and futures trade. That
 group starts at or after 16:15, and one still running is stopped then, so the night starts with
 the key's connections free; the night's child may restart until 09:00. A night is planned by
 `next_stream_night` for an evening before a full trading day: Sunday, or a full trading day
-itself, so futures trade from the evening's 17:00 Chicago session roll to the morning, and the
+itself, so futures trade from the evening's 17:00 Chicago session open to the morning, and the
 night never touches a stream day.
 
 Trading days and half days come from the US exchanges' rules (`calendar`), together with the
