@@ -97,16 +97,21 @@ def _unconverted(stream: str, column: str, frames: Sequence[dict[str, Any]]) -> 
         frames: The raw frames, as decoded JSON objects.
 
     Returns:
-        Each refused value, in frame order; empty when every frame's value converts.
+        Each refused value, in frame order; empty when every frame's value converts. A frame
+        without the field is left out: a missing key is drift, not a value the conversion
+        refuses.
     """
     field = source(Transport.WS, stream).field(column)
     converter = field_converter(field)
     refused: list[object] = []
     for frame in frames:
+        value = frame.get(field.wire_key)
+        if value is None:
+            continue
         try:
-            converter(frame.get(field.wire_key))
+            converter(value)
         except UnconvertibleError:
-            refused.append(frame.get(field.wire_key))
+            refused.append(value)
     return refused
 
 

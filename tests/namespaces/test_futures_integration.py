@@ -464,7 +464,7 @@ def test_how_massive_writes_a_contracts_year(live_rest: RestClient, *, evidence:
         assert shape is not None
         year = expiry[2:4] if digits == 1 else expiry[3]
         other = f"ES{shape['month']}{year}"
-        answer = _page(live_rest, _CONTRACTS, query={"ticker": other, "limit": 10})
+        answer = _page(live_rest, _CONTRACTS, query={"ticker": other, "date": today, "limit": 10})
         evidence(f"{ticker} (last trade {expiry}) asked for as {other}: {len(answer)} rows")
         answered[other] = len(answer)
     assert rows, "Massive listed no ES contract"
@@ -679,6 +679,7 @@ def test_streamed_futures_dates_and_one_second_ends(
     if not due:
         pytest.skip(f"no ES bar is due yet: ES is {status}, or still within the feed delay")
     assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
+    assert bars, f"no one-second bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
     longer = [span for span in spans if span[1] != 1.0]
     assert not longer, f"one-second bars spanning more than a second: {longer[:5]}"
 

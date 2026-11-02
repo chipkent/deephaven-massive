@@ -47,6 +47,11 @@ _LIMIT = 5
 _MINUTE = 61.0
 """Seconds a test lets pass first, so earlier requests have left the limit's window."""
 
+_OPTION = "O:SPY271217C00600000"
+"""The options request's contract, a long-dated SPY call: options data, charged to the options
+subscription, unlike the options contracts list, which is reference data of none. Were it
+unlisted, the empty answer would still count against the class's minute."""
+
 _UNASSIGNED: tuple[Request, ...] = (
     ("/v1/marketstatus/now", {}, {}),
     ("/v3/reference/tickers/types", {}, {}),
@@ -251,11 +256,7 @@ def by_class() -> dict[str, Request]:
     """
     return {
         "stocks": ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": "AAPL"}, {}),
-        "options": (
-            "/v3/reference/options/contracts",
-            {},
-            {"underlying_ticker": "AAPL", "limit": 1},
-        ),
+        "options": ("/v2/aggs/ticker/{optionsTicker}/prev", {"optionsTicker": _OPTION}, {}),
         "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": "I:NDX"}, {}),
         "currencies": ("/v2/aggs/ticker/{forexTicker}/prev", {"forexTicker": "C:EURUSD"}, {}),
         "futures": ("/futures/v1/products", {}, {"limit": 1}),
