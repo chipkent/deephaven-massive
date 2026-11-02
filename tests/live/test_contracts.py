@@ -55,6 +55,19 @@ def test_live_cattle_rolls_before_its_delivery_month(day: date, front: str) -> N
     assert contracts.front_contract("LE", day) == front
 
 
+@pytest.mark.parametrize(
+    ("day", "front"),
+    [
+        (date(2026, 7, 14), "MBTN6"),
+        (date(2026, 10, 29), "MBTV6"),
+        (date(2026, 10, 30), "MBTX6"),  # the last Friday of October, when October's settles
+        (date(2026, 12, 31), "MBTF7"),  # the last Friday of December is the 25th
+    ],
+)
+def test_micro_bitcoin_rolls_on_its_last_friday(day: date, front: str) -> None:
+    assert contracts.front_contract("MBT", day) == front
+
+
 def test_roll_days() -> None:
     assert contracts.roll_day("ES", 2026, 12) == date(2026, 12, 10)
     assert contracts.roll_day("ZC", 2026, 5) == date(2026, 4, 30)

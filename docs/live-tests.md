@@ -226,7 +226,7 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
-| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, and live cattle (where each session and longer bar falls, the 2-session grid, and clipping at `{from}`): most of the open questions |
+| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, live cattle, and Micro Bitcoin (where each session and longer bar falls, the 2-session grid, whether any session opens on a Friday evening or a Saturday, and clipping at `{from}`): most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes) and the day windows and file agreement of about ten indices over recent days, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Options Developer | $79 | adds option bars across NVDA's 2024 split under both bases (whether `adjusted=true` adjusts option bars for the underlying's split) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
@@ -333,11 +333,13 @@ uv run pytest -m integration tests/namespaces/test_indices_integration.py -k min
   minute files have gaps or other prices; (c) whether `I:AAVE100`'s wrong values (a day file
   in no window, or other minute prices) are an isolated case.
 - **Futures bar buckets** (`test_futures_bar_buckets_against_the_bars_inside_them`, in the main
-  run; it needs Futures Starter): for ES, corn, and live cattle over the most recent whole
-  month, where each 1-session bar's `window_start` falls against its first minute bar, whether
-  2-session bars follow a fixed grid, the day 1-week bars start on, whether each longer bar
-  holds exactly the whole sessions that start in its UTC days, and whether a 2-month bar read
-  from inside its bucket is clipped at `{from}`. It sends about 30 REST requests; its
+  run; it needs Futures Starter): for ES, corn, live cattle, and Micro Bitcoin over the most
+  recent whole month, where each 1-session bar's `window_start` falls against its first minute
+  bar, whether any session opens on a Friday evening or a Saturday (the UTC days 1-session bars
+  start on and their labels' weekdays), whether 2-session bars follow a fixed grid, the day
+  1-week bars start on, whether each longer bar holds exactly the whole sessions that start in
+  its UTC days, and whether a 2-month bar read from inside its bucket is clipped at `{from}`.
+  It sends about 40 REST requests; its
   `VERDICT` lines answer each question per contract.
 
 To run these two alone:
