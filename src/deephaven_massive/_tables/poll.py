@@ -60,8 +60,9 @@ page whose every row was dropped because a key could not be read, or a row that,
 has a null poll key, which would merge unrelated rows; one odd row is dropped and counted, or
 its odd value read as null, and the table goes on), `SymbolRowError` (a symbol table's row
 that is not Massive's ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the
-row is skipped and the cycle's `Error` lists it), and `_ingest/rest.py`'s `UnlistedPairError`
-(a crypto pair whose currencies Massive's reference data does not give). The failure is
+row is skipped and the cycle's `Error` lists it), and `UnlistedPairError`
+(a crypto pair of a symbol table Massive's reference data does not split, under
+`unlisted_symbols=RAISE`; under `LOG` and `IGNORE` the cycle leaves it out). The failure is
 logged at the level its cause gives (`log_failure`): ERROR for a defect, naming whose it is,
 and WARNING otherwise.
 A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,

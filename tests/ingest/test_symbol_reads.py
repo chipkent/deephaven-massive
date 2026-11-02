@@ -29,9 +29,9 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     RowDataError,
+    UnlistedPairError,
 )
 from deephaven_massive._ingest import rate_limits
-from deephaven_massive._ingest.rest import UnlistedPairError
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
     failure_kind,

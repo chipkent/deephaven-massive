@@ -278,9 +278,14 @@ class MassiveConfig:
             `Error` until their rows are deleted (a skipped pair stays skipped until its row
             is deleted and added again), and a table whose pairs are all skipped raises
             `MassiveError` at the call. `OnError.RAISE` raises `MassiveError` for such a pair
-            present at the call and fails the stream when one is added later. A `str` or a
-            list passed as `symbols` always raises, whatever this says; `fetch()` and `poll()`
-            refuse such a pair whatever this says. Defaults to `LOG`.
+            present at the call and fails the stream when one is added later. The REST verbs
+            whose paths take a pair as two currencies (the last trade and quote, the daily
+            open and close) follow it too: under `LOG` and `IGNORE`, `fetch()` and each
+            `poll()` cycle leave the pair out (a `poll()` lists it in `Error`), and a
+            `fetch()` of a refreshing table marks it `FAILED` in `m.symbol_reads()`; under
+            `RAISE`, `fetch()` raises and a `poll()` or followed `fetch()` table fails. A
+            failed read of the list fails them as before. A `str` or a list passed as
+            `symbols` always raises, whatever this says. Defaults to `LOG`.
         unreadable_symbols: What a symbol Massive sends in a spelling the library cannot read
             does. Such a spelling is a gap in the library, not in the caller's code.
             `OnError.LOG`, the default, keeps the row with a null `Symbol` and the text in the

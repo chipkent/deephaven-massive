@@ -18,6 +18,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import table_publisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
@@ -111,7 +112,10 @@ class Script:
 
 
 def watchlist(*symbols: str | None, keyed: bool = True) -> Table:
-    table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
+    # Created under the update graph's lock, so no update cycle can refresh it in the step it
+    # was stamped with and make it notify twice.
+    with shared_lock(get_exec_ctx().update_graph):
+        table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
     if symbols:
         table.add(new_table([string_col("Symbol", list(symbols))]))
     return table
@@ -137,7 +141,10 @@ def follow(
 ) -> Table:
     core = m._core
     plan = FollowPlan(
-        Transport.FLAT_FILES if one_scan else Transport.REST, one_scan=one_scan, read=script.read
+        Transport.FLAT_FILES if one_scan else Transport.REST,
+        one_scan=one_scan,
+        symbols_per_read=1,
+        read=script.read,
     )
     return open_followed_read(
         core,

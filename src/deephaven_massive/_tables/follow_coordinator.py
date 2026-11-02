@@ -1,8 +1,9 @@
 """The follow coordinator: the one owner of every followed read's per-symbol state in a session.
 
-A `history()` whose `symbols` is a refreshing table follows it (`_tables/followed_read.py`):
-each symbol added to the table is read over the call's fixed window and lands in the result
-whole, and each symbol removed leaves it. This module decides, for every such result of a
+A `history()` or `fetch()` whose `symbols` is a refreshing table follows it
+(`_tables/followed_read.py`): each symbol added to the table is read (over `history()`'s fixed
+window, or as Massive answers at the read) and lands in the result whole, and each symbol
+removed leaves it. This module decides, for every such result of a
 session, which symbol is read when, what its read's outcome does, and what the diagnostics
 show. It owns:
 
@@ -17,8 +18,9 @@ show. It owns:
 - **One read pool per session**, a `ThreadPoolExecutor` of `MassiveConfig.max_concurrency`
   threads (`massive #1 follow-read_0`), made and ended with the coordinator thread. Each task
   reads some symbols of one result (`FollowPlan.read`) in the session's execution context,
-  listening to that result's stop token, and queues the outcome. A REST read reads one symbol;
-  a flat-file read reads every symbol waiting at once, in one scan, and a result has at most
+  listening to that result's stop token, and queues the outcome. A REST read reads up to
+  `FollowPlan.symbols_per_read` symbols (one, or a `fetch()` list parameter's batch); a
+  flat-file read reads every symbol waiting at once, in one scan, and a result has at most
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
@@ -36,7 +38,8 @@ failed), every symbol still following is `STOPPED`.
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
 `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
-the coordinator records the failure and publishes it, never the listener.
+the coordinator records the failure and publishes it, never the listener. So does a crypto pair
+Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`.
 
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
@@ -58,11 +61,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import Reread
+from deephaven_massive._enums import OnError, Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorCause,
     MassiveError,
+    UnlistedPairError,
     failure_text,
     library_bug,
 )
@@ -754,6 +758,10 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
+        A crypto pair Massive's crypto ticker list does not hold (`UnlistedPairError`) follows
+        `MassiveConfig.unlisted_symbols`: `FAILED` with a WARNING under `LOG`, with only a
+        DEBUG line under `IGNORE`, and under `RAISE` it fails the whole result.
+
         Args:
             result: The result's state.
             name: The symbol.
@@ -761,6 +769,20 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
+        unlisted = (
+            result.read.core.config.unlisted_symbols
+            if isinstance(error, UnlistedPairError)
+            else None
+        )
+        if unlisted is OnError.RAISE:
+            logger.debug(
+                "call %d follow %s: fails the result, under unlisted_symbols=RAISE: %s",
+                result.read.call,
+                name,
+                error,
+            )
+            self._fail(result, error)
+            return
         symbol.error = failure_text(error)
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
@@ -785,7 +807,9 @@ class FollowCoordinator:
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
         level = logging.WARNING if first else logging.DEBUG
-        if error.cause is not ErrorCause.EXPECTED and first:
+        if unlisted is not None:
+            level = logging.WARNING if first and unlisted is OnError.LOG else logging.DEBUG
+        elif error.cause is not ErrorCause.EXPECTED and first:
             level = logging.ERROR
         logger.log(
             level,
@@ -840,8 +864,9 @@ class FollowCoordinator:
         return None if not dues else min(dues) - CLOCK.monotonic()
 
     def _schedule(self, result: _Result) -> None:
-        """Start the reads the result's queue allows: each REST symbol, or one flat-file scan.
+        """Start the reads the result's queue allows: REST groups, or one flat-file scan.
 
+        A REST read takes up to `FollowPlan.symbols_per_read` waiting symbols, in queue order.
         A symbol whose earlier read is still in flight waits for it.
 
         Args:
@@ -855,7 +880,8 @@ class FollowCoordinator:
         for name in ready:
             result.queue.remove(name)
             result.symbols[name].waiting = False
-        batches = [ready] if result.read.plan.one_scan else [[name] for name in ready]
+        size = len(ready) if result.read.plan.one_scan else result.read.plan.symbols_per_read
+        batches = [ready[i : i + size] for i in range(0, len(ready), size)]
         if result.read.plan.one_scan:
             result.scanning = True
         for batch in batches:

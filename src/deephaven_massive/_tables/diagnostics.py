@@ -9,9 +9,9 @@ All four are keyed Deephaven `input_table`s that the library writes and users re
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
-  table, per background read (`wait=False`), and per followed read (a `history()` that follows
-  a refreshing symbol table), told apart by `Kind`, with the `repr` of the query that opened it
-  in `Query`. Keyed by `StreamId`.
+  table, per background read (`wait=False`), and per followed read (a `history()` or `fetch()` that
+  follows a refreshing symbol table), told apart by `Kind`, with the `repr` of the query that opened
+  it in `Query`. Keyed by `StreamId`.
 - **symbol_reads**: one row per symbol of each followed read: whether it is queued, loading,
   waiting to retry, done, failed, removed, stopped, or closed, with its source, its rows, its
   attempts, and its latest error. Keyed by `StreamId` and `Symbol`. The session's follow

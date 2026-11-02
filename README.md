@@ -779,8 +779,8 @@ max_concurrency: 4
 # A row of a symbol table that is not Massive's exact ticker: raise, log, or ignore.
 noncanonical_symbols: raise
 
-# A crypto pair of a symbol table that Massive's crypto ticker list does not hold, in a live
-# stream: raise, log, or ignore.
+# A crypto pair of a symbol table that Massive's crypto ticker list does not hold, in a
+# stream, fetch(), or poll(): raise, log (leave it out), or ignore (the same, quietly).
 unlisted_symbols: log
 
 # A symbol a poll cannot read from Massive (no data, or an argument its endpoint does not
@@ -906,11 +906,12 @@ The converters also work inside query strings; `help(dm.canonical_symbol)` lists
 
 **A live table is followed.** Add a row and a stream subscribes to it; delete one and it
 unsubscribes. `poll()` reads the table at every cycle. `fetch()` and `history()` return a live
-table: an added symbol's rows, over the same range, appear whole once they are read, and a
-deleted symbol's rows leave at once. The range is fixed when you call: an open `end` means
-through that moment. A static table, such as one from `new_table` or `snapshot()`, is a fixed
-list, read once. An input table makes
-a watchlist you can edit in code or by typing in the web UI:
+table: an added symbol's rows appear whole once they are read, and a deleted symbol's rows leave
+at once. `history()` reads every symbol over the same range, fixed when you call: an open `end`
+means through that moment. `fetch()` has no range: each symbol's rows are Massive's answer when
+that symbol was read, so a snapshot of a symbol added at 14:00 is the 14:00 snapshot. A static
+table, such as one from `new_table` or `snapshot()`, is a fixed list, read once. An input table
+makes a watchlist you can edit in code or by typing in the web UI:
 
 ```python
 from deephaven import dtypes as dht
@@ -949,17 +950,19 @@ board = m.stocks.quotes(watchlist).last_by()
 aapl = board.where("Symbol == `AAPL`")
 ```
 
-A `history()` or `fetch()` that follows a watchlist reads each symbol on its own, so one bad
-symbol never stops the table: Massive's "no data" gives that symbol no rows, a passing failure
-(a rate limit, a dropped connection) is retried after 1, 5, and 15 minutes, and a refusal marks
-that symbol failed in `m.symbol_reads()`; delete and re-add its row to read it again. Only a
-rejected API key, a closed session, a failed watchlist, or a library bug fails the whole table.
-With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
-and raises only if every one of them failed. A symbol that comes back after you deleted it is
-downloaded again, unless you choose otherwise (`reread`, in
-[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows. The same holds for
-`underlying=` of `m.options.chain` and `m.options.contracts`, which take a table with a
-`Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode` column.
+A `history()` or `fetch()` that follows a watchlist reads each symbol on its own, so one bad symbol
+never stops the table: Massive's "no data" gives that symbol no rows, a passing failure (a rate
+limit, a dropped connection) is retried after 1, 5, and 15 minutes, and a refusal marks that symbol
+failed in `m.symbol_reads()`; delete and re-add its row to read it again. Only a rejected API key, a
+closed session, a failed watchlist, or a library bug fails the whole table. With `wait=True`, the
+default, the call returns once the watchlist's current symbols are read, and raises only if every
+one of them failed. A symbol that comes back after you deleted it is downloaded again, unless you
+choose otherwise (`reread`, in [verb arguments](#verb-arguments)). `limit` is sent on each request,
+as Massive's cap on its rows. News, filings, and financial statements list their tickers, so one
+article can answer two symbols: it is listed under each symbol whose request Massive returned it
+for. The same holds for `underlying=` of `m.options.chain` and `m.options.contracts`, which take a
+table with a `Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode`
+column.
 
 A large live result costs memory and time downstream: every table you derive from it updates
 when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.
@@ -976,7 +979,11 @@ A crypto pair that Massive's list of crypto tickers does not hold, in the watchl
 or added later, is skipped and listed the same way, and the stream keeps its other pairs; a
 skipped pair stays skipped until its row is deleted and added again. If the list cannot be
 read when a pair is added, it is tried twice more over about ten seconds first, and the `Error`
-says so. To fail instead, set `dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE)`. A
+says so. To fail instead, set `dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE)`. The same
+setting covers `fetch()` and `poll()` of a crypto pair's last trade and daily open and close,
+whose requests name the pair's two currencies: a pair Massive does not list is left out (a
+`poll()` lists it in its `Error`, and a `fetch()` that follows a watchlist marks it failed in
+`m.symbol_reads()`), or, under `RAISE`, the call raises and a live table fails. A
 futures contract a watchlist holds subscribes once its trading schedule has loaded (up to 15
 seconds), so its first rows carry a `Date`.
 

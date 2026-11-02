@@ -673,7 +673,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
 | `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
-| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. `fetch()` and `poll()` of the two crypto REST paths that need the split are not covered. |
+| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. The two crypto REST paths that need the split (the last trade, the daily open and close) follow it too (decision 90): under `LOG` and `IGNORE`, `fetch()` and each `poll()` cycle leave such a pair out (a `poll()` lists it in `Error`, and a followed `fetch()` marks it `FAILED` in `m.symbol_reads()`), and a static table whose every pair is unlisted raises `MassiveError`; under `RAISE`, `fetch()` raises and a `poll()` or followed table fails. A failed read of the list fails them as before. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 | `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
@@ -1997,12 +1997,12 @@ it.`).
   row is assigned to its symbol by its `Symbol` column, which the filter matches exactly.
 - **List-column datasets** (rows with a `Tickers` list and no `Symbol`: the financial
   statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, `partners.benzinga.news`):
-  one request per symbol, each row belonging to the request that returned it. A row returned
-  for two symbols is two copies the library made, so the result removes the duplicates in the
-  engine, keeping one per row; removing one symbol leaves the other symbol's copy.
+  one request per symbol, each row belonging to the request that returned it. A row Massive
+  returns for two symbols' requests is listed under each symbol: it is the data listed by
+  symbol, and nothing removes a copy across requests (decision 90).
 
-**`limit`** caps each symbol's rows in a followed read, on every dataset (§ 22, decision 84):
-a symbol read in a batch that has a `limit` is read one symbol per request.
+**`limit`** is sent on each request of a followed read as Massive's own cap on that request's
+rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
 
 **One-value inputs** follow tables too: `options.chain(underlying=)` and
 `options.contracts(underlying=)` take a table with a `Symbol` column, and every futures
@@ -2028,7 +2028,7 @@ query re-reads it each cycle, as for `symbols`.
 |---|---|
 | HTTP 404 on the first request (Massive has no data) | `DONE` with 0 rows, and the existing WARNING |
 | Transient: a rate limit beyond the read's patience, a network failure, or a 5xx after the REST client's own retries | `RETRYING`, then read again 1, 5, and 15 minutes later; `FAILED` after the last |
-| Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold | `FAILED` at once |
+| Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold (logged as `MassiveConfig.unlisted_symbols` says; under `RAISE` it fails the table) | `FAILED` at once |
 
 A read of several symbols (an `any_of` batch, a flat-file scan) fails as a unit: every symbol
 of it gets the same state and error. Deleting and re-adding a `FAILED` symbol's row reads it
@@ -2703,8 +2703,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   ends the retries at once. At the call there is no retry: a failed read treats the pairs it
   could not split as unlisted, and the stream's worker looks a reactive table's skipped pairs
   up again, with the retries, as it subscribes the table's rows. Nothing
-  falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
-  fails a `poll()` table, since every later cycle would read the same list. Every other REST
+  falls back to a guess. On the two REST paths a pair in code raises the same refusal from
+  `fetch()` and `poll()`; a pair of a symbol table follows `MassiveConfig.unlisted_symbols`
+  (decision 90). Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
   at every point. Every grammar is
   matched against the whole text, so a trailing newline never passes. A dataset that spans classes
@@ -7817,6 +7818,15 @@ document already reflects them.
     them all, and only how requests are made changes, never Massive's values. A row that
     several tickers' requests return whole is kept once, and rows of one request are never
     merged ([section 8](#8-namespace-tree)).
+90. **A followed `fetch()` lists a shared row under each symbol, and an unlisted crypto pair
+    follows `unlisted_symbols` in every REST verb** (2026-11-02, owner). A followed `fetch()`
+    of a dataset whose rows list their tickers (news, financial statements, filings) reads
+    each symbol in requests of its own, and a row Massive returns for two symbols' requests is
+    listed under each symbol: it is the data listed by symbol, so no copy is removed across
+    requests. `limit` is sent as Massive's own cap on each request: once on a per-symbol
+    request, and once on a `ticker.any_of` batch. Rule 24 covers an unlisted crypto pair of a
+    symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and `IGNORE` leave it
+    out, and `RAISE` fails; before, both verbs always failed ([section 5](#5-massiveconfig)).
 
 ## 23. Open verification items
 

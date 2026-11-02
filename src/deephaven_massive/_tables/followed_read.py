@@ -1,9 +1,10 @@
-"""Followed reads: a `history()` result that follows a refreshing symbol table.
+"""Followed reads: a `history()` or `fetch()` result that follows a refreshing symbol table.
 
-When `symbols` is a refreshing table, `history()` follows it: each symbol in the table is read
-over the call's fixed window and its rows land in the result whole, in one update cycle; each
-symbol removed from the table leaves the result in the cycle its row leaves the table. This
-module builds that result and holds what one result owns; the session's follow coordinator
+When `symbols` is a refreshing table, `history()` and `fetch()` follow it: each symbol in the
+table is read (by `history()` over the call's fixed window, by `fetch()` as Massive answers at
+that read) and its rows land in the result whole, in one update cycle; each symbol removed from
+the table leaves the result in the cycle its row leaves the table. This module builds that
+result and holds what one result owns; the session's follow coordinator
 (`_tables/follow_coordinator.py`) decides what is read when.
 
 **How the rows land without a copy.** Everything is created on the caller thread inside the
@@ -118,23 +119,29 @@ wire names, so none can take this name."""
 
 @dataclass(frozen=True, slots=True)
 class FollowPlan:
-    """How a followed read reads its symbols: its source, and the read itself.
+    """How a followed read reads its symbols: its source, how many at once, and the read itself.
 
-    Made by `history()` on the caller thread from its source choice; immutable.
+    Made by `history()` or `fetch()` on the caller thread; immutable.
 
     Attributes:
         transport: The source every read uses, `Transport.REST` or `Transport.FLAT_FILES`.
         one_scan: True for flat files: the symbols waiting for a read are read together, in one
-            scan, and one scan of a result runs at a time. False for REST: each symbol is read
-            on its own, in parallel.
-        read: Reads symbols over the call's window and returns each one's outcome
-            (`RestTransport.history_by_symbol` or `FlatFileTransport.history_by_symbol`),
-            given the symbols and the result's stop token. It raises what fails every symbol
-            alike (a rejected key, a closed session).
+            scan, and one scan of a result runs at a time. False for REST: the waiting symbols
+            are read in groups of `symbols_per_read`, in parallel.
+        symbols_per_read: The most symbols one REST read takes: 1 for a path that takes one
+            symbol a request, or `DatasetSpec.symbols_per_request` for a `fetch()` whose
+            list parameter (`ticker.any_of`) names many symbols in one request. Ignored for
+            flat files.
+        read: Reads symbols and returns each one's outcome, given the symbols and the result's
+            stop token: over the call's window for `history()`
+            (`RestTransport.history_by_symbol`, `FlatFileTransport.history_by_symbol`), and as
+            Massive answers now for `fetch()` (`RestTransport.fetch_by_symbol`). It raises
+            what fails every symbol alike (a rejected key, a closed session).
     """
 
     transport: Transport
     one_scan: bool
+    symbols_per_read: int
     read: Callable[[tuple[str, ...], threading.Event], Mapping[str, SymbolOutcome]]
 
 
@@ -590,7 +597,8 @@ def open_followed_read(
         reread: Whether a returning symbol is read again.
         plan: How the symbols are read.
         note: The sentences the table description adds after the dataset's summary.
-        first: What `history(wait=True)` read of the call-time symbols, or None.
+        first: What `history(wait=True)` or `fetch(wait=True)` read of the call-time symbols,
+            or None.
 
     Returns:
         The refreshing result: every column of the dataset, with the call-time symbols'

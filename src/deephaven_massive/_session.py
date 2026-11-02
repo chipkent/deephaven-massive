@@ -535,19 +535,19 @@ class MassiveSession:
 
     @raises_through(SessionCore.diagnostics_view)
     def symbol_reads(self) -> Table:
-        """Return the live diagnostics table of each symbol of each followed `history()`.
+        """Return the live diagnostics table of each symbol of each followed read.
 
-        A `history()` whose `symbols` is a refreshing table follows it: it reads each symbol as
-        it is added, and drops each one removed. This table has one row per symbol of each such
-        result, so a user sees which symbols are loading, which failed, and why. A symbol is
-        `QUEUED` when its row enters the symbol table, `LOADING` while it is read, and `DONE`
-        once its rows are in the result (0 rows when Massive has no data for it). A failure that
-        may pass (a rate limit beyond the read's patience, a network failure, a server error)
-        makes it `RETRYING`: it is read again 1, 5, and 15 minutes later, and `FAILED` after the
-        last; any other failure makes it `FAILED` at once. Deleting and re-adding its row reads
-        it again. The rows stay for the session's life, also after their result is released.
-        Each call returns a new live view; after `close()` it keeps its final rows. How to read
-        it: README.md#diagnostics.
+        A `history()` or `fetch()` whose `symbols` is a refreshing table follows it: it reads each
+        symbol as it is added, and drops each one removed. This table has one row per symbol of each
+        such result, so a user sees which symbols are loading, which failed, and why. A symbol is
+        `QUEUED` when its row enters the symbol table, `LOADING` while it is read, and `DONE` once
+        its rows are in the result (0 rows when Massive has no data for it). A failure that may pass
+        (a rate limit beyond the read's patience, a network failure, a server error) makes it
+        `RETRYING`: it is read again 1, 5, and 15 minutes later, and `FAILED` after the last; any
+        other failure makes it `FAILED` at once. Deleting and re-adding its row reads it again. The
+        rows stay for the session's life, also after their result is released. Each call returns a
+        new live view; after `close()` it keeps its final rows. How to read it:
+        README.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId` (the result's row in `m.streams()`) and `Symbol`
