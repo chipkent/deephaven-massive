@@ -2228,8 +2228,8 @@ def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Not a skipped pair: the stream fails with the defect itself, wrapped once, and the
-    # lookup is not tried again.
+    # Not a skipped pair: the stream fails with the defect's own message, asking once for a
+    # bug report, and the lookup is not tried again.
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
         "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
     )
@@ -2240,11 +2240,12 @@ def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"] == "cannot stream 'X:DOTUSD': the split broke"
+    assert row["Error"] == f"cannot stream 'X:DOTUSD': the split broke. {LIBRARY_BUG}"
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
-        (f"{ws_session.session._core.label}: cannot stream 'X:DOTUSD': the split broke", True)
+        (f"{ws_session.session._core.label}: {row['Error']}", True)
     ]
+    assert row["Error"].count(LIBRARY_BUG) == 1
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
 
 

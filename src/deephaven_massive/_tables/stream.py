@@ -711,14 +711,16 @@ class StreamSink:
 
     - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
       when a reactive symbol table changes;
-    - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
-      flush thread takes it, but a stream is failed from the caller thread when
-      its connection failed while it was opening, from the closing thread at `m.close()`, and
-      from the reaper when its watchlist failed. The order is the flush lock (on a flush
+    - its publish lock serializes `publish`, `publish_held`, and `fail`, which call Deephaven.
+      Usually only the flush thread takes it, but a stream is failed from the caller thread
+      when its connection failed while it was opening, from the closing thread at
+      `m.close()`, and from the reaper when its watchlist failed; and the verb that opened a
+      stream adds its held rows from its own thread. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
       `fail` calls); the publish lock is never taken under `registry_lock`. A caller that holds
-      the update-graph lock (a console command) takes it to fail the stream, which is safe
-      because nothing done under it takes the update-graph lock or waits for an update cycle:
+      the update-graph lock (a console command) takes it to fail the stream or to add its held
+      rows, which is safe because nothing done under it takes the update-graph lock or waits
+      for an update cycle:
       `partition_by` and `where_in` of static tables, `publisher.add` of a static table,
       `publish_failure`, and `SessionCore.fail_stream`.
 
@@ -851,7 +853,7 @@ class StreamSink:
         context.
         """
         with self._publish_lock:
-            held, self._held = self._held, None
+            held = self._held
             if held and not self.failed:
                 logger.debug(
                     "%s stream %d: its first result is built; adding the %d rows it received "
@@ -860,8 +862,10 @@ class StreamSink:
                     self.stream_id,
                     sum(table.size for table in held),
                 )
-                for table in held:
-                    self.publisher.add(table)
+                # One table at a time: an interrupt leaves the rest held for the next call.
+                while held:
+                    self.publisher.add(held.pop(0))
+            self._held = None
 
     @property
     def receives_all(self) -> bool:

@@ -635,9 +635,10 @@ def test_latest_rows_since_added_builds_under_the_consoles_lock(
 
 @pytest.fixture
 def parallel_updates() -> Iterator[None]:
-    # Make every `select` and `update` run on Deephaven's parallel threads, then restore the
-    # setting: a formula that read the cycle number without an execution context there would
-    # see a clock frozen at its first step.
+    # A smoke test: ask Deephaven to run every `select` and `update` on its parallel threads,
+    # then restore the setting, so a formula that reads the cycle number without an execution
+    # context there may show a clock frozen at its first step. A pass does not prove the
+    # formula ran on those threads.
     # The setting is package-private, so it is opened by reflection. Reflection checks its
     # caller, and a call straight from Python has no Java caller (Java 17 on Linux then raises
     # `NullPointerException`), so a formula, compiled Java, finds and opens the field.

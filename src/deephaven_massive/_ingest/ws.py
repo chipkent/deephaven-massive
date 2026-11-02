@@ -88,6 +88,7 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
+    failure_text,
     library_bug,
 )
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
@@ -794,8 +795,10 @@ class WsConnections:
         Any exception of the change is a defect of the library: it is logged at ERROR with its
         trace, and it fails the stream (`Flusher.fail`), if the stream still exists. A
         `MassiveError` that already names itself a defect (`ErrorCause.LIBRARY_DEFECT`, such as
-        one from the crypto pair lookup) fails the stream as it is; any other exception is
-        wrapped in a `MassiveError` that names the change.
+        one from the crypto pair lookup) fails the stream with its own message, ended with
+        `LIBRARY_BUG` unless it holds it already; any other exception is wrapped once in a
+        `MassiveError` that names the change and asks for a bug report. Either way the message
+        asks for the report exactly once.
 
         Args:
             change: `_change_contracts` or `_change_pairs`.
@@ -807,7 +810,8 @@ class WsConnections:
             change(stream_id, added, removed)
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
             if isinstance(error, MassiveError) and error.cause is ErrorCause.LIBRARY_DEFECT:
-                failure = error  # already a defect, with its own message: never wrapped twice
+                # Its own message, ended with how to report it unless it already says so.
+                failure = MassiveError(failure_text(error), cause=ErrorCause.LIBRARY_DEFECT)
             else:
                 failure = MassiveError(
                     library_bug(

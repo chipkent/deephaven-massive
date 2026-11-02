@@ -747,15 +747,19 @@ class SessionCore:
                 closed"`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle, opened = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         scope: LivenessScope | None = None
+        handle, opened = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         try:
-            with entered(self.exec_ctx):
-                try:
+            # Another verb may hold the stream already, so its held rows are added whatever
+            # happens from here on, an interrupt included; otherwise they would pile up forever
+            # and that verb's result would show none of them.
+            try:
+                with entered(self.exec_ctx):
                     self._require_unfailed(spec, handle.stream_id)
                     result, scope = make_result(self.exec_ctx, lambda: build(handle))
-                finally:
-                    if opened:  # the rows received while the stream opened, after the result
+            finally:
+                if opened:  # the rows received while the stream opened, after the result
+                    with entered(self.exec_ctx):
                         handle.publish_held()
             self.results.track(
                 result,
@@ -873,6 +877,7 @@ class SessionCore:
         may_wait = not holds_update_graph_lock(self.exec_ctx)
         while True:
             holds: list[tuple[int, threading.Event | None]] = []
+            opened_handle: StreamHandle | None = None
             try:
                 claim = self._claim(spec, request, key, query=query, may_wait=may_wait, holds=holds)
                 if isinstance(claim, threading.Event):
@@ -880,7 +885,9 @@ class SessionCore:
                     continue
                 opened = isinstance(claim, int)
                 if isinstance(claim, int):
-                    claim = self._open(spec, request, channel=channel, stream_id=claim)
+                    claim = opened_handle = self._open(
+                        spec, request, channel=channel, stream_id=claim
+                    )
                     symbols = request.symbol_key()
                     shown = (
                         bounded_list(symbols)
@@ -912,12 +919,19 @@ class SessionCore:
                     if ready is not None:
                         ready.set()
             except BaseException:  # the hold did not reach the caller
-                for stream_id, ready in holds:
-                    try:
-                        self._release_hold(stream_id)
-                    finally:
-                        if ready is not None:
-                            ready.set()  # waiters must wake whatever happens
+                try:
+                    # The stream opened, and another verb may reuse it already: add the rows it
+                    # held, or they pile up forever and that verb's result shows none of them.
+                    if opened_handle is not None:
+                        with entered(self.exec_ctx):
+                            opened_handle.publish_held()
+                finally:
+                    for stream_id, ready in holds:
+                        try:
+                            self._release_hold(stream_id)
+                        finally:
+                            if ready is not None:
+                                ready.set()  # waiters must wake whatever happens
                 raise
             return claim, opened  # no checkpoint between the try and the caller's own cleanup
 

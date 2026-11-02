@@ -284,8 +284,8 @@ class FuturesCalendar:
             symbols: Canonical futures symbols; spreads are skipped, as they are never looked
                 up.
             timeout: The most seconds to wait.
-            stop: Ends the wait early once set and followed by `wake`: the waiting session's
-                close sets it, while the calendar, which other sessions share, stays open.
+            stop: Ends the wait early: set it, then call `wake()`. The waiting session's close
+                does so, while the calendar, which other sessions share, stays open.
 
         Returns:
             True once every contract's product is known (or known to be unlisted, or failed)
