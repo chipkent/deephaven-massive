@@ -623,6 +623,69 @@ def test_a_failed_table_stops_its_symbols(
     gate.set()
 
 
+def test_a_read_that_starts_as_its_table_stops_leaves_its_symbol_stopped(
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AAPL's failure stops the result while MSFT's read is still starting. The coordinator
+    # takes the stop and MSFT's start in one batch, the order a busy pool can produce: MSFT
+    # must end STOPPED, not LOADING, although the batch forgets the result.
+    coordinator = follow_coordinator.FollowCoordinator
+    post, read, handle = coordinator.post, coordinator._read, coordinator._handle
+    withheld: list[follow_coordinator._Message] = []
+    stop_withheld, holding, held, resume, handled = (threading.Event() for _ in range(5))
+
+    def is_msft_start(message: follow_coordinator._Message) -> bool:
+        return isinstance(message, follow_coordinator._Began) and "MSFT" in message.generations
+
+    def ordered_post(
+        self: follow_coordinator.FollowCoordinator, message: follow_coordinator._Message
+    ) -> None:
+        if isinstance(message, follow_coordinator._Stop) and not stop_withheld.is_set():
+            withheld.append(message)
+            stop_withheld.set()
+            return
+        post(self, message)
+        if is_msft_start(message):
+            resume.set()
+
+    def late_read(
+        self: follow_coordinator.FollowCoordinator,
+        followed: FollowedRead,
+        generations: Mapping[str, int],
+    ) -> None:
+        if "MSFT" in generations:
+            assert stop_withheld.wait(TIMEOUT)
+            holding.set()
+            self.wake()  # holds the coordinator thread until MSFT's start is queued too
+            assert held.wait(TIMEOUT)
+            post(self, withheld[0])
+        read(self, followed, generations)
+
+    def held_handle(
+        self: follow_coordinator.FollowCoordinator, batch: list[follow_coordinator._Message]
+    ) -> None:
+        if holding.is_set() and not held.is_set():
+            held.set()
+            assert resume.wait(TIMEOUT)
+        handle(self, batch)
+        if any(is_msft_start(message) for message in batch):
+            handled.set()
+
+    monkeypatch.setattr(coordinator, "post", ordered_post)
+    monkeypatch.setattr(coordinator, "_read", late_read)
+    monkeypatch.setattr(coordinator, "_handle", held_handle)
+    script = Script(massive_session)
+    gate = script.gates["MSFT"] = threading.Event()
+    script.answers["AAPL"] = [dm.AuthenticationError("HTTP 401: wrong key")]
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    until(lambda: bool(result.j_table.isFailed()))
+    assert handled.wait(TIMEOUT)
+    assert state(massive_session, "MSFT") is SymbolReadState.STOPPED
+    gate.set()
+
+
 def test_a_symbol_added_after_its_result_failed_is_stopped_not_queued(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
