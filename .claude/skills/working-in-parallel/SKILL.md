@@ -11,7 +11,8 @@ pushes.
 
 ## Before starting
 
-1. List the files and the `README.md` sections you will change.
+1. List the files and the user-doc pages and sections (`README.md`, `docs/guide/`) you will
+   change.
 2. Check the open PRs: `gh pr list`, then `gh pr diff <n> --name-only` for each likely overlap.
 3. If an open PR changes the same files, stack yours on it with GitHub's native stacked PRs:
    branch from its branch, push, open your PR against that branch

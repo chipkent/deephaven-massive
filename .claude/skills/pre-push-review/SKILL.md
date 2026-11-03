@@ -27,7 +27,7 @@ git diff origin/main...HEAD --stat
 git diff origin/main...HEAD
 ```
 
-Read it hunting for defects, with the spec open: the PR's issue, the `README.md` sections and
+Read it hunting for defects, with the spec open: the PR's issue, the user-doc pages and
 public docstrings it touches, the decisions it follows in `docs/dev/decisions.md`, and
 `AGENTS.md`. In the `--stat`, look first at deleted lines under
 `tests/`: a deleted or weakened test is a finding unless the diff adds one that pins the same
@@ -38,7 +38,7 @@ property. For each changed file ask:
   Deephaven. Is any failure swallowed, logged without failing the table that needs it, or retried
   forever?
 - **Contract.** A user-visible change (a public signature, default, column, or failure
-  behavior) needs a new `docs/dev/decisions.md` entry and matching `README.md`, docstring, and
+  behavior) needs a new `docs/dev/decisions.md` entry and matching user-doc, docstring, and
   test changes in the same PR; a change that keeps documented behavior cites the decision it
   follows in the PR body. Does the new behavior match how the API already treats the same
   concept elsewhere (ranges, dates, missing data, errors)? An inconsistency with a sibling call
@@ -67,7 +67,7 @@ property. For each changed file ask:
   noting it.
 - **Names.** Every new or renamed function, argument, column, environment variable, and pytest
   marker says what it is or does (`AGENTS.md` rule 18). After any rename, `git grep` the old
-  name across code, docs, and `README.md`, and check the PR description and its linked issues'
+  name across code, `README.md`, and `docs/`, and check the PR description and its linked issues'
   bodies; fix every hit.
 - **Duplicates and private imports.** For every new helper, `git grep -n` for the concept (the
   format it parses, the rule it applies), not only for its name. An import of another module's
@@ -111,7 +111,12 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
 - Docstrings meet the `writing-docstrings` skill: every argument, return, exception
   and side effect, and examples that run. They describe the code as it is now: reread the
   docstring and comments of every function whose body changed.
-- `README.md`, `AGENTS.md`, the skills, and `docs/dev/` say exactly what the code does.
+- `README.md`, `docs/guide/`, `AGENTS.md`, the skills, and `docs/dev/` say exactly what the code
+  does. For each behavior the diff changes (a default, a limit, an error, a column), run
+  `git grep -n '<name or message>' -- README.md docs/guide docs/tester-guide.md` and update
+  every page that describes it.
+- A diff that touches a user page (`README.md`, `docs/guide/`, `docs/tester-guide.md`) passes
+  the checklist in section 3 of the `writing-user-docs` skill.
 - Every comment in a config file, pytest marker description, and CLI help text the diff adds or
   changes reads as edited prose for a reader new to the project: what it means, when to use
   it, and what each argument means, with no internal shorthand.

@@ -35,7 +35,10 @@ keep a paragraph only where prose reads better. Link to a doc page instead of re
 
 Run the self-edit checklist at the end of `docs/dev/pull-requests.md`, every item, and fix the
 draft until each passes. Its core is item 2: read the draft as an O'Reilly technical editor
-would, and fix what they'd mark. Its narration and hedge grep:
+would, and fix what they'd mark. Sweep too for the banned patterns of
+`docs/dev/user-docs.md` (meta-commentary, filler negation, coined jargon, precision theater,
+so-chains, hype words, the tricolon formula, colon reveals): they read as machine-written in a
+PR as much as on a user page. Its narration and hedge grep:
 
 ```bash
 grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>
