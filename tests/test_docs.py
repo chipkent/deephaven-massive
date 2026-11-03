@@ -245,6 +245,7 @@ def test_every_readme_example_runs_in_order(
     assert isinstance(names["kept"], Table)
     assert isinstance(names["watched"], Table)
     assert isinstance(names["es"], Table)
+    assert isinstance(names["near_quotes"], Table)
     assert names["config"].max_outage == 600  # read from the example file
     _forget(names)
 
