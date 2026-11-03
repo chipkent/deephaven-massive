@@ -13,7 +13,6 @@ namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
@@ -49,7 +48,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASETS", "_Reference"]
 
-logger = logging.getLogger(__name__)
 
 _REST: Final = Transport.REST
 

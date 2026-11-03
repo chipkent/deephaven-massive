@@ -16,8 +16,5 @@ except ValueError as error:
 
 watchlist = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
-    watchlist,
-    dm.AssetClass.STOCKS,
-    convention=dm.SymbolConvention.YAHOO,
-    on_error=dm.OnError.LOG,
+    watchlist, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )

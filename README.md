@@ -213,7 +213,7 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 | read a long range without freezing the console | `history(..., wait=False)`: see [live tables](#live-tables) |
 | list a company's dividends | `m.stocks.dividends("AAPL", start="2025-01-01").fetch()` |
 | follow news as it appears | `m.reference.news("AAPL", start=today).poll(300)`, with `today` as [first tables](#first-tables) sets it |
-| stream the contracts of a futures product | `m.futures.trades(m.futures.contracts(product_code="ES").fetch()).last_by()` |
+| stream the contracts of a futures product | `m.futures.trades(m.futures.contracts(product_code="ES", filters={"active": True}).fetch()).last_by()` |
 | find a ticker by name | `m.reference.tickers(search="Nvidia").fetch()` |
 | see what a column means | `query.columns()`, or hover over the column header |
 | see what the library is doing | `m.streams()`, `m.connections()`, `m.rate_limits()`: see [diagnostics](#diagnostics) |
@@ -427,6 +427,12 @@ column is null, with one WARNING per dataset and field (and a `?` in a live tabl
 `SchemaDrift`). A symbol the library cannot read leaves `Symbol` null and keeps Massive's text
 in `RawSymbol`; `dm.MassiveConfig(unreadable_symbols=dm.OnError.RAISE)` fails the read instead.
 A row missing its symbol or time is dropped and logged.
+
+Each such cause has its own `dm.MassiveConfig` setting, named for the cause, such as
+`unreadable_symbols` and `noncanonical_symbols`, and each takes a `dm.OnError` member: `LOG`,
+the default, skips the symbol or row and logs each distinct value once at WARNING; `IGNORE`
+skips it and logs only at DEBUG; `RAISE` fails the read or the table instead. Only a problem
+that affects every row, such as a rejected API key, fails a table short of `RAISE`.
 
 Tables of one kind from two asset classes, such as stock and forex quotes, share their common
 columns' names and types but can differ in which columns they have. To stack them, keep the
@@ -945,8 +951,9 @@ Every ticker must be Massive's exact spelling: `AAPL`, `BRK.B`, `O:SPY271217C007
 `I:SPX`, `C:EURUSD`, `X:BTCUSD`, `ESZ6`. A wrong one in a string or list raises `ValueError` at
 once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/USD")` returns
 `"C:EURUSD"`, `dm.canonical_symbol_stock_yahoo("BRK-B")` returns `"BRK.B"`, and
-`dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive.
-The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
+`dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive; by
+default (`on_error=dm.OnError.LOG`) a row it cannot convert gets an empty symbol and is logged,
+and the table keeps updating. The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
 
 **Rows that list several tickers.** News, filings, and financial statements list the tickers
 each row concerns, in `Tickers`, and their `Symbol` is each ticker you named that the row lists.
@@ -983,14 +990,14 @@ In code, delete rows by passing a static table of the keys, as above: a live vie
 watchlist itself can hang the server. Any table with a `Symbol` column can choose symbols, so
 one dataset can choose another's: a live one, such as a `poll()`, is followed, and a static one,
 such as a `fetch()` of a list, is a fixed list read at the call. This streams the trades of the
-day's top gainers, re-checked every minute, and the trades of every E-mini S&P 500 futures
-contract listed when you call:
+day's top gainers, re-checked every minute, and the trades of every active E-mini S&P 500
+futures contract listed when you call:
 
 ```python
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
 hot = m.stocks.trades(gainers).last_by()
 
-contracts = m.futures.contracts(product_code="ES").fetch()
+contracts = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
 es = m.futures.trades(contracts).last_by()
 ```
 
@@ -1012,10 +1019,10 @@ that symbol failed in `m.symbol_reads()`; delete and re-add its row to read it a
 rejected API key, a closed session, a failed watchlist, or a library bug fails the whole table.
 With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
 and raises only if every one of them failed. A symbol that comes back after you deleted it is
-downloaded again, unless you choose otherwise (`reread`, in
-[verb arguments](#verb-arguments)). `limit` is sent on each request, as Massive's cap on its
-rows. As in every read, a news article, filing, or financial statement is listed under each
-named ticker it lists.
+downloaded again: a `fetch()` always reads it again, and a `history()` does unless its `reread`
+argument says otherwise ([verb arguments](#verb-arguments)). `limit` is sent on each request,
+as Massive's cap on its rows. As in every read, a news article, filing, or financial statement
+is listed under each named ticker it lists.
 
 The arguments that take one value take a table too: `underlying=` of `m.options.chain` and
 `m.options.contracts` a table with a `Symbol` column, and every futures `product_code=` one with a
@@ -1045,7 +1052,8 @@ watchlist, and shows nothing for a symbol added back until it trades again; with
 span symbols, such as `last_by("Exchange")`, a group keeps its row after the symbol behind it
 leaves. To replace the list, add the new list first, then delete only the symbols that left: a
 symbol on both lists never leaves the watchlist, so its row stays, while one deleted and added
-back waits for its next trade.
+back waits for its next trade. `append_only()` and `ring()` keep the rows a removed symbol
+already produced.
 
 ```python
 watchlist.add(new_table([string_col("Symbol", ["AAPL", "AMD"])]))  # the new list: AAPL, AMD
@@ -1068,10 +1076,10 @@ live_board = merge([seed, trades]).last_by("Symbol")
 ```
 
 The stream's rows come after the snapshot's in the merge, so `last_by("Symbol")` shows a
-symbol's latest trade once it has one, and its snapshot until then. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
-watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
-stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
-bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
+symbol's latest trade once it has one, and its snapshot until then. A watchlist row that is not
+Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
+`m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
+fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
 A crypto pair that Massive's list of crypto tickers does not hold, in the watchlist at the call
 or added later, is skipped and listed the same way, and the stream keeps its other pairs; a
 skipped pair stays skipped until its row is deleted and added again. If the list cannot be
@@ -1333,8 +1341,9 @@ Massive on a mix of paid and free plans. Some questions remain open because thos
 settle them, such as how index daily bars and futures sessions are stamped and parts of the flat
 files; on those, the library follows its best reading of Massive's documentation and warns when what
 Massive sends differs. `history()` and `fetch()` follow a live symbol table, with
-`m.symbol_reads()`. Following a table passed as `underlying=` or `product_code=` is planned. The
-library is not on PyPI yet. Outside testers start with the [tester guide](docs/tester-guide.md).
+`m.symbol_reads()`, and `fetch()` follows a live table passed as `underlying=` or
+`product_code=`. The library is not on PyPI yet. Outside testers start with the
+[tester guide](docs/tester-guide.md).
 
 <a id="contributing"></a>
 

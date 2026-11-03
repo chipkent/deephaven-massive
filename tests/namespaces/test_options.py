@@ -623,7 +623,12 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
         daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         daily(CONTRACT, "2025-01-02", adjusted=cast("bool", None))
-    with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)"):
+    # Massive has no grouped daily endpoint for options: the day's bars serve every contract.
+    with pytest.raises(
+        ValueError,
+        match=r"; use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
+        r"\.history\(day, day\), every contract's bar of that day$",
+    ):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
         daily(CONTRACT, cast("str", 20250102))

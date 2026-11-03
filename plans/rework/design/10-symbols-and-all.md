@@ -138,16 +138,17 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   spelling of classes and preferreds. Nasdaq's ACT symbology is not
   supported: it writes `.W` for warrants and `.V` for both a class and when-issued.
 - **`dm.canonicalize_symbols(table, asset_class, *, column="Symbol",
-  convention=dm.SymbolConvention.MASSIVE, on_error=dm.OnError.RAISE)`**, in
+  convention=dm.SymbolConvention.MASSIVE, on_error=dm.OnError.LOG)`**, in
   `_tables/symbols.py`, is the table form of the converters. It keeps its own `on_error`
   argument, apart from the session settings below, since it is a standalone function that
-  needs no session. The table's
-  current rows are converted in Python first (one call per distinct value), static or
-  refreshing, so `RAISE` gives a clean `ValueError` listing up to five values; every table is
-  then converted by `update`, so under `RAISE` a later bad row of a refreshing table fails the
-  table. `OnError.LOG` writes a null symbol and logs each bad value once at WARNING, at most
-  20 per table; `OnError.IGNORE` writes a null symbol and logs nothing above DEBUG. The
-  result keeps every other column, and the converted column keeps its name.
+  needs no session; its default is `LOG`, as theirs is (decision 93), so one bad row never
+  fails the table. The table's current rows are converted in Python first (one call per
+  distinct value), static or refreshing, so `RAISE` gives a clean `ValueError` listing up to
+  five values; every table is then converted by `update`, so under `RAISE` a later bad row of
+  a refreshing table fails the table. `OnError.LOG`, the default, writes a null symbol and
+  logs each bad value once at WARNING, at most 20 per table, and the table and every table
+  that follows it keep updating; `OnError.IGNORE` writes a null symbol and logs nothing above
+  DEBUG. The result keeps every other column, and the converted column keeps its name.
 - **A symbol table** must have a `Symbol` column, and every non-null row should be canonical.
   What a row that is not does follows `MassiveConfig.noncanonical_symbols`
   ([section 5](05-massiveconfig.md#5-massiveconfig)), an `OnError` whose default is `LOG`; a `str` or a sequence
@@ -170,8 +171,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
     session's reaper, a `poll()` table with `SymbolRowError`, a followed read through the
     session's follow coordinator) and logs at ERROR, with a message
     that names the row, the reason, and the fix: correct the row, or pass the table through
-    `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.LOG)` (for a
-    dataset that spans classes, `dm.canonical_symbol` per row with each row's class).
+    `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>)`, which nulls what it cannot
+    convert (for a dataset that spans classes, `dm.canonical_symbol` per row with each row's
+    class).
   - **`LOG`** and **`IGNORE`**: a bad row is skipped, never subscribed or requested, and the
     result keeps running on the good rows. `LOG` logs each distinct value once at WARNING
     (bounded, at most 100 per process), naming the row, the reason, and the fix; `IGNORE` logs

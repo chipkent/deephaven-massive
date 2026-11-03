@@ -38,7 +38,8 @@ earlier download at once, with no request. A `FAILED` symbol is read again on ev
 and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
 dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
 re-add during a read waits for it to end). When the result stops (released and unused, or failed),
-every symbol still following is `STOPPED`.
+every symbol still following is `STOPPED`, and stays so: a read that starts after the stop
+changes nothing.
 
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
@@ -626,6 +627,14 @@ class FollowCoordinator:
         elif isinstance(message, _Invalid):
             self._fail(result, SymbolRowError(message.message))
         elif isinstance(message, _Began):
+            if result.ended:  # a read that started as the result stopped leaves it STOPPED
+                logger.debug(
+                    "call %d follow: the read of %s started after the stop; its symbols stay "
+                    "as the stop left them",
+                    result.read.call,
+                    bounded_list(sorted(message.generations)),
+                )
+                return
             for name, generation in message.generations.items():
                 symbol = result.symbols[name]
                 if symbol.generation == generation and symbol.in_table:

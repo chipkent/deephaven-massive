@@ -34,7 +34,6 @@ namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._config import require_positive_int
@@ -59,8 +58,6 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["DATASETS", "_Indicators"]
-
-logger = logging.getLogger(__name__)
 
 
 def _indicator(name: str, summary: str) -> DatasetSpec:

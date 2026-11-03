@@ -17,7 +17,6 @@ Users import `Symbols`, `DateLike`, and `FilterValue` for annotations from the p
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 from datetime import date, datetime
 from enum import Enum
@@ -38,7 +37,6 @@ __all__ = [
     "override",
 ]
 
-logger = logging.getLogger(__name__)
 
 _F = TypeVar("_F")
 

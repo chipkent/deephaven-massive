@@ -26,7 +26,6 @@ together.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -69,7 +68,6 @@ __all__ = [
     "_Stocks",
 ]
 
-logger = logging.getLogger(__name__)
 
 _R: Final = Transport.REST
 _W: Final = Transport.WS
