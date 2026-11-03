@@ -282,15 +282,20 @@ def test_a_child_that_ignores_the_interrupt_is_killed(harness: Harness) -> None:
 def test_control_c_stops_the_child_and_records_the_attempt_interrupted(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The child's "hanging" line arrives on the output thread, which may run before the main
-    # thread reaches the wait: the interrupt is sent only once the wait has begun.
+    # The child's "hanging" line arrives on its output thread, which can run before the main
+    # thread has even returned from starting the child. The interrupt is sent only once the main
+    # thread waits for that child, the attempt's second; a gate the collection's wait opened
+    # would let it land outside the attempt's handler and leave the attempt running.
+    waits: list[children.Child] = []
     waiting = threading.Event()
     real_wait = children.wait
 
     def wait(
         child: children.Child, *, deadline: datetime, now: Callable[[], datetime], grace: float
     ) -> tuple[int, bool]:
-        waiting.set()
+        waits.append(child)
+        if len(waits) == 2:  # the first wait is the collection's, which never hangs
+            waiting.set()
         return real_wait(child, deadline=deadline, now=now, grace=grace)
 
     def interrupt(line: str) -> None:

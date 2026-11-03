@@ -1224,28 +1224,35 @@ released by the same rule. Everything is created on the caller thread inside the
 scope:
 
 ```python
-blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": int, "Constituent": TABLE}, ...)
-latest = blink.last_by("Symbol")                    # each symbol's latest cell
-held = latest                                       # wait=False
-held = merge([seed.natural_join(latest, on="Symbol", joins="Over=Seq")   # wait=True: the
-                  .where("isNull(Over)").drop_columns("Over"),           # static seed, masked
-              latest])                                                   # once a symbol has a
-                                                                         # newer cell
-shown = watched_rows(held.where("!isNull(Constituent)"), symbol_table)
-parts = PartitionedTable.from_partitioned_table(shown, key_cols=["Symbol"], unique_keys=True,
-            constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
-            constituent_changes_permitted=True)
+# One partition per symbol. Deephaven has no call that adds or removes a partition: the rows of
+# the partition table define them, so a blink publisher plus last_by stands in for a keyed
+# input table (the library never uses one), and watched_rows removes a symbol's partition.
+blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long, "Constituent": TABLE,
+                                          "DecidedAtStep": long}, ...)
+latest_per_symbol = blink.last_by("Symbol")          # one partition row per symbol: its newest
+with_seed = latest_per_symbol                        # wait=False
+with_seed = merge([seed.natural_join(latest_per_symbol, on="Symbol", joins="NewerSeq=Seq")
+                       .where("isNull(NewerSeq)").drop_columns("NewerSeq"),  # wait=True: the
+                   latest_per_symbol])               # static seed until a newer row is published
+in_watchlist = watched_rows(with_seed.where("!isNull(Constituent)"), symbol_table)
+# reread=ALWAYS: also hide a row whose DecidedAtStep precedes its symbol's last join cycle
+parts = PartitionedTable.from_partitioned_table(in_watchlist, key_cols=["Symbol"],
+            unique_keys=True, constituent_column="Constituent",
+            constituent_table_columns=<the dataset's columns>, constituent_changes_permitted=True)
 result = describe(parts.merge(), spec, schema)      # [list-column datasets: the dedupe]
 ```
 
-A cell holds one symbol's complete static rows, built off the update-graph lock; `Seq` orders a
-result's cells. A symbol lands, is replaced, or leaves as one constituent, so no rows are copied
-in the update cycle. A removed symbol's rows leave in the cycle that removes its row from the
-user's table, because `watched_rows` drops its partition there. With `wait=True` the seed is a
-static table of the call-time symbols' cells, so their rows are visible at once, also inside a
-console command. A cell with a null `Constituent` (a tombstone) frees a symbol's rows: under
-`reread=ALWAYS` a removal publishes one, and `NEVER` keeps the cell and republishes it on a
-re-add. There is no `input_table` and no `add_async`: `add_async` runs on the JVM's shared
+A partition row holds one symbol's complete static rows, built off the update-graph lock; `Seq`
+numbers a result's partition rows, and the seed's join copies it only because it is never null.
+A symbol lands, is replaced, or leaves as one partition, so no rows are copied in the update
+cycle. A removed symbol's rows leave in the cycle that removes its row from the user's table,
+because `watched_rows` drops its partition there. With `wait=True` the seed is a static table of
+the call-time symbols' partition rows, so their rows are visible at once, also inside a console
+command. A partition row with a null `Constituent` (an empty partition row) frees a symbol's
+rows: under `reread=ALWAYS` a removal publishes one, and `DecidedAtStep`, the latest symbol-table
+cycle the coordinator had applied when it decided to publish a row, hides a download decided
+before the symbol's last join; `NEVER` keeps the row, so a re-add shows it at once. There is no
+`input_table` and no `add_async`: `add_async` runs on the JVM's shared
 `ForkJoinPool.commonPool()`, and on an input table already destroyed it never completes and
 keeps a pool thread (measured: 20 calls left all 9 threads busy, 11 more queued, and no
 callback). `publisher.add` returns without waiting for an update cycle, also under the
@@ -1254,13 +1261,13 @@ exclusive lock (measured).
 - **One follow coordinator per session** (`massive #1 follow`, section 18.1) owns all
   per-symbol state of every followed read of the session and does no I/O. It takes the symbol
   tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`, starts reads on
-  the session's read pool, times the retries, and publishes each cell. The `SymbolWatch`
+  the session's read pool, times the retries, and publishes each partition row. The `SymbolWatch`
   listener only enqueues.
 - **One read pool per session**, of `max_concurrency` threads, runs every followed read: the
   transport call, in the session's execution context, and the static conversion. It hands the
   outcome back to the coordinator through the queue.
-- **Per result**: a publish lock and a failed flag. A cell's `publisher.add` and the
-  failure check the flag under the lock, so a failed result never gets another cell.
+- **Per result**: a publish lock and a failed flag. A partition row's `publisher.add`
+  and the failure check the flag under the lock, so a failed result never gets another row.
 - **Releasing stops it.** The blink table's shutdown, once nothing uses the result, sets the
   result's stop token and enqueues a stop; reads in flight stop at their next request, and the
   watch's stop is queued on the reaper. Every symbol's row in `m.symbol_reads()` becomes

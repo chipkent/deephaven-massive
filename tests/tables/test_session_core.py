@@ -2020,12 +2020,17 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
 
 
 class _FatalPublisher:
-    # A diagnostics publisher whose add raises what the writer cannot carry on after.
+    # A diagnostics publisher whose add raises what the writer cannot carry on after, once the
+    # test sets `go`: the test picks when the writer dies.
+    def __init__(self) -> None:
+        self.go = threading.Event()
+
     def add(self, rows: Table) -> None:
+        assert self.go.wait(TIMEOUT)
         raise _Fatal
 
 
-def test_a_dying_diagnostics_writer_fails_the_sessions_live_tables(
+def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     *,
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
@@ -2035,8 +2040,10 @@ def test_a_dying_diagnostics_writer_fails_the_sessions_live_tables(
     monkeypatch.setattr(threading, "excepthook", escaped.append)  # the death still escapes
     core = massive_session._core
     writer = core.diagnostics.thread
-    core.diagnostics._streams.publisher = cast("BlinkPublisher", _FatalPublisher())
-    result = stream_query(massive_session).append_only()  # its row kills the writer
+    publisher = _FatalPublisher()
+    core.diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    result = stream_query(massive_session).append_only()  # its row waits for `go`
+    publisher.go.set()  # the row kills the writer only now, after the call returned
     writer.join(TIMEOUT)
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
@@ -2045,6 +2052,37 @@ def test_a_dying_diagnostics_writer_fails_the_sessions_live_tables(
     assert text.endswith("this table no longer updates")
     massive_session.release(result)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)  # the death still escapes
+    core = massive_session._core
+    writer = core.diagnostics.thread
+    publisher = _FatalPublisher()
+    publisher.go.set()
+    core.diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    require_unfailed = core._require_unfailed
+
+    def after_the_death(spec: DatasetSpec, stream_id: int) -> None:
+        writer.join(TIMEOUT)  # the stream's opening row has killed the writer by now
+        require_unfailed(spec, stream_id)
+
+    monkeypatch.setattr(core, "_require_unfailed", after_the_death)
+    with pytest.raises(
+        dm.MassiveError,
+        match=rf"^test\.trades stream 1 failed: {re.escape(label(massive_session))}: its "
+        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates$",
+    ):
+        stream_query(massive_session).append_only()
+    assert not writer.is_alive()
+    assert [args.exc_type for args in escaped] == [_Fatal]
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the call released its hold
 
 
 def test_a_thread_of_a_freed_session_dies_quietly() -> None:
