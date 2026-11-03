@@ -157,9 +157,13 @@ class SymbolRows:
             (`SessionCore.dataset_schema`), in the order the transport returned them; empty
             when Massive has no data for the symbol (HTTP 404 on its first request, or no row
             in the range).
+        source: Where the rows came from, as users read it: `"REST"`, `"flat files"`, or
+            `"flat files and REST"` when REST served the days the files lack; empty when the
+            maker did not say.
     """
 
     table: Table
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)

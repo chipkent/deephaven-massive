@@ -32,6 +32,7 @@ from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import (
     CONNECTION_KEYS,
     CONNECTIONS,
+    FLAT_FILES_AND_REST,
     GAPS_SHOWN,
     QUERY_SHOWN,
     RATE_LIMIT_KEYS,
@@ -61,6 +62,12 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.symbol_read_rows import (
+    SYMBOL_READ_KEYS,
+    SYMBOL_READS,
+    SymbolReadRow,
+    SymbolReadState,
+)
 from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
@@ -119,6 +126,7 @@ def test_column_sets() -> None:
         "Path",
         "Recency",
         "RowsPublished",
+        "Loading",
         "RequestsPerCycle",
         "State",
         "Error",
@@ -258,8 +266,13 @@ def _diagnostics(exec_ctx: ExecutionContext) -> Diagnostics:
 
 @pytest.mark.parametrize(
     ("schema", "keys"),
-    [(CONNECTIONS, CONNECTION_KEYS), (STREAMS, STREAM_KEYS), (RATE_LIMITS, RATE_LIMIT_KEYS)],
-    ids=["connections", "streams", "rate_limits"],
+    [
+        (CONNECTIONS, CONNECTION_KEYS),
+        (STREAMS, STREAM_KEYS),
+        (RATE_LIMITS, RATE_LIMIT_KEYS),
+        (SYMBOL_READS, SYMBOL_READ_KEYS),
+    ],
+    ids=["connections", "streams", "rate_limits", "symbol_reads"],
 )
 def test_each_table_has_its_schemas_columns_keys_first(
     dh_exec_ctx: ExecutionContext, schema: Schema, keys: tuple[str, ...]
@@ -276,7 +289,12 @@ def test_each_table_has_its_schemas_columns_keys_first(
 def test_the_tables_are_not_input_tables(dh_exec_ctx: ExecutionContext) -> None:
     # Nobody can edit them in the web UI: no table carries the input-table attribute.
     diagnostics = _diagnostics(dh_exec_ctx)
-    for table in (diagnostics.connections, diagnostics.streams, diagnostics.rate_limits):
+    for table in (
+        diagnostics.connections,
+        diagnostics.streams,
+        diagnostics.rate_limits,
+        diagnostics.symbol_reads,
+    ):
         assert not isinstance(table, InputTable)
         assert not table.j_table.hasAttribute("InputTable")
     diagnostics.release()
@@ -1282,9 +1300,62 @@ def test_pascal_case(path: str, expected: str) -> None:
     assert pascal_case(path) == expected
 
 
+# --- A followed read's row ----------------------------------------------------------------------
+
+
+def test_a_followed_read_row_shows_its_loading_count() -> None:
+    assert as_row(_stream(loading=2))["Loading"] == 2
+    assert as_row(STREAM)["Loading"] is None
+
+
+def test_a_followed_read_update_sets_its_loading_and_transport() -> None:
+    row = _stream(transport=Transport.REST)
+    updated = StreamUpdate(loading=3, transport=FLAT_FILES_AND_REST).apply(row)
+    assert (updated.loading, updated.transport) == (3, FLAT_FILES_AND_REST)
+    assert StreamUpdate().apply(updated) == updated
+
+
+# --- m.symbol_reads() -------------------------------------------------------------------------
+
+_SYMBOL_READ = SymbolReadRow(
+    stream_id=7,
+    symbol="AAPL",
+    dataset="stocks.bars",
+    state=SymbolReadState.QUEUED,
+    added_at=1_000,
+    updated_at=2_000,
+)
+
+
+def _symbol_read(symbol: str = "AAPL", **changes: object) -> SymbolReadRow:
+    return dataclasses.replace(_SYMBOL_READ, symbol=symbol, **cast("dict[str, Any]", changes))
+
+
+def _reads(to_list: Rows, diagnostics: Diagnostics) -> list[tuple[int, str, str]]:
+    return sorted(
+        (r["StreamId"], r["Symbol"], r["State"]) for r in to_list(diagnostics.symbol_reads)
+    )
+
+
+def test_symbol_reads_show_the_latest_row_of_each_key(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    assert diagnostics.symbol_reads.is_refreshing
+    diagnostics.write(_symbol_read())
+    diagnostics.write(_symbol_read("MSFT"))
+    diagnostics.write(_symbol_read(stream_id=8))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    diagnostics.write(_symbol_read(state=SymbolReadState.LOADING, attempts=1))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    expected = [(7, "AAPL", "LOADING"), (7, "MSFT", "QUEUED"), (8, "AAPL", "QUEUED")]
+    assert _reads(dh_to_pylist, diagnostics) == expected
+    diagnostics.release()
+
+
 def test_the_tables_are_created_under_the_update_graphs_shared_lock(
     dh_exec_ctx: ExecutionContext, blink_creations: list[bool]
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
-    assert blink_creations == [True, True, True]
+    assert blink_creations == [True, True, True, True]
     diagnostics.release()

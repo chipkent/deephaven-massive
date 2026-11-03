@@ -38,6 +38,10 @@ worker threads after it (`massive #1 call-7 rest_0`), so every line of one call 
 With `wait=False` a static verb checks its arguments on the calling thread, then returns at once
 a refreshing table that a library thread of its own fills in one update when the download
 completes (`open_read` in `_tables/background_read.py`); that thread logs the call's outcome.
+A `history()` whose symbols are a refreshing table follows it instead: the result is always
+refreshing, each symbol added to the table is read over the call's fixed window and lands
+whole, and each symbol removed leaves it (`open_followed_read` in `_tables/followed_read.py`,
+run by the session's follow coordinator).
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -87,6 +91,7 @@ from deephaven_massive._enums import (
     AssetClass,
     HistorySource,
     PollMode,
+    Reread,
     Timespan,
     _require_enum,
 )
@@ -97,6 +102,7 @@ from deephaven_massive._errors import (
     raises_through,
 )
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
     column_table,
@@ -104,11 +110,18 @@ from deephaven_massive._tables.columns import (
     recency_note,
     rest_recency_note,
 )
-from deephaven_massive._tables.diagnostics import shown_query
+from deephaven_massive._tables.diagnostics import shown_query, utc_text
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
+from deephaven_massive._tables.follow_coordinator import FirstRead
+from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.time_text import deephaven_time_text
-from deephaven_massive._tables.transports import FlatFileTransport, RestTransport, StreamTransport
+from deephaven_massive._tables.transports import (
+    FlatFileTransport,
+    RestTransport,
+    StreamTransport,
+    SymbolFailure,
+)
 from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
     latest_rows_since_added,
@@ -151,6 +164,9 @@ _FROM_REQUEST: Final = frozenset(
 )
 """The arguments a query's repr writes as its request holds them, normalized: the symbols sorted
 and de-duplicated, the time bounds parsed. They keep these names in every dataset method."""
+
+_FAILED_SHOWN: Final = 5
+"""The most failed call-time symbols the WARNING of a followed `history(wait=True)` names."""
 
 SYMBOLS_SHOWN: Final = 5
 """The most symbols a query's repr lists; `… (N more)` stands for the rest."""
@@ -1337,6 +1353,9 @@ class HistoryQuery(QueryBase):
         _check_rest_history,
         RestTransport.history,
         FlatFileTransport.history,
+        RestTransport.history_by_symbol,
+        FlatFileTransport.history_by_symbol,
+        open_followed_read,
         _wait,
     )
     def history(
@@ -1345,48 +1364,63 @@ class HistoryQuery(QueryBase):
         end: DateLike | None = None,
         *,
         source: HistorySource = HistorySource.AUTO,
+        reread: Reread = Reread.ALWAYS,
         wait: bool = True,
     ) -> Table:
         """Return the dataset's rows over a range of whole days or of exact instants.
 
         Dates (`"2025-03-03"`, a `date`, `dh_today()`) are whole days in the asset class's time
         zone, both ends included; aware datetimes and instants are exact, the end excluded
-        (README.md#start-and-end). A bar is returned only when its whole window lies in the
-        range and has ended (README.md#bars). Rows come from REST or the flat files; under
-        `AUTO`, the days whose flat files are missing, and files the plan lacks, are read
-        from REST, so the call fails only when no source can serve it
-        (README.md#history-sources). The table's description names the source and why. A
-        symbol table is read once, now. A bar with an unexpected stamp is served, with a
-        WARNING, never refused. History is past data, so `MassiveConfig.delayed_subscriptions`
-        does not affect it (README.md#real-time-or-delayed).
+        (README.md#start-and-end). A bar is returned only when its whole window lies in the range
+        and has ended (README.md#bars). Rows come from REST or the flat files; under `AUTO`, the
+        days whose flat files are missing, and files the plan lacks, are read from REST, so the call
+        fails only when no source can serve it (README.md#history-sources). The table's description
+        names the source and why. A static symbol table is read once, now. A refreshing one is
+        followed: the result is a refreshing table that holds, for each symbol now in the table, the
+        complete rows of its latest read over this call's range (fixed now, so `end=None` means
+        through this instant), landing whole in one update; a symbol removed from the table leaves
+        the result in the same update. `AUTO` then reads REST whenever REST can serve the request. A
+        failure of one symbol leaves the others: a 404 gives it no rows, a failure that may pass is
+        retried 1, 5, and 15 minutes later, and any other fails it; `m.symbol_reads()` shows each
+        symbol's state (README.md#history-of-a-watchlist). A bar with an unexpected stamp is served,
+        with a WARNING, never refused. History is past data, so
+        `MassiveConfig.delayed_subscriptions` does not affect it (README.md#real-time-or-delayed).
 
         Args:
             start: The first day, or the first instant included (`DateLike`).
             end: The last day included, or the first instant excluded; None reads through now.
             source: `AUTO` (the default) picks; `REST` or `FLAT_FILES` forces one.
+            reread: For a refreshing symbol table, whether a symbol that returns after its row
+                was removed is downloaded again (`dm.Reread.ALWAYS`, the default) or gets its
+                earlier download back with no request (`NEVER`); ignored otherwise.
             wait: True (the default) blocks; False returns a table a background read fills.
-                See README.md#verb-arguments.
+                For a refreshing symbol table, True blocks until each symbol in it has had one
+                read and False returns at once; the result is refreshing either way. See
+                README.md#verb-arguments.
 
         Returns:
             A static table in the dataset's schema, empty when no row lies in the range; with
-            `wait=False`, a refreshing table filled once in the background.
+            `wait=False`, a refreshing table filled once in the background; for a refreshing
+            symbol table, a refreshing table that follows it.
 
         Raises:
-            TypeError: If `source` is not a `dm.HistorySource`, a bound is not `DateLike`, or
-                `wait` is not a `bool`.
+            TypeError: If `source` is not a `dm.HistorySource`, `reread` is not a `dm.Reread`, a
+                bound is not `DateLike`, or `wait` is not a `bool`.
             ValueError: Before any request: a naive, unparseable, or `NaT` bound; a date mixed
                 with a datetime; `start` after `end` or after now; an empty or unreadable symbol
                 table; futures session dates with a `session_end_date` filter; a source that
                 cannot serve the request (every violated condition is listed); or a call on a
                 Deephaven update-graph thread.
             AuthenticationError: If Massive or S3 rejects the credentials. With `wait=False`
-                every request error fails the table instead.
+                every request error fails the table instead; a followed table fails on it too.
             EntitlementError: If the plan does not include the data (HTTP 403, or S3's 403
                 under `FLAT_FILES` or when REST cannot serve the read).
             MassiveError: If the session is closed; a request fails; adjusted bars echo the
                 other basis; a symbol's later page answers HTTP 404; or a day's flat file is not
                 published yet (no later day's file exists), or a week or more old and absent,
-                under `FLAT_FILES` or when REST cannot serve the read.
+                under `FLAT_FILES` or when REST cannot serve the read. For a refreshing symbol
+                table with `wait=True`, only when every symbol in it failed, with the first
+                symbol's error.
 
         Example:
             ::
@@ -1394,9 +1428,14 @@ class HistoryQuery(QueryBase):
                 day = m.crypto.trades("X:BTCUSD").history("2026-01-02", "2026-01-02")
         """
         background = not _wait(wait)
+        again = _require_enum(reread, Reread, "reread")
+        rereads = "" if again is Reread.ALWAYS else f", reread={again!r}"
         return self._logged_call(
-            f"history({start!r}, {end!r}, source={source!r}{', wait=False' if background else ''})",
-            lambda call: self._history(start, end, source=source, call=call, wait=wait),
+            f"history({start!r}, {end!r}, source={source!r}{rereads}"
+            f"{', wait=False' if background else ''})",
+            lambda call: self._history(
+                start, end, source=source, reread=again, call=call, wait=wait
+            ),
             background=background,
         )
 
@@ -1406,18 +1445,21 @@ class HistoryQuery(QueryBase):
         end: DateLike | None,
         *,
         source: HistorySource,
+        reread: Reread,
         call: int,
         wait: bool,
     ) -> Table:
         """Run `history()` as call `call`; see `history` for everything else.
 
         Everything that needs no request is checked here, on the calling thread, before the
-        transport call runs or a background read starts.
+        transport call runs or a background read starts. A refreshing symbol table is followed
+        (`_followed_history`).
 
         Args:
             start: As `history` takes it.
             end: As `history` takes it.
             source: As `history` takes it.
+            reread: As `history` takes it.
             call: The call id.
             wait: As `history` takes it.
 
@@ -1432,6 +1474,10 @@ class HistoryQuery(QueryBase):
             else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
         )
         symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
+            return self._followed_history(
+                call, symbols, first=first, last=last, source=chosen, reread=reread, wait=wait
+            )
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
         # A dataset with a path per symbol class takes its days from its symbols' class.
@@ -1463,6 +1509,159 @@ class HistoryQuery(QueryBase):
         return self._flat_history(
             call, request, window, dates=dates, wait=wait, note=note, forced=forced
         )
+
+    def _followed_history(
+        self,
+        call: int,
+        symbols: SymbolTable,
+        *,
+        first: date | datetime,
+        last: date | datetime | None,
+        source: HistorySource,
+        reread: Reread,
+        wait: bool,
+    ) -> Table:
+        """Run a `history()` call that follows a refreshing symbol table.
+
+        The table's current rows are checked now, as a live verb checks them, and its call-time
+        symbols fix the window's day zones; the window itself is fixed for every later read.
+        Under `AUTO` the source is REST whenever REST can serve the request, whatever the
+        number of symbols, so one added symbol never re-reads the flat files of the whole range;
+        otherwise flat files. With `wait=True` the call-time symbols are read now, as one read;
+        the call raises only when every one of them failed, and logs one WARNING when some did.
+
+        Args:
+            call: The call id.
+            symbols: The boxed refreshing table.
+            first: The parsed `start`.
+            last: The parsed `end`, or None for the call's instant.
+            source: As `history` takes it.
+            reread: As `history` takes it.
+            wait: As `history` takes it.
+
+        Returns:
+            The refreshing result (`open_followed_read`).
+
+        Raises:
+            ValueError: If no source can serve the request, as `choose_source` and
+                `_check_rest_history` say.
+        """
+        spec, core = self._spec, self._core
+        call_time = _read_symbol_table(core, spec, symbols, query=repr(self), live=True)
+        request = replace(self._request, start=first, end=last, symbols=call_time)
+        window = history_window(
+            spec, request, start=first, end=last, classes=map(symbol_class, call_time)
+        )
+        span = _window_text(first, last, window.now)
+        if source is HistorySource.REST:
+            self._check_rest_history()
+            plan = self._rest_plan(call, request, window=window)
+            note = "Read from REST: requested with source=dm.HistorySource.REST."
+        elif source is HistorySource.AUTO and rest_history_problem(spec, request) is None:
+            plan = self._rest_plan(call, request, window=window)
+            note = (
+                "Read from REST: AUTO reads a followed symbol table from REST, which can serve it."
+            )
+        else:
+            choose_source(spec, request, requested=source, config=core.config)
+            files = core.flat_file_transport()
+            dates = partition_dates(spec, window)
+            forced = source is HistorySource.FLAT_FILES
+            plan = FollowPlan(
+                Transport.FLAT_FILES,
+                one_scan=True,
+                read=lambda names, stop: files.history_by_symbol(
+                    spec,
+                    request,
+                    window,
+                    symbols=names,
+                    dates=dates,
+                    call=call,
+                    forced=forced,
+                    stop=stop,
+                ),
+            )
+            note = (
+                "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES."
+                if forced
+                else "Read from flat files: AUTO reads a followed symbol table from flat files, "
+                f"since {rest_history_problem(spec, request)}."
+            )
+        logger.info("%s history: follows its symbol table; %s", spec.name, note)
+        loaded = self._first_read(plan, call_time) if wait and call_time else None
+        return open_followed_read(
+            core,
+            spec=spec,
+            call=call,
+            query=repr(self),
+            symbol_table=symbols.table,
+            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
+            reread=reread,
+            plan=plan,
+            note=f"Follows its symbol table over {span}. {note}",
+            first=loaded,
+        )
+
+    def _rest_plan(self, call: int, request: Request, *, window: HistoryWindow) -> FollowPlan:
+        """Return the plan of a followed `history()` that reads REST, its parameters checked.
+
+        Args:
+            call: The call id.
+            request: The request with the call-time symbols and the parsed bounds.
+            window: The call's window.
+
+        Returns:
+            One read per symbol (`RestTransport.history_by_symbol`).
+        """
+        spec = self._spec
+        rest = self._core.rest_transport()
+        if not window.empty:  # a parameter error raises now, with symbols or without
+            rest.check_history(spec, request, window)
+        return FollowPlan(
+            Transport.REST,
+            one_scan=False,
+            read=lambda names, stop: rest.history_by_symbol(
+                spec, request, window, symbols=names, call=call, stop=stop
+            ),
+        )
+
+    def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...]) -> FirstRead:
+        """Read the call-time symbols of a followed `history(wait=True)` now, as one read.
+
+        Args:
+            plan: How the symbols are read.
+            call_time: The call-time symbols; at least one.
+
+        Returns:
+            Each symbol's outcome, with when the read began and how long it took.
+
+        Raises:
+            MassiveError: The first symbol's error, when every symbol failed. A failure of
+                every symbol alike (a rejected key, a closed session) propagates from the read.
+        """
+        began_at = int(follow_coordinator.CLOCK.time() * 1e9)
+        started = time.monotonic()
+        outcomes = plan.read(call_time, self._core.read_stop())
+        failed = {
+            name: outcome
+            for name, outcome in outcomes.items()
+            if isinstance(outcome, SymbolFailure)
+        }
+        if len(failed) == len(call_time):
+            raise failed[call_time[0]].error
+        if failed:
+            logger.warning(
+                "%s history: %d of the %d symbols of the call failed and are left out of the "
+                "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
+                self._spec.name,
+                len(failed),
+                len(call_time),
+                "; ".join(
+                    f"{name}: {failure_text(outcome.error)}"
+                    for name, outcome in list(failed.items())[:_FAILED_SHOWN]
+                ),
+            )
+        return FirstRead(outcomes, began_at, time.monotonic() - started)
 
     def _flat_history(
         self,
@@ -1568,6 +1767,26 @@ class HistoryQuery(QueryBase):
         schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return dh_arrow.to_table(schema.arrow_schema().empty_table())
+
+
+def _window_text(first: date | datetime, last: date | datetime | None, now: datetime) -> str:
+    """Write a followed `history()`'s fixed window for its table description.
+
+    Args:
+        first: The parsed `start`.
+        last: The parsed `end`, or None for the call's instant.
+        now: The call's instant (`HistoryWindow.now`).
+
+    Returns:
+        Such as `"2026-10-01 through 2026-11-02T14:05:12Z"`: a date as itself, an instant
+        as UTC text to the second, and an open end as the call's instant.
+    """
+
+    def shown(value: date | datetime) -> str:
+        return utc_text(value.timestamp()) if isinstance(value, datetime) else value.isoformat()
+
+    end = utc_text(now.timestamp()) if last is None else shown(last)
+    return f"{shown(first)} through {end}"
 
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery):

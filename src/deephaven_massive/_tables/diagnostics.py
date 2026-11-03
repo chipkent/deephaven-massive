@@ -1,15 +1,23 @@
-"""The live diagnostics tables behind `m.connections()`, `m.streams()`, and `m.rate_limits()`.
+"""The live diagnostics tables: the session's connections, streams, rate limits, and symbol reads.
 
-Each is a keyed table that the library writes and users read: a blink table that the
-library's writer adds rows to through its publisher (`blink_publisher`), and the latest row of
-each key of it (`last_by` on the keys), which a later row of the key replaces:
+They are the tables behind `m.connections()`, `m.streams()`, `m.rate_limits()`, and
+`m.symbol_reads()`. Each is a keyed table that the library writes and users read: a blink
+table that the library's writer adds rows to through its publisher (`blink_publisher`), and
+the latest row of each key of it (`last_by` on the keys), which a later row of the key
+replaces:
 
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
-  table, and per background read (`wait=False`), told apart by `Kind`, with the `repr` of the
-  query that opened it in `Query`. Keyed by `StreamId`.
+  table, per background read (`wait=False`), and per followed read (a `history()` that follows
+  a refreshing symbol table), told apart by `Kind`, with the `repr` of the query that opened it
+  in `Query`. Keyed by `StreamId`.
+- **symbol_reads**: one row per symbol of each followed read: whether it is queued, loading,
+  waiting to retry, done, failed, removed, stopped, or closed, with its source, its rows, its
+  attempts, and its latest error. Keyed by `StreamId` and `Symbol`. The session's follow
+  coordinator (`_tables/follow_coordinator.py`) makes the rows (`_tables/symbol_read_rows.py`)
+  and the session core queues them (`SessionCore.write_symbol_reads`).
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -30,9 +38,9 @@ keeps its last row), as the session's history of what it opened.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. Users never get the tables themselves: `m.connections()`,
-`m.streams()`, and `m.rate_limits()` return a view of one, tracked like a live result
-(`SessionCore.diagnostics_view`), which keeps the session alive and current while it is held
-and keeps the table, with its final rows, after the scope is released. One daemon writer
+`m.streams()`, `m.rate_limits()`, and `m.symbol_reads()` return a view of one, tracked like a
+live result (`SessionCore.diagnostics_view`), which keeps the session alive and current while
+it is held and keeps the table, with its final rows, after the scope is released. One daemon writer
 thread per session adds every row: the rest of the library hands it immutable row snapshots
 through a queue, so no caller, reaper, or flush thread ever waits on the update graph for
 bookkeeping, and nothing is written from a Deephaven listener callback. The writer adds
@@ -78,6 +86,12 @@ from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
 from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive._tables.symbol_read_rows import (
+    SYMBOL_READ_KEYS,
+    SYMBOL_READS,
+    SymbolReadRow,
+    symbol_read_values,
+)
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -95,6 +109,7 @@ __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
     "DROPPED_COUNT_INTERVAL",
+    "FLAT_FILES_AND_REST",
     "GAPS_SHOWN",
     "QUERY_SHOWN",
     "RATE_LIMITS",
@@ -166,7 +181,9 @@ class StreamKind(StrEnum):
         STREAM: A WebSocket stream, shared by every live verb of an equal query.
         POLL: A `poll()` table, which re-reads a REST dataset on an interval.
         READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
-            table fills once, when its download completes.
+            table fills once, when its download completes; or a followed read, a `history()`
+            of a refreshing symbol table, whose table gains and drops each symbol's rows as the
+            symbol table changes.
     """
 
     STREAM = "stream"
@@ -179,6 +196,8 @@ class StreamState(StrEnum):
 
     `RUNNING` is a stream or `poll()` table that publishes. A background read is `LOADING`
     while it downloads and `DONE` once its rows have landed; `DONE` is final, like `FAILED`.
+    A followed read is `LOADING` while any of its current symbols is queued, loading, or
+    waiting to retry, and `RUNNING` once every one has landed or failed; it keeps following.
     `RELEASED` means the library holds no result of the stream any more; the stream keeps
     publishing until its blink table dies (a derived table or an open panel may hold it), and a
     read released while loading keeps loading for such a table, becoming `DONE` if its rows
@@ -226,6 +245,12 @@ class NotePart(StrEnum):
     LEFT_OUT = "left_out"
     """Symbols the latest good `poll()` cycle left out: no path of theirs takes a parameter the
     poll sends, or Massive answered HTTP 404 for them."""
+    RETRYING_SYMBOLS = "retrying_symbols"
+    """A followed read's symbols whose read failed in a way that may pass, read again later,
+    grouped by cause."""
+    FAILED_SYMBOLS = "failed_symbols"
+    """A followed read's symbols whose read failed for good, grouped by cause; deleting and
+    re-adding a symbol's row reads it again."""
 
 
 _NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
@@ -314,6 +339,7 @@ STREAMS: Final = Schema(
             ("Path", _S),
             ("Recency", _S),
             ("RowsPublished", _L),
+            ("Loading", _I),
             ("RequestsPerCycle", _I),
             ("State", _S),
             ("Error", _S),
@@ -327,6 +353,7 @@ STREAMS: Final = Schema(
 
 STREAM_KEYS: Final = ("StreamId",)
 """The key column of `m.streams()`."""
+
 
 RATE_LIMITS: Final = Schema(
     "rate_limits",
@@ -426,7 +453,9 @@ class StreamRow:
             stream reads one channel).
         transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`, and for a
             background read the source it reads, `Transport.REST` or `Transport.FLAT_FILES`;
-            the table shows its label, `WebSocket`, `REST`, or `flat files`.
+            the table shows its label, `WebSocket`, `REST`, or `flat files`. A followed read
+            whose flat-file reads also read days from REST holds the text
+            `FLAT_FILES_AND_REST` instead.
         host: The serving host; null for a background read.
         path: The cluster path; null for a background read.
         recency: Whether the table's data is real-time or delayed: a stream's host's
@@ -436,7 +465,10 @@ class StreamRow:
             `MassiveConfig.delayed_subscriptions`; a delayed label on any other fails the
             table), and `UNKNOWN` until a label shows either; null for reference, economy,
             and partner data and for a background read. `UNKNOWN` is never real-time.
-        rows_published: Rows published so far; a background read's, once its rows land.
+        rows_published: Rows published so far; a background read's, once its rows land; a
+            followed read's, the rows now in its result.
+        loading: A followed read's symbols that are queued, loading, or waiting to retry;
+            None (null) on every other row.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
         error: Why the stream stopped, once it has; null while it runs, when the `Error`
@@ -470,11 +502,12 @@ class StreamRow:
     symbols: str
     held_results: int
     deferred: int = 0
-    transport: Transport
+    transport: Transport | str
     host: str | None = None
     path: str | None = None
     recency: Recency | None = None
     rows_published: int = 0
+    loading: int | None = None
     requests_per_cycle: int | None = None
     state: StreamState = StreamState.RUNNING
     error: str | None = None
@@ -493,12 +526,12 @@ class StreamRow:
 class StreamUpdate:
     """A change to one stream's diagnostics row, for `SessionCore.update_streams`.
 
-    Built by the WebSocket transport's flush thread after each flush, and by a `poll()` table's
-    poller after each cycle, and by a connection's loop thread; every field left as None keeps
-    the row's current value. It never changes `State` or the failure: only
-    `SessionCore.fail_stream` fails a stream. A warning is one named part of the `Error`
-    (`notes`): an update sets or clears only the parts it names, so the other sources' warnings
-    stay (for example, an outage's note leaves the options-cap warning in place).
+    Built by the WebSocket transport's flush thread after each flush, by a `poll()` table's poller
+    after each cycle, by a connection's loop thread, and by the follow coordinator for a followed
+    read; every field left as None keeps the row's current value. It never changes `State` or the
+    failure: only `SessionCore.fail_stream` fails a stream. A warning is one named part of the
+    `Error` (`notes`): an update sets or clears only the parts it names, so the other sources'
+    warnings stay (for example, an outage's note leaves the options-cap warning in place).
 
     Attributes:
         rows_published: The stream's total rows published so far.
@@ -514,6 +547,8 @@ class StreamUpdate:
         clear_skipped: True to set that text back to null; takes precedence over `skipped`.
         gap: A gap that has just ended, `(start, end)` in epoch nanoseconds, appended to the
             row's `gaps`; None for none. A gap is recorded on a stopped row too: it is history.
+        loading: A followed read's count of symbols queued, loading, or waiting to retry.
+        transport: A followed read's sources so far (`StreamRow.transport`).
 
     `SchemaDrift` is not set here: `SessionCore.record_stream_drift` records a stream's drift
     and writes its row in one step, so concurrent reports cannot leave an older text behind.
@@ -529,6 +564,8 @@ class StreamUpdate:
     skipped: str | None = None
     clear_skipped: bool = False
     gap: tuple[int, int] | None = None
+    loading: int | None = None
+    transport: Transport | str | None = None
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
@@ -559,6 +596,8 @@ class StreamUpdate:
             if self.clear_skipped
             else (row.skipped if self.skipped is None else self.skipped),
             gaps=row.gaps if self.gap is None else (*row.gaps, self.gap),
+            loading=row.loading if self.loading is None else self.loading,
+            transport=row.transport if self.transport is None else self.transport,
         )
 
     def _notes(self, row: StreamRow) -> tuple[tuple[NotePart, str], ...]:
@@ -579,6 +618,11 @@ class StreamUpdate:
             else:
                 notes[part] = text
         return tuple(sorted(notes.items(), key=lambda item: _NOTE_ORDER[item[0]]))
+
+
+FLAT_FILES_AND_REST: Final = "flat files and REST"
+"""The `Transport` text of a followed read whose flat-file read also read days from REST: the
+files of some days were missing, and REST served them."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -620,7 +664,7 @@ class RateLimitRow:
     updated_at: int
 
 
-def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
+def as_row(row: ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
     A `Transport` value becomes its user-facing label (`TRANSPORT_LABELS`), so the tables spell
@@ -629,12 +673,17 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     with `"; "`, or is null when there is none; a stopped stream's shows only why it stopped.
     A stream's `Gaps` is its `gaps` as `gaps_text` writes them, whatever its state.
 
+    A symbol-read row is written by `symbol_read_values`.
+
     Args:
-        row: A connection, stream, or rate-limit row.
+        row: A connection, stream, rate-limit, or symbol-read row.
 
     Returns:
-        A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`.
+        A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, `RATE_LIMITS`, or
+        `SYMBOL_READS`.
     """
+    if isinstance(row, SymbolReadRow):
+        return symbol_read_values(row)
     shown = {
         pascal_case(f.name): _shown(getattr(row, f.name))
         for f in fields(row)
@@ -1017,7 +1066,7 @@ RateLimitPull: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | N
 _RATE_LIMITS_CHANGED: Final = object()
 """The queue item that asks the writer to pull fresh `m.rate_limits()` rows."""
 
-_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event | object"
+_Item: TypeAlias = "ConnectionRow | StreamRow | SymbolReadRow | threading.Event | object"
 
 
 class _KeyedTable:
@@ -1070,7 +1119,7 @@ class _KeyedTable:
         )
         self.table: Final = blink.last_by(list(keys))
 
-    def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow]) -> None:
+    def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow]) -> None:
         """Add rows with one conversion and one `add`, skipping rows that do not fit.
 
         The whole batch is converted at once; only if that fails is each row converted on its
@@ -1111,7 +1160,7 @@ def _log_shut_down(name: str) -> None:
 
 
 class Diagnostics:
-    """The session's three diagnostics tables and the single thread that writes them.
+    """The session's four diagnostics tables and the single thread that writes them.
 
     Created by `SessionCore` on the caller thread, inside the session's execution context, so
     the tables live in a session-owned liveness scope. A daemon writer (`QueueWorker`) takes
@@ -1145,6 +1194,7 @@ class Diagnostics:
         "_released",
         "_scope",
         "_streams",
+        "_symbol_reads",
         "_writer",
     )
 
@@ -1156,7 +1206,7 @@ class Diagnostics:
         release_later: Callable[[LivenessScope], None],
         on_death: Callable[[BaseException], None] | None = None,
     ) -> None:
-        """Create the three tables inside a new session-owned scope and start the writer.
+        """Create the four tables inside a new session-owned scope and start the writer.
 
         Each blink table is created under the update graph's shared lock (`blink_publisher`),
         so this waits for a running update cycle to end; it must not run on an update-graph
@@ -1199,6 +1249,12 @@ class Diagnostics:
                     RATE_LIMIT_KEYS,
                     release_later=release_later,
                 )
+                self._symbol_reads = _KeyedTable(
+                    f"{name} {SYMBOL_READS.name}",
+                    SYMBOL_READS,
+                    SYMBOL_READ_KEYS,
+                    release_later=release_later,
+                )
             self._writer: QueueWorker[_Item] = QueueWorker(
                 exec_ctx,
                 name,
@@ -1229,11 +1285,16 @@ class Diagnostics:
         return self._rate_limits.table
 
     @property
+    def symbol_reads(self) -> Table:
+        """The table behind `m.symbol_reads()`: the latest row per key (`SYMBOL_READ_KEYS`)."""
+        return self._symbol_reads.table
+
+    @property
     def thread(self) -> threading.Thread:
         """The writer thread."""
         return self._writer.thread
 
-    def write(self, row: ConnectionRow | StreamRow) -> None:
+    def write(self, row: ConnectionRow | StreamRow | SymbolReadRow) -> None:
         """Queue one row's full current state; it replaces the row with the same key.
 
         Never blocks. After `release()` the row is not queued at all.
@@ -1362,6 +1423,7 @@ class Diagnostics:
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
+        symbol_reads: dict[tuple[int, str], SymbolReadRow] = {}
         added: list[threading.Event] = []
         # The rows' time-driven change is due: a queue too busy for the timed wait to expire
         # must not starve that pull.
@@ -1374,6 +1436,8 @@ class Diagnostics:
                 streams[item.stream_id] = item
             elif isinstance(item, ConnectionRow):
                 connections[item.transport, item.asset_class, item.family] = item
+            elif isinstance(item, SymbolReadRow):
+                symbol_reads[item.stream_id, item.symbol] = item
             else:
                 pull = True
         try:
@@ -1381,6 +1445,7 @@ class Diagnostics:
                 (self._streams, lambda: list(streams.values())),
                 (self._connections, lambda: list(connections.values())),
                 (self._rate_limits, self._pull_rate_limits if pull else list),
+                (self._symbol_reads, lambda: list(symbol_reads.values())),
             ):
                 try:  # one table's failure never costs the others their rows
                     table.add(rows())
