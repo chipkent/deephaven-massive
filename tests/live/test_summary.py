@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
+
 from tests._live import plans, summary
 
 _SETTLED = {
@@ -110,3 +114,44 @@ def test_a_question_with_a_failed_test_is_not_verified() -> None:
         "1 not verified (failed or skipped):",
         "    7",
     ]
+
+
+def _marker_items(source: str) -> set[str]:
+    """Return the items named by the `verifies` and `settles` markers in a module's source."""
+    items: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"verifies", "settles"}
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "mark"
+        ):
+            items.update(
+                arg.value
+                for arg in node.args
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            )
+    return items
+
+
+def test_marker_items_reads_both_markers_and_ignores_other_marks() -> None:
+    source = (
+        "import pytest\n"
+        "@pytest.mark.verifies('2', '3')\n"
+        "@pytest.mark.settles('52')\n"
+        "@pytest.mark.needs('stocks:basic')\n"
+        "def test_x(): ...\n"
+    )
+    assert _marker_items(source) == {"2", "3", "52"}
+
+
+def test_every_marked_item_is_listed_in_the_verification_items() -> None:
+    root = Path(__file__).resolve().parents[2]
+    items_page = (root / "docs/dev/verification-items.md").read_text()
+    listed = set(re.findall(r"^- \*\*(\d+)\.\*\*", items_page, re.MULTILINE))
+    marked: set[str] = set()
+    for path in sorted((root / "tests").rglob("test_*_integration.py")):
+        marked |= _marker_items(path.read_text())
+    assert marked, "no verifies or settles marker was found"
+    assert marked <= listed, f"unlisted items: {sorted(marked - listed, key=int)}"

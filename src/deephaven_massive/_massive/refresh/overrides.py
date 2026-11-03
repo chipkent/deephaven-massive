@@ -118,7 +118,7 @@ class Unit:
         unit: The unit the integer counts since the Unix epoch. `None` means the value is not
             an epoch integer: a field stays a plain `long`, and a parameter is sent as date or
             date-time text (`ParamKind.DATE`).
-        reason: The evidence: the documentation's wording and sample, or the design's table.
+        reason: The evidence: the documentation's wording and sample, or a live check's finding.
         verified: False when the evidence is the vendor's word alone, with no sample that
             confirms the magnitude; such a unit is still used, and a live test retires it.
     """

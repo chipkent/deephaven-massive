@@ -1,13 +1,13 @@
 ---
 name: plan-parallel-prs
-description: "Use this skill whenever you coordinate work split across several agents or PRs at once: planning which agent does what, writing their briefs, setting a merge order, running their reviews, or reporting to the owner which PRs are ready. That includes requests such as \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", and \"which PRs can merge?\". It maps where the pieces overlap, groups them into PRs, stacks overlapping PRs in a set merge order, reserves DESIGN.md numbers, gives every brief the same checklist, and runs one blockers-only review per PR. Not for an agent doing one PR (AGENTS.md \"Working in parallel\" covers that), and not for writing a single PR description."
+description: "Use this skill whenever you coordinate work split across several agents or PRs at once: planning which agent does what, writing their briefs, setting a merge order, running their reviews, or reporting to the owner which PRs are ready. That includes requests such as \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", and \"which PRs can merge?\". It maps where the pieces overlap, groups them into PRs, stacks overlapping PRs in a set merge order, reserves decision and verification-item numbers, gives every brief the same checklist, and runs one blockers-only review per PR. Not for an agent doing one PR (the working-in-parallel skill covers that), and not for writing a single PR description."
 ---
 
 # Planning parallel PRs
 
 Parallel agents save time only when their PRs do not collide. On 2026-11-02, four PRs changed
-the same ingest module and `DESIGN.md` and merged in no set order; one PR merged `main` four
-times, each a full check and a paid CI run; `DESIGN.md` decision numbers collided again and
+the same ingest module and the design and merged in no set order; one PR merged `main` four
+times, each a full check and a paid CI run; decision numbers collided again and
 again; and reviews found blockers that a line in the brief would have prevented. Plan before
 any agent starts.
 
@@ -15,7 +15,7 @@ any agent starts.
 
 For each piece of work, list what it will change:
 
-| Piece | Files | `DESIGN.md` sections | `README.md` sections |
+| Piece | Files | `README.md` sections | New decisions or verification items |
 |---|---|---|---|
 
 Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-only`).
@@ -38,10 +38,10 @@ Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-onl
   PR body. No agent force-pushes or rebases a pushed branch.
 - Tell the owner the order, with each PR's number, in one list.
 
-## 4. Reserve `DESIGN.md` numbers
+## 4. Reserve decision and verification-item numbers
 
-Decisions (§ 22) live in `plans/rework/design/22-decisions.md` and verification items (§ 23) in
-`plans/rework/design/23-open-verification-items.md`. Take the highest of each on `main` and in
+Decisions live in `docs/dev/decisions.md` and verification items in
+`docs/dev/verification-items.md`. Take the highest of each on `main` and in
 every open PR's diff, and give each PR that adds one its own next numbers, in merge order. Put
 them in the brief.
 
@@ -50,7 +50,8 @@ them in the brief.
 Every agent brief includes:
 
 - **Rules most often missed**, from `AGENTS.md`:
-  - 9: `DESIGN.md` first for a public signature, default, or table semantics;
+  - 9: a contract change is an owner decision, with a `decisions.md` entry and matching README,
+    docstring, and test changes;
   - 19: an enum member selects a mode, never `None`;
   - 22: log each decision and failure with its values, never a secret;
   - 23: supply Massive's data, never repair it;
@@ -58,6 +59,8 @@ Every agent brief includes:
     fails the table.
 - **The Deephaven invariants** section of `AGENTS.md`, for any change that runs off the caller's
   thread, takes a lock, or creates a live table.
+- **The skills to follow**: `working-in-parallel`, and `writing-tests` or `writing-docstrings`
+  when the work touches tests or documentation.
 - **The pre-push hook is the check**: never run `./scripts/check.sh` before a push.
 - **The base branch**: `origin/main`, or the branch of the PR below it in its stack, and the
   stack's PR numbers, bottom to top.
@@ -71,8 +74,7 @@ Almost all of an agent's cost is context re-read on every turn: one analysis fou
 cached tokens re-read against 0.5 million of output. Put these rules into every brief:
 
 - **Read only what the task needs**: `grep -n`, then the exact section with an offset and limit,
-  never a whole large file. The design is split by section: read only the `plans/rework/design/`
-  file for the topic, never all of them (together they are about 180k tokens).
+  never a whole large file.
 - **Quiet commands**: `pytest -q`, `| tail -n 40`, `git diff --stat` before a full diff, and
   `gh pr checks` summarized. Write a large output to a scratch file; read only what you need.
 - **Never re-read a file you just edited.**
@@ -94,9 +96,9 @@ cached tokens re-read against 0.5 million of output. Put these rules into every 
 
 Follow the `writing-to-the-owner` skill. In short:
 
-- Check each question against the owner's recorded decisions and `DESIGN.md` first; ask only
-  what they do not settle.
-- Ask about a `DESIGN.md` change only when it changes what users see or the documented
+- Check each question against the owner's recorded decisions (`docs/dev/decisions.md`) first;
+  ask only what they do not settle.
+- Ask about a change only when it changes what users see or the documented
   contract. A fix that keeps the documented intent and changes only the mechanism records the
   existing decision it follows, and the work proceeds.
 - Frame it in user terms, with a concrete example, every term defined, and one recommendation.
