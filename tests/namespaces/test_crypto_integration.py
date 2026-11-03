@@ -81,6 +81,19 @@ def _ohlcv(row: Mapping[str, Any]) -> tuple[Any, ...]:
     return row.get("o"), row.get("h"), row.get("l"), row.get("c"), row.get("v")
 
 
+def _prices(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return a raw REST bar's open, high, low, and close, without its volume.
+
+    The day's prices are what tell which window a bar covers. Its volume is not: on 2026-11-03
+    the range's `X:BTCUSD` bar of the day before carried a volume 0.15% above that of `/prev`,
+    grouped daily, and the day's minute bars, which all agreed, with the same prices.
+
+    Returns:
+        The four prices, None where the bar lacks one.
+    """
+    return _ohlcv(row)[:4]
+
+
 def _utc_day(stamp_ms: int) -> date:
     """Return the UTC calendar day an epoch-millisecond stamp falls on.
 
@@ -115,12 +128,12 @@ def _largest(left: Sequence[Any], right: Sequence[Any]) -> float:
 
 
 def _same(left: Sequence[Any], right: Sequence[Any]) -> bool:
-    """Compare two OHLCV tuples: open and close exactly, the rest within the tolerance.
+    """Compare two OHLCV or OHLC tuples: open and close exactly, the rest within the tolerance.
 
     Returns:
         Whether they describe the same bar.
     """
-    if len(left) != len(right) or len(left) != 5:
+    if len(left) != len(right) or len(left) not in {4, 5}:
         return False
     errors = [error for error in _errors(left, right) if error is not None]
     if len(errors) != len(left):
@@ -190,6 +203,9 @@ def _assert_one_utc_day(
 ) -> None:
     """Assert that `/prev`, the range, and grouped daily send one bar for one UTC day.
 
+    The bars must share their prices; their volumes may differ, as Massive's sources sometimes
+    do, and the test records them as evidence instead.
+
     Args:
         day: The UTC day of `/prev`'s stamp.
         prev: The `/prev` bar.
@@ -198,16 +214,16 @@ def _assert_one_utc_day(
 
     Raises:
         AssertionError: If a source lacks the bar, stamps it off the day's first or last
-            millisecond, or sends other OHLCV.
+            millisecond, or sends other prices.
     """
     assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
     assert len(same_day) == 1, f"range bars of {day}: {same_day}"
     assert _at_day_edge(int(same_day[0]["t"]), day), f"range bar stamped {same_day[0]['t']}"
-    assert _same(_ohlcv(same_day[0]), _ohlcv(prev)), "the range bar is not /prev's bar"
+    assert _same(_prices(same_day[0]), _prices(prev)), "the range bar is not /prev's day"
     assert len(grouped) == 1, f"grouped rows of {_PAIR} on {day}: {grouped}"
     assert _at_day_edge(int(grouped[0]["t"]), day), f"grouped bar stamped {grouped[0]['t']}"
-    assert _same(_ohlcv(grouped[0]), _ohlcv(prev)), "the grouped bar is not /prev's bar"
+    assert _same(_prices(grouped[0]), _prices(prev)), "the grouped bar is not /prev's day"
 
 
 @pytest.mark.needs("currencies:basic")
@@ -227,15 +243,17 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
 
     Records the raw `X:BTCUSD` day bar of `/prev`, the range bars around that day, and the
     grouped-daily row, each `t` as a UTC instant, whether they agree, and what the library
-    makes of the same requests. Passes when all three sources send the same bar (open and close
-    equal, the rest within 1e-6) for one UTC day, each stamped at its first or last millisecond,
-    which the library labels with that day; the range bar is stamped at 00:00 UTC, and `/prev`
-    and grouped daily at 23:59:59.999. A failure means a source cuts or stamps days
-    otherwise: a stamp at midnight New York time (04:00 or 05:00 UTC) or at no day boundary is
-    served with a WARNING, and the minute-rebuild test says which day it covers. With
-    Currencies on Basic, which allows 5 requests a minute, it leaves out the library's
-    `previous_day_bar` and `dm.ALL` history, which read the same `/prev` and grouped daily as
-    the raw requests.
+    makes of the same requests. Passes when all three sources send a bar with the same prices
+    (open and close equal, high and low within 1e-6) for one UTC day, each stamped at its first
+    or last millisecond, which the library labels with that day; the range bar is stamped at
+    00:00 UTC, and `/prev` and grouped daily at 23:59:59.999. A failure means a source cuts or
+    stamps days otherwise: a stamp at midnight New York time (04:00 or 05:00 UTC) or at no day
+    boundary is served with a WARNING, and the minute-rebuild test says which day it covers. The
+    volumes are evidence, not asserted: on 2026-11-03 the range bar of 2026-11-02 carried 12811.42
+    against 12791.71 from `/prev` and grouped daily, which the day's minute bars sum to; a
+    difference is Massive's to explain. With Currencies on Basic, which allows 5 requests a
+    minute, it leaves out the library's `previous_day_bar` and `dm.ALL` history, which read the
+    same `/prev` and grouped daily as the raw requests.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -263,6 +281,15 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
         f"range bars equal to /prev: {equal}; "
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
+    for name, day_bars in (
+        ("range", [b for b in ranged if _utc_day(int(b["t"])) == day]),
+        ("grouped", grouped),
+    ):
+        for bar in day_bars:
+            evidence(
+                f"{name} volume {bar.get('v')} against /prev's {prev.get('v')}: relative error "
+                f"{_errors(_ohlcv(bar), _ohlcv(prev))[4]}"
+            )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
     evidence(
         "library history(REST): "

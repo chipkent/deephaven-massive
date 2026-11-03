@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from deephaven_massive._enums import AssetClass, FuturesVenue
@@ -5,6 +7,9 @@ from deephaven_massive._massive import spec
 from deephaven_massive._massive.refresh import naming, overrides
 from deephaven_massive._massive.refresh.lexicon import CRYPTO_SNAPSHOTS, FOREX_SNAPSHOTS
 from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
+
+_LIVE_RUN_DATE = re.compile(r"live run of \d{4}-\d{2}-\d{2}")
+"""How a hand entry's reason dates the live run that observed it."""
 
 
 def test_every_entry_has_a_reason() -> None:
@@ -191,6 +196,22 @@ def test_the_futures_snapshot_ticker_and_product_code_are_read_where_the_schema_
     assert futures.field("DetailsProductCode").wire_key == "details.product_code"
 
 
+def test_the_option_chain_day_bar_and_break_even_may_be_absent() -> None:
+    # The live run of 2026-11-03 received chain rows without them, for contracts that had not
+    # traded that day, though the specification marks them required.
+    chain = spec.source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}")
+    for column in ("DayClose", "DayVolume", "BreakEvenPrice", "UnderlyingAssetChangeToBreakEven"):
+        assert not chain.field(column).required, column
+
+
+def test_the_conditions_carry_the_finra_tdds_code() -> None:
+    # The live run of 2026-11-03 received `sip_mapping.FINRA_TDDS`, which the specification
+    # does not declare, beside its CTA, OPRA, and UTP codes.
+    field = spec.source(Transport.REST, "/v3/reference/conditions").field("SipMappingFinraTdds")
+    assert field.wire_key == "sip_mapping.FINRA_TDDS"
+    assert not field.required
+
+
 def test_the_futures_stream_prices_read_text_as_massive_sends_it() -> None:
     # The live run of 2026-11-02 received every futures price as text on both hosts.
     for channel, keys in {
@@ -214,12 +235,12 @@ def test_the_forex_and_crypto_snapshot_update_times_are_read_by_magnitude() -> N
 def test_every_undeclared_and_optional_field_cites_the_live_run() -> None:
     assert overrides.UNDECLARED_FIELDS
     for key, entry in overrides.UNDECLARED_FIELDS.items():
-        assert "2026-11-02" in entry.reason, key
+        assert _LIVE_RUN_DATE.search(entry.reason), key
         assert entry.json_type in {"string", "number", "integer", "boolean"}, key
         assert entry.description.endswith("."), key
     assert overrides.OPTIONAL_FIELDS
     for key, reason in overrides.OPTIONAL_FIELDS.items():
-        assert "2026-11-02" in reason, key
+        assert _LIVE_RUN_DATE.search(reason), key
 
 
 def test_result_keys_may_be_nested_or_the_body() -> None:

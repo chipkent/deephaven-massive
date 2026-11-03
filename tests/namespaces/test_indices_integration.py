@@ -885,7 +885,7 @@ def test_index_day_windows_and_files_across_many_indices(
     days = index_check_days
     found = {
         family: rest_rows(
-            _TICKERS, {}, {"market": "indices", "search": family, "active": "true", "limit": 1000}
+            _TICKERS, {}, {"market": "indices", "search": family, "active": True, "limit": 1000}
         )
         for family in _CRYPTO_FAMILIES
     }
