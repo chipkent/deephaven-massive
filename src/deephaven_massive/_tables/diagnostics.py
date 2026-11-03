@@ -796,8 +796,9 @@ class DriftRegistry:
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
       the owner's new `SchemaDrift` text when it changed, for the caller to write into the
       owner's diagnostics row: its drifted fields, and how many of its rows were dropped. So
-      a dropped row stays visible after its one WARNING. `forget` drops an owner once it has
-      left its registry.
+      a dropped row stays visible after its one WARNING. The count counts reads, not
+      distinct rows: a `poll()` that reads the same bad row every cycle adds one every cycle.
+      `forget` drops an owner once it has left its registry.
 
     Drift is never a failure: one odd value or row never costs the rest of a payload. Only a
     payload whose every row was dropped fails where it is found, before it reaches the
@@ -965,9 +966,10 @@ class DriftRegistry:
         `<prefix>:<field>-`, each field that held a value that does not fit
         `<prefix>:<field>?`, and each `long` field whose widening to a `double` rounded a value
         `<prefix>:<field>~`. An owner's entries only accumulate: drift seen once stays shown.
-        Dropped rows add one entry per prefix with the owner's running count,
-        `<prefix>:<n> rows dropped`, which sorts before the prefix's fields, so a long text cut
-        at `SCHEMA_DRIFT_SHOWN` keeps it.
+        Dropped rows add one entry per prefix with the owner's running count of dropped reads,
+        `<prefix>:<n> rows dropped`: a row read again (by every cycle of a `poll()`) is counted
+        again. The count entries, sorted, come before every field entry, so a long text cut at
+        `SCHEMA_DRIFT_SHOWN` keeps each prefix's count.
 
         Args:
             owner: The stream's id, or the connection's key (a tuple), whose row shows the
@@ -977,7 +979,8 @@ class DriftRegistry:
             drift: The payload's drift; its `statuses` are not shown.
 
         Returns:
-            The owner's entries, sorted, joined by `", "`, and cut to `SCHEMA_DRIFT_SHOWN`
+            The owner's count entries, sorted, then its field entries, sorted, joined by
+            `", "`, and cut to `SCHEMA_DRIFT_SHOWN`
             characters (ending in `…` when cut); None when the report added no entry.
         """
         entries = {f"{prefix}:{field}+" for field in drift.extra}
@@ -995,7 +998,7 @@ class DriftRegistry:
                 dropped[prefix] = dropped.get(prefix, 0) + drift.dropped_rows
             counts = {f"{name}:{count} {_rows(count)} dropped" for name, count in dropped.items()}
             # Built under the lock, so the text is the owner's entries at this moment.
-            text = ", ".join(sorted(seen | counts))
+            text = ", ".join(sorted(counts) + sorted(seen))
         if len(text) > SCHEMA_DRIFT_SHOWN:
             text = text[: SCHEMA_DRIFT_SHOWN - 1] + "…"
         return text

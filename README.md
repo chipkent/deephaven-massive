@@ -874,7 +874,8 @@ wrong.
   lists fields Massive added (`WebSocket:zz+`), stopped sending (`REST:size-`), sent with a
   value that does not fit (`REST:exchange?`), or sent as a whole number too large for its
   decimal column, which holds it rounded (`WebSocket:s~`), and counts the rows dropped because
-  their symbol or time cannot be read (`REST:3 rows dropped`). 100 such streamed rows in a
+  their symbol or time cannot be read (`REST:3 rows dropped`; a `poll()` that reads the same
+  bad row every cycle counts it every cycle). 100 such streamed rows in a
   row, with none delivered, fail the streams, since Massive has most likely changed its format.
   A `history()` or `fetch()` that follows a live symbol table has a row too: `LOADING` while a
   symbol is still being read, then `RUNNING`, with `Loading` counting the symbols left.

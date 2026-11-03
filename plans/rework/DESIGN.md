@@ -4710,7 +4710,7 @@ use it to read rows.
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
-| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (rows whose key could not be read, counted), sorted, truncated at 200 characters |
+| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (each read of a row whose key could not be read, counted), the counts first, then the fields, each sorted, truncated at 200 characters |
 
 **`m.streams()`**: one row per stream, per `poll()` table, per background read
 (`wait=False`), and per followed read (a `fetch()` or `history()` that follows a refreshing
@@ -4740,7 +4740,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, the symbols the latest good `poll()` cycle left out, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
 | `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the start of its first failed cycle (which published nothing, whatever pages it received) to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
 | `CreatedAt` | `Instant` |
-| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (rows whose key could not be read), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
+| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (each read of a row whose key could not be read, so a `poll()` that reads the same bad row every cycle counts it every cycle), with the transport spelled as in `Transport` (`WebSocket:zz+`), the counts first, then the fields, each sorted, truncated at 200 characters |
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
 `Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
@@ -6613,9 +6613,11 @@ sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` fo
 not fit, and `transport:field~` for a `long` field whose widening into a `double` column
 rounded a value, with the transport spelled `WebSocket` or `REST`, and `m.connections()` uses
 `channel:field+`, `channel:field-`, `channel:field?`, and `channel:field~`. Dropped rows add
-one entry per transport or channel with the owner's running count, `REST:3 rows dropped`,
-which sorts before the fields so a cut text keeps it: after its one WARNING, a dropped row
-stays visible on every live table that lost it.
+one entry per transport or channel with the owner's running count, `REST:3 rows dropped`.
+The count entries, sorted, come before every field entry, so a text cut at 200 characters
+keeps each of them: after its one WARNING, a dropped row stays visible on every live table
+that lost it. The count counts reads, not distinct rows: a `poll()` that reads the same bad
+row every cycle adds one to it every cycle.
 
 **The library supplies Massive's data and never repairs it.** Whatever it cannot serve as
 Massive sent it is reported where a user looks, never absorbed: a row it drops is counted in

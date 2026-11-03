@@ -913,7 +913,8 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
 
 def test_dropped_rows_are_counted_in_the_owners_schema_drift() -> None:
     # After its one WARNING, a dropped row stays visible: each owner's row counts its drops,
-    # per prefix, before its fields, so a text cut at its limit keeps the count.
+    # per prefix, every count before every field. A count counts reads: a report of a row
+    # read again adds to it again.
     registry = DriftRegistry()
     first = DriftReport(dropped_rows=2, dropped_reason="row 0: no Ticker")
     assert registry.record(1, "REST", first) == "REST:2 rows dropped"
@@ -921,11 +922,24 @@ def test_dropped_rows_are_counted_in_the_owners_schema_drift() -> None:
     halted = DriftReport(extra=frozenset({"halted"}), dropped_rows=1)
     assert registry.record(1, "REST", halted) == "REST:3 rows dropped, REST:halted+"
     assert registry.record(1, "WebSocket", DriftReport(dropped_rows=1)) == (
-        "REST:3 rows dropped, REST:halted+, WebSocket:1 row dropped"
+        "REST:3 rows dropped, WebSocket:1 row dropped, REST:halted+"
     )
     assert registry.record(2, "T", DriftReport(dropped_rows=1)) == "T:1 row dropped"
     registry.forget(1)
     assert registry.record(1, "REST", DriftReport(dropped_rows=1)) == "REST:1 row dropped"
+
+
+def test_a_cut_schema_drift_keeps_every_prefix_s_dropped_count() -> None:
+    # One prefix's fields fill the text past its limit; a later prefix's count, which sorts
+    # after them by name, still shows.
+    registry = DriftRegistry()
+    fields = frozenset(f"field_{index:02d}" for index in range(30))
+    registry.record(1, "REST", DriftReport(extra=fields))
+    text = registry.record(1, "WebSocket", DriftReport(dropped_rows=4))
+    assert text is not None
+    assert len(text) == SCHEMA_DRIFT_SHOWN
+    assert text.endswith("…")
+    assert text.startswith("WebSocket:4 rows dropped, REST:field_00+, ")
 
 
 def test_a_rounded_whole_number_warns_once_and_shows_with_a_tilde(
