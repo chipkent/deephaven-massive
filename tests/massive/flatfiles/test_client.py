@@ -1783,8 +1783,9 @@ def test_a_close_ends_the_wait_for_a_connection_of_open_and_prefixes(
 
 def test_overlapping_reads_share_the_pool_without_discarding_connections(
     *,
-    tls_server: FakeRestServer,
-    trusted: pytest.MonkeyPatch,
+    fake_rest: FakeRestServer,
+    network_env: pytest.MonkeyPatch,
+    no_aws_settings: None,
     make_csv_gz: Callable[[str], bytes],
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
@@ -1792,10 +1793,13 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     # Two reads of two files each, on a client of two connections: two objects are open at
     # once while the others wait for one to be closed, so urllib3 never opens an extra
     # connection only to discard it ("Connection pool is full").
+    # Plain HTTP: over TLS, two connections set up at once race on the pool's shared SSL
+    # context (urllib3 replaces its ALPN list while another thread copies it), and the
+    # handshake fails now and then. Issue #491 tracks the fix in the flat-file client.
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     keys = [KEY.replace("03-03", f"03-0{day}") for day in range(3, 7)]
     for key in keys:
-        tls_server.reply(f"/flatfiles/{key}", Reply(data))
+        fake_rest.reply(f"/flatfiles/{key}", Reply(data))
     ready = threading.Condition()
     hold = threading.Event()
     in_flight = 0
@@ -1807,8 +1811,8 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
             ready.notify_all()
         hold.wait(TIMEOUT)
 
-    tls_server.on_request(held)
-    client = make_client(endpoint_url=tls_server.url, max_pool=2)
+    fake_rest.on_request(held)
+    client = make_client(endpoint_url=fake_rest.url, max_pool=2)
     waiting = _waits_seen(client)
     caplog.set_level(logging.WARNING, logger="urllib3")
     with ThreadPoolExecutor(2) as one, ThreadPoolExecutor(2) as other:

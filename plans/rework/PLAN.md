@@ -145,7 +145,7 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
    `massive-com/client-python` ([upstream-sdk-issues](#upstream-sdk-issues); pull requests there
    are never opened), force-pushing #51 (flat-file-history), PyPI configuration, and any change to
    branch protection. Agents prepare the text and stop at the gate.
-7. **Test layout** ([DESIGN § 4.2](DESIGN.md#42-test-layout)). `tests/` mirrors
+7. **Test layout** ([DESIGN § 4.2](design/04-package-layout.md#42-test-layout)). `tests/` mirrors
    `src/deephaven_massive/`: every path component drops one leading underscore
    (`_namespaces/stocks.py` → `tests/namespaces/test_stocks.py`, `_massive/rest/client.py` →
    `tests/massive/rest/test_client.py`); `__init__.py` maps to `test_init.py` and `__main__.py`
@@ -166,7 +166,7 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
 10. **Deephaven invariants.** `AGENTS.md` lists them. A planned PR that touches library code
     under `src/deephaven_massive/` outside `_massive/` restates the invariants it relies on in
     its PR description.
-11. **No live testing as design input** ([DESIGN § 22](DESIGN.md#22-decisions)). Unit
+11. **No live testing as design input** ([DESIGN § 22](design/22-decisions.md#22-decisions)). Unit
     tests use the fakes in `tests/_fakes/` and fixtures shaped from the vendor's spec examples
     and documentation samples. Live tests belong to live-integration-suite alone.
 12. **Docstrings and docs sync.** Every module, class, and function, public or private, has a
@@ -185,7 +185,7 @@ These rules apply to every planned PR. Planned-PR sections only add to them.
 
 ## Parallelism guide
 
-The module names are fixed by [DESIGN § 4.1](DESIGN.md#41-source-modules), so planned PRs own
+The module names are fixed by [DESIGN § 4.1](design/04-package-layout.md#41-source-modules), so planned PRs own
 disjoint files:
 
 - **The wire package** is split by owner. wire-package-scaffold owns `_massive/__init__.py`, `net/`
@@ -196,7 +196,7 @@ disjoint files:
   (field-descriptions adds `spec/descriptions.json` and `Field.description`; api-drift-check adds
   `drift.py`). Each adds its own block to `_massive/__init__.py`, so a later merge rebases that one
   file.
-- **The library modules** are grouped by layer ([DESIGN § 4.1](DESIGN.md#41-source-modules)):
+- **The library modules** are grouped by layer ([DESIGN § 4.1](design/04-package-layout.md#41-source-modules)):
   `_datasets/`, `_tables/`, and `_ingest/`, beside the vocabulary and the API at the root.
   layer-packages moves the existing modules into them and layer-rules enforces the layers, so
   both land before any planned PR below edits a library module. rest-transport owns
@@ -262,8 +262,8 @@ a stable source of truth, and open the tracking issues that hold the live checkl
 
 **DESIGN sections implemented.** All of `DESIGN.md` is the deliverable (Appendix A v3 with the
 "Required v3 edits" applied, rewritten in O'Reilly style), including
-[§ 1 Purpose and scope](DESIGN.md#1-purpose-and-scope) and
-[§ 22 Decisions](DESIGN.md#22-decisions), which no planned PR implements in code; no code.
+[§ 1 Purpose and scope](design/01-purpose-and-scope.md#1-purpose-and-scope) and
+[§ 22 Decisions](design/22-decisions.md#22-decisions), which no planned PR implements in code; no code.
 
 **Depends on.** Nothing. **Parallel with.** fork-setup.
 
@@ -330,12 +330,12 @@ entry point, git and Claude Code hooks, a CI matrix that includes free-threaded 
 no committed lockfile: every sync resolves the newest versions, including the latest SDK fork.
 Legacy code is excluded from the gate until finish-rework.
 
-**DESIGN sections implemented.** [§ 20 Quality gates](DESIGN.md#20-quality-gates) (the whole
-section); [§ 4.2 Test layout](DESIGN.md#42-test-layout) (`tests/conftest.py` and
-`tests/test_layout.py`); [§ 11 Enums and types](DESIGN.md#11-enums-and-types) (the `>=3.11`
-floor and the CI matrix); [§ 18.4 Free-threaded specifics](DESIGN.md#184-free-threaded-specifics)
+**DESIGN sections implemented.** [§ 20 Quality gates](design/20-quality-gates.md#20-quality-gates) (the whole
+section); [§ 4.2 Test layout](design/04-package-layout.md#42-test-layout) (`tests/conftest.py` and
+`tests/test_layout.py`); [§ 11 Enums and types](design/11-enums-and-types.md#11-enums-and-types) (the `>=3.11`
+floor and the CI matrix); [§ 18.4 Free-threaded specifics](design/18-concurrency-model.md#184-free-threaded-specifics)
 (free-threaded CI is gating); the `[tool.uv.sources]` branch source of the former § 19 (the
-SDK fork, since replaced by [§ 19 Wire clients and the spec snapshot](DESIGN.md#19-wire-clients-and-the-spec-snapshot)). The exact configuration is [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration).
+SDK fork, since replaced by [§ 19 Wire clients and the spec snapshot](design/19-wire-clients-and-the-spec-snapshot.md#19-wire-clients-and-the-spec-snapshot)). The exact configuration is [§ 20.1 Tooling configuration](design/20-quality-gates.md#201-tooling-configuration).
 
 **Depends on.** rework-design-and-plan (merged), fork-setup (the `deephaven-fixes` branch must
 exist to be tracked). **Parallel with.** the fork PRs.
@@ -366,7 +366,7 @@ exist to be tracked). **Parallel with.** the fork PRs.
     `orjson` as an optional extra (`[project.optional-dependencies] orjson = ["orjson>=3.9"]`).
   - `[dependency-groups] dev`: `ruff>=…` (floor only; every sync installs the latest), `mypy`, `types-boto3[s3]`, `pytest>=9`,
     `pytest-cov`, `pytest-timeout`, `pyright`, `pre-commit`, `deephaven-server>=42.0`. No
-    `pytest-asyncio` ([DESIGN § 20.1](DESIGN.md#201-tooling-configuration)).
+    `pytest-asyncio` ([DESIGN § 20.1](design/20-quality-gates.md#201-tooling-configuration)).
   - Ruff: `select = ["ALL", "DOC201", "DOC501", "DOC502"]`, `preview = true`,
     `explicit-preview-rules = true`, global ignores exactly: `COM812`,
     `COM819`, `W191`, `E111`, `E114`, `E117`, `D206`, `D300`, `Q000`–`Q003`, `TRY003`, `EM101`,
@@ -375,9 +375,9 @@ exist to be tracked). **Parallel with.** the fork PRs.
     `PLR0917` with `max-positional-args = 3`. Tests-only ignores: `S101`, `PLR2004`, `INP001`,
     `SLF001`, `ARG001`, `ARG002`, `ARG005`, `FBT001`, `FBT002`, `D100`–`D107`. Google
     convention; `docstring-code-format = true`. **Do not** add Appendix D's `banned-module-level-imports`
-    for `deephaven` ([DESIGN § 20.1](DESIGN.md#201-tooling-configuration): module-level imports; the JVM starts in `pytest_configure`).
+    for `deephaven` ([DESIGN § 20.1](design/20-quality-gates.md#201-tooling-configuration): module-level imports; the JVM starts in `pytest_configure`).
   - Mypy: `strict`, `warn_unreachable`, `warn_unused_configs`, the eight `enable_error_code`
-    entries from [DESIGN § 20.1](DESIGN.md#201-tooling-configuration). Overrides: `ignore_missing_imports` for `pyarrow.*` only;
+    entries from [DESIGN § 20.1](design/20-quality-gates.md#201-tooling-configuration). Overrides: `ignore_missing_imports` for `pyarrow.*` only;
     the fork's `massive` ships `py.typed` (the fork's `py.typed` PR).
   - Pytest 9 `[tool.pytest]`: `minversion = "9.0"`, `strict = true`, `filterwarnings = ["error"]`,
     `addopts = ["-ra", "--import-mode=importlib"]`, `timeout = "60"`,
@@ -503,23 +503,23 @@ build on (schema registry, time units, symbols, dates, liveness, diagnostics, da
 and stub domain modules so the transport and dataset planned PRs can proceed in parallel without
 touching shared files. No network code.
 
-**DESIGN sections implemented.** [§ 2 Principles and terms](DESIGN.md#2-principles-and-terms);
-[§ 3 Exports](DESIGN.md#3-exports); [§ 4 Package layout](DESIGN.md#4-package-layout) (every
+**DESIGN sections implemented.** [§ 2 Principles and terms](design/02-principles-and-terms.md#2-principles-and-terms);
+[§ 3 Exports](design/03-exports.md#3-exports); [§ 4 Package layout](design/04-package-layout.md#4-package-layout) (every
 § 4.1 module this planned PR owns exists after it, the domain modules as stubs; the
 transport modules `_rest.py`, `_hosts.py`, `_poll.py`, `_ws.py`, `_stream.py`, `_watchlist.py`,
 and `_flatfiles.py` are created by rest-transport, websocket-layer, and flat-file-history);
-[§ 5 `MassiveConfig`](DESIGN.md#5-massiveconfig);
-[§ 6 `MassiveSession` and lifecycle](DESIGN.md#6-massivesession-and-lifecycle) including
-[§ 6.1 How a live table is kept alive and released](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released);
-[§ 7 Query classes and verbs](DESIGN.md#7-query-classes-and-verbs) (class shapes,
-[§ 7.2 synchronous `ValueError`s](DESIGN.md#72-synchronous-valueerrors-for-parameter-values),
-and [§ 7.3 the runtime enum check](DESIGN.md#73-runtime-enum-check); transport-dependent verb
+[§ 5 `MassiveConfig`](design/05-massiveconfig.md#5-massiveconfig);
+[§ 6 `MassiveSession` and lifecycle](design/06-massivesession-and-lifecycle.md#6-massivesession-and-lifecycle) including
+[§ 6.1 How a live table is kept alive and released](design/06-massivesession-and-lifecycle.md#61-how-a-live-table-is-kept-alive-and-released);
+[§ 7 Query classes and verbs](design/07-query-classes-and-verbs.md#7-query-classes-and-verbs) (class shapes,
+[§ 7.2 synchronous `ValueError`s](design/07-query-classes-and-verbs.md#72-synchronous-valueerrors-for-parameter-values),
+and [§ 7.3 the runtime enum check](design/07-query-classes-and-verbs.md#73-runtime-enum-check); transport-dependent verb
 bodies raise `NotImplementedError` until their transport lands);
-[§ 10 Symbols and `ALL`](DESIGN.md#10-symbols-and-all);
-[§ 11 Enums and types](DESIGN.md#11-enums-and-types);
-[§ 12 Timestamp units and day boundaries](DESIGN.md#12-timestamp-units-and-day-boundaries);
-[§ 17 Diagnostics](DESIGN.md#17-diagnostics) (table definitions and the session-owned scope);
-[§ 18 Concurrency model](DESIGN.md#18-concurrency-model) (registry lock, reaper thread, lock
+[§ 10 Symbols and `ALL`](design/10-symbols-and-all.md#10-symbols-and-all);
+[§ 11 Enums and types](design/11-enums-and-types.md#11-enums-and-types);
+[§ 12 Timestamp units and day boundaries](design/12-timestamp-units-and-day-boundaries.md#12-timestamp-units-and-day-boundaries);
+[§ 17 Diagnostics](design/17-diagnostics.md#17-diagnostics) (table definitions and the session-owned scope);
+[§ 18 Concurrency model](design/18-concurrency-model.md#18-concurrency-model) (registry lock, reaper thread, lock
 order).
 
 **Depends on.** tooling-foundation. **Parallel with.** the fork PRs.
@@ -605,7 +605,7 @@ query classes and the type aliases are importable from `deephaven_massive._query
       once, streams `CLOSED`), `__enter__/__exit__`, fail-fast without an `ExecutionContext`.
 - [ ] Add the enum-only signature test in `tests/test_enums.py` (DESIGN § 11): walk every
       public callable reachable from `deephaven_massive` and the session namespaces; assert no
-      parameter annotation contains a `Literal` of `str` ([DESIGN § 11](DESIGN.md#11-enums-and-types)), and that every enum
+      parameter annotation contains a `Literal` of `str` ([DESIGN § 11](design/11-enums-and-types.md#11-enums-and-types)), and that every enum
       mirroring an SDK enum has the same value set. The `dm.__all__` test lives in
       `tests/test_init.py`.
 - [ ] Remove the three top-level files from the `LEGACY-EXCLUSION` lists.
@@ -757,7 +757,7 @@ git diff --stat origin/main -- . ':!plans' ':!AGENTS.md'      # empty
 **Goal.** Declare the libraries the wire clients import, so nothing relies on a dependency that
 only `massive` brings in.
 
-**DESIGN sections implemented.** [§ 20.1 Tooling configuration](DESIGN.md#201-tooling-configuration)
+**DESIGN sections implemented.** [§ 20.1 Tooling configuration](design/20-quality-gates.md#201-tooling-configuration)
 (the runtime dependencies).
 
 **Depends on.** Nothing; it may merge at any time. **Parallel with.** everything.
@@ -848,9 +848,9 @@ uv build && unzip -l dist/*.whl | grep -E 'engine/|/domains/|schemas/' ; test $?
 **Goal.** Rename to the final layout before new code lands: `_domains/` to `_namespaces/`, the
 test paths to the rule of DESIGN § 4.2, and the import roots.
 
-**DESIGN sections implemented.** [§ 4.1 Source modules](DESIGN.md#41-source-modules) (the
-`_namespaces/` name); [§ 4.2 Test layout](DESIGN.md#42-test-layout) (the naming rule, the
-dunder rule, the import roots); [§ 20.1](DESIGN.md#201-tooling-configuration) (`pythonpath`,
+**DESIGN sections implemented.** [§ 4.1 Source modules](design/04-package-layout.md#41-source-modules) (the
+`_namespaces/` name); [§ 4.2 Test layout](design/04-package-layout.md#42-test-layout) (the naming rule, the
+dunder rule, the import roots); [§ 20.1](design/20-quality-gates.md#201-tooling-configuration) (`pythonpath`,
 `mypy_path`).
 
 **Depends on.** final-design, legacy-deletion. **Parallel with.** wire-client-dependencies.
@@ -903,8 +903,8 @@ change.
 rest-client, websocket-client, flat-file-history, and rest-wire-schema import nothing from each
 other.
 
-**DESIGN sections implemented.** [§ 3 Exports](DESIGN.md#3-exports) (`MassiveError.status`
-and `request_id`, the lazy `__init__`); [§ 19](DESIGN.md#19-wire-clients-and-the-spec-snapshot)
+**DESIGN sections implemented.** [§ 3 Exports](design/03-exports.md#3-exports) (`MassiveError.status`
+and `request_id`, the lazy `__init__`); [§ 19](design/19-wire-clients-and-the-spec-snapshot.md#19-wire-clients-and-the-spec-snapshot)
 (the package, its interface skeleton, the wire errors, the boundary and layers).
 
 **Depends on.** wire-client-dependencies, final-names. **Parallel with.** nothing on the critical
@@ -969,12 +969,12 @@ symbol pushdown, per-venue futures prefixes, partition-date rules, the publish-c
 the `HistorySource.AUTO` choice between S3 and REST, with the S3 wire access in
 `_massive/flatfiles/` and the policy in `_flat_files.py` and `_history_source.py`.
 
-**DESIGN sections implemented.** [§ 16 `HistorySource.AUTO`](DESIGN.md#16-historysourceauto);
-[§ 19.3 The flat-file client](DESIGN.md#193-the-flat-file-client);
-[§ 12 Timestamp units and day boundaries](DESIGN.md#12-timestamp-units-and-day-boundaries)
-(flat-file partition dates, futures sessions, epoch 0); [§ 7](DESIGN.md#7-query-classes-and-verbs)
-(`history(source=…)`, the reactive table read once); [§ 5](DESIGN.md#5-massiveconfig) (`s3_*`,
-`flat_file_symbol_threshold`, `flat_file_publish_cutoff`); [§ 18](DESIGN.md#18-concurrency-model)
+**DESIGN sections implemented.** [§ 16 `HistorySource.AUTO`](design/16-historysourceauto.md#16-historysourceauto);
+[§ 19.3 The flat-file client](design/19-wire-clients-and-the-spec-snapshot.md#193-the-flat-file-client);
+[§ 12 Timestamp units and day boundaries](design/12-timestamp-units-and-day-boundaries.md#12-timestamp-units-and-day-boundaries)
+(flat-file partition dates, futures sessions, epoch 0); [§ 7](design/07-query-classes-and-verbs.md#7-query-classes-and-verbs)
+(`history(source=…)`, the reactive table read once); [§ 5](design/05-massiveconfig.md#5-massiveconfig) (`s3_*`,
+`flat_file_symbol_threshold`, `flat_file_publish_cutoff`); [§ 18](design/18-concurrency-model.md#18-concurrency-model)
 (the reader pool, `FlatFileClient`'s lock).
 
 **Depends on.** wire-package-scaffold. **Parallel with.** rest-client, websocket-client,
@@ -1091,8 +1091,8 @@ planned PRs); REST history (rest-transport); live S3 tests (live-integration-sui
 every thread of a session, that turns pages into Arrow batches of the generated fields and
 reports drift.
 
-**DESIGN sections implemented.** [§ 19.1 The REST client](DESIGN.md#191-the-rest-client); the
-REST column of [§ 19.5 Runtime drift](DESIGN.md#195-runtime-drift); the shared retry schedule.
+**DESIGN sections implemented.** [§ 19.1 The REST client](design/19-wire-clients-and-the-spec-snapshot.md#191-the-rest-client); the
+REST column of [§ 19.5 Runtime drift](design/19-wire-clients-and-the-spec-snapshot.md#195-runtime-drift); the shared retry schedule.
 
 **Depends on.** wire-package-scaffold. **Parallel with.** websocket-client, rest-wire-schema,
 flat-file-history.
@@ -1151,9 +1151,9 @@ retries underneath the client.
 decodes every frame against injected generated sources into status events, rows, rejects, and
 drift.
 
-**DESIGN sections implemented.** [§ 19.2 The WebSocket client](DESIGN.md#192-the-websocket-client);
-the client's side of [§ 13.3](DESIGN.md#133-connection-and-subscription-protocol); the WebSocket
-column of [§ 19.5](DESIGN.md#195-runtime-drift); [§ 5](DESIGN.md#5-massiveconfig) (the 15 s
+**DESIGN sections implemented.** [§ 19.2 The WebSocket client](design/19-wire-clients-and-the-spec-snapshot.md#192-the-websocket-client);
+the client's side of [§ 13.3](design/13-host-resolution-and-connection-protocol.md#133-connection-and-subscription-protocol); the WebSocket
+column of [§ 19.5](design/19-wire-clients-and-the-spec-snapshot.md#195-runtime-drift); [§ 5](design/05-massiveconfig.md#5-massiveconfig) (the 15 s
 `reconnect_backoff` floor).
 
 **Depends on.** wire-package-scaffold. **Parallel with.** rest-client, rest-wire-schema,
@@ -1216,13 +1216,13 @@ which would send binary frames.
 documented REST path named and given units. Scope: about 120 paths, with about 90
 timestamp-like integers (68 of them untagged) and about 50 short keys.
 
-**DESIGN sections implemented.** [§ 19.4 Generated schemas](DESIGN.md#194-generated-schemas)
+**DESIGN sections implemented.** [§ 19.4 Generated schemas](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas)
 (REST sources, representation rules, the type lattice, naming, the gates `short-key`,
 `column-collision`, `timestamp-unit`, and `stale-entry`);
-[§ 19.6 Refresh and drift](DESIGN.md#196-refresh-and-drift) (the command, canonical storage);
-[§ 8.12](DESIGN.md#812-excluded-endpoints) (`EXCLUSIONS`, documented coverage);
-[§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries) (REST `UNITS`);
-[§ 20.1](DESIGN.md#201-tooling-configuration) (the wheel exclusion).
+[§ 19.6 Refresh and drift](design/19-wire-clients-and-the-spec-snapshot.md#196-refresh-and-drift) (the command, canonical storage);
+[§ 8.12](design/08-namespace-tree.md#812-excluded-endpoints) (`EXCLUSIONS`, documented coverage);
+[§ 12](design/12-timestamp-units-and-day-boundaries.md#12-timestamp-units-and-day-boundaries) (REST `UNITS`);
+[§ 20.1](design/20-quality-gates.md#201-tooling-configuration) (the wheel exclusion).
 
 **Depends on.** wire-package-scaffold, rest-client. **Parallel with.** websocket-client,
 flat-file-history.
@@ -1304,9 +1304,9 @@ the vocabulary (`_config`, `_enums`, `_errors`, `_types`) and the API (`__init__
 to `_tables/core.py`. The move comes first so that every later planned PR edits the final
 paths.
 
-**DESIGN sections implemented.** [§ 4.1](DESIGN.md#41-source-modules) (the tree);
-[§ 4.2](DESIGN.md#42-test-layout) (the mirrored tests and fixtures);
-[§ 19](DESIGN.md#19-wire-clients-and-the-spec-snapshot) (the library paths it names).
+**DESIGN sections implemented.** [§ 4.1](design/04-package-layout.md#41-source-modules) (the tree);
+[§ 4.2](design/04-package-layout.md#42-test-layout) (the mirrored tests and fixtures);
+[§ 19](design/19-wire-clients-and-the-spec-snapshot.md#19-wire-clients-and-the-spec-snapshot) (the library paths it names).
 
 **Depends on.** flat-file-history, rest-client, websocket-client, rest-wire-schema (all
 merged). **Parallel with.** field-descriptions, flat-file-s3-shared-rules. **Before.**
@@ -1382,12 +1382,12 @@ imports included, and `tests/test_layout.py` enforces it. The four upward edges 
 go: the catalog's `query_class` and its namespace-module import, the core's import of the
 flat-file transport, and the Deephaven calls inside `_datasets`.
 
-**DESIGN sections implemented.** [§ 4.3](DESIGN.md#4-package-layout) "Layers" (created here: the
-layer table, the rules, and what justifies each boundary); [§ 4.1](DESIGN.md#41-source-modules)
+**DESIGN sections implemented.** [§ 4.3](design/04-package-layout.md#4-package-layout) "Layers" (created here: the
+layer table, the rules, and what justifies each boundary); [§ 4.1](design/04-package-layout.md#41-source-modules)
 (`_ingest/clients.py`, `_tables/columns.py`, `_tables/watchlist.py`);
-[§ 7](DESIGN.md#7-query-classes-and-verbs) (the query class derived from the spec);
-[§ 8](DESIGN.md#8-namespace-tree) (the catalog built from the namespace modules);
-[§ 19.4](DESIGN.md#194-generated-schemas) (the `Catalog` and its `dataset_schema` cache).
+[§ 7](design/07-query-classes-and-verbs.md#7-query-classes-and-verbs) (the query class derived from the spec);
+[§ 8](design/08-namespace-tree.md#8-namespace-tree) (the catalog built from the namespace modules);
+[§ 19.4](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas) (the `Catalog` and its `dataset_schema` cache).
 
 **Depends on.** layer-packages. **Parallel with.** field-descriptions,
 websocket-and-flat-file-wire-schemas, flat-file-s3-shared-rules, api-drift-check. **Before.**
@@ -1501,11 +1501,11 @@ text, in a separate generated file, `spec/descriptions.json`, and the `spec` loa
 into `Field.description`. This is the source of every vendor-written column description users
 later see; it needs no declared dataset.
 
-**DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (**Field
+**DESIGN sections implemented.** [§ 19.4](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas) (**Field
 descriptions**: sources, normalization, no gate, the file format, the join at load);
-[§ 19](DESIGN.md#19-wire-clients-and-the-spec-snapshot) (the interface's `provenance` and
-`Provenance`); [§ 2.1](DESIGN.md#21-principles) principle 12 (its source half);
-[§ 22](DESIGN.md#22-decisions) “Vendor descriptions in a separate generated file”.
+[§ 19](design/19-wire-clients-and-the-spec-snapshot.md#19-wire-clients-and-the-spec-snapshot) (the interface's `provenance` and
+`Provenance`); [§ 2.1](design/02-principles-and-terms.md#21-principles) principle 12 (its source half);
+[§ 22](design/22-decisions.md#22-decisions) “Vendor descriptions in a separate generated file”.
 
 **Depends on.** rest-wire-schema. **Parallel with.** websocket-client. **Before.**
 websocket-and-flat-file-wire-schemas, which writes the WebSocket and flat-file entries with the
@@ -1580,7 +1580,7 @@ column-reference-pages).
 **Goal.** `spec/ws.json` and `spec/flatfiles.json`, the dataset kinds, and the gates that make
 names, types, and transports agree.
 
-**DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (WebSocket and
+**DESIGN sections implemented.** [§ 19.4](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas) (WebSocket and
 flat-file sources, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`, the channel and
 prefix half of `stale-entry`, and `type-agreement`, `transport-agreement`, and
 `venue-agreement`).
@@ -1656,10 +1656,10 @@ tape or average trade size); a flat key table cannot work.
 **Goal.** Report drift and fail loudly on bad data for flat files, and add the diagnostics
 column and registry every transport uses.
 
-**DESIGN sections implemented.** [§ 19.5 Runtime drift](DESIGN.md#195-runtime-drift) (the
-registry, `SchemaDrift`, the flat-file column); [§ 16](DESIGN.md#16-historysourceauto) (the
-header peek); [§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries) (the timestamp routine
-for flat files); [§ 17](DESIGN.md#17-diagnostics).
+**DESIGN sections implemented.** [§ 19.5 Runtime drift](design/19-wire-clients-and-the-spec-snapshot.md#195-runtime-drift) (the
+registry, `SchemaDrift`, the flat-file column); [§ 16](design/16-historysourceauto.md#16-historysourceauto) (the
+header peek); [§ 12](design/12-timestamp-units-and-day-boundaries.md#12-timestamp-units-and-day-boundaries) (the timestamp routine
+for flat files); [§ 17](design/17-diagnostics.md#17-diagnostics).
 
 **Depends on.** flat-file-history, layer-rules (the files below are the layered paths).
 **Parallel with.** field-descriptions, websocket-and-flat-file-wire-schemas.
@@ -1707,7 +1707,7 @@ extra one is ignored silently; read by name.
 
 **Goal.** S3 follows the same TLS, proxy, and retry rules as REST.
 
-**DESIGN sections implemented.** [§ 19.3 The flat-file client](DESIGN.md#193-the-flat-file-client)
+**DESIGN sections implemented.** [§ 19.3 The flat-file client](design/19-wire-clients-and-the-spec-snapshot.md#193-the-flat-file-client)
 (TLS, proxies, retries).
 
 **Depends on.** flat-file-history, rest-client. **Parallel with.**
@@ -1757,10 +1757,10 @@ uv run pytest tests/massive/flatfiles -q
 **Goal.** Derive every dataset schema from the generated tables and delete every hand-written
 schema.
 
-**DESIGN sections implemented.** [§ 19.4](DESIGN.md#194-generated-schemas) (the run-time merge,
-the catalog gates); [§ 4.1](DESIGN.md#41-source-modules) (`_datasets/catalog.py`, `_datasets/schema.py`);
-[§ 8.12](DESIGN.md#812-excluded-endpoints) (used coverage);
-[§ 11](DESIGN.md#11-enums-and-types); [§ 12](DESIGN.md#12-timestamp-units-and-day-boundaries)
+**DESIGN sections implemented.** [§ 19.4](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas) (the run-time merge,
+the catalog gates); [§ 4.1](design/04-package-layout.md#41-source-modules) (`_datasets/catalog.py`, `_datasets/schema.py`);
+[§ 8.12](design/08-namespace-tree.md#812-excluded-endpoints) (used coverage);
+[§ 11](design/11-enums-and-types.md#11-enums-and-types); [§ 12](design/12-timestamp-units-and-day-boundaries.md#12-timestamp-units-and-day-boundaries)
 (the routine for every transport).
 
 **Depends on.** websocket-and-flat-file-wire-schemas, flat-file-history, runtime-drift-reporting
@@ -1835,8 +1835,8 @@ uv run pytest tests/datasets/test_catalog.py tests/datasets/test_schema.py tests
 
 **Goal.** `--check` and the weekly drift job.
 
-**DESIGN sections implemented.** [§ 19.6 Refresh and drift](DESIGN.md#196-refresh-and-drift)
-(`--check`, the drift job); [§ 20](DESIGN.md#20-quality-gates) (spec drift is advisory).
+**DESIGN sections implemented.** [§ 19.6 Refresh and drift](design/19-wire-clients-and-the-spec-snapshot.md#196-refresh-and-drift)
+(`--check`, the drift job); [§ 20](design/20-quality-gates.md#20-quality-gates) (spec drift is advisory).
 
 **Depends on.** websocket-and-flat-file-wire-schemas, flat-file-history, flat-file-s3-shared-rules.
 **Parallel with.** generated-catalog-and-schemas.
@@ -1886,7 +1886,7 @@ uv run python -m deephaven_massive._massive.refresh --check    # live; prints th
 
 **Goal.** Remove the `massive` dependency and its fork source.
 
-**DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration).
+**DESIGN sections implemented.** [§ 20.1](design/20-quality-gates.md#201-tooling-configuration).
 
 **Depends on.** generated-catalog-and-schemas. **Parallel with.** rest-transport, websocket-layer.
 
@@ -1930,12 +1930,12 @@ rm -rf .venv && uv sync --upgrade
 `DatasetSpec`, batches renamed and converted, 403/429 handling, drift routing, single-flight
 host resolution, and `poll()` with all three modes, including reactive symbol tables.
 
-**DESIGN sections implemented.** [§ 7](DESIGN.md#7-query-classes-and-verbs) (`fetch`, `poll`,
-REST `history`); [§ 9](DESIGN.md#9-filters); [§ 13.1](DESIGN.md#131-invariants),
-[§ 13.2](DESIGN.md#132-host-decision); [§ 13.4](DESIGN.md#134-rest);
-[§ 19.5](DESIGN.md#195-runtime-drift) (REST routing); [§ 14](DESIGN.md#14-publishers-fan-out-and-failure-semantics)
-(the `poll()` publisher and `input_table` rules); [§ 17](DESIGN.md#17-diagnostics) (REST rows,
-`RequestsPerCycle`, `SchemaDrift` for `poll()`); [§ 18](DESIGN.md#18-concurrency-model) (poller
+**DESIGN sections implemented.** [§ 7](design/07-query-classes-and-verbs.md#7-query-classes-and-verbs) (`fetch`, `poll`,
+REST `history`); [§ 9](design/09-filters.md#9-filters); [§ 13.1](design/13-host-resolution-and-connection-protocol.md#131-invariants),
+[§ 13.2](design/13-host-resolution-and-connection-protocol.md#132-host-decision); [§ 13.4](design/13-host-resolution-and-connection-protocol.md#134-rest);
+[§ 19.5](design/19-wire-clients-and-the-spec-snapshot.md#195-runtime-drift) (REST routing); [§ 14](design/14-publishers-fan-out-and-failure-semantics.md#14-publishers-fan-out-and-failure-semantics)
+(the `poll()` publisher and `input_table` rules); [§ 17](design/17-diagnostics.md#17-diagnostics) (REST rows,
+`RequestsPerCycle`, `SchemaDrift` for `poll()`); [§ 18](design/18-concurrency-model.md#18-concurrency-model) (poller
 threads).
 
 **Depends on.** rest-client, generated-catalog-and-schemas (and through it layer-rules).
@@ -2040,12 +2040,12 @@ fixtures (the dataset planned PRs).
 the `NO_ACK` rule, the verdict rule, publishers with shared-batch fan-out, rejects and drift
 routing, the options cap, reactive watchlists, and the live diagnostics.
 
-**DESIGN sections implemented.** [§ 13.3](DESIGN.md#133-connection-and-subscription-protocol)
-(the library's side); [§ 14](DESIGN.md#14-publishers-fan-out-and-failure-semantics);
-[§ 15](DESIGN.md#15-options-contract-cap); [§ 17](DESIGN.md#17-diagnostics) (live rows,
-`SchemaDrift` in `connections()`); [§ 18](DESIGN.md#18-concurrency-model);
-[§ 19.5](DESIGN.md#195-runtime-drift) (WebSocket routing, the bound mask);
-[§ 6.1](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released).
+**DESIGN sections implemented.** [§ 13.3](design/13-host-resolution-and-connection-protocol.md#133-connection-and-subscription-protocol)
+(the library's side); [§ 14](design/14-publishers-fan-out-and-failure-semantics.md#14-publishers-fan-out-and-failure-semantics);
+[§ 15](design/15-options-contract-cap.md#15-options-contract-cap); [§ 17](design/17-diagnostics.md#17-diagnostics) (live rows,
+`SchemaDrift` in `connections()`); [§ 18](design/18-concurrency-model.md#18-concurrency-model);
+[§ 19.5](design/19-wire-clients-and-the-spec-snapshot.md#195-runtime-drift) (WebSocket routing, the bound mask);
+[§ 6.1](design/06-massivesession-and-lifecycle.md#61-how-a-live-table-is-kept-alive-and-released).
 
 **Depends on.** websocket-client, generated-catalog-and-schemas (and through it layer-rules).
 **Parallel with.** rest-transport, massive-sdk-removal.
@@ -2120,15 +2120,15 @@ column-header tooltip) and whose table description names the dataset; every quer
 public, no-network `columns()`; and `dataset_schema` picks one description per column of each
 dataset.
 
-**DESIGN sections implemented.** [§ 7](DESIGN.md#7-query-classes-and-verbs) (`columns()`);
-[§ 7.4](DESIGN.md#74-column-descriptions) (outlets 1 and 2, `describe()`,
-`DatasetSpec.summary`); [§ 19.4](DESIGN.md#194-generated-schemas) (**Column descriptions**:
-`Column`, rules 1–3); [§ 6.1](DESIGN.md#61-how-a-live-table-is-kept-alive-and-released) (the
+**DESIGN sections implemented.** [§ 7](design/07-query-classes-and-verbs.md#7-query-classes-and-verbs) (`columns()`);
+[§ 7.4](design/07-query-classes-and-verbs.md#74-column-descriptions) (outlets 1 and 2, `describe()`,
+`DatasetSpec.summary`); [§ 19.4](design/19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas) (**Column descriptions**:
+`Column`, rules 1–3); [§ 6.1](design/06-massivesession-and-lifecycle.md#61-how-a-live-table-is-kept-alive-and-released) (the
 described `blink()` copy, a stream failed during its open);
-[§ 23](DESIGN.md#23-open-verification-items) (whether the described copy of a keyed
+[§ 23](design/23-open-verification-items.md#23-open-verification-items) (whether the described copy of a keyed
 `input_table` keeps its input-table attribute, and whether the web UI shows a
 `TableDescription`);
-[§ 22](DESIGN.md#22-decisions) “`columns()` on every query” and “Every result carries column
+[§ 22](design/22-decisions.md#22-decisions) “`columns()` on every query” and “Every result carries column
 descriptions”.
 
 **Depends on.** rest-transport, websocket-layer (and through them field-descriptions,
@@ -2219,11 +2219,11 @@ the dataset schemas, one command that owns the whole directory so that no page i
 orphaned, and a parity test that fails on a stale, missing, or extra file. Dataset docstrings
 link to their section instead of listing columns.
 
-**DESIGN sections implemented.** [§ 7.4](DESIGN.md#74-column-descriptions) (outlet 3: the
+**DESIGN sections implemented.** [§ 7.4](design/07-query-classes-and-verbs.md#74-column-descriptions) (outlet 3: the
 renderer, `sync`, the command, the parity test, the docstring rule);
-[§ 4.1](DESIGN.md#41-source-modules) (`_datasets/column_reference.py`, the supporting files);
-[§ 20](DESIGN.md#20-quality-gates) (the column-reference gate);
-[§ 22](DESIGN.md#22-decisions) “A generated column reference that cannot hold an orphaned page”.
+[§ 4.1](design/04-package-layout.md#41-source-modules) (`_datasets/column_reference.py`, the supporting files);
+[§ 20](design/20-quality-gates.md#20-quality-gates) (the column-reference gate);
+[§ 22](design/22-decisions.md#22-decisions) “A generated column reference that cannot hold an orphaned page”.
 
 **Depends on.** result-column-descriptions. **Parallel with.** api-drift-check,
 massive-sdk-removal, and the dataset planned PRs. It renders the pages of every dataset declared
@@ -2313,8 +2313,8 @@ from `origin/main` after `git fetch`.
 methods with the exact DESIGN signatures, and prove each dataset with spec-shaped fixtures.
 
 **DESIGN sections implemented.** The namespace's subsection of
-[§ 8](DESIGN.md#8-namespace-tree); [§ 7.1](DESIGN.md#71-bars-overloads) where it has `bars`;
-[§ 9](DESIGN.md#9-filters); [§ 10](DESIGN.md#10-symbols-and-all); [§ 11](DESIGN.md#11-enums-and-types).
+[§ 8](design/08-namespace-tree.md#8-namespace-tree); [§ 7.1](design/07-query-classes-and-verbs.md#71-bars-overloads) where it has `bars`;
+[§ 9](design/09-filters.md#9-filters); [§ 10](design/10-symbols-and-all.md#10-symbols-and-all); [§ 11](design/11-enums-and-types.md#11-enums-and-types).
 
 **Depends on.** rest-transport and websocket-layer, no more: no dataset planned PR waits for
 result-column-descriptions or column-reference-pages. **Parallel with.** every other dataset
@@ -2386,31 +2386,31 @@ per dataset, no aliases. Read the legacy code, if needed, with
 
 **Shared approval gates.** Opening the PR.
 
-- **stocks-datasets** ([§ 8.1](DESIGN.md#81-mstocks)): `trades`, `quotes`, `bars` (overloads;
+- **stocks-datasets** ([§ 8.1](design/08-namespace-tree.md#81-mstocks)): `trades`, `quotes`, `bars` (overloads;
   `A`/`AM`; `/prev`; range; grouped daily; `minute_aggs_v1`/`day_aggs_v1` adjusted=False only),
   `luld`, `imbalances`, `fmv`, `snapshots(include_otc)`, `movers(Direction)`, `daily_open_close`,
   `dividends`, `splits`, `ipos`, `short_interest`, `short_volume`, `share_float`, the
   `financials.*` and `filings.*` namespaces as inner classes.
-- **options-datasets** ([§ 8.2](DESIGN.md#82-moptions)): `trades`, `quotes`, `bars`, `fmv`,
+- **options-datasets** ([§ 8.2](design/08-namespace-tree.md#82-moptions)): `trades`, `quotes`, `bars`, `fmv`,
   `chain`, `snapshots` (unified `/v3/snapshot`, 250 per request; `Underlying` parsed; `ALL`
   allowed), `contracts`, `daily_open_close`. OCC normalization via `_datasets/symbols.py`.
-- **futures-datasets** ([§ 8.3](DESIGN.md#83-mfutures)): `trades`, `quotes`, `bars` (no `DAY`;
+- **futures-datasets** ([§ 8.3](design/08-namespace-tree.md#83-mfutures)): `trades`, `quotes`, `bars` (no `DAY`;
   `SESSION`; `resolution = f"{multiplier}{unit}"`), `snapshots(product_code)`, `contracts`,
   `products`, `exchanges`, `market_status`, `schedules`. Streams always `/futures`.
-- **indices-datasets** ([§ 8.4](DESIGN.md#84-mindices)): `values` (`fetch()` through the snapshot's
+- **indices-datasets** ([§ 8.4](design/08-namespace-tree.md#84-mindices)): `values` (`fetch()` through the snapshot's
   membership of the values kind; history
   flat files only), `bars` (no `adjusted`), `snapshots`, `daily_open_close`; the `V`
   not-authorized message.
-- **forex-datasets** ([§ 8.5](DESIGN.md#85-mforex)): `quotes`, `bars`, `fmv`, `snapshots`,
+- **forex-datasets** ([§ 8.5](design/08-namespace-tree.md#85-mforex)): `quotes`, `bars`, `fmv`, `snapshots`,
   `movers`, `conversion`. Pair forms `EUR/USD` ↔ `C:EURUSD`.
-- **crypto-datasets** ([§ 8.6](DESIGN.md#86-mcrypto)): `trades`, `quotes`, `bars`, `fmv`,
+- **crypto-datasets** ([§ 8.6](design/08-namespace-tree.md#86-mcrypto)): `trades`, `quotes`, `bars`, `fmv`,
   `snapshots`, `movers`, `daily_open_close`. Pair forms `BTC-USD` ↔ `X:BTCUSD`.
 - **reference-indicator-economy-datasets**
-  ([§ 8.7](DESIGN.md#87-mreference)–[§ 8.9](DESIGN.md#89-meconomy),
-  [§ 8.11](DESIGN.md#811-msnapshots)): the reference, indicators, and economy namespaces, and
+  ([§ 8.7](design/08-namespace-tree.md#87-mreference)–[§ 8.9](design/08-namespace-tree.md#89-meconomy),
+  [§ 8.11](design/08-namespace-tree.md#811-msnapshots)): the reference, indicators, and economy namespaces, and
   `MassiveSession.snapshots()` with its record `reference.snapshots` in `_namespaces/reference.py`;
   the one dataset planned PR that edits `_session.py`.
-- **partner-datasets** ([§ 8.10](DESIGN.md#810-mpartners)): the four vendor classes in
+- **partner-datasets** ([§ 8.10](design/08-namespace-tree.md#810-mpartners)): the four vendor classes in
   `_namespaces/partners.py`.
 
 ---
@@ -2427,8 +2427,8 @@ per dataset, no aliases. Read the legacy code, if needed, with
 **Goal.** Close the rework: the README examples run, `README.md` is rewritten, the durable rules
 move into `AGENTS.md`, and generated = used.
 
-**DESIGN sections implemented.** [§ 21 Examples](DESIGN.md#21-examples);
-[§ 8.12](DESIGN.md#812-excluded-endpoints) (generated = used).
+**DESIGN sections implemented.** [§ 21 Examples](design/21-examples.md#21-examples);
+[§ 8.12](design/08-namespace-tree.md#812-excluded-endpoints) (generated = used).
 
 **Depends on.** Every dataset planned PR, column-reference-pages, api-drift-check,
 massive-sdk-removal. **Parallel with.** live-integration-suite.
@@ -2481,7 +2481,7 @@ uv run pytest tests/test_readme.py tests/datasets/test_catalog.py -q
 **Goal.** `*_integration.py` tests that run only with `MASSIVE_API_KEY` (and S3 keys), so the
 owner can retire every UNVERIFIED note with evidence.
 
-**DESIGN sections implemented.** [§ 23](DESIGN.md#23-open-verification-items) (the live-test
+**DESIGN sections implemented.** [§ 23](design/23-open-verification-items.md#23-open-verification-items) (the live-test
 column).
 
 **Depends on.** Every dataset planned PR. **Parallel with.** finish-rework.
@@ -2535,7 +2535,7 @@ MASSIVE_API_KEY=… uv run pytest -m integration 2>&1 | tee live-checks.log   # 
 **Goal.** Retire each UNVERIFIED note that live-integration-suite verified and delete
 `plans/rework/`.
 
-**DESIGN sections implemented.** [§ 23](DESIGN.md#23-open-verification-items).
+**DESIGN sections implemented.** [§ 23](design/23-open-verification-items.md#23-open-verification-items).
 
 **Depends on.** finish-rework, live-integration-suite. **Parallel with.** release-workflow.
 
@@ -2587,7 +2587,7 @@ publisher.
 
 **Goal.** Release reproducibly in one manual run, with no long-lived token.
 
-**DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration) (release).
+**DESIGN sections implemented.** [§ 20.1](design/20-quality-gates.md#201-tooling-configuration) (release).
 
 **Depends on.** finish-rework and the owner's go-ahead. **Parallel with.** live-integration-suite,
 plan-retirement.
@@ -2638,7 +2638,7 @@ planned PR depends on this one.
 
 **Goal.** Prepare the first release.
 
-**DESIGN sections implemented.** [§ 20.1](DESIGN.md#201-tooling-configuration).
+**DESIGN sections implemented.** [§ 20.1](design/20-quality-gates.md#201-tooling-configuration).
 
 **Depends on.** plan-retirement, release-workflow. **Parallel with.** nothing.
 

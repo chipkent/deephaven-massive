@@ -40,8 +40,10 @@ Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-onl
 
 ## 4. Reserve `DESIGN.md` numbers
 
-Take the highest decision (§ 22) and verification item (§ 23) on `main` and in every open PR's
-diff, and give each PR that adds one its own next numbers, in merge order. Put them in the brief.
+Decisions (§ 22) live in `plans/rework/design/22-decisions.md` and verification items (§ 23) in
+`plans/rework/design/23-open-verification-items.md`. Take the highest of each on `main` and in
+every open PR's diff, and give each PR that adds one its own next numbers, in merge order. Put
+them in the brief.
 
 ## 5. Brief checklist
 
@@ -69,7 +71,8 @@ Almost all of an agent's cost is context re-read on every turn: one analysis fou
 cached tokens re-read against 0.5 million of output. Put these rules into every brief:
 
 - **Read only what the task needs**: `grep -n`, then the exact section with an offset and limit,
-  never a whole large file (`plans/rework/DESIGN.md` is about 180k tokens).
+  never a whole large file. The design is split by section: read only the `plans/rework/design/`
+  file for the topic, never all of them (together they are about 180k tokens).
 - **Quiet commands**: `pytest -q`, `| tail -n 40`, `git diff --stat` before a full diff, and
   `gh pr checks` summarized. Write a large output to a scratch file; read only what you need.
 - **Never re-read a file you just edited.**
