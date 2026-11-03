@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table, time_table, update_graph
+from deephaven import dtypes, empty_table, input_table, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
@@ -16,26 +18,29 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._namespaces import crypto, forex, partners
+from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
+    _CURRENT_STEP,
     SymbolRowRule,
     SymbolRows,
     SymbolWatch,
     _SymbolCounter,
     invalid_row_message,
+    latest_rows_since_added,
     read_symbols,
-    rows_since_added,
     skipped_rows_text,
     watched_rows,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -43,6 +48,9 @@ if TYPE_CHECKING:
 Change = tuple[frozenset[str], frozenset[str]]
 PRICES = {"Symbol": dtypes.string, "Price": dtypes.int32}
 STAMPED = {**PRICES, "TimestampInsert": dtypes.Instant}
+EXCHANGED = {**STAMPED, "Exchange": dtypes.int32}
+_JPY = cast("Any", importlib.import_module("jpy"))
+_JAVA_BOOLEAN = _JPY.get_type("java.lang.Boolean")
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
@@ -448,51 +456,251 @@ def test_watched_rows_keeps_a_blink_table_blink_and_counts_a_repeated_symbol_onc
     release_scope(dh_exec_ctx, scope)
 
 
-def stamped(symbol: str, price: int) -> Table:
-    # One row received now, as the library stamps it.
+def stamped(symbol: str, price: int, *, at: int | None = None, exchange: int = 1) -> Table:
+    # One row as the library stamps it: received `at` (epoch nanoseconds), by default now.
     return new_table(
         [
             string_col("Symbol", [symbol]),
             int_col("Price", [price]),
-            datetime_col("TimestampInsert", [time.time_ns()]),
+            datetime_col("TimestampInsert", [time.time_ns() if at is None else at]),
+            int_col("Exchange", [exchange]),
         ]
     )
 
 
-def test_rows_since_added_hides_a_re_added_symbols_old_row(
+def keyed_watchlist(dh_exec_ctx: ExecutionContext, symbols: list[str]) -> InputTable:
+    # An editable watchlist keyed by symbol. Created under the update graph's lock, so its
+    # first cycle cannot run while Deephaven is still wiring it up.
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", symbols)]))
+    return watchlist
+
+
+@dataclass
+class Latest:
+    """A stream's blink table, its publisher, and `latest_rows_since_added` over a watchlist."""
+
+    publisher: BlinkPublisher
+    kept: Table
+    scope: LivenessScope
+    pins: list[LivenessScope]
+
+    def shown(
+        self, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    ) -> list[tuple[str, int]]:
+        return sorted(
+            (cast("str", r["Symbol"]), cast("int", r["Price"])) for r in dh_to_pylist(self.kept)
+        )
+
+    def release(self, dh_exec_ctx: ExecutionContext) -> None:
+        release_scope(dh_exec_ctx, self.scope)
+        for pin in self.pins:
+            release_scope(dh_exec_ctx, pin)
+
+
+def latest_of(watchlist: Table, keys: tuple[str, ...] = ("Symbol",)) -> Latest:
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, publisher = blink_publisher(
+            "latest", EXCHANGED, on_shutdown=lambda: None, release_later=pins.append
+        )
+        kept = latest_rows_since_added(blink, watchlist, keys)
+    return Latest(publisher, kept, scope, pins)
+
+
+def cycle_ended(dh_exec_ctx: ExecutionContext) -> None:
+    # Taking the shared lock waits for the running update cycle to end.
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        pass
+
+
+def test_latest_rows_since_added_shows_a_row_received_before_the_build(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    # A row the library received while the result was being built reaches the table after
+    # it: it shows, whatever its receive time says.
+    received = time.time_ns()
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    latest = latest_of(watchlist)
+    latest.publisher.add(stamped("A", 1, at=received))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1)])
+    assert latest.kept.column_names == list(EXCHANGED)  # both hidden steps are dropped
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_shows_a_row_that_arrives_in_the_cycle_its_symbol_joins(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
 ) -> None:
     pins: list[LivenessScope] = []
     scope = new_scope()
     with scope.open():
-        blink, publisher = blink_publisher(
-            "latest", STAMPED, on_shutdown=lambda: None, release_later=pins.append
+        watch_blink, watch_publisher = blink_publisher(
+            "watch", {"Symbol": dtypes.string}, on_shutdown=lambda: None, release_later=pins.append
         )
-        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-        watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
-        kept = rows_since_added(blink.last_by("Symbol"), watchlist)
-
-    def shown() -> list[tuple[object, object]]:
-        return [(r["Symbol"], r["Price"]) for r in dh_to_pylist(kept)]
-
-    publisher.add(stamped("A", 1))
-    publisher.add(stamped("B", 2))
-    wait_for(lambda: shown() == [("A", 1), ("B", 2)])
-    assert kept.column_names == list(STAMPED)  # the hidden time is dropped
-    watchlist.delete(new_table([string_col("Symbol", ["A"])]))
-    wait_for(lambda: shown() == [("B", 2)])
-    watchlist.add(new_table([string_col("Symbol", ["A"])]))
-    with update_graph.shared_lock(dh_exec_ctx.update_graph):
-        pass  # the cycle that re-added A has ended
-    assert shown() == [("B", 2)]  # A's row was received before A rejoined
-    publisher.add(stamped("A", 3))
-    wait_for(lambda: shown() == [("A", 3), ("B", 2)])
+        latest = latest_of(blink_to_append_only(watch_blink))
+    received = time.time_ns()
+    with update_graph.exclusive_lock(dh_exec_ctx.update_graph):  # both land in one cycle
+        watch_publisher.add(new_table([string_col("Symbol", ["C"])]))
+        latest.publisher.add(stamped("C", 9, at=received))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("C", 9)])
+    latest.release(dh_exec_ctx)
     release_scope(dh_exec_ctx, scope)
     for pin in pins:
         release_scope(dh_exec_ctx, pin)
 
 
-@pytest.mark.parametrize("keep", [watched_rows, rows_since_added], ids=lambda keep: keep.__name__)
+def test_latest_rows_since_added_reads_no_wall_clock(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    latest = latest_of(watchlist)
+    latest.publisher.add(stamped("A", 1, at=946_684_800_000_000_000))  # 2000-01-01
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1)])
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_hides_a_re_added_symbols_old_row(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A", "B"])
+    latest = latest_of(watchlist)
+    latest.publisher.add(stamped("A", 1))
+    latest.publisher.add(stamped("B", 2))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1), ("B", 2)])
+    watchlist.delete(new_table([string_col("Symbol", ["A"])]))
+    cycle_ended(dh_exec_ctx)  # the delete hides A's row in its own cycle
+    assert latest.shown(dh_to_pylist) == [("B", 2)]
+    watchlist.add(new_table([string_col("Symbol", ["A"])]))
+    cycle_ended(dh_exec_ctx)
+    assert latest.shown(dh_to_pylist) == [("B", 2)]  # A's row entered before A rejoined
+    latest.publisher.add(stamped("A", 3))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 3), ("B", 2)])
+    # A second row after the rejoin replaces the first: each row is stamped as it arrives, not
+    # once per key.
+    latest.publisher.add(stamped("A", 4))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 4), ("B", 2)])
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_keeps_symbols_swapped_between_watchlist_rows(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    # One write moves A and B between two rows: neither leaves the watchlist, so neither
+    # rejoins, and both keep their rows.
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        watchlist = input_table({"Slot": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Slot"])
+    watchlist.add(new_table([int_col("Slot", [1, 2]), string_col("Symbol", ["A", "B"])]))
+    latest = latest_of(watchlist)
+    latest.publisher.add(stamped("A", 1))
+    latest.publisher.add(stamped("B", 2))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1), ("B", 2)])
+    watchlist.add(new_table([int_col("Slot", [1, 2]), string_col("Symbol", ["B", "A"])]))
+    cycle_ended(dh_exec_ctx)
+    assert latest.shown(dh_to_pylist) == [("A", 1), ("B", 2)]
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_by_symbol_and_exchange_shows_only_rows_since_the_rejoin(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    latest = latest_of(watchlist, ("Symbol", "Exchange"))
+
+    def shown() -> list[tuple[object, object]]:
+        return sorted((r["Exchange"], r["Price"]) for r in dh_to_pylist(latest.kept))
+
+    latest.publisher.add(stamped("A", 1, exchange=1))
+    latest.publisher.add(stamped("A", 2, exchange=2))
+    wait_for(lambda: shown() == [(1, 1), (2, 2)])
+    watchlist.delete(new_table([string_col("Symbol", ["A"])]))
+    wait_for(lambda: shown() == [])
+    watchlist.add(new_table([string_col("Symbol", ["A"])]))
+    latest.publisher.add(stamped("A", 5, exchange=2))
+    wait_for(lambda: shown() == [(2, 5)])
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_builds_under_the_consoles_lock(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    with update_graph.exclusive_lock(dh_exec_ctx.update_graph):  # as a console command holds it
+        latest = latest_of(watchlist)
+    latest.publisher.add(stamped("A", 1))
+    wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1)])
+    latest.release(dh_exec_ctx)
+
+
+@pytest.fixture
+def parallel_updates() -> Iterator[None]:
+    # A smoke test: ask Deephaven to run every `select` and `update` on its parallel threads,
+    # then restore the setting, so a formula that reads the cycle number without an execution
+    # context there may show a clock frozen at its first step. A pass does not prove the
+    # formula ran on those threads.
+    # The setting is package-private, so it is opened by reflection. Reflection checks its
+    # caller, and a call straight from Python has no Java caller (Java 17 on Linux then raises
+    # `NullPointerException`), so a formula, compiled Java, finds and opens the field.
+    opened = empty_table(1).update(
+        [
+            (
+                "Field = java.lang.Class.forName(`io.deephaven.engine.table.impl.QueryTable`)"
+                ".getDeclaredField(`FORCE_PARALLEL_SELECT_AND_UPDATE`)"
+            ),
+            "Opened = Field.trySetAccessible()",
+        ]
+    )
+    assert opened.j_table.getColumnSource("Opened").getBoolean(0)
+    field = _JPY.cast(
+        opened.j_table.getColumnSource("Field").get(0), _JPY.get_type("java.lang.reflect.Field")
+    )
+    before = field.getBoolean(None)
+    field.set(None, _JAVA_BOOLEAN.TRUE)
+    try:
+        yield
+    finally:
+        field.setBoolean(None, before)
+
+
+@pytest.mark.usefixtures("parallel_updates")
+def test_latest_rows_since_added_stamps_the_cycle_on_parallel_update_threads(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+) -> None:
+    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, publisher = blink_publisher(
+            "parallel", EXCHANGED, on_shutdown=lambda: None, release_later=pins.append
+        )
+        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+            built = update_cycle(dh_exec_ctx)
+            added = watchlist.select_distinct("Symbol").update(f"Step = {_CURRENT_STEP}")
+            rows = blink.update(f"Step = {_CURRENT_STEP}").last_by("Symbol")
+        kept = latest_rows_since_added(blink, watchlist, ("Symbol",))
+    publisher.add(stamped("A", 1))
+    wait_for(lambda: len(dh_to_pylist(kept)) == 1)
+    (joined,) = dh_to_pylist(added)
+    (row,) = dh_to_pylist(rows)
+    assert joined["Step"] == built > 0
+    assert cast("int", row["Step"]) > built
+    release_scope(dh_exec_ctx, scope)
+    for pin in pins:
+        release_scope(dh_exec_ctx, pin)
+
+
+def _filter_after_last_by(table: Table, watchlist: Table) -> Table:
+    return watched_rows(table.last_by("Symbol"), watchlist)
+
+
+def _latest_rows(table: Table, watchlist: Table) -> Table:
+    return latest_rows_since_added(table, watchlist, ("Symbol",))
+
+
+@pytest.mark.parametrize(
+    "keep", [_filter_after_last_by, _latest_rows], ids=["watched_rows", "latest_rows_since_added"]
+)
 @pytest.mark.parametrize(
     "order", ["in one cycle", "watchlist first", "table first"], ids=lambda order: order
 )
@@ -511,7 +719,7 @@ def test_a_watchlist_filter_takes_one_failure_when_both_of_its_tables_fail(
         watch_blink, watch_publisher = blink_publisher(
             "watch", {"Symbol": dtypes.string}, on_shutdown=lambda: None, release_later=pins.append
         )
-        kept = keep(blink.last_by("Symbol"), blink_to_append_only(watch_blink))
+        kept = keep(blink, blink_to_append_only(watch_blink))
         downstream = kept.update_view("Twice = Price * 2")
     if order == "in one cycle":
         with update_graph.exclusive_lock(dh_exec_ctx.update_graph):
