@@ -283,10 +283,15 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   mode onto its context before every connection it opens, while another thread's `SSL_new` may
   be copying the ALPN list with the GIL released, a use-after-free in CPython
   (python/cpython#141012, unfixed in every release, the free-threaded build included) that
-  corrupts the handshake (`TLSV1_ALERT_DECODE_ERROR`) or crashes the process. So every urllib3
-  pool gets a context of its own (`net.http.new_ssl_context()`, built when the REST client is
-  constructed: a few milliseconds each to parse the bundle), used by one thread at a time; the
-  refresh's downloads do the same per host. `websockets` and asyncio never write to a context,
+  corrupts the handshake (`TLSV1_ALERT_DECODE_ERROR`) or crashes the process. So each of the
+  REST client's urllib3 pools gets a context of its own (`net.http.new_ssl_context()`, built
+  when the REST client is constructed: a few milliseconds each to parse the bundle), used by
+  one thread at a time; the refresh's downloads do the same per host. botocore's flat-file
+  pools build their own contexts. A pool's context does not examine `SSL_CERT_DIR`, so the
+  REST client calls `net.http.check_certificate_directories()` once when it is constructed: a
+  configured directory that cannot be listed, or an entry of one that cannot be examined,
+  logs a WARNING, once per process for each path and error, as the shared context does.
+  `websockets` and asyncio never write to a context,
   so the WebSocket clients share one, `net.http.ssl_context()`, built per process and
   certificate setting under a lock. The shared context's certificate
   setting is the values of `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, plus the

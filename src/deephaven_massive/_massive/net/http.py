@@ -28,7 +28,10 @@ with the GIL released, and CPython does not guard the copy, so a context shared 
 that open connections can corrupt a handshake (`TLSV1_ALERT_DECODE_ERROR`) or crash the process
 (python/cpython#141012; no CPython release avoids it, the free-threaded build included). So
 urllib3 never gets a shared context: `new_ssl_context` builds one for each connection pool, and
-the REST client keeps each pool to one connection, used by one request at a time. `websockets`
+the REST client keeps each pool to one connection, used by one request at a time. Such a
+context does not examine the certificate directories, so the REST client calls
+`check_certificate_directories` once when it is created, to warn about one it cannot read.
+`websockets`
 and asyncio never write to a context, so the WebSocket client shares the one `ssl_context`
 returns.
 
@@ -49,7 +52,14 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import certifi
 
-__all__ = ["ca_file", "https_proxy", "new_ssl_context", "proxy_credentials", "ssl_context"]
+__all__ = [
+    "ca_file",
+    "check_certificate_directories",
+    "https_proxy",
+    "new_ssl_context",
+    "proxy_credentials",
+    "ssl_context",
+]
 
 _log = logging.getLogger(__name__)
 
@@ -194,6 +204,25 @@ def new_ssl_context() -> ssl.SSLContext:
         os.environ.get("SSLKEYLOGFILE", ""),
     )
     return context
+
+
+def check_certificate_directories() -> None:
+    """Warn about every `SSL_CERT_DIR` directory or entry that cannot be examined.
+
+    A client whose pools each take a `new_ssl_context()` calls this once when it is created,
+    so a certificate directory the user configured but the process cannot list, or an entry
+    of one whose file cannot be examined, is reported as `ssl_context()` reports it for the
+    WebSocket client: OpenSSL itself skips such a location without a word, and the failure
+    would otherwise show only as a certificate verification error on the first connection.
+    It examines the directories exactly as `ssl_context()` does, one listing per directory and
+    one `stat` per entry, and reads no certificate. Safe from any thread.
+
+    Logs each such failure with its path and the error at WARNING, once per process for each
+    pair; nothing when `SSL_CERT_DIR` is unset or empty.
+    """
+    cert_dir = os.environ.get("SSL_CERT_DIR", "")
+    if cert_dir:
+        _directories_identity(cert_dir, configured=True)
 
 
 def _build(*, uses_openssl: bool) -> ssl.SSLContext:

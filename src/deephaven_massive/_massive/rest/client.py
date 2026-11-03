@@ -60,6 +60,7 @@ from deephaven_massive._massive.net.errors import (
     linked_errors,
 )
 from deephaven_massive._massive.net.http import (
+    check_certificate_directories,
     https_proxy,
     new_ssl_context,
     proxy_credentials,
@@ -345,7 +346,9 @@ class RestClient:
         here, through `net.http`. Credentials in the proxy URL go to the proxy as a
         `Proxy-Authorization` header; the pools hold the proxy URL without them. Each of the
         `max_concurrency` pools gets a TLS context of its own, built here: a few milliseconds
-        of CPU each, to parse the certificate bundle.
+        of CPU each, to parse the certificate bundle. A directory in `SSL_CERT_DIR` that cannot
+        be listed, or an entry of one that cannot be examined, logs a WARNING here, once per
+        process for each path and error (`net.http.check_certificate_directories`).
 
         Args:
             api_key: The Massive API key, sent as a bearer token: non-empty visible ASCII,
@@ -387,6 +390,9 @@ class RestClient:
             "Accept-Encoding": "gzip",
         }
         proxy = https_proxy(self._host)
+        # Once per client, not once per pool: the pools' contexts do not examine the
+        # certificate directories, so this is where a configured one that is unreadable warns.
+        check_certificate_directories()
         # One pool per connection slot, each with a TLS context of its own: see the module
         # docstring for why no two threads may open connections on one context.
         self._pools: Final = tuple(_new_pool(proxy) for _ in range(max_concurrency))

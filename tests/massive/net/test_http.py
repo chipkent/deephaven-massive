@@ -476,6 +476,35 @@ def test_an_entry_that_cannot_be_examined_logs_a_warning_once(
     assert isinstance(record.args[1], FileNotFoundError)
 
 
+def test_checking_the_cert_directories_warns_as_the_shared_context_does(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    dangling = directory / _HASHED_NAME
+    dangling.symlink_to(tmp_path / "missing.pem")
+    missing = tmp_path / "missing"
+    clean_env.setenv("SSL_CERT_DIR", os.pathsep.join([str(directory), str(missing)]))
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.check_certificate_directories()
+        http.check_certificate_directories()  # the same paths and errors: logged once
+        http.ssl_context()  # the shared context finds them already reported
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    [entry, unlisted] = warnings
+    assert repr(str(dangling)) in entry.getMessage()
+    assert repr(str(missing)) in unlisted.getMessage()
+
+
+def test_checking_the_cert_directories_examines_nothing_without_ssl_cert_dir(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # OpenSSL's built-in directory is often absent; only a configured directory is checked.
+    clean_env.setattr(http, "_OPENSSL_CAPATH", str(tmp_path / "missing"))
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.check_certificate_directories()
+    assert caplog.records == []
+
+
 def test_an_unexaminable_entry_of_the_built_in_directory_logs_only_at_debug(
     clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

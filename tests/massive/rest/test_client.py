@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 import urllib3
 
-from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net import USER_AGENT, http
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import (
     WireAuthError,
@@ -38,6 +38,7 @@ from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
+    import socket
     from collections.abc import Hashable, Iterator
     from concurrent.futures import Future
 
@@ -585,6 +586,33 @@ def test_ssl_cert_file_supplies_the_trusted_certificates(
     assert _client(tls_server).get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
 
 
+def test_an_unreadable_ssl_cert_dir_warns_once_when_the_client_is_built(
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # OpenSSL skips a certificate directory it cannot list without a word, so the client says
+    # so when it is built: once, however many pools it has, not once per pool's TLS context.
+    missing = tmp_path / "missing"
+    monkeypatch.setenv("SSL_CERT_DIR", str(missing))
+    monkeypatch.setattr(http, "_WARNED", set())
+    examined: list[str] = []
+    examine = http._directories_identity
+
+    def counted(cert_dir: str, *, configured: bool) -> tuple[object, ...]:
+        examined.append(cert_dir)
+        return examine(cert_dir, configured=configured)
+
+    monkeypatch.setattr(http, "_directories_identity", counted)
+    with caplog.at_level(logging.WARNING, logger=http.__name__):
+        _client(fake_rest, max_concurrency=3).close()
+    assert examined == [str(missing)]
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert f"cannot list the certificate directory {str(missing)!r}" in caplog.text
+
+
 def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
     tls_server: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -597,12 +625,30 @@ def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
     tls_server.reply_default(Reply(_ok().body, headers={"Connection": "close"}))
     rest = _client(tls_server, max_concurrency=3)
     handshakes: list[int] = []  # the context of each connection the client opened
+    handshakes_lock = threading.Lock()  # the client's threads append to it at once
     wrap_socket = ssl.SSLContext.wrap_socket
 
-    def recorded(self: ssl.SSLContext, *args: object, **kwargs: object) -> ssl.SSLSocket:
-        if not kwargs.get("server_side"):  # the fake's own handshakes are not the client's
-            handshakes.append(id(self))
-        return wrap_socket(self, *args, **kwargs)  # type: ignore[arg-type]
+    def recorded(
+        self: ssl.SSLContext,
+        sock: socket.socket,
+        *,
+        server_side: bool = False,
+        do_handshake_on_connect: bool = True,
+        suppress_ragged_eofs: bool = True,
+        server_hostname: str | None = None,
+    ) -> ssl.SSLSocket:
+        # urllib3 and the fake server's accepting socket pass only these, by keyword.
+        if not server_side:  # the fake's own handshakes are not the client's
+            with handshakes_lock:
+                handshakes.append(id(self))
+        return wrap_socket(
+            self,
+            sock,
+            server_side=server_side,
+            do_handshake_on_connect=do_handshake_on_connect,
+            suppress_ragged_eofs=suppress_ragged_eofs,
+            server_hostname=server_hostname,
+        )
 
     monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recorded)
     ready = threading.Condition()
@@ -623,7 +669,8 @@ def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
         with ready:
             assert ready.wait_for(lambda: in_flight == 3, 10)
         assert rest._idle == []  # every slot's pool is held
-        held_at_once = set(handshakes)
+        with handshakes_lock:
+            held_at_once = set(handshakes)
         hold.set()
         assert [call.result(10).rows for call in calls] == [[{"i": 1}]] * 6
     rest.close()
