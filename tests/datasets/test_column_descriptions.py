@@ -348,7 +348,7 @@ def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
     end = description(futures.BARS, "TimestampEnd")
     assert "17:00 Chicago time on its label, Massive's `session_end_date`, which is its last" in end
     assert "only once no later session can still join it" in end
-    assert "the later of that and Massive's `e`" in end
+    assert "at Massive's `e` as sent, with a WARNING when that is not one second" in end
     trades = description(futures.TRADES, "Date")
     assert "the session Massive's futures schedules place it in" in trades
     assert "logs a WARNING (once per product and date)" in trades

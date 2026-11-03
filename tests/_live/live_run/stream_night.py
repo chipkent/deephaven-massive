@@ -62,6 +62,7 @@ from tests._live.live_run.stream_capture import (
     record_gap,
     sample_until,
     total_gaps,
+    wait_for_diagnostics,
     write_csv,
 )
 from tests._live.live_run.stream_units import delay_of
@@ -232,6 +233,7 @@ def run_stream_night(
     recorder = Recorder(folder)
     with held_streams(m, streams, recorder):
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        wait_for_diagnostics(m)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     summary = summarize_night(folder, streams, units=units, night=night, end=clock.now())
     gaps = total_gaps(folder)
