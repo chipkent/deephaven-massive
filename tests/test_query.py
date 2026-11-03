@@ -46,6 +46,7 @@ from deephaven_massive._namespaces import futures
 from deephaven_massive._namespaces.options import CHAIN
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import (
+    MINIMUM_POLL_INTERVAL,
     HistoryQuery,
     Query,
     QueryBase,
@@ -690,14 +691,39 @@ def test_a_feed_with_a_limit_polls_its_latest_rows(
     assert [c[0] for c in rest.calls] == ["poll"]
 
 
-@pytest.mark.parametrize(
-    "interval", [0, -1, float("inf"), float("nan"), timedelta(0), 1e-9, 1e300, 10**400]
-)
+@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), 1e300, 10**400])
 def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
     with pytest.raises(ValueError, match=r"interval must be (positive|a positive, finite)"):
         feed(massive_session).poll(cast("float", interval))
+    assert rest.calls == []
+
+
+@pytest.mark.parametrize(
+    "interval",
+    [0.999, timedelta(milliseconds=999), 1e-9, timedelta(0), timedelta(seconds=-5)],
+)
+def test_poll_refuses_an_interval_under_one_second(
+    massive_session: dm.MassiveSession, rest: Recorder, interval: float | timedelta
+) -> None:
+    # A typo such as poll(0.01) for poll(10) would send requests back to back on a plan
+    # Massive does not pace; the error names the minimum and the value given.
+    message = (
+        f"interval must be at least 1 second, got {interval!r}: each poll() cycle sends a "
+        "request; use a stream for faster updates"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        feed(massive_session).poll(interval)
+    assert rest.calls == []
+
+
+@pytest.mark.parametrize("interval", [1, 1.0, timedelta(seconds=1)])
+def test_poll_accepts_an_interval_of_one_second(
+    massive_session: dm.MassiveSession, rest: Recorder, interval: float | timedelta
+) -> None:
+    feed(massive_session).poll(interval)
+    assert [(c[0], c[3]["interval"]) for c in rest.calls] == [("poll", MINIMUM_POLL_INTERVAL)]
 
 
 @pytest.mark.parametrize("interval", ["30", True, None])

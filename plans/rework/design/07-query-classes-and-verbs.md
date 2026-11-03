@@ -146,6 +146,14 @@ row behind: [section 23](23-open-verification-items.md#23-open-verification-item
 filing taxonomies included (a taxonomy is a reference list revised in place, not a feed of new
 rows).
 
+**The interval is at least 1 second.** `poll(interval)` takes seconds as a number or a
+`timedelta`, and refuses one shorter than 1 second with a `ValueError` at the call that names
+the minimum and the value given: `interval must be at least 1 second, got 0.01: each poll()
+cycle sends a request; use a stream for faster updates`. A shorter interval is almost always a
+typo, such as `poll(0.01)` for `poll(10)`, and on a plan Massive does not pace it would send
+requests back to back. A stream serves anything faster
+([section 22](22-decisions.md#22-decisions), decision 94).
+
 **Feeds need `start` or `limit`.** A *feed* is a dataset whose default `poll()` mode is
 `APPEND`: the news datasets and the filings listed above. Massive keeps a feed's whole archive,
 and a feed query's `start`, `end`, and `limit` are its only bounds on what a cycle reads, so a
