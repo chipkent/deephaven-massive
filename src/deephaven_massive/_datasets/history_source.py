@@ -228,9 +228,10 @@ def history_window(
     Returns:
         The window, holding the instant it was built for (`HistoryWindow.now`).
 
-    An unparseable or naive bound, a date mixed with a datetime, or a reversed range raises
-    the `ValueError` of `dates.bounds`. Futures trades and quotes named by session dates raise
-    the `ValueError` of `_futures_sessions` for a `session_end_date` filter.
+    Raises:
+        ValueError: From `dates.bounds`, for an unparseable or naive bound, a date mixed with
+            a datetime, or a reversed range; from `_futures_sessions`, for futures trades and
+            quotes named by session dates with a `session_end_date` filter.
     """
     moment = _now() if now is None else now
     asset_class = day_class(spec, classes)

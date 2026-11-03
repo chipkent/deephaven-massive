@@ -245,14 +245,19 @@ class HttpGetter:
                     ssl_context=context,
                 )
                 _log.debug(
-                    "downloads from %s go through the proxy %s (credentials sent: %s)",
+                    "downloads from %s go through the proxy %s (credentials sent: %s), trusting %s",
                     host,
                     proxy_url,
                     bool(proxy_headers),
+                    http.trust_description(),
                 )
             else:
                 self._pools[host] = urllib3.PoolManager(ssl_context=context)
-                _log.debug("downloads from %s connect directly, through no proxy", host)
+                _log.debug(
+                    "downloads from %s connect directly, through no proxy, trusting %s",
+                    host,
+                    http.trust_description(),
+                )
         return self._pools[host]
 
     def __call__(self, url: str) -> bytes:

@@ -284,9 +284,12 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   be copying the ALPN list with the GIL released, a use-after-free in CPython
   (python/cpython#141012, unfixed in every release, the free-threaded build included) that
   corrupts the handshake (`TLSV1_ALERT_DECODE_ERROR`) or crashes the process. So each of the
-  REST client's urllib3 pools gets a context of its own (`net.http.new_ssl_context()`, built
-  when the REST client is constructed: a few milliseconds each to parse the bundle), used by
-  one thread at a time; the refresh's downloads do the same per host. botocore's flat-file
+  REST client's urllib3 pools gets a context of its own (`net.http.new_ssl_context()`), used
+  by one thread at a time. A pool and its context are built when a request takes a connection
+  slot and finds no idle pool, so there is at most one per slot; a context takes about 15 ms
+  and 0.75 MB to parse the bundle, too much to build all of a large `max_concurrency` up
+  front. The client logs what its contexts trust once, at DEBUG, when it is constructed. The
+  refresh's downloads build one context per host's pool. botocore's flat-file
   pools build their own contexts. A pool's context does not examine `SSL_CERT_DIR`, so the
   REST client calls `net.http.check_certificate_directories()` once when it is constructed: a
   configured directory that cannot be listed, or an entry of one that cannot be examined,
@@ -640,8 +643,8 @@ whose every row of the requested symbols is dropped raises after its last block;
 survivors, the conversion of every header from text to its type (a value that does not parse
 is null and reported in `unconvertible`), list parsing, and the rename to long-form names.
 Instants stay in their wire unit; the library converts them. The reader first peeks the
-header line and reads by name ([section 16](16-historysourceauto.md#16-historysourceauto)). `close()` is idempotent and
-safe from any thread.
+header line and reads by name ([section 16](16-historysourceauto.md#16-historysourceauto)). `close()` is idempotent; the
+reader thread that iterates the file closes it.
 
 ```python
 ReadPlan(columns: tuple[ReadColumn, ...], symbol_header, symbols, time_header, window_ns,

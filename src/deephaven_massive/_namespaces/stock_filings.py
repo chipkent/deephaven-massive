@@ -49,7 +49,7 @@ __all__ = [
     "_StockFilings",
 ]
 
-_R: Final = Transport.REST
+_REST: Final = Transport.REST
 _STOCKS: Final = AssetClass.STOCKS
 
 
@@ -135,7 +135,7 @@ def _filing(
         summary=summary,
         asset_class=_STOCKS,
         fetch_path=path,
-        keys={(_R, path): _OPTIONAL_TICKER if keys is None else keys},
+        keys={(_REST, path): _OPTIONAL_TICKER if keys is None else keys},
         time_axis=_FILING_AXIS,
         symbol_param=symbol_param,
         poll_mode=PollMode.APPEND,
@@ -303,7 +303,7 @@ INSIDER_ACTIVITY: Final = DatasetSpec(
     summary="Open-market insider purchases and sales, summed per company and transaction day.",
     asset_class=_STOCKS,
     fetch_path=_INSIDER_ACTIVITY,
-    keys={(_R, _INSIDER_ACTIVITY): _NO_KEYS},
+    keys={(_REST, _INSIDER_ACTIVITY): _NO_KEYS},
     time_axis=("transaction_date.gte", "transaction_date.lte"),
     symbol_param="tickers.any_of",
     ticker_list="Tickers",
@@ -319,7 +319,7 @@ INSIDER_HOLDINGS: Final = DatasetSpec(
     summary="Each company's insiders and the shares each one holds now, one row per insider.",
     asset_class=_STOCKS,
     fetch_path=_INSIDER_HOLDINGS,
-    keys={(_R, _INSIDER_HOLDINGS): _NO_KEYS},
+    keys={(_REST, _INSIDER_HOLDINGS): _NO_KEYS},
     time_axis=("last_filing_date.gte", "last_filing_date.lte"),
     symbol_param="tickers.any_of",
     ticker_list="Tickers",

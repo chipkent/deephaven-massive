@@ -17,15 +17,18 @@ of connections, the list of idle connection pools, behind a leaf lock, and the c
 token. Every request listens to a token of its own, made from the client's and the caller's, so
 closing the client ends its waits and nobody else's. No call modifies its arguments.
 
-**One TLS context per connection.** The client keeps `max_concurrency` urllib3 pools of one
-connection each, and each pool has an `ssl.SSLContext` of its own (`net.http.new_ssl_context`).
-A request takes a connection slot and, with it, an idle pool, uses that pool alone, and gives
-both back together, so no two threads ever open connections on one context. urllib3 writes the
-ALPN protocol list onto the context of every connection it opens, while OpenSSL may be copying
-that list for another thread's handshake with the GIL released: CPython does not guard the
-copy, so a context shared between threads can corrupt a handshake (`TLSV1_ALERT_DECODE_ERROR`)
-or crash the process (python/cpython#141012). No CPython or urllib3 release avoids it, the
-free-threaded build included.
+**One TLS context per connection.** The client keeps up to `max_concurrency` urllib3 pools of
+one connection each, and each pool has an `ssl.SSLContext` of its own
+(`net.http.new_ssl_context`). A request takes a connection slot and, with it, an idle pool, or
+builds one when none is idle; it uses that pool alone and gives both back together, so no two
+threads ever open connections on one context, and there are never more pools than slots.
+urllib3 writes the ALPN protocol list onto the context of every connection it opens, while
+OpenSSL may be copying that list for another thread's handshake with the GIL released: CPython
+does not guard the copy, so a context shared between threads can corrupt a handshake
+(`TLSV1_ALERT_DECODE_ERROR`) or crash the process (python/cpython#141012). No CPython or urllib3
+release avoids it, the free-threaded build included. A pool is built when a request first needs
+it, not with the client: a context takes about 15 ms and 0.75 MB to build, so building every
+pool of a `max_concurrency` of 64 up front would cost about a second and 48 MB.
 
 **Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
@@ -64,6 +67,7 @@ from deephaven_massive._massive.net.http import (
     https_proxy,
     new_ssl_context,
     proxy_credentials,
+    trust_description,
 )
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import Redactor, without_userinfo
@@ -339,16 +343,18 @@ class RestClient:
         governor: RequestGovernor,
         on_refused: RefusalHook | None = None,
     ) -> None:
-        """Create the client and its connection pools; no request is sent.
+        """Create the client; no request is sent, and no connection pool is built yet.
 
-        The proxy (`HTTPS_PROXY`, `NO_PROXY`) and the certificate authorities
-        (`SSL_CERT_FILE`, `SSL_CERT_DIR`, else `certifi`) are read from the environment once,
-        here, through `net.http`. Credentials in the proxy URL go to the proxy as a
-        `Proxy-Authorization` header; the pools hold the proxy URL without them. Each of the
-        `max_concurrency` pools gets a TLS context of its own, built here: a few milliseconds
-        of CPU each, to parse the certificate bundle. A directory in `SSL_CERT_DIR` that cannot
-        be listed, or an entry of one that cannot be examined, logs a WARNING here, once per
-        process for each path and error (`net.http.check_certificate_directories`).
+        The proxy (`HTTPS_PROXY`, `NO_PROXY`) is read from the environment once, here, through
+        `net.http`. Credentials in the proxy URL go to the proxy as a `Proxy-Authorization`
+        header; the pools hold the proxy URL without them. Each of the up to `max_concurrency`
+        pools gets a TLS context of its own, built with the pool the first time a request finds
+        no idle pool: about 15 ms of CPU each, to parse the certificate bundle. Each context
+        trusts the certificate authorities (`SSL_CERT_FILE`, `SSL_CERT_DIR`, else `certifi`)
+        as the environment and files name them when it is built. A directory in
+        `SSL_CERT_DIR` that cannot be listed, or an entry of one that cannot be examined, logs
+        a WARNING here, once per process for each path and error
+        (`net.http.check_certificate_directories`).
 
         Args:
             api_key: The Massive API key, sent as a bearer token: non-empty visible ASCII,
@@ -393,12 +399,15 @@ class RestClient:
         # Once per client, not once per pool: the pools' contexts do not examine the
         # certificate directories, so this is where a configured one that is unreadable warns.
         check_certificate_directories()
-        # One pool per connection slot, each with a TLS context of its own: see the module
-        # docstring for why no two threads may open connections on one context.
-        self._pools: Final = tuple(_new_pool(proxy) for _ in range(max_concurrency))
-        # The pools no request holds; a request takes one only with a slot, so it is never
-        # empty when one is taken. Guarded by `_idle_lock`, a leaf lock.
-        self._idle = list(self._pools)
+        self._proxy = proxy
+        # Every pool built, for `close()`: one per connection slot at most, each with a TLS
+        # context of its own (the module docstring says why no two threads may open
+        # connections on one context). Guarded by `_idle_lock`, a leaf lock.
+        self._pools: list[urllib3.PoolManager] = []
+        # The pools no request holds. A request takes one only with a slot, and builds one
+        # only when none is idle, so every pool is idle or held by the one request whose slot
+        # it goes with. Guarded by `_idle_lock`.
+        self._idle: list[urllib3.PoolManager] = []
         self._idle_lock = threading.Lock()
         self._closed = Cancel()
         # Every request of every caller takes one, and an idle pool with it, so the session
@@ -406,10 +415,11 @@ class RestClient:
         # overlap.
         self._slots = ConnectionSlots(max_concurrency)
         _log.debug(
-            "REST client for %s: %d connection pools of one connection, each with its own "
-            "TLS context, through %s",
+            "REST client for %s: up to %d connection pools of one connection, each built on "
+            "first need with its own TLS context trusting %s, through %s",
             self._base,
             max_concurrency,
+            trust_description(),
             "no proxy" if proxy is None else f"the proxy {proxy_credentials(proxy)[0]}",
         )
 
@@ -520,7 +530,9 @@ class RestClient:
         that share it are not affected.
         """
         self._closed.set()
-        for pool in self._pools:
+        with self._idle_lock:
+            pools = list(self._pools)
+        for pool in pools:  # outside the leaf lock: closing a connection may block
             pool.clear()
 
     def _pages(self, job: _Job, target: str, limit: int | None) -> Iterator[Page]:
@@ -634,9 +646,13 @@ class RestClient:
             if not self._slots.acquire(stop):
                 self._governor.release(permit)
                 raise self._stopped(request)
-            # The slot's pool: no other thread uses it, or its TLS context, until it is back.
-            with self._idle_lock:
-                pool = self._idle.pop()
+            try:
+                # The slot's pool: no other thread uses it, or its TLS context, until it is back.
+                pool = self._take_pool()
+            except BaseException:
+                self._slots.release()
+                self._governor.release(permit)
+                raise
             try:
                 return self._send(
                     job, request, permit, pool=pool, waited=self._clock.monotonic() - queued
@@ -645,6 +661,25 @@ class RestClient:
                 with self._idle_lock:
                     self._idle.append(pool)
                 self._slots.release()
+
+    def _take_pool(self) -> urllib3.PoolManager:
+        """Take an idle pool, or build one; the caller holds a connection slot without a pool.
+
+        Every pool is idle or held by the one request whose slot it goes with, so a caller
+        that finds none idle holds a slot that has no pool yet, and the pool it builds keeps
+        the count at one per slot at most. The pool is built outside the leaf lock: its TLS
+        context takes a few milliseconds to parse the certificate bundle.
+
+        Returns:
+            A pool, and its TLS context, that no other request holds.
+        """
+        with self._idle_lock:
+            if self._idle:
+                return self._idle.pop()
+        pool = _new_pool(self._proxy)
+        with self._idle_lock:
+            self._pools.append(pool)
+        return pool
 
     def _send(
         self,

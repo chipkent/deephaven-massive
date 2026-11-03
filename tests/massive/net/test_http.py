@@ -135,34 +135,34 @@ def test_each_new_ssl_context_is_built_for_its_caller_alone(
     clean_env: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # urllib3 writes to the context of every connection it opens, so no urllib3 pool may share
-    # its context with another pool, or with the shared context `websockets` uses.
+    # its context with another pool, or with the shared context `websockets` uses. A client
+    # builds one per pool, so building one logs nothing: the client logs its trust once.
     calls = _record_cafile(clean_env)
     shared = http.ssl_context()
     with caplog.at_level(logging.DEBUG, logger=http.__name__):
         first, second = http.new_ssl_context(), http.new_ssl_context()
+    assert caplog.records == []
     assert len({id(shared), id(first), id(second)}) == 3
     assert http.ssl_context() is shared  # the shared one is neither replaced nor built again
     assert calls == [certifi.where()] * 3
     for context in (first, second):
         assert context.verify_mode is ssl.CERT_REQUIRED
         assert context.check_hostname
-    built = (
-        "built a TLS context of its own trusting certifi's bundle (SSL_CERT_FILE='', "
-        "SSL_CERT_DIR='', SSLKEYLOGFILE='')"
+    assert http.trust_description() == (
+        "certifi's bundle (SSL_CERT_FILE='', SSL_CERT_DIR='', SSLKEYLOGFILE='')"
     )
-    assert [record.getMessage() for record in caplog.records] == [built, built]
 
 
 @pytest.mark.parametrize("variable", _CERT_VARS)
 def test_a_new_ssl_context_defers_to_openssl_when_a_cert_variable_is_set(
-    clean_env: pytest.MonkeyPatch, variable: str, caplog: pytest.LogCaptureFixture
+    clean_env: pytest.MonkeyPatch, variable: str
 ) -> None:
     clean_env.setenv(variable, certifi.where())
     calls = _record_cafile(clean_env)
-    with caplog.at_level(logging.DEBUG, logger=http.__name__):
-        http.new_ssl_context()
+    http.new_ssl_context()
     assert calls == [None]
-    assert "trusting the OpenSSL locations" in caplog.records[0].getMessage()
+    assert http.trust_description().startswith("the OpenSSL locations (")
+    assert f"{variable}={certifi.where()!r}" in http.trust_description()
 
 
 def test_a_new_ssl_context_writes_tls_secrets_to_the_key_log_file(

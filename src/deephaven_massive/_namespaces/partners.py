@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 __all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
 
 
-_REST = Transport.REST
+_REST: Final = Transport.REST
 
 _NO_TICKER_FILTER: Final = "leave symbols out, which applies no ticker filter"
 """The alternative a list dataset names when it is given `dm.ALL`."""

@@ -4,6 +4,7 @@ import dataclasses
 import logging
 import re
 import threading
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
@@ -1167,6 +1168,7 @@ def test_stream_verbs_build_results(
         q.last_by(),
         q.last_by(by="Symbol"),
         q.last_by(by=("Symbol", "Exchange")),
+        q.last_by(by=deque(["Symbol", "Exchange"])),  # any sequence, as the message says
     ]
     assert all(r.is_refreshing for r in results)
     schema = massive_session._core.catalog.dataset_schema(TRADES_SPEC)

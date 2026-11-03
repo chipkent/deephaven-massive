@@ -1925,3 +1925,18 @@ def test_a_body_whose_close_raises_still_gives_its_slot_back() -> None:
     with pytest.raises(OSError, match="broke while closing"):
         body.close()
     assert slots._free == 1  # given back
+
+
+def test_an_attempt_never_waits_for_the_lock_a_client_build_holds(
+    client: FlatFileClient,
+) -> None:
+    # Building a boto3 client for another slot holds the client's lock while it reads local
+    # AWS configuration. An attempt on a client its caller already holds needs nothing the
+    # lock guards, so it is sent while the lock is held elsewhere.
+    def attempt() -> object:
+        return client._attempt(
+            cast("Any", None), lambda _: "sent", key="k", location="s3://bucket/k", verb="read"
+        )
+
+    with ThreadPoolExecutor(1) as pool, client._lock:  # the lock is let go first
+        assert pool.submit(attempt).result(timeout=10) == "sent"

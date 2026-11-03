@@ -120,10 +120,70 @@ def _ok(*, status: str = "OK", request_id: str = "req-1", next_url: str | None =
 # Construction and transport.
 
 
+def test_a_pool_is_built_only_when_a_request_finds_none_idle(
+    fake_rest: FakeRestServer, no_proxy_env: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A pool's TLS context takes about 15 ms and 0.75 MB to build, so the client builds none
+    # up front: a request builds one only when no pool is idle, and the next one reuses it.
+    monkeypatch = no_proxy_env
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE"):
+        monkeypatch.delenv(name, raising=False)
+    built: list[urllib3.PoolManager] = []
+    new_pool = client_module._new_pool
+
+    def counted(proxy: str | None) -> urllib3.PoolManager:
+        built.append(new_pool(proxy))
+        return built[-1]
+
+    monkeypatch.setattr(client_module, "_new_pool", counted)
+    fake_rest.reply_default(_ok())
+    with caplog.at_level(logging.DEBUG):
+        rest = _client(fake_rest)
+        assert (rest._pools, built) == ([], [])
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert rest._pools == built
+    assert len(built) == 1
+    assert rest._idle == built  # given back, to be taken again
+    # The trust is logged once, by the client, not once per TLS context built.
+    trusting = [r.getMessage() for r in caplog.records if "trusting" in r.getMessage()]
+    assert trusting == [
+        (
+            f"REST client for {fake_rest.url}: up to 4 connection pools of one connection, each "
+            "built on first need with its own TLS context trusting certifi's bundle "
+            "(SSL_CERT_FILE='', SSL_CERT_DIR='', SSLKEYLOGFILE=''), through no proxy"
+        )
+    ]
+    rest.close()
+
+
+def test_a_pool_that_cannot_be_built_hands_back_its_slot_and_permit(
+    fake_rest: FakeRestServer, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor, max_concurrency=1)
+
+    def interrupted(_proxy: str | None) -> urllib3.PoolManager:
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(client_module, "_new_pool", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    state = governor.snapshot()[0]
+    assert (state.in_flight, state.recent, rest._pools) == (0, 0, [])
+    # The one slot is free again: the next request takes it and builds the pool.
+    fake_rest.reply_default(_ok())
+    assert rest.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    assert len(rest._pools) == 1
+    rest.close()
+
+
 def test_each_connection_has_a_pool_that_never_retries_with_the_timeouts(
     client: RestClient,
 ) -> None:
-    assert len(client._pools) == 4  # one pool of one connection per connection slot
+    pool = client._take_pool()
+    assert client._pools == [pool]
     for pool in client._pools:
         options = pool.connection_pool_kw
         retries = options["retries"]
@@ -516,7 +576,7 @@ def test_a_proxy_reached_over_https_is_verified_like_massive(
     rest = RestClient(
         _KEY, base_url="https://api.massive.test", max_concurrency=1, governor=_governor()
     )
-    (pool,) = rest._pools
+    pool = rest._take_pool()
     assert type(pool).__name__ == "ProxyManager"
     proxy_context = pool.connection_pool_kw["_proxy_config"].ssl_context
     assert proxy_context is not None
@@ -669,6 +729,7 @@ def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
         with ready:
             assert ready.wait_for(lambda: in_flight == 3, 10)
         assert rest._idle == []  # every slot's pool is held
+        assert len(rest._pools) == 3  # one built per slot, and no more
         with handshakes_lock:
             held_at_once = set(handshakes)
         hold.set()
@@ -1431,8 +1492,7 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
     def interrupted(*_: object, **__: object) -> None:
         raise KeyboardInterrupt
 
-    for pool in rest._pools:
-        monkeypatch.setattr(pool, "request", interrupted)
+    monkeypatch.setattr(urllib3.PoolManager, "request", interrupted)
     with pytest.raises(KeyboardInterrupt):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert governor.snapshot()[0].in_flight == 0
@@ -1640,8 +1700,7 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     def unreachable(*_: object, **__: object) -> None:
         raise error
 
-    for pool in rest._pools:
-        monkeypatch.setattr(pool, "request", unreachable)
+    monkeypatch.setattr(urllib3.PoolManager, "request", unreachable)
     with pytest.raises(WireError):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     state = governor.snapshot()[0]

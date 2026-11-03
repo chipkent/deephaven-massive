@@ -69,9 +69,9 @@ __all__ = [
 ]
 
 
-_R: Final = Transport.REST
-_W: Final = Transport.WS
-_F: Final = Transport.FLAT_FILES
+_REST: Final = Transport.REST
+_WS: Final = Transport.WS
+_FLAT_FILES: Final = Transport.FLAT_FILES
 _STOCKS: Final = AssetClass.STOCKS
 
 
@@ -115,9 +115,9 @@ TRADES: Final = DatasetSpec(
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
-        (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
-        (_W, "stocks/T"): ticker_key("SipTimestamp"),
-        (_F, "us_stocks_sip/trades_v1"): ticker_key("SipTimestamp"),
+        (_REST, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
+        (_WS, "stocks/T"): ticker_key("SipTimestamp"),
+        (_FLAT_FILES, "us_stocks_sip/trades_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
 )
@@ -131,7 +131,7 @@ LAST_TRADE: Final = DatasetSpec(
     fetch_path=_LAST_TRADE,
     serves_current_data=True,
     refused_alternative="stocks.snapshots",
-    keys={(_R, _LAST_TRADE): ticker_key("SipTimestamp")},
+    keys={(_REST, _LAST_TRADE): ticker_key("SipTimestamp")},
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
@@ -144,9 +144,9 @@ QUOTES: Final = DatasetSpec(
     channels={NotBars.ANY: "Q"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
-        (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
-        (_W, "stocks/Q"): ticker_key("SipTimestamp"),
-        (_F, "us_stocks_sip/quotes_v1"): ticker_key("SipTimestamp"),
+        (_REST, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
+        (_WS, "stocks/Q"): ticker_key("SipTimestamp"),
+        (_FLAT_FILES, "us_stocks_sip/quotes_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
 )
@@ -158,7 +158,7 @@ LAST_QUOTE: Final = DatasetSpec(
     fetch_path=_LAST_QUOTE,
     serves_current_data=True,
     refused_alternative="stocks.snapshots",
-    keys={(_R, _LAST_QUOTE): ticker_key("SipTimestamp")},
+    keys={(_REST, _LAST_QUOTE): ticker_key("SipTimestamp")},
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
@@ -176,12 +176,12 @@ BARS: Final = DatasetSpec(
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
-        (_R, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
-        (_R, _GROUPED): ticker_key("WindowStart"),
-        (_W, "stocks/A"): _stream_bar_keys(),
-        (_W, "stocks/AM"): _stream_bar_keys(),
-        (_F, _MINUTE_FILES): ticker_key("WindowStart"),
-        (_F, _DAY_FILES): ticker_key("WindowStart"),
+        (_REST, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
+        (_REST, _GROUPED): ticker_key("WindowStart"),
+        (_WS, "stocks/A"): _stream_bar_keys(),
+        (_WS, "stocks/AM"): _stream_bar_keys(),
+        (_FLAT_FILES, _MINUTE_FILES): ticker_key("WindowStart"),
+        (_FLAT_FILES, _DAY_FILES): ticker_key("WindowStart"),
     },
     page_size=_AGGREGATES_PAGE,
     column_notes=_BAR_NOTES,
@@ -192,7 +192,7 @@ PREVIOUS_DAY_BAR: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="bars",
     fetch_path=_PREV,
-    keys={(_R, _PREV): ticker_key("WindowStart")},
+    keys={(_REST, _PREV): ticker_key("WindowStart")},
     per_symbol=True,
     revision_keys=("TimestampStart",),
     column_notes=_BAR_NOTES,
@@ -203,7 +203,7 @@ LULD: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="luld",
     channels={NotBars.ANY: "LULD"},
-    keys={(_W, "stocks/LULD"): ticker_key("UnixTimestamp")},
+    keys={(_WS, "stocks/LULD"): ticker_key("UnixTimestamp")},
 )
 IMBALANCES: Final = DatasetSpec(
     name="stocks.imbalances",
@@ -211,7 +211,7 @@ IMBALANCES: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="imbalances",
     channels={NotBars.ANY: "NOI"},
-    keys={(_W, "stocks/NOI"): ticker_key("UnixTimestamp")},
+    keys={(_WS, "stocks/NOI"): ticker_key("UnixTimestamp")},
 )
 FMV: Final = DatasetSpec(
     name="stocks.fmv",
@@ -220,7 +220,7 @@ FMV: Final = DatasetSpec(
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
-    keys={(_W, "stocks/FMV"): ticker_key("FmvLastUpdated")},
+    keys={(_WS, "stocks/FMV"): ticker_key("FmvLastUpdated")},
 )
 
 # --- Snapshots and daily summaries -------------------------------------------------------------
@@ -237,7 +237,7 @@ SNAPSHOTS: Final = DatasetSpec(
     asset_class=_STOCKS,
     fetch_path=_SNAPSHOTS,
     serves_current_data=True,
-    keys={(_R, _SNAPSHOTS): ticker_key()},
+    keys={(_REST, _SNAPSHOTS): ticker_key()},
     symbol_param="tickers",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
@@ -248,7 +248,7 @@ MOVERS: Final = DatasetSpec(
     asset_class=_STOCKS,
     fetch_path=_MOVERS,
     serves_current_data=True,
-    keys={(_R, _MOVERS): ticker_key()},
+    keys={(_REST, _MOVERS): ticker_key()},
     revision_keys=("Updated",),
 )
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
@@ -256,7 +256,7 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     summary="The open, close, and pre- and after-market prices of US stocks on one day.",
     asset_class=_STOCKS,
     fetch_path=_OPEN_CLOSE,
-    keys={(_R, _OPEN_CLOSE): SourceKeys(symbol=_row("Symbol"), date=_row("From"))},
+    keys={(_REST, _OPEN_CLOSE): SourceKeys(symbol=_row("Symbol"), date=_row("From"))},
     per_symbol=True,
     row_times=RowTimes.DAY,
     column_notes=adjustment_notes(
@@ -278,7 +278,7 @@ DIVIDENDS: Final = DatasetSpec(
     summary="Cash dividends of US-listed stocks, one row per distribution.",
     asset_class=_STOCKS,
     fetch_path=_DIVIDENDS,
-    keys={(_R, _DIVIDENDS): ticker_key()},
+    keys={(_REST, _DIVIDENDS): ticker_key()},
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
@@ -288,7 +288,7 @@ SPLITS: Final = DatasetSpec(
     summary="Stock splits, reverse splits, and stock dividends of US-listed stocks.",
     asset_class=_STOCKS,
     fetch_path=_SPLITS,
-    keys={(_R, _SPLITS): ticker_key()},
+    keys={(_REST, _SPLITS): ticker_key()},
     time_axis=("execution_date.gte", "execution_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
@@ -299,7 +299,7 @@ IPOS: Final = DatasetSpec(
     summary="Initial public offerings on US exchanges, upcoming and past, one row per offering.",
     asset_class=_STOCKS,
     fetch_path=_IPOS,
-    keys={(_R, _IPOS): ticker_key()},
+    keys={(_REST, _IPOS): ticker_key()},
     time_axis=("listing_date.gte", "listing_date.lte"),
     symbol_param="ticker",
     poll_mode=PollMode.UPSERT,
@@ -316,7 +316,7 @@ SHORT_INTEREST: Final = DatasetSpec(
     summary="Short interest of US-listed stocks, one row per ticker and FINRA settlement date.",
     asset_class=_STOCKS,
     fetch_path=_SHORT_INTEREST,
-    keys={(_R, _SHORT_INTEREST): ticker_key()},
+    keys={(_REST, _SHORT_INTEREST): ticker_key()},
     time_axis=("settlement_date.gte", "settlement_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "SettlementDate"),
@@ -326,7 +326,7 @@ SHORT_VOLUME: Final = DatasetSpec(
     summary="Daily short sale volume of US-listed stocks, one row per ticker and trading day.",
     asset_class=_STOCKS,
     fetch_path=_SHORT_VOLUME,
-    keys={(_R, _SHORT_VOLUME): ticker_key()},
+    keys={(_REST, _SHORT_VOLUME): ticker_key()},
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
@@ -336,7 +336,7 @@ SHARE_FLOAT: Final = DatasetSpec(
     summary="The free float of US-listed stocks: the latest count of shares the public can trade.",
     asset_class=_STOCKS,
     fetch_path=_FLOAT,
-    keys={(_R, _FLOAT): ticker_key()},
+    keys={(_REST, _FLOAT): ticker_key()},
     symbol_param="ticker.any_of",
 )
 
