@@ -17,20 +17,22 @@ import threading
 import time
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 import deephaven_massive as dm
-from tests._live.live_run import stream_night
+from tests._live.live_run import stream_capture, stream_night
 from tests._live.live_run.stream_capture import Clock, Stream
 from tests._live.live_run.stream_night import Boundary
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from deephaven.table import Table
 
     from deephaven_massive import MassiveSession
     from tests._fakes.ws_session import WsSession
@@ -347,6 +349,25 @@ class _Night:
         return False
 
 
+def _record_diagnostics_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # Records, in order, each wait for the diagnostics rows to show and each diagnostics read
+    # the night module makes itself.
+    steps: list[str] = []
+    wait, read = stream_capture.wait_for_diagnostics, stream_capture.diagnostics_rows
+
+    def waited(m: MassiveSession) -> None:
+        steps.append("wait")
+        wait(m)
+
+    def read_rows(m: MassiveSession, view: Table) -> list[dict[str, Any]]:
+        steps.append("read")
+        return read(m, view)
+
+    monkeypatch.setattr(stream_night, "wait_for_diagnostics", waited)
+    monkeypatch.setattr(stream_night, "diagnostics_rows", read_rows)
+    return steps
+
+
 @pytest.mark.jvm_held
 def test_a_night_records_its_rows_and_judges_its_units(
     make_ws_session: Callable[..., WsSession],
@@ -390,6 +411,7 @@ def test_a_night_records_its_rows_and_judges_its_units(
 
     clock = _Night(publish)
     seen: list[tuple[str, str, str]] = []
+    steps = _record_diagnostics_reads(monkeypatch)
     stream_night.run_stream_night(
         harness.session,
         units=["crypto real-time"],
@@ -401,6 +423,8 @@ def test_a_night_records_its_rows_and_judges_its_units(
         clock=Clock(now=clock.now, wait=clock.wait),
     )
     assert seen == [("crypto real-time", "passed", "")]
+    # The final read of failed streams waits for the queued diagnostics rows to show first.
+    assert steps[-2:] == ["wait", "read"]
     assert [r["rows"] for r in _csv(tmp_path / "hours.csv")] == ["1"]
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert (summary["night"], summary["gaps_minutes"]) == ("2026-11-04", 0)

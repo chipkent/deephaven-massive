@@ -28,10 +28,14 @@ Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-onl
 
 ## 3. Set the merge order
 
-- For PRs that share a file or section, fix the order now.
-- Each later PR branches from the earlier one's branch, not `main`, and its body says
-  "Builds on #<n>".
-- After the earlier PR merges, the later one merges `main` once.
+- For PRs that share a file or section, fix the order now and plan them as one GitHub native
+  stack. A stack is a single chain, so a PR that two others need sits below both.
+- Each later PR branches from the branch of the PR below it, opens against that branch, and
+  joins the stack with `gh stack link <every PR in the stack, bottom to top>`.
+- The owner merges from the bottom up. After each merge, GitHub re-targets the next PR and
+  rebases its branch; its agent pulls that branch. When a conflict stops GitHub's rebase, the
+  agent merges the PR's base branch, resolves the conflict, and explains the resolution in the
+  PR body. No agent force-pushes or rebases a pushed branch.
 - Tell the owner the order, with each PR's number, in one list.
 
 ## 4. Reserve `DESIGN.md` numbers
@@ -53,10 +57,10 @@ Every agent brief includes:
 - **The Deephaven invariants** section of `AGENTS.md`, for any change that runs off the caller's
   thread, takes a lock, or creates a live table.
 - **The pre-push hook is the check**: never run `./scripts/check.sh` before a push.
-- **The base branch**: `origin/main`, or the branch of the PR it builds on.
+- **The base branch**: `origin/main`, or the branch of the PR below it in its stack, and the
+  stack's PR numbers, bottom to top.
 - **The reserved numbers**, or "none".
-- **The PR-description standard**: `docs/dev/pull-requests.md`, including "Builds on #<n>" and
-  the reserved number.
+- **The PR-description standard**: `docs/dev/pull-requests.md`, including the reserved number.
 - **Keep context small**: the rules of the next section, copied in.
 
 ## 6. Keep context small

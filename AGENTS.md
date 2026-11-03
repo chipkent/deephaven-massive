@@ -131,9 +131,20 @@ Several agents work at once, and every collision costs a full check and a paid C
 
 - **Before starting**, list the files, `DESIGN.md` sections, and `README.md` sections you will
   change. If an open PR changes the same files (`gh pr list`, `gh pr diff <n> --name-only`),
-  branch from that PR's branch instead of `main`, and write "Builds on #<n>" in the PR body.
-- **Merge `main` once, and only when needed**: when the branch conflicts with it, or after the
-  PR it builds on merges. Never merge only to stay current.
+  stack yours on it with GitHub's native stacked PRs: branch from its branch, push, open your
+  PR against that branch (`gh pr create --base <its branch>`), then run
+  `gh stack link <its PR> <your PR>`, listing every PR of a longer stack bottom to top. Install
+  the extension once: `gh extension install github/gh-stack`.
+- **Never rewrite a pushed branch**: never force-push, and never rebase a branch you have
+  pushed. Never run `gh stack submit`, `push`, or `sync`, which push with `--force-with-lease`,
+  or `gh stack rebase`. GitHub's own stack rebases are allowed: the automatic one after a PR
+  below yours merges, and the owner's **Rebase stack** click.
+- **After the PR below yours merges**, GitHub re-targets yours and rebases its branch: pull the
+  rebased branch (`git pull --rebase`) instead of merging `main` by hand.
+- **Merge only when needed.** When GitHub cannot rebase the stack because of a conflict, merge
+  your PR's base branch (`main` for the bottom PR); when your branch conflicts with `main`,
+  merge `main`. Resolve the conflict in the merge, push, and say in the PR body how you resolved
+  it. Never merge only to stay current.
 - **The pre-push hook is the check.** It runs `./scripts/check.sh` and picks the scope from the
   files the branch changes: never run the check yourself just before a push.
 - **Take a free `DESIGN.md` number.** A new decision (§ 22) or verification item (§ 23) takes

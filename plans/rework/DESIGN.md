@@ -1124,12 +1124,13 @@ return result
      and leaves the connection's users, so no later row replaces it.
   5. It has the writer add the final rows, release the diagnostics scope under the shared
      update-graph lock, and end, and waits for it. The rows reach the tables on the next update
-     cycle, so while a diagnostics view is held `close()` then waits for a cycle that started
-     after the writer ended (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then
-     a WARNING), and a held `m.streams()` view shows them when it returns. A held view keeps
-     its table, the blink table under it, and the publisher alive, so the release does not
-     drop the pending rows; with no view held nothing could show them, and `close()` does not
-     wait. On a thread that holds the UG lock it waits for neither: the writer's release
+     cycle, so `close()` then waits for a cycle that started after the writer ended
+     (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then a WARNING), and a held
+     `m.streams()` view, or a table derived from one, shows them when it returns. A held view
+     keeps its table, the blink table under it, and the publisher alive, so the release does
+     not drop the pending rows. `close()` waits even when it counts no view held: in
+     `x = m.streams().where(...)` the view's wrapper is collected at once while `x` keeps the
+     table, and the wait is usually shorter than one cycle. On a thread that holds the UG lock it waits for neither: the writer's release
      cannot take the lock until the caller lets it go, so `close()` asks the writer to add the
      rows, release the scope, and end, and returns at once; the rows, and a held view, follow
      once the console command is over.
@@ -1224,28 +1225,35 @@ released by the same rule. Everything is created on the caller thread inside the
 scope:
 
 ```python
-blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": int, "Constituent": TABLE}, ...)
-latest = blink.last_by("Symbol")                    # each symbol's latest cell
-held = latest                                       # wait=False
-held = merge([seed.natural_join(latest, on="Symbol", joins="Over=Seq")   # wait=True: the
-                  .where("isNull(Over)").drop_columns("Over"),           # static seed, masked
-              latest])                                                   # once a symbol has a
-                                                                         # newer cell
-shown = watched_rows(held.where("!isNull(Constituent)"), symbol_table)
-parts = PartitionedTable.from_partitioned_table(shown, key_cols=["Symbol"], unique_keys=True,
-            constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
-            constituent_changes_permitted=True)
+# One partition per symbol. Deephaven has no call that adds or removes a partition: the rows of
+# the partition table define them, so a blink publisher plus last_by stands in for a keyed
+# input table (the library never uses one), and watched_rows removes a symbol's partition.
+blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long, "Constituent": TABLE,
+                                          "DecidedAtStep": long}, ...)
+latest_per_symbol = blink.last_by("Symbol")          # one partition row per symbol: its newest
+with_seed = latest_per_symbol                        # wait=False
+with_seed = merge([seed.natural_join(latest_per_symbol, on="Symbol", joins="NewerSeq=Seq")
+                       .where("isNull(NewerSeq)").drop_columns("NewerSeq"),  # wait=True: the
+                   latest_per_symbol])               # static seed until a newer row is published
+in_watchlist = watched_rows(with_seed.where("!isNull(Constituent)"), symbol_table)
+# reread=ALWAYS: also hide a row whose DecidedAtStep precedes its symbol's last join cycle
+parts = PartitionedTable.from_partitioned_table(in_watchlist, key_cols=["Symbol"],
+            unique_keys=True, constituent_column="Constituent",
+            constituent_table_columns=<the dataset's columns>, constituent_changes_permitted=True)
 result = describe(parts.merge(), spec, schema)      # [list-column datasets: the dedupe]
 ```
 
-A cell holds one symbol's complete static rows, built off the update-graph lock; `Seq` orders a
-result's cells. A symbol lands, is replaced, or leaves as one constituent, so no rows are copied
-in the update cycle. A removed symbol's rows leave in the cycle that removes its row from the
-user's table, because `watched_rows` drops its partition there. With `wait=True` the seed is a
-static table of the call-time symbols' cells, so their rows are visible at once, also inside a
-console command. A cell with a null `Constituent` (a tombstone) frees a symbol's rows: under
-`reread=ALWAYS` a removal publishes one, and `NEVER` keeps the cell and republishes it on a
-re-add. There is no `input_table` and no `add_async`: `add_async` runs on the JVM's shared
+A partition row holds one symbol's complete static rows, built off the update-graph lock; `Seq`
+numbers a result's partition rows, and the seed's join copies it only because it is never null.
+A symbol lands, is replaced, or leaves as one partition, so no rows are copied in the update
+cycle. A removed symbol's rows leave in the cycle that removes its row from the user's table,
+because `watched_rows` drops its partition there. With `wait=True` the seed is a static table of
+the call-time symbols' partition rows, so their rows are visible at once, also inside a console
+command. A partition row with a null `Constituent` (an empty partition row) frees a symbol's
+rows: under `reread=ALWAYS` a removal publishes one, and `DecidedAtStep`, the latest symbol-table
+cycle the coordinator had applied when it decided to publish a row, hides a download decided
+before the symbol's last join; `NEVER` keeps the row, so a re-add shows it at once. There is no
+`input_table` and no `add_async`: `add_async` runs on the JVM's shared
 `ForkJoinPool.commonPool()`, and on an input table already destroyed it never completes and
 keeps a pool thread (measured: 20 calls left all 9 threads busy, 11 more queued, and no
 callback). `publisher.add` returns without waiting for an update cycle, also under the
@@ -1254,13 +1262,13 @@ exclusive lock (measured).
 - **One follow coordinator per session** (`massive #1 follow`, section 18.1) owns all
   per-symbol state of every followed read of the session and does no I/O. It takes the symbol
   tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`, starts reads on
-  the session's read pool, times the retries, and publishes each cell. The `SymbolWatch`
+  the session's read pool, times the retries, and publishes each partition row. The `SymbolWatch`
   listener only enqueues.
 - **One read pool per session**, of `max_concurrency` threads, runs every followed read: the
   transport call, in the session's execution context, and the static conversion. It hands the
   outcome back to the coordinator through the queue.
-- **Per result**: a publish lock and a failed flag. A cell's `publisher.add` and the
-  failure check the flag under the lock, so a failed result never gets another cell.
+- **Per result**: a publish lock and a failed flag. A partition row's `publisher.add`
+  and the failure check the flag under the lock, so a failed result never gets another row.
 - **Releasing stops it.** The blink table's shutdown, once nothing uses the result, sets the
   result's stop token and enqueues a stop; reads in flight stop at their next request, and the
   watch's stop is queued on the reaper. Every symbol's row in `m.symbol_reads()` becomes
@@ -2016,7 +2024,9 @@ it.`).
   `partners.benzinga.news`): requested as a static `fetch()` requests them, and each row is
   listed under each named ticker it lists, with that ticker in `Symbol`, as a static
   `fetch()` lists it ([section 10](#10-symbols-and-all), decision 90). Nothing removes a
-  copy across requests.
+  copy across requests. A row that lists none of a batch's named tickers keeps its null
+  `Symbol`, as in a static `fetch()`, and goes with the batch's first symbol: it leaves the
+  result when that symbol does.
 
 **`limit`** is sent on each request of a followed read as Massive's own cap on that request's
 rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
@@ -2029,8 +2039,8 @@ query re-reads it each cycle, as for `symbols`.
 
 - **Each value is read as if passed alone**, with the requests that one value's call makes:
   one request series per value, `limit` sent on each, and an index underlying sent bare to
-  the contracts list as `underlying="I:SPX"` is. The `m.symbol_reads()` rows of a followed
-  `fetch()` are keyed by the value.
+  the contracts list as `underlying="I:SPX"` is. Values are never batched into one request,
+  so every row a value's requests return goes with that value, whatever its `Symbol`. The `m.symbol_reads()` rows of a followed `fetch()` are keyed by the value.
 - **A static table** is a fixed list, read once: the result joins each value's rows, and a
   value that fails fails the call, as a failed request of a list call does.
 - **A value the dataset does not take** follows `noncanonical_symbols`, as a symbol table's
@@ -3325,7 +3335,7 @@ first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `Timestam
 | Rows | `TimestampStart` | `TimestampEnd` | `Date` |
 |---|---|---|---|
 | Tick | (none: `Timestamp`) | (none) | the day zone's date of `Timestamp`; futures: `session_end_date` from REST and flat files, the WebSocket rule below on streams |
-| Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: the later of that and Massive's `e` | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
+| Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: Massive's `e`, or start + 1 s when Massive sends none (a WARNING when `e` is not start + 1 s) | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
 | 1-day bar | 00:00 of the day | 00:00 of the next day; indices 01:00 New York time (`dates.day_end`) | the day |
 | n-day, week, month, quarter, year bar | 00:00 of the window's first day: for stocks and options a week's Monday and a month's, quarter's, or year's first weekday; for indices, forex, and crypto its first calendar day (a week's Sunday) | the end of the window's last day: n days count calendar days, weekends included, as Massive counts them; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
 | Futures bar of a session or longer | Massive's `window_start`, unchanged: 00:00 UTC on the first day of its bucket | 17:00 Chicago time on its label, `session_end_date`, the bucket's last session | the label for a 1-session bar; null otherwise |
@@ -4736,7 +4746,7 @@ use it to read rows.
 | `Reconnects` | count |
 | `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
-| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (rows whose key could not be read, counted), sorted, truncated at 200 characters |
+| `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra), `channel:field-` (missing), `channel:field?` (a value that does not fit), `channel:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `channel:<n> rows dropped` (each read of a row whose key could not be read, counted), the counts first, then the fields, each sorted, truncated at 200 characters |
 
 **`m.streams()`**: one row per stream, per `poll()` table, per background read
 (`wait=False`), and per followed read (a `fetch()` or `history()` that follows a refreshing
@@ -4766,7 +4776,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `Error` | text: why a `FAILED` or `CLOSED` stream stopped, and nothing else; while it runs, every current warning that leaves it running, joined with `"; "` in a fixed order: its connection's outage or silence ([section 13.3](#133-connection-and-subscription-protocol), "Outages" and "Silence"), the options cap's deferral, a futures stream's schedule miss ([section 12](#12-timestamp-units-and-day-boundaries)), a `dm.ALL` stream's symbols whose rows are dropped, a `poll()` cycle's error, the symbols the latest good `poll()` cycle left out, then the skipped symbol-table values. Each warning is one named part (`NotePart`) that only its source sets or clears (`StreamUpdate.notes`), so no source replaces or clears another's warning. |
 | `Gaps` | text: every span over which the table's rows may be missing, a lasting record of the warnings `Error` shows only while they last: a WebSocket outage the stream recovered from, from the last frame before the drop (or the stream's open, when it opened during the outage) to the data's return, and a run of failed `poll()` cycles, from the start of its first failed cycle (which published nothing, whatever pages it received) to the next good cycle's start. Each is `<start> to <end>` in UTC to the second, oldest first, joined by `"; "`; the latest five are shown, after a count of the earlier ones (`"2 earlier gaps; ..."`). Kept on a stopped stream; null while there is none. An outage that fails the stream is named by its failure instead. |
 | `CreatedAt` | `Instant` |
-| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (rows whose key could not be read), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
+| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra), `transport:field-` (missing), `transport:field?` (a value that does not fit), `transport:field~` (a whole number beyond 2<sup>53</sup> served rounded), and `transport:<n> rows dropped` (each read of a row whose key could not be read, so a `poll()` that reads the same bad row every cycle counts it every cycle), with the transport spelled as in `Transport` (`WebSocket:zz+`), the counts first, then the fields, each sorted, truncated at 200 characters |
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
 `Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
@@ -6639,14 +6649,17 @@ sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` fo
 not fit, and `transport:field~` for a `long` field whose widening into a `double` column
 rounded a value, with the transport spelled `WebSocket` or `REST`, and `m.connections()` uses
 `channel:field+`, `channel:field-`, `channel:field?`, and `channel:field~`. Dropped rows add
-one entry per transport or channel with the owner's running count, `REST:3 rows dropped`,
-which sorts before the fields so a cut text keeps it: after its one WARNING, a dropped row
-stays visible on every live table that lost it.
+one entry per transport or channel with the owner's running count, `REST:3 rows dropped`.
+The count entries, sorted, come before every field entry, so a text cut at 200 characters
+keeps each of them: after its one WARNING, a dropped row stays visible on every live table
+that lost it. The count counts reads, not distinct rows: a `poll()` that reads the same bad
+row every cycle adds one to it every cycle.
 
 **The library supplies Massive's data and never repairs it.** Whatever it cannot serve as
 Massive sent it is reported where a user looks, never absorbed: a row it drops is counted in
-`SchemaDrift`, a value it changes (a whole number a `double` rounds, a futures one-second bar's
-`TimestampEnd` that is not Massive's `e`) logs a WARNING, a symbol a `poll()` cycle cannot read
+`SchemaDrift`, a value it changes (a whole number a `double` rounds) logs a WARNING, a futures
+one-second bar's `e` that is not its start plus one second is served as sent with a WARNING,
+a symbol a `poll()` cycle cannot read
 is listed in `Error`, a gap in a live table's rows is kept in `Gaps`, and a flat-file day taken
 for a holiday is named in the table's description.
 
@@ -7380,7 +7393,9 @@ document already reflects them.
     futures bar of a session or longer (revised 2026-11-02, after the live check of item 40
     found its buckets and labels) at 17:00 Chicago on its label, its last session, returned by
     `history()` only once it has certainly ended; a futures
-    one-second WebSocket bar at the later of its length and Massive's `e`. `history()` keeps a
+    one-second WebSocket bar at Massive's `e` (revised 2026-11-02 by the owner: the library
+    serves `e` as sent and logs a WARNING when it is not the start plus one second; the start
+    plus one second only when Massive sends no `e`). `history()` keeps a
     bar only when its start lies in the range and its `TimestampEnd` is no later than the
     range's end (for dates, the last day's end) or now, so selection and the join key apply the
     same end; a futures bar named by dates must have every session in the range, so the
@@ -7980,7 +7995,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 56 | Whether `adjusted=true` applies `stock_dividend` events of the splits dataset | Documented as unknown: the README's recipe applies every factor the splits dataset lists | none (documentation) | `tests/namespaces/test_stocks_integration.py`: one ticker with a `stock_dividend` event; compare both bases across its execution date |
 | 57 | Whether option bars are adjusted for splits of the underlying in full (`adjusted=true`) | Options take `adjusted` like stocks, with the same guarantee | `tests/namespaces/test_options.py`: the parameter is sent and its echo checked | `tests/namespaces/test_options_integration.py`: a contract of NVDA across 2024-06-10 under both bases; record the prices |
 | 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place gets a null `Date` with a WARNING; a row between sessions gets the next session's date. The live check of 2026-10-31 found Massive's REST label flipping at 17:00 Chicago: ESZ6 minute bars of Monday 2026-10-26 carry `2026-10-26` before 17:00 and `2026-10-27` from 17:00, and ESM6 around Good Friday carries `2026-04-03` from Thursday 17:00 and `2026-04-06` from Sunday 17:00. ZCZ6 had no bars that Monday, so the 16:45 CBOT pre-open is still unrecorded | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
-| 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | Settled by the live check of 2026-11-02: every one-second bar spanned exactly one second, and the library logged no disagreement with `e`; the handling holds. `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once, at WARNING, with both ends: the library never changes a vendor value without saying so | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
+| 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | Settled by the live check of 2026-11-02: every one-second bar spanned exactly one second, and the library logged no disagreement with `e`; the handling holds. `TimestampEnd` is Massive's `e` as sent (revised 2026-11-02 by the owner: no longer the later of `e` and `s` plus one second), or `s` plus one second when Massive sends no `e`; an `e` that is not `s` plus one second is logged once, at WARNING, with both ends | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
 | 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
 | 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp is served at its own stamp, with a null `Date` and an end a period later, and a WARNING | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday are served with a WARNING | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
 | 62 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | Settled by the live check of 2026-11-02: `/prev`, the range, and `/v3/trades` answered an unknown ticker with an empty 200, and ticker details with a 404; the handling holds. A symbol with no data returns no rows; a 404 after the first page of a request series raises `MassiveError`; a futures session is its own series, so a 404 on a later session drops that session with its own WARNING | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises; a later futures session's 404 is left out with a per-session WARNING | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |
