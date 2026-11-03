@@ -13,7 +13,7 @@ what you should see, and what to do if you see something else.
 | Phase | What you do | Your time | Computer time |
 |---|---|---|---|
 | 1. Set up | Install the tools, get the code twice (once for the console, once for the live run), check both | 45 to 90 minutes | the same |
-| 2. Console exercises | Paste 25 short examples into Deephaven's web console and judge what they show | 90 minutes | the same |
+| 2. Console exercises | Paste 26 short examples into Deephaven's web console and judge what they show | 90 minutes | the same |
 | 3. Live run | Start one program that runs every check your Massive plan allows | 30 minutes to start, then 10 minutes a day | days to weeks, unattended |
 | 4. Send back | Pack the results and send them, with your notes | 15 minutes | a few minutes |
 
@@ -104,7 +104,8 @@ to each item, note anything that surprised you.
 - [ ] 13 debug log        - [ ] 14 to 17 try your own (free plan)
 - [ ] 18 to 20 try your own (paid plans only)       - [ ] 21 watchlist poll (free plan)
 - [ ] 22 crypto watchlist (Currencies) - [ ] 23 gainers to trades (Stocks)
-- [ ] 24 save diagnostics - [ ] 25 finish         - [ ] tester.py examples ran all of them at once
+- [ ] 24 history that follows a watchlist (free plan)
+- [ ] 25 save diagnostics - [ ] 26 finish         - [ ] tester.py examples ran all of them at once
 ## Live run
 - [ ] live_run.py check says ready: yes
 - [ ] first run started with --any-time
@@ -384,7 +385,7 @@ import os; exec(open(os.path.expanduser("~/massive-test/deephaven-massive/docs/t
 
 **All at once.** After you have done the exercises by hand, run them all with one command, from
 the checkout, in a terminal with your key set. Close the web console's session first (example
-25), since both use the same key's limits.
+26), since both use the same key's limits.
 
 ```bash
 uv run python scripts/tester.py examples
@@ -398,7 +399,7 @@ one-line verdict per example in `summary.txt`:
 
 - `passed`. On a key without live stocks or crypto data, examples 18 to 20, 22, and 23
   pass too: their live tables open before Massive refuses them, and the refusals show in
-  `~/massive-test/diagnostics/streams.csv`, which example 24 writes.
+  `~/massive-test/diagnostics/streams.csv`, which example 25 writes.
 - `refused by your plan`: expected for an example your plan does not include.
 - `failed`: report it.
 
@@ -923,9 +924,9 @@ trades_per_minute = crypto_trades.update("Minute = lowerBin(Timestamp, MINUTE)")
 
 A table can choose a dataset's symbols. When it is live, such as an input table you type into,
 the library follows it: a symbol you add is read or subscribed to, and one you delete is
-dropped. These three examples check that. Example 21 works on the free plan; 22 and 23 need a
-paid plan's data. On a free key their tables open, and a few seconds later Massive refuses
-them: the streams panel shows their rows `FAILED`, as in step 11.
+dropped. These four examples check that. Examples 21 and 24 work on the free plan; 22 and
+23 need a paid plan's data. On a free key their tables open, and a few seconds later Massive
+refuses them: the streams panel shows their rows `FAILED`, as in step 11.
 
 You edit an input table in its panel:
 
@@ -1029,14 +1030,14 @@ stock joins or leaves the gainers at a minute's read, it joins or leaves `Symbol
 `gainer_trades` too. On Stocks Developer the trades run 15 minutes behind, and the session
 needs example 1's line for that plan, as example 18 says.
 
-### History that follows a watchlist
-
-`history()` given a watchlist you can edit follows it: each symbol you add is read over the same
-range and its rows arrive all at once, and each symbol you delete leaves in the same update.
-`m.symbol_reads()` shows each symbol's read. This works on the free plan: each added symbol is
-one request.
+### 24. History that follows a watchlist (`24_followed_history.py`)
 
 ```python
+# Makes a watchlist you can edit and a month of daily bars that follows it: each stock you add
+# is read over the same month, and each one you delete leaves. One Stocks request for each
+# stock you add, within the free plan. You should see three new tables: names, with two rows;
+# followed, with about 20 bars each of AAPL and MSFT; and reads, with one DONE row for each.
+# Then follow the steps after this block.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -1049,25 +1050,22 @@ names.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
 month_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=30)
 followed = m.stocks.bars(names, dm.Timespan.DAY).history(month_ago)
 reads = m.symbol_reads()
-
-names.add(new_table([string_col("Symbol", ["NVDA"])]))
 ```
 
-**You should see** `followed` with AAPL's and MSFT's bars at once, and NVDA's bars a few seconds
-later, all of them in one update. In `reads`, NVDA goes `QUEUED`, `LOADING`, then `DONE`, with
-`Rows` equal to its bars in `followed`. Then delete NVDA: its bars leave `followed` in the same
-update, and its row in `reads` becomes `REMOVED`.
+Then, in the `names` panel:
 
-```python
-names.delete(new_table([string_col("Symbol", ["NVDA"])]))
-```
-
-Add NVDA back and it is downloaded again: its `ReadAt` in `reads` is newer. To get the earlier
-download back with no request, pass `reread=dm.Reread.NEVER` to `history()`.
+1. Add `NVDA`. **You should see** NVDA's bars join `followed` a few seconds later, all of them
+   in one update. In `reads`, NVDA goes `QUEUED`, `LOADING`, then `DONE`, with `Rows` equal to
+   its bars in `followed`.
+2. Delete `NVDA`. **You should see** its bars leave `followed` in the same update, and its row
+   in `reads` become `REMOVED`.
+3. Add `NVDA` again. **You should see** it downloaded again: its `ReadAt` in `reads` is newer.
+   To get the earlier download back with no request, pass `reread=dm.Reread.NEVER` to
+   `history()`.
 
 ## 2.4 Save the diagnostics, and finish
 
-### 24. Save the diagnostics (`24_save_diagnostics.py`)
+### 25. Save the diagnostics (`25_save_diagnostics.py`)
 
 Run this whenever something goes wrong, before anything else, and before you close the session:
 the bug report (part 4) collects these files.
@@ -1088,7 +1086,7 @@ for name, table in tables.items():
 print("saved to", diagnostics)
 ```
 
-### 25. Close the session (`25_finish.py`)
+### 26. Close the session (`26_finish.py`)
 
 ```python
 # Closes the session, shows that a closed session refuses new work, and downloads once more
@@ -1322,7 +1320,7 @@ In `tester.py examples`, a refusal shows as `refused by your plan` and anything 
 
 ## 4.2 Make the report
 
-1. **Right away**, in the console, run example 24 (`24_save_diagnostics.py`) to save the
+1. **Right away**, in the console, run example 25 (`25_save_diagnostics.py`) to save the
    diagnostics tables. Take a screenshot of anything on screen that looks wrong.
 2. Write `~/massive-test/bug-report.md` from the template below.
 3. From the checkout, with your key set, bundle everything:

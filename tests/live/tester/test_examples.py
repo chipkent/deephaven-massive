@@ -217,7 +217,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.jvm_held
-@pytest.mark.timeout(300)  # 25 examples, Deephaven compiling each formula, on a busy worker
+@pytest.mark.timeout(300)  # 26 examples, Deephaven compiling each formula, on a busy worker
 def test_every_example_runs_against_the_fake_market(
     market: MarketServer,
     tmp_path: Path,
@@ -247,11 +247,12 @@ def test_every_example_runs_against_the_fake_market(
     assert "live minute bars: opened;" in printed["11_plan_refusals"]
     assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["13_check_the_log"]
-    assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
+    assert re.search(r"<MassiveSession #\d+ closed>", printed["26_finish"])
+    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["26_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (out / "tables" / "21_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "21_watchlist_poll" / "watched_contracts.csv").exists()
+    assert (out / "tables" / "24_followed_history" / "followed.csv").exists()
     assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
