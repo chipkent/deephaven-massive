@@ -152,20 +152,23 @@ class _Follow:
 class _Baseline:
     """The symbol table's whole set of symbols when its watch started.
 
-    Every later change is relative to it.
+    Every later change is relative to it. `step` is the update cycle the watch replayed the
+    table at, or 0 when the table held no symbol then.
     """
 
     read: FollowedRead
     symbols: frozenset[str]
+    step: int
 
 
 @dataclass(frozen=True, slots=True)
 class _Changed:
-    """Symbols the table gained and lost in one update cycle."""
+    """Symbols the table gained and lost in one update cycle, the cycle `step`."""
 
     read: FollowedRead
     added: frozenset[str]
     removed: frozenset[str]
+    step: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,9 +280,13 @@ class _Result:
         transports: The sources its reads have used.
         skipped: The text of its skipped symbol-table values, or None.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
+        heard: The latest update cycle of the symbol table whose change the coordinator has
+            applied (the result's build cycle until the first), stamped on every cell it
+            publishes; see `FollowedRead.publish`.
     """
 
     read: FollowedRead
+    heard: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
     queue: list[str] = field(default_factory=list)
     scanning: bool = False
@@ -463,24 +470,28 @@ class FollowCoordinator:
 
     # --- Events from other threads, for a result -------------------------------------------
 
-    def baseline(self, read: FollowedRead, symbols: frozenset[str]) -> None:
+    def baseline(self, read: FollowedRead, symbols: frozenset[str], step: int) -> None:
         """Queue the symbol table's set of symbols when its watch started.
 
         Args:
             read: The result.
             symbols: The set.
+            step: The update cycle the watch replayed the table at, or 0 for an empty set.
         """
-        self.post(_Baseline(read, symbols))
+        self.post(_Baseline(read, symbols, step))
 
-    def changed(self, read: FollowedRead, added: frozenset[str], removed: frozenset[str]) -> None:
+    def changed(
+        self, read: FollowedRead, added: frozenset[str], removed: frozenset[str], *, step: int
+    ) -> None:
         """Queue one change of the symbol table's set (the watch's listener calls it).
 
         Args:
             read: The result.
             added: The symbols gained.
             removed: The symbols lost.
+            step: The update cycle that made the change.
         """
-        self.post(_Changed(read, added, removed))
+        self.post(_Changed(read, added, removed, step))
 
     def skipped(self, read: FollowedRead, text: str | None) -> None:
         """Queue the text of the table's skipped values, or None once none is skipped.
@@ -607,6 +618,7 @@ class FollowCoordinator:
             added, removed = message.symbols - held, frozenset(held - message.symbols)
         else:
             added, removed = message.added, message.removed
+        result.heard = max(result.heard, message.step)
         now = _now_ns()
         for name in sorted(removed):
             self._remove(result, name)
@@ -629,7 +641,7 @@ class FollowCoordinator:
             Its state.
         """
         read = message.read
-        result = _Result(read)
+        result = _Result(read, heard=read.built_step)
         self._results[id(read)] = result
         if read.core.closed:  # the close failed the table while it was handed over
             result.ended = True
@@ -717,7 +729,7 @@ class FollowCoordinator:
             result.queue.remove(name)
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
-            result.read.publish(name, result.seq, None)
+            result.read.publish(name, result.seq, None, heard=result.heard)
             symbol.kept = False
             symbol.read_at = None
             symbol.rows = 0
@@ -799,7 +811,7 @@ class FollowCoordinator:
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
-                read.publish(name, result.seq, outcome.table)
+                read.publish(name, result.seq, outcome.table, heard=result.heard)
             symbol.state = SymbolReadState.DONE
             symbol.kept = True
             symbol.rows = outcome.table.size
@@ -807,12 +819,14 @@ class FollowCoordinator:
             symbol.error = symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
-                "call %d %s: %d rows in %.1f s from %s",
+                "call %d %s: %d rows in %.1f s from %s (cell %d, heard cycle %d)",
                 read.call,
                 name,
                 symbol.rows,
                 seconds,
                 transport,
+                result.seq,
+                result.heard,
             )
             return
         self._failed(result, name, outcome)

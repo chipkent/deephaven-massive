@@ -602,7 +602,7 @@ def test_a_cell_is_never_published_after_the_table_failed(
     assert handle.fail_table(MassiveError("stop now")) is True
     assert handle.fail_table(MassiveError("again")) is False
     with entered(massive_session._core.exec_ctx):
-        handle.publish("AAPL", 99, rows_of(massive_session, "AAPL", 1))  # dropped
+        handle.publish("AAPL", 99, rows_of(massive_session, "AAPL", 1), heard=0)  # dropped
     gate.set()
     until(lambda: bool(result.j_table.isFailed()))
 
@@ -614,7 +614,7 @@ def test_the_router_drops_a_report_for_a_collected_result(
         pass
 
     gone = Gone()
-    router = followed_read._WatchRouter(massive_session._core.follows, cast("Any", gone))
+    router = followed_read._WatchRouter(massive_session._core.follows, cast("Any", gone), lambda: 1)
     router.finish(cast("Any", gone))
     del gone
     router.on_change(frozenset({"AAPL"}), frozenset())  # nothing to report to; no error
@@ -653,11 +653,11 @@ def test_always_hides_an_old_download_before_its_empty_cell_lands(
     held = threading.Event()
     publish = followed_read.FollowedRead.publish
 
-    def holding(read: followed_read.FollowedRead, *cell: object) -> None:
+    def holding(read: followed_read.FollowedRead, *cell: object, heard: int) -> None:
         symbol, seq, table = cast("tuple[str, int, Table | None]", cell)
         if table is None:  # the empty cell of a removal
             assert held.wait(TIMEOUT)
-        publish(read, symbol, seq, table)
+        publish(read, symbol, seq, table, heard=heard)
 
     monkeypatch.setattr(followed_read.FollowedRead, "publish", holding)
     gate = script.gates["AAPL"] = threading.Event()  # and the new download waits too
@@ -667,6 +667,48 @@ def test_always_hides_an_old_download_before_its_empty_cell_lands(
     held.set()
     gate.set()
     wait_rows(dh_to_pylist, result, {"AAPL": 2})  # the new download shows
+    massive_session.release(result)
+
+
+def test_always_never_shows_a_download_published_after_its_symbol_left_and_returned(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The coordinator has taken the first read's outcome and is publishing it when the symbol
+    # leaves and returns: the removal and the re-add queue behind the outcome, so its cell lands
+    # after the re-add, and must not show as the returning symbol's rows.
+    script = Script(massive_session)
+    wl = watchlist()
+    result = follow(massive_session, wl, script)
+    first_gate = script.gates["AAPL"] = threading.Event()
+    publishing, go, published, freed = (threading.Event() for _ in range(4))
+    publish = followed_read.FollowedRead.publish
+
+    def slow(read: followed_read.FollowedRead, *cell: object, heard: int) -> None:
+        symbol, seq, table = cast("tuple[str, int, Table | None]", cell)
+        if table is None:  # the empty cell of the removal waits, so the stale cell is latest
+            assert freed.wait(TIMEOUT)
+        elif not publishing.is_set():  # the first download
+            publishing.set()
+            assert go.wait(TIMEOUT)
+        publish(read, symbol, seq, table, heard=heard)
+        published.set()
+
+    monkeypatch.setattr(followed_read.FollowedRead, "publish", slow)
+    add(wl, "AAPL")
+    until(lambda: script.calls == [("AAPL",)])
+    reread = script.gates["AAPL"] = threading.Event()  # the read after the re-add waits
+    first_gate.set()
+    assert publishing.wait(TIMEOUT)  # the coordinator checked the outcome and publishes it
+    delete(wl, "AAPL")  # a cycle the coordinator has not heard of yet
+    add(wl, "AAPL")  # and the re-add, a later one
+    go.set()
+    assert published.wait(TIMEOUT)
+    add(wl, "MSFT")  # later cycles: the old download's cell has landed
+    add(wl, "NVDA")
+    assert "AAPL" not in counts(dh_to_pylist(result))
+    freed.set()
+    reread.set()
+    wait_rows(dh_to_pylist, result, {"AAPL": 2, "MSFT": 2, "NVDA": 2})  # the new one shows
     massive_session.release(result)
 
 
@@ -717,11 +759,13 @@ class _Heard:
     def __init__(self) -> None:
         self.reports: list[tuple[str, object]] = []
 
-    def baseline(self, _read: object, symbols: frozenset[str]) -> None:
-        self.reports.append(("baseline", symbols))
+    def baseline(self, _read: object, symbols: frozenset[str], step: int) -> None:
+        self.reports.append(("baseline", (symbols, step)))
 
-    def changed(self, _read: object, added: frozenset[str], removed: frozenset[str]) -> None:
-        self.reports.append(("changed", (added, removed)))
+    def changed(
+        self, _read: object, added: frozenset[str], removed: frozenset[str], *, step: int
+    ) -> None:
+        self.reports.append(("changed", (added, removed, step)))
 
     def skipped(self, _read: object, text: str | None) -> None:
         self.reports.append(("skipped", text))
@@ -737,8 +781,10 @@ def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> No
 
     read = Read()
     heard = _Heard()
-    router = followed_read._WatchRouter(cast("Any", heard), cast("Any", read))
+    step = [7]  # the update cycle the update graph's clock shows
+    router = followed_read._WatchRouter(cast("Any", heard), cast("Any", read), lambda: step[0])
     router.on_change(frozenset({"AAPL", "MSFT"}), frozenset())  # the replay, on this thread
+    step[0] = 8
 
     def listener() -> None:  # a change that comes before the replay is handed on
         router.on_change(frozenset({"NVDA"}), frozenset({"MSFT"}))
@@ -751,8 +797,8 @@ def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> No
     router.finish(cast("Any", read))
     router.on_skipped(())  # handed on at once now
     assert heard.reports == [
-        ("baseline", frozenset({"AAPL", "MSFT"})),
-        ("changed", (frozenset({"NVDA"}), frozenset({"MSFT"}))),
+        ("baseline", (frozenset({"AAPL", "MSFT"}), 7)),
+        ("changed", (frozenset({"NVDA"}), frozenset({"MSFT"}), 8)),
         ("invalid", "a bad row"),
         ("skipped", skipped_rows_text(("msft",))),
         ("skipped", None),
@@ -764,7 +810,7 @@ def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSes
     coordinator.stop()
     read = cast("Any", object())
     coordinator.follow(read, None)  # the session closed: nothing starts
-    coordinator.changed(read, frozenset({"AAPL"}), frozenset())
+    coordinator.changed(read, frozenset({"AAPL"}), frozenset(), step=1)
     coordinator.invalid(read, "a bad row")
     coordinator.skipped(read, None)
     coordinator.wake()
