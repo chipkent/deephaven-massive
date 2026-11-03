@@ -38,7 +38,7 @@ dm.canonical_symbol_stock_nasdaq
 dm.canonical_symbol_stock_cms
 dm.canonicalize_symbols          # (table, asset_class, *, column="Symbol",
                                  #  convention=SymbolConvention.MASSIVE,
-                                 #  on_error=OnError.RAISE) -> Table
+                                 #  on_error=OnError.LOG) -> Table
 
 # Enums (all StrEnum; values are Massive's wire strings where the enum reaches the wire)
 dm.AssetClass
