@@ -1499,7 +1499,7 @@ def test_rows_of_the_dropped_socket_flushed_late_never_recover_a_stream(
 ) -> None:
     # A stalled flush publishes rows from the dropped socket after the reconnect. They prove
     # nothing about the new socket, which never acknowledges AAPL, so the stream stays down.
-    custom_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
     result = custom_session.query(TRADES, ["AAPL"]).blink()
     custom_session.subscribed("T.AAPL")
     custom_session.publish(trade("AAPL"))  # rows that could look current
