@@ -362,8 +362,8 @@ class FollowCoordinator:
 
     __slots__ = (
         "_closed",
-        "_count",
         "_exec_ctx",
+        "_following",
         "_lock",
         "_max_workers",
         "_pool",
@@ -384,12 +384,14 @@ class FollowCoordinator:
         self._exec_ctx = exec_ctx
         self._thread_prefix = thread_prefix
         self._max_workers = max_workers
-        # Guards the thread, the pool, the count of followed reads, and the stop. Held only
+        # Guards the thread, the pool, the followed reads, and the stop. Held only
         # around a queue put or a pool submit, which never waits on another thread's lock.
         self._lock = threading.Lock()
         self._worker: QueueWorker[_Message] | None = None
         self._pool: ThreadPoolExecutor | None = None
-        self._count = 0
+        # Every followed read handed over (`follow`) and not yet forgotten, by `id`: what a
+        # dying thread fails, including a read whose start never reached it.
+        self._following: dict[int, FollowedRead] = {}
         self._closed = False
         # Touched only by the coordinator thread.
         self._results: dict[int, _Result] = {}
@@ -404,7 +406,7 @@ class FollowCoordinator:
     def following(self) -> int:
         """How many followed reads the coordinator serves: counted until each one stops."""
         with self._lock:
-            return self._count
+            return len(self._following)
 
     def follow(self, read: FollowedRead, first: FirstRead | None) -> None:
         """Start coordinating a new followed read, starting the thread and pool if needed.
@@ -433,8 +435,8 @@ class FollowCoordinator:
                     on_exit=self._exited,
                     on_death=self._died,
                 )
-            started = self._count == 0
-            self._count += 1
+            started = not self._following
+            self._following[id(read)] = read
             self._worker.put(_Follow(read, first))
         if started:
             logger.debug("%s follow: a followed read starts", self._thread_prefix)
@@ -1164,12 +1166,8 @@ class FollowCoordinator:
         for key, result in touched.items():
             if result.ended and result.read.shut_down and key in self._results:
                 del self._results[key]
-                self._release_one()
-
-    def _release_one(self) -> None:
-        """Count one followed read less."""
-        with self._lock:
-            self._count -= 1
+                with self._lock:
+                    self._following.pop(key, None)
 
     def _exited(self) -> None:
         """The coordinator thread ends (`stop`): forget every result, so none outlives it.
@@ -1179,11 +1177,16 @@ class FollowCoordinator:
         """
         logger.debug("follow: the coordinator ends with %d results", len(self._results))
         self._results.clear()
+        with self._lock:
+            self._following.clear()
 
     def _died(self, death: BaseException) -> None:
-        """The coordinator thread died: fail every followed read it served.
+        """The coordinator thread died: fail every followed read it served or was handed.
 
         Runs on the dying thread. Its results would stop following without an error otherwise.
+        A `follow` that came before the thread was cleared queued its start to the dead thread,
+        so every read handed over is failed, not only those the thread had started; a `follow`
+        after it starts a new thread.
 
         Args:
             death: What ended the thread.
@@ -1192,17 +1195,19 @@ class FollowCoordinator:
             library_bug(f"the follow coordinator died ({death!r}); this table no longer updates"),
             cause=ErrorCause.LIBRARY_DEFECT,
         )
-        results = list(self._results.values())
+        for result in self._results.values():
+            result.ended = True
         self._results.clear()  # before the next thread can start: never two owners
         with self._lock:
-            self._count = 0
+            reads = list(self._following.values())
+            self._following.clear()
             pool = self._pool  # None when a stop came first
             self._worker = self._pool = None
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
-        for result in results:
-            result.ended = True
-            result.read.fail_table(error)
+        logger.debug("follow: the coordinator died; failing %d followed reads", len(reads))
+        for read in reads:
+            read.fail_table(error)
 
 
 def _ns_text(value: int) -> str:

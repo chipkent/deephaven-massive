@@ -1216,3 +1216,41 @@ def test_a_read_scheduled_after_the_coordinator_stopped_is_dropped(
     assert "died" not in caplog.text
     assert script.calls == []
     massive_session.release(result)
+
+
+def test_a_follow_handed_to_a_dying_coordinator_fails_its_table(
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A result handed over after the thread died but before its death was handled queues its
+    # start to the dead thread, which never handles it: the death fails it too.
+    died = follow_coordinator.FollowCoordinator._died
+    dying, go = threading.Event(), threading.Event()
+
+    def slow_death(self: follow_coordinator.FollowCoordinator, death: BaseException) -> None:
+        dying.set()
+        assert go.wait(TIMEOUT)
+        died(self, death)
+
+    # The thread takes its death handler when it starts: replace it first.
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_died", slow_death)
+    script = Script(massive_session)
+    first = follow(massive_session, watchlist("AAPL"), script)
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+
+    def dies(_self: follow_coordinator.FollowCoordinator, _touched: object = None) -> None:
+        raise SystemExit("the coordinator is told to die")
+
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_retry_due", dies)
+    with caplog.at_level(logging.ERROR):
+        massive_session._core.follows.wake()
+        assert dying.wait(TIMEOUT)
+        second = follow(massive_session, watchlist("MSFT"), script)  # to the dead thread
+        go.set()
+        until(lambda: bool(first.j_table.isFailed()) and bool(second.j_table.isFailed()))
+    until(lambda: [args.exc_type for args in escaped] == [SystemExit])
+    assert massive_session._core.follows.following == 0
+    assert script.calls == [("AAPL",)]
