@@ -138,8 +138,8 @@ the reader needs is ever cut.
 3. Grep for narration and hedges, as the checklist's banned-pattern item shows:
    `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
    Fix every hit that is narration, a hedge, or filler.
-4. Check that the body names the PR the branch builds on ("Builds on #<n>"), if any, and the
-   `DESIGN.md` decision or verification-item number it takes, if any.
+4. Check that the body names the `DESIGN.md` decision or verification-item number it takes, if
+   any.
 5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
    `gh pr view <n> --json closingIssuesReferences`.
 
