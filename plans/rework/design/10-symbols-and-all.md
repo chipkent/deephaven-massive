@@ -181,7 +181,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
     lists the values
     skipped now in `Error` (`skipping 2 symbol-table rows that are not Massive's tickers:
     'aapl', 'EUR/USD'`, the count and the first five), and the text is cleared once none is
-    left. Fixing or deleting a row clears it, and a fixed row subscribes (a stream) or is
+    left. A stream of a **static** table lists none: it is read once into a symbol list and
+    opens the same stream as that list, which a plain list query may share, so the skipped
+    text has no row of its own; its skipped rows are only logged, one WARNING per distinct
+    value under `LOG`, until a user need for the listing appears. A `poll()` re-reads even a
+    static table each cycle, so its `Error` lists them. Fixing or deleting a row clears it, and a fixed row subscribes (a stream) or is
     requested on the next cycle (a poll) like any added row. A table whose current rows are all
     bad (at least one row, and no good one) raises `ValueError` at the call rather than start a
     result that follows nothing; a later moment with only bad rows simply follows no symbol.

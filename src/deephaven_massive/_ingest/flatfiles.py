@@ -36,8 +36,10 @@ to keep.
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
 
 Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NYMEX, COMEX),
-then file order; they are not sorted by time across venues. Only an empty CSV field is null:
-text such as `NA` or `NULL` is data (both are valid tickers).
+then file order: this module never sorts them by time, so a futures read's rows are not in time
+order across venues. A `history()` whose missing days REST serves sorts the joined rows by time
+(`_ingest/history_reads.py`), so that read comes back in time order. Only an empty CSV field is
+null: text such as `NA` or `NULL` is data (both are valid tickers).
 
 A missing file is judged by what exists, never by the clock, since Massive's publication time
 varies. On a day without trading (a weekend for every class but crypto, which trades every

@@ -113,7 +113,11 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     page = rendered()["snapshots.md"]
     assert page.startswith("# `m.snapshots`\n")
     assert "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)\n" in page
-    assert "[`m.snapshots`](snapshots.md)" in rendered()[INDEX]
+    # `m.snapshots` is a method of the session, so the index lists it under no namespace.
+    index = rendered()[INDEX]
+    assert "\n## Session methods\n\n| Dataset | Summary | Verbs |\n" in index
+    assert "[`m.snapshots`](snapshots.md)" in index.partition("## Session methods")[2]
+    assert "## `m.snapshots`" not in index
 
 
 def test_the_real_pages_state_each_poll_mode() -> None:

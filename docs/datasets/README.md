@@ -6,7 +6,7 @@ Every dataset the library serves, one page each. A page shows how to call the da
 
 ## By asset class
 
-The datasets that several asset classes have, one row each; a mark links that class's page. Every other dataset is listed under its namespace below.
+The datasets that several asset classes have, one row each; a mark links that class's page. Every other dataset is listed under its namespace below, and a method of the session itself, such as `m.snapshots`, under Session methods.
 
 | Dataset | `m.stocks` | `m.options` | `m.futures` | `m.indices` | `m.forex` | `m.crypto` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -144,7 +144,7 @@ Tables of one kind from two asset classes (stock and forex quotes, say) can diff
 | [`m.reference.market_status`](reference.market_status.md) | Whether the markets are open now, by exchange, currency market, and index group. | fetch, poll |
 | [`m.reference.market_holidays`](reference.market_holidays.md) | The upcoming market holidays and early closes, one row per exchange and day. | fetch, poll |
 
-## `m.snapshots`
+## Session methods
 
 | Dataset | Summary | Verbs |
 | --- | --- | --- |

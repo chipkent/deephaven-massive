@@ -1211,9 +1211,13 @@ class Query(QueryBase):
         that is not Massive's exact ticker is skipped and listed in `m.streams()` (or fails the
         table under `noncanonical_symbols=RAISE`); a crypto pair of a symbol table that Massive's
         crypto ticker list does not hold is left out of the cycle and listed the same way (or
-        fails the table under `unlisted_symbols=RAISE`). A feed (a dataset whose default mode is
-        `APPEND`: news and filings) needs a `start` or a `limit`. The poller runs while the
-        table or anything derived from it is in use (README.md#live-tables). Once the table
+        fails the table under `unlisted_symbols=RAISE`). A symbol of a live symbol table
+        whose path does not take a parameter the query sets (`adjusted=False` on a crypto
+        indicator), or that Massive answers with no data, is left out of each cycle that meets
+        it and listed the same way, or fails the table under `unavailable_symbols=RAISE`. A
+        feed (a dataset whose default mode is `APPEND`: news and filings) needs a `start` or a
+        `limit`. The poller runs while the table or anything derived from it is in use
+        (README.md#live-tables). Once the table
         exists, an authentication, entitlement, or schema failure, a null or NaN poll key, or a
         response Massive labels `DELAYED` for a subscription not in
         `MassiveConfig.delayed_subscriptions` (README.md#real-time-or-delayed), fails it and
@@ -1586,10 +1590,10 @@ class StreamQuery(QueryBase):
         added again shows no row until it ticks again. With keys that span symbols
         (`by="Exchange"`), each group's row is the latest from a symbol watched when it arrived,
         and removing that symbol does not remove the group's row. A table row that is not
-        Massive's exact ticker is skipped and listed in `m.streams()` (convert with
-        `dm.canonicalize_symbols`). `last_by()` never seeds from REST: for current state, use
-        `snapshots(symbols).poll(n)`, which needs a plan that includes snapshots
-        (README.md#plans-and-errors). A static symbol table is read once, now.
+        Massive's exact ticker is skipped, logged once, and, for a live table, listed in
+        `m.streams()` (convert with `dm.canonicalize_symbols`). `last_by()` never seeds from
+        REST: for current state, use `snapshots(symbols).poll(n)`, which needs a plan that
+        includes snapshots (README.md#plans-and-errors). A static symbol table is read once, now.
 
         Args:
             by: The key column or columns, positionally or by keyword as in Deephaven's

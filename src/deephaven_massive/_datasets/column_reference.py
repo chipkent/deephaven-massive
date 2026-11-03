@@ -9,7 +9,8 @@ which readers browse on GitHub before they install anything. This module owns th
   (`DatasetCall`, which the API layer supplies) into one Markdown page per dataset, named after
   its dotted name (`stocks.trades.md`, `stocks.financials.ratios.md`, `snapshots.md`), and an
   index, `README.md`, which GitHub shows when a reader opens the directory: a grid of asset
-  classes by dataset and a list of every dataset by namespace. A dataset's page says how to
+  classes by dataset and a list of every dataset by namespace, with the methods of the session
+  itself (`m.snapshots`) under a heading of their own. A dataset's page says how to
   call it, its verbs, its time range, its `poll()` mode, the `sort` values and `filters` keys
   it accepts, which of Massive's plans include it (from the plan tables of Massive's own pages,
   so they follow every refresh), and its columns, with the Massive field behind each column
@@ -109,9 +110,13 @@ _INDEX_GUIDE: Final = (
 
 _GRID_GUIDE: Final = (
     "The datasets that several asset classes have, one row each; a mark links that class's "
-    "page. Every other dataset is listed under its namespace below."
+    "page. Every other dataset is listed under its namespace below, and a method of the "
+    "session itself, such as `m.snapshots`, under Session methods."
 )
 """The paragraph above the index's grid."""
+
+_SESSION_HEADING: Final = "Session methods"
+"""The index's heading over the datasets that are methods of the session, such as `m.snapshots`."""
 
 _MERGE: Final = (
     "Tables of one kind from two asset classes (stock and forex quotes, say) can differ in "
@@ -345,11 +350,15 @@ def _index(
             cells = [f"[✓]({page_name(by_class[c])})" if c in by_class else "" for c in classes]
             lines.append(_row([f"`{name}`", *cells]))
         lines.extend(("", _MERGE))
-    by_namespace: dict[str, list[DatasetSpec]] = {}
+    # A dataset named without a dot, such as `snapshots`, is a method of the session rather than
+    # of a namespace, so it goes under a heading that names no namespace.
+    by_heading: dict[str, list[DatasetSpec]] = {}
     for spec in specs:
-        by_namespace.setdefault(spec.name.partition(".")[0], []).append(spec)
-    for namespace, members in by_namespace.items():
-        lines.extend(("", f"## `m.{namespace}`", ""))
+        namespace, dot, _ = spec.name.partition(".")
+        heading = f"`m.{namespace}`" if dot else _SESSION_HEADING
+        by_heading.setdefault(heading, []).append(spec)
+    for heading, members in by_heading.items():
+        lines.extend(("", f"## {heading}", ""))
         lines.append(_row(["Dataset", "Summary", "Verbs"]))
         lines.append(_row(["---"] * 3))
         lines.extend(
