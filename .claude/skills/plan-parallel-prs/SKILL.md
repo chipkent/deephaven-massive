@@ -15,7 +15,7 @@ any agent starts.
 
 For each piece of work, list what it will change:
 
-| Piece | Files | `README.md` sections | New decisions or verification items |
+| Piece | Files | User-doc pages and sections | New decisions or verification items |
 |---|---|---|---|
 
 Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-only`).

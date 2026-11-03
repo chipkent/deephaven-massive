@@ -33,12 +33,20 @@ A release is one manual run of the Release workflow on `main`;
 
 ## Documentation
 
-User documentation lives in one place, [`README.md`](README.md); `tests/test_docs.py` runs
-every Python block in it against the fake Massive servers. The dataset reference under
-[`docs/datasets/`](docs/datasets/README.md) is generated: never edit it by hand, regenerate it
-with `uv run python scripts/render_reference.py`. Docstrings cite README sections as
-`README.md#<anchor>` and dataset pages as `docs/datasets/<dataset>.md`, and the same test checks
-that every cited anchor and page exists.
+User documentation has three parts:
+
+- [`README.md`](README.md): the complete landing page, which takes a new user from "what is
+  this?" through install to everyday use and the main recipes.
+- `docs/guide/`: reference pages, looked up when a specific case comes up.
+- [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference. Never edit it by
+  hand; regenerate it with `uv run python scripts/render_reference.py`.
+
+[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: who reads
+it, which page owns each fact, the voice, the banned patterns, and the terminology.
+`tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
+Docstrings cite a section by its explicit anchor (`README.md#<anchor>` or
+`docs/guide/<page>.md#<anchor>`) and a dataset page as `docs/datasets/<dataset>.md`; the same
+test checks that every cited README anchor and dataset page exists.
 
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.

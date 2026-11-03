@@ -2,9 +2,10 @@
 
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
 Deephaven tables: a Python library managed with `uv`. This file wins over every other document.
-`README.md` and the public docstrings are the user contract, enforced by tests;
-`docs/dev/decisions.md` records why the contract is what it is. The library has no users yet, so
-nothing is kept, aliased, or shimmed for compatibility: a rename is an ordinary edit.
+The user docs (`README.md` and `docs/guide/`) and the public docstrings are the user contract,
+enforced by tests; `docs/dev/decisions.md` records why the contract is what it is. The library
+has no users yet, so nothing is kept, aliased, or shimmed for compatibility: a rename is an
+ordinary edit.
 
 ## Commands
 
@@ -56,10 +57,10 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
    and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
 9. **Contract changes first.** A change to a public signature, default, column, or failure
-   behavior is an owner decision: add an entry to `docs/dev/decisions.md` and update
-   `README.md`, the docstrings, and the tests in the same PR. A change that keeps the documented
-   behavior and changes only how it is achieved cites, in its PR, the existing decision it
-   follows, and proceeds.
+   behavior is an owner decision: add an entry to `docs/dev/decisions.md` and update the user
+   docs (`README.md` and `docs/guide/`), the docstrings, and the tests in the same PR. A change
+   that keeps the documented behavior and changes only how it is achieved cites, in its PR, the
+   existing decision it follows, and proceeds.
 10. **Tests mirror the package**, one leading underscore dropped per path component
     (`_massive/rest/client.py` → `tests/massive/rest/test_client.py`). Two helper packages sit
     outside the rule: `tests/_fakes/`, the fake servers, which have no tests, and `tests/_live/`,
@@ -146,9 +147,12 @@ before a push, since the pre-push hook is the check.
 ## Documentation
 
 Docstrings serve a person in an IDE or the Deephaven console and an agent that knows only the
-code: a one-line docstring on anything with behavior worth knowing is a defect. User docs go in
-`README.md` alone. Follow the `writing-docstrings` skill whenever you write or change a
-docstring, the README, or other user-facing text.
+code: a one-line docstring on anything with behavior worth knowing is a defect. User docs have
+three parts: `README.md`, the complete landing page that takes a new user from install to
+everyday use; `docs/guide/`, reference pages looked up for specific cases; and `docs/datasets/`,
+generated. `docs/dev/user-docs.md` is their standard. Follow the `writing-user-docs` skill
+whenever you write, move, or review a user page, or change behavior one describes, and the
+`writing-docstrings` skill for docstrings and other text in code.
 
 ## Deephaven invariants
 
