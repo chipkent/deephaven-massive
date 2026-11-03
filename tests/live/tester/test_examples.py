@@ -12,8 +12,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import threading
 import weakref
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -25,6 +26,7 @@ from deephaven import empty_table
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
+from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
 from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
@@ -285,6 +287,61 @@ def test_the_paid_examples_run_on_streams_from_the_fake_server(
         "gainer_trades",
     ):
         assert name in made
+
+
+@pytest.mark.jvm_held
+def test_history_plus_live_keeps_one_row_per_minute(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # History holds 04:00 and 04:01 New York time; the stream then sends 04:01 again, as
+    # Massive recomputed it, and 04:02. The table keeps one row per minute: the stream's
+    # where both hold it.
+    day = datetime.now(NEW_YORK).date()
+    midnight = datetime.combine(day, day_time(), NEW_YORK)
+    monkeypatch.setattr(history_source, "_now", lambda: midnight + timedelta(hours=23))
+
+    def minute(index: int) -> int:
+        return int((midnight + timedelta(hours=4, minutes=index)).timestamp() * 1000)
+
+    rest = FakeRestServer()
+    rest.start()
+    try:
+        first, last = minute(-240), minute(24 * 60 - 240) - 1
+        rows = [
+            {"o": c, "h": c, "l": c, "c": c, "v": 1.0, "t": minute(i)}
+            for i, c in [(0, 1.0), (1, 2.0)]
+        ]
+        rest.reply(
+            f"/v2/aggs/ticker/AAPL/range/1/minute/{first}/{last}",
+            Reply(envelope(rows, ticker="AAPL", adjusted=True, resultsCount=2)),
+        )
+        session = make_ws_session(rest_base_url=rest.url)
+        namespace: dict[str, Any] = {"m": session.session, "dm": dm}
+        outcome, _ = examples.run_example(EXAMPLES / "19_history_plus_live.py", namespace)
+        assert (outcome.status, outcome.error) == (examples.PASSED, "")
+        session.subscribed("AM.AAPL")
+        live = [
+            {"ev": "AM", "sym": "AAPL", "v": 1, "o": c, "c": c, "h": c, "l": c}
+            | {"s": minute(i), "e": minute(i + 1)}
+            for i, c in [(1, 3.0), (2, 4.0)]
+        ]
+        session.publish(*live)
+        table = namespace["aapl_today"]
+        pace = threading.Event()  # never set; only paces the loop
+        made = dh_to_pylist(table)
+        for _ in range(500):
+            if len(made) == 3 and made[1]["Close"] == 3.0:
+                break
+            pace.wait(0.02)
+            made = dh_to_pylist(table)
+    finally:
+        rest.close()
+    starts = [datetime.fromtimestamp(minute(i) / 1000, UTC) for i in range(3)]
+    assert [(r["TimestampStart"], r["Close"]) for r in made] == list(
+        zip(starts, [1.0, 3.0, 4.0], strict=True)
+    )
 
 
 def test_the_guide_shows_each_example_exactly_as_its_file() -> None:
