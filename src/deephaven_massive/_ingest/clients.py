@@ -22,7 +22,6 @@ governor's state to `m.rate_limits()`, and releases the lease with the session.
 from __future__ import annotations
 
 import functools
-import logging
 import weakref
 from typing import TYPE_CHECKING
 
@@ -47,8 +46,6 @@ if TYPE_CHECKING:
     )
 
 __all__ = ["CONNECTION_SETTINGS", "SessionClients"]
-
-logger = logging.getLogger(__name__)
 
 
 class SessionClients:

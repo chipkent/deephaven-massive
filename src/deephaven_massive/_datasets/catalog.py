@@ -33,7 +33,6 @@ so the declarations and the gates that keep them true read whole only side by si
 
 from __future__ import annotations
 
-import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -73,7 +72,6 @@ __all__ = [
     "timespan_key",
 ]
 
-logger = logging.getLogger(__name__)
 
 REFERENCE_PATH: Final = re.compile(r"/v\w+/reference/")
 """The start of every reference endpoint's path (`/v3/reference/...`, `/vX/reference/...`).

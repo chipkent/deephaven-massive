@@ -536,8 +536,8 @@ document already reflects them.
     `poll()` cycle cannot read from Massive (HTTP 404, or a path that lacks a parameter the
     poll sends). They have no environment variables: code or
     the settings file sets them (decision 80). A `str` or a list in code
-    always raises, whatever the setting, and `canonicalize_symbols(on_error=OnError.RAISE)`
-    keeps its own argument, since it is a standalone function. No per-dataset parameter: it
+    always raises, whatever the setting, and `canonicalize_symbols` keeps its own `on_error`
+    argument, since it is a standalone function; its default is `LOG` too (decision 93). No per-dataset parameter: it
     would act only when a symbol table is passed, and nobody wants a different strictness per
     query. The setting governs every row read from a symbol table, present at the call or added
     later, for streams and `poll()`: under `RAISE` a bad row present at the call raises at
@@ -841,3 +841,12 @@ document already reflects them.
     cycle runs can be refreshed in the step its creation stamp claims, and a first change in
     that step is fatal ([section 14](14-publishers-fan-out-and-failure-semantics.md#14-publishers-fan-out-and-failure-semantics)). Tests may
     still use an input table to stand in for a user's watchlist.
+93. **`dm.canonicalize_symbols` skips and logs a bad row by default** (owner decision,
+    2026-11-03, applying the rule that one bad symbol or row never fails the table). Its
+    `on_error` default changes from `RAISE` to `LOG`: a value that does not convert gets a null
+    symbol, which every dataset ignores, and is logged once at WARNING, at most 20 per table,
+    and the converted table and every table that follows it keep updating. `RAISE` stays
+    available and keeps its behavior: a current bad value raises `ValueError` at the call, and
+    a later bad row of a refreshing table fails the table and every result that follows it.
+    The refusal of a bad symbol-table row now suggests `dm.canonicalize_symbols(table,
+    dm.AssetClass.<CLASS>)` without an `on_error` argument.

@@ -1161,7 +1161,7 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS, on_error=dm.OnError.RAISE)
     script.rows()
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
@@ -1206,10 +1206,7 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
-    assert (
-        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.LOG)"
-        in (row["Error"])
-    )
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 

@@ -136,7 +136,7 @@ left. That text is kept apart from the transport's own warning (a wait for a con
 deferred options contracts, a poll cycle's error), and `Error` shows both, joined by `; `, so
 neither hides or clears the other. Under `RAISE`, such a
 later row fails the result (`a symbol table holds 'msft' (...). Fix the row, or pass the table
-through dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.LOG), ...`),
+through dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which ...`),
 and under `unreadable_symbols=RAISE` a symbol Massive sent in a spelling the library cannot
 read does (`stocks.trades: Massive sent the symbol 'BRK/B', ... This is a bug in
 deephaven-massive. ...`). Under `unreadable_symbols=LOG` an unreadable spelling is logged once

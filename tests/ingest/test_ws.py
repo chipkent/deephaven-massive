@@ -632,7 +632,7 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, " in row["Error"]
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
     # The row that is not canonical never became a topic.
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
     assert sent == {"T.AAPL"}
@@ -710,7 +710,7 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
     # it rather than keep its old topics, and the failure is one ERROR, the stream's.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS, on_error=dm.OnError.RAISE)
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
@@ -726,6 +726,34 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
     ]
     assert len(errors) == 1
     assert errors[0].startswith("test.trades stream 1 failed: the symbol table passed to")
+
+
+def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_following(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # One bad row never fails the table: by default canonicalize_symbols nulls a late bad row
+    # and logs it once, and both it and the stream that follows it keep updating.
+    source = dh_input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    result = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.AAPL")
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
+        source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+        wait_for(lambda: len(caplog.records) == 1)  # logged on an update-graph thread
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "'BRK-B'" in caplog.records[0].getMessage()
+    source.add(new_table([string_col("Symbol", ["MSFT"])]))
+    ws_session.subscribed("T.MSFT")
+    assert [r["Symbol"] for r in dh_to_pylist(watchlist)] == ["AAPL", None, "MSFT"]
+    failed = bool(watchlist.j_table.isFailed()) or bool(result.j_table.isFailed())
+    assert not failed  # pytest cannot describe a Java method
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
 
 
 def stream_blink(ws_session: WsSession) -> Table:
@@ -755,7 +783,7 @@ def test_a_failing_watchlist_fails_a_last_by_stream_once(
     # and Deephaven ends the process on it.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS, on_error=dm.OnError.RAISE)
     result = ws_session.query(TRADES, watchlist).last_by(*keys)
     ws_session.subscribed("T.AAPL")
     blink = stream_blink(ws_session)
