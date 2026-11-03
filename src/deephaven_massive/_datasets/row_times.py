@@ -27,8 +27,8 @@ fields and, for bars of a day or longer, moved their stamps to the start of thei
 (`stamp_rule`). The vendor's own time fields feed these columns through the
 dataset's declared keys and are not kept beside them: the bar start (`t`, `s`,
 `window_start`) becomes `TimestampStart`, the WebSocket bar end `e` becomes `TimestampEnd`
-(recomputed, see below), and the futures `session_end_date` and the open-close `from` and `day`
-become `Date`.
+(recomputed except for futures one-second bars, see below), and the futures
+`session_end_date` and the open-close `from` and `day` become `Date`.
 
 **The windows.**
 
@@ -36,7 +36,8 @@ become `Date`.
   `session_end_date`, or on the WebSocket, which sends none, the 17:00 Chicago rule corrected
   by the schedules (`SessionDates`), null for a row they cannot place.
 - **Intraday bar of n units.** `TimestampStart` is Massive's start and `TimestampEnd` the start
-  plus n units (for a futures one-second WebSocket bar, the later of that and Massive's `e`).
+  plus n units (for a futures one-second WebSocket bar, Massive's `e` as sent, and the start
+  plus one second only where Massive sends no `e`).
   `Date` is the start's date, null when the bar ends on a later date; for futures it is the
   session as for ticks, null when the bar crosses 17:00 Chicago time.
 - **1-day bar.** 00:00 of the day to 00:00 of the next day (01:00 New York time for indices);
@@ -835,7 +836,7 @@ class TimeRule:
         start = _to_int(rows.column(START))
         end = pc.add(start, unit_ns(timespan) * self.multiplier)
         if self._futures and timespan is Timespan.SECOND:
-            end = self._later_end(rows, end)
+            end = self._sent_end(rows, end)
         last = pc.subtract(end, 1)
         if self._futures:
             dates = self._sessions(rows, start, session_dates)
@@ -850,14 +851,14 @@ class TimeRule:
         rows = _set(rows, DATE, pc.if_else(same, dates, pa.scalar(None, pa.string())))
         return _set(rows, END, pc.cast(end, _INSTANT))
 
-    def _later_end(self, rows: _Rows, computed: pa.Array) -> pa.Array:
-        """Return the later of a futures one-second bar's computed end and Massive's `e`.
+    def _sent_end(self, rows: _Rows, computed: pa.Array) -> pa.Array:
+        """Return a futures one-second bar's end: Massive's `e`, or its start plus one second.
 
-        Massive's documented futures one-second sample spans 60 seconds from `s` to `e`;
-        whichever is right, the later end never attaches a bar before its window closed. A
-        disagreement is logged once per process, at WARNING, with both ends: the library
-        supplies Massive's data as sent, so a `TimestampEnd` that is not Massive's `e` must be
-        visible to whoever reads the table.
+        The library supplies Massive's data as sent, so `TimestampEnd` keeps `e` even when it
+        is not the start plus one second (Massive's documented futures one-second sample spans
+        60 seconds from `s` to `e`). Such a disagreement is logged once per process, at
+        WARNING, with both ends, so whoever reads the table learns that a window is not one
+        second long. A row without `e` ends at its start plus one second.
 
         Args:
             rows: The batch, whose `TimestampEnd` holds Massive's `e` where the source sends it.
@@ -875,15 +876,14 @@ class TimeRule:
                 logger,
                 f"futures-second-end:{self.dataset}",
                 "%s: a one-second bar's end from Massive (%d ns) is not its start plus one "
-                "second (%d ns); TimestampEnd holds the later of the two, so it can differ "
-                "from Massive's e",
+                "second (%d ns); TimestampEnd keeps Massive's e, so the bar's window is not "
+                "one second long",
                 self.dataset,
                 first,
                 plus_one,
                 level=logging.WARNING,
             )
-        later = pc.if_else(pc.greater(sent, computed), sent, computed)
-        return pc.coalesce(later, computed)
+        return pc.coalesce(sent, computed)
 
     def _long_bars(self, rows: _Rows, timespan: Timespan) -> _Rows:
         """Fill a bar of a day or longer of a class with a day zone.

@@ -58,7 +58,7 @@ def ns(text: str) -> int:
     moment = datetime.fromisoformat(text)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return int(moment.timestamp()) * 10**9
+    return instant_ns(moment)
 
 
 def instants(values: Sequence[str | None]) -> pa.Array:
@@ -281,29 +281,36 @@ def test_a_streamed_bar_s_own_end_is_recomputed() -> None:
     assert fill(rule, sent)[END] == ["2025-03-03T14:30:01+00:00"]
 
 
-def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
+def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_one_second(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_log_limits, "_logged", set())
     rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SECOND, 1)
     sent = bars(
-        ["2025-03-07T15:00:00", "2025-03-07T15:00:01", "2025-03-07T15:00:02"],
-        ends=["2025-03-07T15:01:00", None, "2025-03-07T15:00:03"],
+        [
+            "2025-03-07T15:00:00",
+            "2025-03-07T15:00:01",
+            "2025-03-07T15:00:02",
+            "2025-03-07T15:00:03",
+        ],
+        ends=["2025-03-07T15:01:00", None, "2025-03-07T15:00:03", "2025-03-07T15:00:03.500"],
     )
     with caplog.at_level(logging.INFO, logger=row_times.__name__):
+        # Massive's `e` is kept, longer or shorter than one second; no `e` ends one second on.
         assert fill(rule, sent)[END] == [
             "2025-03-07T15:01:00+00:00",
             "2025-03-07T15:00:02+00:00",
             "2025-03-07T15:00:03+00:00",
+            "2025-03-07T15:00:03.500000+00:00",
         ]
         fill(rule, sent)
     warned = [r for r in caplog.records if "is not its start plus one second" in r.message]
-    # Once per process, at WARNING: TimestampEnd then differs from Massive's own `e`.
+    # Once per process, at WARNING: the bar's window is then not one second long.
     assert [r.levelno for r in warned] == [logging.WARNING]
     assert warned[0].message == (
         "futures.bars: a one-second bar's end from Massive (1741359660000000000 ns) is not its "
-        "start plus one second (1741359601000000000 ns); TimestampEnd holds the later of the "
-        "two, so it can differ from Massive's e"
+        "start plus one second (1741359601000000000 ns); TimestampEnd keeps Massive's e, so the "
+        "bar's window is not one second long"
     )
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()
