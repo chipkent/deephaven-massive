@@ -48,7 +48,9 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
     NotePart,
+    StreamKind,
     StreamRow,
+    StreamState,
     StreamUpdate,
 )
 from deephaven_massive._tables.execution_context import entered
@@ -977,6 +979,39 @@ def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
     assert len(fake_streams.opened) == 1
     assert core.results.held() == 1  # no hold was taken on the closed stream
     massive_session.release(first)
+
+
+def test_a_followed_read_s_progress_after_close_changes_nothing(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The coordinator may report progress after the close: the row keeps what the close wrote.
+    core = massive_session._core
+    call = core.next_stream_id()
+    core.register_worker(
+        StreamRow(
+            stream_id=call,
+            kind=StreamKind.READ,
+            dataset="test.trades",
+            query="m.test.trades(<table>)",
+            symbol_count=0,
+            symbols="",
+            held_results=1,
+            transport=Transport.REST,
+            state=StreamState.LOADING,
+            loading=0,
+            created_at=1,
+        ),
+        fail=lambda _error: True,
+    )
+    massive_session.close()
+    with core.registry_lock:
+        closed = core._workers[call].row
+    core.update_followed_read(call, StreamUpdate(rows_published=7, loading=1), loading=True)
+    with core.registry_lock:
+        assert core._workers[call].row == closed
+    assert closed.state is StreamState.CLOSED
+    core.release_worker(call)  # as releasing the result, then its shutdown, do
+    core.worker_shut_down(call)
 
 
 def test_a_session_collected_unclosed_runs_its_closers(

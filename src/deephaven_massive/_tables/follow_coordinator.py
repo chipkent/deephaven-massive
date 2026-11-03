@@ -58,6 +58,7 @@ shows read whole only here.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -90,7 +91,7 @@ from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolRead
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -334,7 +335,7 @@ def _transport(read: FollowedRead, outcome: SymbolOutcome) -> str:
         The source the rows name (`SymbolRows.source`), such as `"flat files and REST"`, or
         else the plan's source, such as `"REST"`.
     """
-    if isinstance(outcome, SymbolRows) and outcome.source:
+    if isinstance(outcome, SymbolRows) and outcome.source is not None:
         return outcome.source
     return TRANSPORT_LABELS[read.plan.transport]
 
@@ -533,6 +534,9 @@ class FollowCoordinator:
     def _handle(self, batch: list[_Message]) -> None:
         """Handle one batch of events in order, then start reads and write the rows.
 
+        Each step for one result runs guarded (`_guarded`): an error fails that result alone,
+        and the rest of the batch still runs, for it and for every other result.
+
         Args:
             batch: The events.
         """
@@ -541,7 +545,9 @@ class FollowCoordinator:
             if isinstance(message, _Wake):
                 continue
             if isinstance(message, _Follow):
-                result = self._start(message)
+                result = _Result(message.read, decided_at_step=message.read.built_step)
+                self._results[id(message.read)] = result
+                self._guarded(result, "starting", functools.partial(self._start, result, message))
             else:
                 found = self._results.get(id(message.read))
                 if found is None:  # an event of a result already stopped
@@ -552,22 +558,59 @@ class FollowCoordinator:
                     )
                     continue
                 result = found
-                try:
-                    self._apply(result, message)
-                except Exception as error:  # one result's defect; the others go on
-                    logger.exception(
-                        "call %d follow: handling %s failed. %s",
-                        result.read.call,
-                        type(message).__name__,
-                        LIBRARY_BUG,
-                    )
-                    self._defect(result, message, error)
+                self._guarded(
+                    result,
+                    f"handling {type(message).__name__}",
+                    functools.partial(self._apply, result, message),
+                )
             touched[id(result.read)] = result
         self._retry_due(touched)
+        self._schedule_and_show(touched)
         for result in touched.values():
-            self._schedule(result)
-            self._show(result)
-        self._forget_stopped(touched)
+            self._guarded(result, "forgetting it", functools.partial(self._forget, result))
+
+    def _guarded(self, result: _Result, step: str, action: Callable[[], None]) -> None:
+        """Run one step for one result; an error fails that result alone.
+
+        The error is logged at ERROR with its traceback, the result's call and dataset, and the
+        step, and the result's table fails with it (`_defect`). If failing the table raises too,
+        that is logged as well. Either way the coordinator goes on with its next step.
+
+        Args:
+            result: The result the step is for.
+            step: What the step does, for the log and the table's error, such as
+                `"handling _Changed"`.
+            action: The step.
+        """
+        try:
+            action()
+        except Exception as error:  # one result's defect; the others go on
+            logger.exception(  # the traceback names the error and its text
+                "call %d follow: %s failed (%s). %s",
+                result.read.call,
+                step,
+                result.read.dataset,
+                LIBRARY_BUG,
+            )
+            try:
+                self._defect(result, step, error)
+            except Exception:
+                logger.exception(
+                    "call %d follow: failing its table after %s failed raised too. %s",
+                    result.read.call,
+                    step,
+                    LIBRARY_BUG,
+                )
+
+    def _schedule_and_show(self, touched: Mapping[int, _Result]) -> None:
+        """Start each touched result's reads and write its rows, each step guarded.
+
+        Args:
+            touched: The results whose state changed.
+        """
+        for result in touched.values():
+            self._guarded(result, "starting its reads", functools.partial(self._schedule, result))
+            self._guarded(result, "writing its rows", functools.partial(self._show, result))
 
     def _apply(self, result: _Result, message: _Message) -> None:
         """Apply one event of a known result.
@@ -594,21 +637,22 @@ class FollowCoordinator:
         else:  # _Stop
             self._stopped(result)
 
-    def _defect(self, result: _Result, message: _Message, error: Exception) -> None:
-        """Fail a result whose event raised: its state may no longer be whole.
+    def _defect(self, result: _Result, step: str, error: Exception) -> None:
+        """Fail a result one of whose steps raised: its state may no longer be whole.
 
         The caller logged the defect with its traceback; this fails the result's table with a
-        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`), marked as logged.
+        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`), marked as logged. The
+        table's failure stops the result, so none of its symbols stays queued or loading.
 
         Args:
             result: The result's state.
-            message: The event that raised.
+            step: The step that raised, such as `"handling _Changed"`.
             error: What it raised.
         """
         failure = MassiveError(
             library_bug(
-                f"{result.read.dataset}: the followed read failed handling "
-                f"{type(message).__name__}: {type(error).__name__}: {error}"
+                f"{result.read.dataset}: the followed read failed {step}: "
+                f"{type(error).__name__}: {error}"
             ),
             cause=ErrorCause.LIBRARY_DEFECT,
         )
@@ -640,22 +684,18 @@ class FollowCoordinator:
             bounded_list(sorted(removed)),
         )
 
-    def _start(self, message: _Follow) -> _Result:
-        """Start following a result: record what its caller read, if anything.
+    def _start(self, result: _Result, message: _Follow) -> None:
+        """Start following a new result: record what its caller read, if anything.
 
         Args:
+            result: The result's new, empty state, already registered.
             message: The new result and its first read.
-
-        Returns:
-            Its state.
         """
         read = message.read
-        result = _Result(read, decided_at_step=read.built_step)
-        self._results[id(read)] = result
         if read.core.closed:  # the close failed the table while it was handed over
             result.ended = True
             logger.debug("call %d follow: the session closed before it started", read.call)
-            return result
+            return
         first = message.first
         if first is not None:
             # The call warned of its failed symbols already: once per result and cause.
@@ -683,10 +723,12 @@ class FollowCoordinator:
             read.reread.name,
             0 if first is None else len(first.outcomes),
         )
-        return result
 
     def _add(self, result: _Result, name: str, now: int) -> None:
         """A symbol entered the table: reuse its kept download under `NEVER`, or queue a read.
+
+        A result that has failed or stopped reads nothing, so the symbol is `STOPPED` at once:
+        queued, it would wait for a read that never starts.
 
         Args:
             result: The result's state.
@@ -702,6 +744,14 @@ class FollowCoordinator:
         symbol.generation += 1
         symbol.added_at = now
         result.dirty.add(name)
+        if result.ended:
+            symbol.state = SymbolReadState.STOPPED
+            logger.debug(
+                "call %d follow %s: added after the result failed or stopped; not read",
+                result.read.call,
+                name,
+            )
+            return
         if result.read.reread is Reread.NEVER and symbol.kept:
             symbol.state = SymbolReadState.DONE
             logger.debug(
@@ -921,20 +971,32 @@ class FollowCoordinator:
         now = CLOCK.monotonic()
         woke = touched is None
         touched = {} if touched is None else touched
-        for key, result in self._results.items():
-            if result.ended:
-                continue
-            for name, symbol in result.symbols.items():
-                if symbol.state is SymbolReadState.RETRYING and (symbol.due or 0.0) <= now:
-                    symbol.state = SymbolReadState.QUEUED
-                    symbol.due = symbol.next_attempt_at = None
-                    result.dirty.add(name)
-                    self._enqueue(result, name)
-                    touched[key] = result
+        for result in list(self._results.values()):
+            self._guarded(
+                result,
+                "queuing its due retries",
+                functools.partial(self._queue_due_retries, result, now, touched),
+            )
         if woke:
-            for result in touched.values():
-                self._schedule(result)
-                self._show(result)
+            self._schedule_and_show(touched)
+
+    def _queue_due_retries(self, result: _Result, now: float, touched: dict[int, _Result]) -> None:
+        """Queue one result's retries whose time has come.
+
+        Args:
+            result: The result's state.
+            now: The monotonic clock's reading, seconds.
+            touched: Receives the result when a retry of it is queued.
+        """
+        if result.ended:
+            return
+        for name, symbol in result.symbols.items():
+            if symbol.state is SymbolReadState.RETRYING and (symbol.due or 0.0) <= now:
+                symbol.state = SymbolReadState.QUEUED
+                symbol.due = symbol.next_attempt_at = None
+                result.dirty.add(name)
+                self._enqueue(result, name)
+                touched[id(result.read)] = result
 
     def _next_due(self) -> float | None:
         """Return the seconds until the next retry is due, for the queue wait.
@@ -1187,17 +1249,17 @@ class FollowCoordinator:
             head = f"{total} {noun} retrying after a failure that may pass"
         return f"{head}: {'; '.join(parts)}"
 
-    def _forget_stopped(self, touched: Mapping[int, _Result]) -> None:
-        """Forget each result whose blink table has shut down: no event of it matters any more.
+    def _forget(self, result: _Result) -> None:
+        """Forget a result once its blink table has shut down: no event of it matters any more.
 
         Args:
-            touched: The results this batch touched.
+            result: A result this batch touched.
         """
-        for key, result in touched.items():
-            if result.ended and result.read.shut_down and key in self._results:
-                del self._results[key]
-                with self._lock:
-                    self._following.pop(key, None)
+        key = id(result.read)
+        if result.ended and result.read.shut_down and key in self._results:
+            del self._results[key]
+            with self._lock:
+                self._following.pop(key, None)
 
     def _exited(self) -> None:
         """The coordinator thread ends (`stop`): forget every result, so none outlives it.
