@@ -407,7 +407,9 @@ two shapes of one query, or the same shape twice, subscribes once: the tables sh
 value. Pass a column name or a list to key by something else, such as
 `last_by(["Symbol", "Exchange"])`.
 
-`poll(seconds)` combines its cycles by a `mode`. `dm.PollMode.REPLACE` keeps one row per key
+`poll(seconds)` re-reads the query every `seconds`, a number or a `timedelta` of at least 1
+second: a shorter one, usually a typo such as `poll(0.01)` for `poll(10)`, raises `ValueError`.
+Use a stream for anything faster. `poll()` combines its cycles by a `mode`. `dm.PollMode.REPLACE` keeps one row per key
 (usually `Symbol`) and drops keys the latest cycle did not return. `UPSERT` keeps one row per
 key and never drops one. `APPEND` adds rows it has not seen and never changes or removes one, so
 the table grows into a feed. The default, `dm.PollMode.AUTO`, uses each dataset's own mode,

@@ -14,7 +14,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `SipMappingFinraTdds`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` |
 | `sort` | `asset_class`, `id`, `type`, `name`, `data_types`, `legacy` |
 | `filters` | none |
 
@@ -53,6 +53,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `SipMappingCta` | String | Condition code from the Consolidated Tape Association (CTA). From the `sip_mapping` object: A comprehensive mapping that translates condition codes from individual SIPs (CTA, OPRA, UTP) to a unified code used by Massive. This facilitates consistent interpretation and application of market data conditions across different data streams, ensuring that users can accurately apply these conditions to their data analysis and reporting. | REST |
 | `SipMappingOpra` | String | Condition code from the Options Price Reporting Authority (OPRA). From the `sip_mapping` object: A comprehensive mapping that translates condition codes from individual SIPs (CTA, OPRA, UTP) to a unified code used by Massive. This facilitates consistent interpretation and application of market data conditions across different data streams, ensuring that users can accurately apply these conditions to their data analysis and reporting. | REST |
 | `SipMappingUtp` | String | Condition code from UTP Plan (UTP). From the `sip_mapping` object: A comprehensive mapping that translates condition codes from individual SIPs (CTA, OPRA, UTP) to a unified code used by Massive. This facilitates consistent interpretation and application of market data conditions across different data streams, ensuring that users can accurately apply these conditions to their data analysis and reporting. | REST |
+| `SipMappingFinraTdds` | String | Condition code from FINRA's Trade Data Dissemination Service (TDDS). From the `sip_mapping` object: A comprehensive mapping that translates condition codes from individual SIPs (CTA, OPRA, UTP) to a unified code used by Massive. This facilitates consistent interpretation and application of market data conditions across different data streams, ensuring that users can accurately apply these conditions to their data analysis and reporting. | REST |
 | `Type` | String | An identifier for a collection of related conditions. | REST |
 | `UpdateRulesConsolidatedUpdatesHighLow` | boolean | Whether or not trades with this condition update the high/low. From the `update_rules` object: A list of aggregation rules. From the `update_rules.consolidated` object: Describes aggregation rules on a consolidated (all exchanges) basis. | REST |
 | `UpdateRulesConsolidatedUpdatesOpenClose` | boolean | Whether or not trades with this condition update the open/close. From the `update_rules` object: A list of aggregation rules. From the `update_rules.consolidated` object: Describes aggregation rules on a consolidated (all exchanges) basis. | REST |
@@ -79,6 +80,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 | `SipMappingCta` | `sip_mapping.CTA` |
 | `SipMappingOpra` | `sip_mapping.OPRA` |
 | `SipMappingUtp` | `sip_mapping.UTP` |
+| `SipMappingFinraTdds` | `sip_mapping.FINRA_TDDS` |
 | `Type` | `type` |
 | `UpdateRulesConsolidatedUpdatesHighLow` | `update_rules.consolidated.updates_high_low` |
 | `UpdateRulesConsolidatedUpdatesOpenClose` | `update_rules.consolidated.updates_open_close` |

@@ -960,6 +960,13 @@ UNDECLARED_FIELDS: Mapping[tuple[str, str], UndeclaredField] = MappingProxyType(
                 '"AAPL"` for Apple, the issuer\'s trading symbol of the SEC form.',
             ),
         ),
+        ("/v3/reference/conditions", "sip_mapping.FINRA_TDDS"): UndeclaredField(
+            json_type="string",
+            description="Condition code from FINRA's Trade Data Dissemination Service (TDDS).",
+            reason="The live run of 2026-11-03 received it on the conditions reference, "
+            '`"FINRA_TDDS": "W"` in a condition\'s `sip_mapping`, beside the declared '
+            "`CTA`, `OPRA`, and `UTP` codes; the text follows theirs.",
+        ),
     }
 )
 """`(source, wire key)` to a field Massive sends that its specification does not declare."""
@@ -970,6 +977,34 @@ OPTIONAL_FIELDS: Mapping[tuple[str, str], str] = MappingProxyType(
         "timestamp required, but the live run of 2026-11-02 received an options last trade "
         "without it (O:AAPL261204C00345000). It is kept as an optional column, so its absence "
         "is not reported as drift.",
+        **_for(
+            ("/v3/snapshot/options/{underlyingAsset}",),
+            (
+                "break_even_price",
+                "underlying_asset.change_to_break_even",
+                *(
+                    f"day.{key}"
+                    for key in (
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "previous_close",
+                        "volume",
+                        "vwap",
+                        "change",
+                        "change_percent",
+                    )
+                ),
+            ),
+            "The specification marks the contract's day bar and break-even price required, but "
+            "the live run of 2026-11-03 received chain rows without them at about 10:52 New York "
+            "time: rows among the first three SPX contracts (`limit=3`) lacked every `day` "
+            "price, change, and volume field, `break_even_price`, and "
+            "`underlying_asset.change_to_break_even`, and rows among the first twenty SPY calls "
+            "(`contract_type=call&limit=20`) lacked the same `day` fields. They are kept as "
+            "optional columns, so their absence is not reported as drift.",
+        ),
     }
 )
 """`(source, wire key)` to why a field the specification marks required is optional."""
