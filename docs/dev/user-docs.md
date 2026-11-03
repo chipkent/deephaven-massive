@@ -30,8 +30,8 @@ thin page of links. Reading only the README, you can:
    bullets of concrete outcomes.
 2. **Watch it work**: a free-plan example with enough data to be interesting, then a paid live
    example with ticking prices.
-3. **Install it and get a first table**: complete steps for the common platforms (Java, `uv`,
-   the install, the API key, the server, opening the Deephaven IDE, the first table), each
+3. **Install it and get a first table**: complete steps for the common platforms (Java,
+   Python, the install, the API key, the server, opening the Deephaven IDE, the first table), each
    saying what you should see.
 4. **Use the core every day**: the one call pattern; `fetch`, `history`, `poll`, and the live
    shapes (`blink`, `append_only`, `ring`, `last_by`); symbols and the watchlists that drive
@@ -96,14 +96,28 @@ Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`, never on a user p
 - **Examples are complete and pasteable.** Each block runs as written after the page's stated
   setup, and the text right after it says what you see: the table's rows, its columns, how it
   changes.
-- **Never hard-code a release version**, so the docs need no edit at release time:
-  - Installing from git: look up the newest release tag in the same step, with
-    `gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName'`.
-    `gh release list` includes release candidates; `gh release view` skips them.
-  - Installing from PyPI: `pip install deephaven-massive` gets the newest release (add `--pre`
-    while only release candidates exist).
-  - Linking to a release: `https://github.com/chipkent/deephaven-massive/releases/latest`.
-  - An example that shows a version string marks it as an example, never the current version.
+
+## Install commands
+
+- **pip first, uv as the alternative.** Many users have no `uv`, so every install step shows
+  the `pip` command, with the `uv pip` form as a one-line comment after it.
+- **State the prerequisites plainly**, with how to get each: Python 3.11 or later, Java 17 or
+  later with `JAVA_HOME` set, and, while the repository is private, `gh auth login`.
+- **Until the PyPI release, install from git at the newest release tag**, looked up in the same
+  step, so the docs never need an edit at release time:
+
+  ```bash
+  TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
+  pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  # with uv:  uv pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  ```
+
+  `gh release list` includes release candidates; `gh release view` skips them.
+- **After the PyPI release**, the block becomes `pip install deephaven-server deephaven-massive`,
+  which gets the newest release by itself (add `--pre` while only release candidates exist).
+- **Never hard-code a release version.** Link to a release as
+  `https://github.com/chipkent/deephaven-massive/releases/latest`; an example that shows a
+  version string marks it as an example, never the current version.
 
 ## Banned patterns
 

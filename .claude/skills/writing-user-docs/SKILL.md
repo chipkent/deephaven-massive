@@ -30,6 +30,8 @@ Update each hit in the same PR.
 - One question per section; bullets and tables over paragraphs.
 - Every term defined at first use, in the words of the standard's terminology table.
 - A number only when the reader acts on it.
+- Install steps follow the standard's Install commands: `pip` first with `uv pip` as a one-line
+  alternative, and the prerequisites stated plainly.
 - No hard-coded release version: look up the newest tag, use plain `pip install`, or link to
   `releases/latest`; mark any shown version string as an example.
 
