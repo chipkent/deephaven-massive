@@ -47,6 +47,8 @@ class FakeStreamTransport:
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
         self.failed: dict[int, str] = {}
+        # The stream of each `publish_held` call, in order.
+        self.published_held: list[int] = []
         self._lock = threading.Lock()
 
     def _on_shutdown(self, stream_id: int) -> None:
@@ -67,6 +69,10 @@ class FakeStreamTransport:
         core.fail_stream(stream_id, str(error))
         self.publishers[stream_id].publish_failure(error)
         return True
+
+    def _publish_held(self, stream_id: int) -> None:
+        with self._lock:
+            self.published_held.append(stream_id)
 
     def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
         # Every pair is listed here; `tests/ingest/test_ws.py` tests the real lookups.
@@ -100,6 +106,7 @@ class FakeStreamTransport:
             "/stocks",
             "test host",
             fail,
+            functools.partial(self._publish_held, stream_id),
             recency=Recency.REALTIME,
         )
 

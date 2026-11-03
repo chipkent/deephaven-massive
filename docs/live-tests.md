@@ -186,7 +186,12 @@ from under it and requires the crypto stream to reconnect, return to `RUNNING`, 
 trades, recording any `WAITING_SLOT` on the way; one reads AAPL's minute bars from the previous
 trading day through today on `AUTO` and on REST, before today's flat file exists, and requires
 the same minutes from both, no day missing or doubled, recording `AUTO`'s warning that it
-filled days from REST (it needs Stocks Starter and the S3 credentials).
+filled days from REST (it needs Stocks Starter and the S3 credentials). A third,
+`test_a_crypto_stream_follows_its_watchlist` in `tests/ingest/test_ws_integration.py`, is the
+live check of a watchlist: it streams crypto trades from an input table, adds `X:ETHUSD`,
+deletes it, and adds it again, and requires a row after each add, the row and the stream's
+`Symbols` entry gone after the delete, and no row from before the re-add (Currencies Starter;
+each step waits at most 60 s).
 
 Two checks are about a delayed plan's labels. The past-data check records the envelope status
 Massive gives AAPL's previous day bar, and counts only when that status is `DELAYED`: on a key
@@ -222,7 +227,7 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Plans | Per month | What it settles |
 |---|---|---|
 | Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, whether past stock data (the previous day's bar, a day's open and close) reads on the default configuration though Massive labels it `DELAYED`, the futures session labels around the 17:00 Chicago roll and Good Friday; the futures spread ticker forms of every venue, how Massive writes a futures contract's year (one digit or two), the crypto ticker list's currencies; plus the 429 text, the rate buckets, whether a market-filtered ticker lookup is charged to its class, how a spent minute frees its requests, and whether a learned limit outlives the key's sessions |
-| Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
+| Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, the watchlist follow, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |

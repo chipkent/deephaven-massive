@@ -139,6 +139,9 @@ Several agents work at once, and every collision costs a full check and a paid C
 - **Take a free `DESIGN.md` number.** A new decision (§ 22) or verification item (§ 23) takes
   the number the coordinator reserved for you, or else the next after the highest on `main` and
   in every open PR's diff. Name the number in the PR body.
+- **Keep context small.** Every turn re-reads all the context so far: `grep -n` and read only
+  the section you need, keep command output short (`-q`, `| tail`, `--stat`), and never re-read
+  a file you just edited. The `plan-parallel-prs` skill has the full list.
 
 ## Documentation standard
 

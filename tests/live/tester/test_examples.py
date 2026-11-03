@@ -46,7 +46,13 @@ EXAMPLES = ROOT / "docs" / "tester-examples"
 GUIDE = ROOT / "docs" / "tester-guide.md"
 KEY = "PLANTED-tester-key-41c7"
 NEW_YORK = ZoneInfo("America/New_York")
-LIVE = ("18_live_minute_bars.py", "19_history_plus_live.py", "20_live_crypto.py")
+LIVE = (
+    "18_live_minute_bars.py",
+    "19_history_plus_live.py",
+    "20_live_crypto.py",
+    "22_crypto_watchlist.py",
+    "23_gainers_trades.py",
+)
 """The examples that need a paid plan's streams."""
 
 AGGS = re.compile(r"^/v2/aggs/ticker/([^/]+)/range/(\d+)/(\w+)/([\d-]+)/([\d-]+)$")
@@ -151,6 +157,7 @@ def market(
         ("/v1/marketstatus/upcoming", "reference/market_holidays.json"),
         ("/fed/v1/treasury-yields", "economy/treasury_yields.json"),
         ("/stocks/v1/dividends", "stocks/dividends.json"),
+        ("/v2/snapshot/locale/us/markets/stocks/gainers", "stocks/movers.json"),
     ):
         server.reply(path, Reply(load_fixture("namespaces", name)))
     for symbol in ("AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"):
@@ -207,7 +214,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.jvm_held
-@pytest.mark.timeout(300)  # 22 examples, Deephaven compiling each formula, on a busy worker
+@pytest.mark.timeout(300)  # 25 examples, Deephaven compiling each formula, on a busy worker
 def test_every_example_runs_against_the_fake_market(
     market: MarketServer,
     tmp_path: Path,
@@ -237,9 +244,10 @@ def test_every_example_runs_against_the_fake_market(
     assert "live minute bars: opened;" in printed["11_plan_refusals"]
     assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["13_check_the_log"]
-    assert re.search(r"<MassiveSession #\d+ closed>", printed["22_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["22_finish"])
+    assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
+    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
+    assert (out / "tables" / "21_watchlist_poll" / "watched_bars.csv").exists()
     assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
@@ -263,7 +271,14 @@ def test_the_paid_examples_run_on_streams_from_the_fake_server(
         outcome, _ = examples.run_example(EXAMPLES / name, namespace)
         assert (outcome.name, outcome.status, outcome.error) == (name, examples.PASSED, "")
     made = examples.tables_of(namespace)
-    for name in ("latest_bars", "aapl_today", "crypto_latest", "trades_per_minute"):
+    for name in (
+        "latest_bars",
+        "aapl_today",
+        "crypto_latest",
+        "trades_per_minute",
+        "crypto_board",
+        "gainer_trades",
+    ):
         assert name in made
 
 
