@@ -536,9 +536,7 @@ def test_a_failing_scope_release_still_notifies_the_owner(dh_exec_ctx: Execution
             raise RuntimeError("cannot release")
 
     notified: list[str] = []
-    record = ResultRecord(
-        1, cast("LivenessScope", BrokenScope()), lambda: notified.append("released")
-    )
+    record = ResultRecord(cast("LivenessScope", BrokenScope()), lambda: notified.append("released"))
     with pytest.raises(RuntimeError, match="cannot release"):
         ResultRegistry(threading.RLock(), cast("Reaper", None), dh_exec_ctx)._reap(record)
     assert notified == ["released"]

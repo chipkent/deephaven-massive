@@ -66,7 +66,6 @@ from __future__ import annotations
 import dataclasses
 import functools
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass, fields, replace
@@ -117,6 +116,7 @@ __all__ = [
     "SCHEMA_DRIFT_SHOWN",
     "STREAMS",
     "STREAM_KEYS",
+    "SYMBOLS_LISTED",
     "WRITE_INTERVAL",
     "ConnectionRow",
     "ConnectionState",
@@ -134,14 +134,15 @@ __all__ = [
     "as_row",
     "describe_symbols",
     "gaps_text",
-    "pascal_case",
     "shown_query",
+    "symbol_list_text",
+    "thread_died",
     "utc_text",
 ]
 
 logger = logging.getLogger(__name__)
 
-_SYMBOLS_SHOWN: Final = 20
+SYMBOLS_LISTED: Final = 20
 """How many symbols the `Symbols` column lists before it truncates."""
 
 QUERY_SHOWN: Final = 200
@@ -685,7 +686,7 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow) -> dic
     if isinstance(row, SymbolReadRow):
         return symbol_read_values(row)
     shown = {
-        pascal_case(f.name): _shown(getattr(row, f.name))
+        _pascal_case(f.name): _shown(getattr(row, f.name))
         for f in fields(row)
         if not f.metadata.get(_NOT_A_COLUMN)
     }
@@ -772,9 +773,26 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
         return None, "ALL"
     if isinstance(symbols, SymbolTable):
         return None, "reactive table"
-    shown = ", ".join(symbols[:_SYMBOLS_SHOWN])
-    hidden = len(symbols) - _SYMBOLS_SHOWN
-    return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
+    return symbol_list_text(len(symbols), symbols[:SYMBOLS_LISTED])
+
+
+def symbol_list_text(count: int, first: Sequence[str]) -> tuple[int, str]:
+    """Summarize a list of symbols from its length and its first symbols alone.
+
+    For a caller that keeps a large, changing set of symbols and finds its first ones without
+    sorting it all (the follow coordinator).
+
+    Args:
+        count: How many symbols the list holds.
+        first: Its first `SYMBOLS_LISTED` symbols, in order (all of them for a shorter list).
+
+    Returns:
+        `(count, text)`: the text joins `first` by commas, with a `(+N more)` suffix when the
+        list holds more.
+    """
+    shown = ", ".join(first)
+    hidden = count - len(first)
+    return count, f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
 _EXTRA: Final = "is not in the schema; it is dropped"
@@ -1181,21 +1199,30 @@ class Diagnostics:
 
     `release()` lets the writer add the rows already queued, release the scope, and exit, and
     waits for it unless told not to (a caller that holds the update graph's lock must not: the
-    writer releases the scope under that lock); `stop()` does the same without waiting and
-    without taking any lock, for use from a finalizer. A writer that dies on something it
-    cannot carry on after calls `on_death` first (the session fails its live tables there).
+    writer releases the scope under that lock).
+
+    A writer that dies on something it cannot carry on after (`QueueWorker`) calls `on_death`
+    first (the session fails its live tables there), then fails the four tables, so every view
+    of them and every table derived from one fails too instead of showing frozen rows as if
+    they were current, and hands the scope to `release_later`, since the writer will never
+    release it. No row is queued after the death; `died` names it.
     """
 
     __slots__ = (
         "_connections",
+        "_died",
         "_exec_ctx",
+        "_label",
+        "_on_death",
         "_rate_due",
         "_rate_limits",
         "_rate_pending",
         "_rate_pull",
+        "_release_later",
         "_release_lock",
         "_released",
         "_scope",
+        "_scope_released",
         "_streams",
         "_symbol_reads",
         "_writer",
@@ -1206,8 +1233,9 @@ class Diagnostics:
         exec_ctx: ExecutionContext,
         name: str,
         *,
+        label: str,
         release_later: Callable[[LivenessScope], None],
-        on_death: Callable[[BaseException], None] | None = None,
+        on_death: Callable[[BaseException], None],
     ) -> None:
         """Create the four tables inside a new session-owned scope and start the writer.
 
@@ -1220,12 +1248,24 @@ class Diagnostics:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps, such as
                 `massive #1 diagnostics`; each table's publisher adds the table's name.
+            label: The session's label, such as `"MassiveSession #1"`, which the tables'
+                failure names if the writer dies.
             release_later: Releases a scope on the session's reaper, under the update graph's
-                shared lock (`SessionCore.release_later`), for the blink tables' publishers.
-            on_death: Runs if the writer dies on something it cannot carry on after
+                shared lock (`SessionCore.release_later`): for the blink tables' publishers,
+                and for the tables' scope if the writer dies. The reaper must outlive the
+                writer.
+            on_death: Runs first if the writer dies on something it cannot carry on after
                 (`QueueWorker`).
         """
         self._exec_ctx = exec_ctx
+        self._label = label
+        self._release_later = release_later
+        self._on_death = on_death
+        # What killed the writer, set once by the dying writer; guarded by `_release_lock`.
+        self._died: BaseException | None = None
+        # Whether the writer began to release the scope (`_release_tables`): a death after that
+        # must not hand it over again. Only the writer thread touches it.
+        self._scope_released = False
         self._release_lock = threading.Lock()
         self._released = False
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
@@ -1262,10 +1302,10 @@ class Diagnostics:
                 exec_ctx,
                 name,
                 handle=self._apply,
-                on_exit=functools.partial(release_scope, exec_ctx, self._scope),
+                on_exit=self._release_tables,
                 timeout=self._rate_wait,
                 on_timeout=self._rate_due_now,
-                on_death=on_death,
+                on_death=self._writer_died,
                 interval=WRITE_INTERVAL,
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
@@ -1296,6 +1336,12 @@ class Diagnostics:
     def thread(self) -> threading.Thread:
         """The writer thread."""
         return self._writer.thread
+
+    @property
+    def died(self) -> BaseException | None:
+        """What killed the writer, once it died (the tables have failed); None while it has not."""
+        with self._release_lock:
+            return self._died
 
     def write(self, row: ConnectionRow | StreamRow | SymbolReadRow) -> None:
         """Queue one row's full current state; it replaces the row with the same key.
@@ -1384,15 +1430,6 @@ class Diagnostics:
             return False
         return wait_for_update_cycle(self._exec_ctx, max(deadline - time.monotonic(), 0.0))
 
-    def stop(self) -> None:
-        """Ask the writer to add the queued rows, release the tables, and exit; no wait.
-
-        Takes no lock, so the session's finalizer can call it from garbage collection. Later
-        rows and rate-limit notices are not queued, as after `release()`.
-        """
-        self._released = True  # one attribute store; `write` and the rest read it under a lock
-        self._writer.stop()
-
     def release(self, *, wait: bool = True) -> None:
         """Add the queued rows, release the tables' scope, and end the writer. Idempotent.
 
@@ -1414,6 +1451,50 @@ class Diagnostics:
         self._writer.stop()
         if wait:
             self._writer.thread.join()
+
+    def _release_tables(self) -> None:
+        """The writer's last step (`on_exit`): release the tables' scope (`release_scope`)."""
+        self._scope_released = True
+        release_scope(self._exec_ctx, self._scope)
+
+    def _writer_died(self, death: BaseException) -> None:
+        """The writer's `on_death`: fail the tables and hand their scope to the reaper.
+
+        Runs on the dying writer, after the owner's `on_death`, even if that raised. Each table
+        fails through its publisher (`BlinkPublisher.publish_failure`), which pins it until the
+        failure is delivered and hands the pin to `release_later`; a table whose failure raises
+        is logged at ERROR and the others still fail. The scope goes to `release_later` unless
+        the writer died releasing it, since releasing a scope twice raises.
+
+        Args:
+            death: What ended the writer.
+        """
+        with self._release_lock:
+            self._released = True  # nothing would ever take a row queued from now on
+            self._died = death
+        error = thread_died(self._label, "diagnostics writer", death)
+        try:
+            self._on_death(death)
+        finally:
+            tables = (self._connections, self._streams, self._rate_limits, self._symbol_reads)
+            for table in tables:
+                try:
+                    table.publisher.publish_failure(error)
+                except Exception:
+                    logger.exception(
+                        "%s: could not fail the %s table. %s",
+                        self._writer.thread.name,
+                        table.schema.name,
+                        LIBRARY_BUG,
+                    )
+            if not self._scope_released:
+                self._release_later(self._scope)
+            logger.debug(
+                "%s: the diagnostics tables failed with the writer (%r); their scope %s",
+                self._writer.thread.name,
+                death,
+                "was being released" if self._scope_released else "is handed to the reaper",
+            )
 
     def _apply(self, items: list[_Item]) -> None:
         """Add one batch: the latest row per key, one `add` per table, then mark the waits.
@@ -1494,19 +1575,34 @@ class Diagnostics:
         self._apply([_RATE_LIMITS_CHANGED])
 
 
-def pascal_case(path: str) -> str:
-    """Turn a snake-case name or a dotted path of them into a PascalCase column name.
-
-    Every underscore- or dot-separated word is capitalized and joined: `sip_timestamp` becomes
-    `SipTimestamp` and `last_trade.sip_timestamp` becomes `LastTradeSipTimestamp`. Words that
-    are already capitalized keep their other letters. The diagnostics tables name their columns
-    with it.
+def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
+    """Return the error a session's tables fail with when one of its library threads died.
 
     Args:
-        path: A name or a dot-separated path of names.
+        label: The session's label, such as `"MassiveSession #1"`.
+        thread: The thread, as the message names it, such as `"reaper"`.
+        death: What ended the thread.
+
+    Returns:
+        Such as `MassiveError("MassiveSession #1: its reaper thread died (SystemExit()); this
+        table no longer updates")`.
+    """
+    return MassiveError(
+        f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
+    )
+
+
+def _pascal_case(name: str) -> str:
+    """Turn a snake-case field name into a PascalCase column name.
+
+    Every underscore-separated word is capitalized and joined: `sip_timestamp` becomes
+    `SipTimestamp`. Words that are already capitalized keep their other letters. The
+    diagnostics tables name their columns with it.
+
+    Args:
+        name: A row field's name.
 
     Returns:
         The PascalCase column name.
     """
-    words = re.split(r"[._]+", path)
-    return "".join(word[:1].upper() + word[1:] for word in words if word)
+    return "".join(word[:1].upper() + word[1:] for word in name.split("_") if word)

@@ -974,6 +974,7 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
     # Deephaven runs it on whichever thread shut the table down; here, on the test thread.
     class Read:
         def __init__(self) -> None:
+            self.stop_token = threading.Event()
             self.shut_down_event = threading.Event()
             self.watch_stopped = threading.Event()
 
@@ -981,12 +982,13 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
             self.watch_stopped.set()
 
     read = Read()
-    stop = threading.Event()
     core = massive_session._core
     followed_read._shut_down(
-        weakref.ref(core), weakref.ref(cast("Any", read)), call=12_345, stop=stop
+        weakref.ref(core),
+        weakref.ref(cast("Any", read)),
+        worker_shut_down=core.worker_shutdown_callback(12_345, read.stop_token),
     )
-    assert stop.is_set()
+    assert read.stop_token.is_set()
     assert read.shut_down_event.is_set()
     drain()  # the watch's stop ran on the reaper
     assert read.watch_stopped.is_set()

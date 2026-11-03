@@ -22,7 +22,9 @@ conversion and one `publisher.add` per table; it starts its next batch no sooner
 `WRITE_INTERVAL` (0.1 s) after the last, so a burst of rows costs each table one add per
 interval and the queue stays bounded however fast rows arrive. An add returns at once; the
 rows reach the tables on the next update cycle. Only the writer touches the publishers, so they
-need no lock of their own. `Diagnostics.wait_until_shown(timeout)` waits for the writer to add
+need no lock of their own. If the writer dies, it fails the tables, and with them every view
+([section 6.1](06-massivesession-and-lifecycle.md#61-how-a-live-table-is-kept-alive-and-released), "Library thread death").
+`Diagnostics.wait_until_shown(timeout)` waits for the writer to add
 every row queued before the call and then for an update cycle that started after that; tests
 use it to read rows.
 
@@ -82,7 +84,7 @@ governor signals a change, at most once per batch, instead of applying queued ro
 never be overtaken by an older one, and every sharing session shows the same rows. The state
 also changes with time alone (a pause ends, a slot frees), so each pull names when the rows
 next change, and the writer waits on its queue no longer than that before it pulls them
-again; a batch handled after that moment pulls them too, so a busy queue cannot hold them back. No other thread or timer is involved, so nothing outlives `release()` or `stop()`.
+again; a batch handled after that moment pulls them too, so a busy queue cannot hold them back. No other thread or timer is involved, so nothing outlives `release()`.
 
 | Column | Meaning |
 |---|---|

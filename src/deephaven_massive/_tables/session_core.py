@@ -94,7 +94,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 from deephaven.dherror import DHError
 
@@ -112,6 +112,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
     shown_query,
+    thread_died,
 )
 from deephaven_massive._tables.execution_context import (
     entered,
@@ -154,6 +155,25 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+class WorkerTable(Protocol):
+    """What `SessionCore.track_worker` needs of a worker table: a `poll()` table or a read."""
+
+    def fail(self, error: MassiveError) -> bool:
+        """Stop the thread and fail the table, once (`_WorkerState.fail`)."""
+        ...
+
+    def release(self) -> None:
+        """Mark the row released; the result record's `on_released` callback."""
+        ...
+
+    def abandon(self) -> None:
+        """Stop a worker whose thread will never start, and let go of what it joined."""
+        ...
+
+
+_W = TypeVar("_W", bound=WorkerTable)
 
 
 # Stream ids are minted here, not by the transport, so a stream is registered before it opens.
@@ -242,6 +262,31 @@ def _release_on(reaper: Reaper, exec_ctx: ExecutionContext, scope: LivenessScope
     reaper.submit(functools.partial(release_scope, exec_ctx, scope))
 
 
+def _worker_table_shut_down(
+    core_ref: weakref.ref[SessionCore],
+    stream_id: int,
+    *,
+    record: Callable[[SessionCore, int], None],
+    stop: threading.Event,
+) -> None:
+    """A worker table's blink-table shutdown callback: stop its thread and tell the session.
+
+    Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
+    thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
+    sets a token and updates the registry (`SessionCore._worker_shut_down`). The session is
+    alive: the table's record keeps it in the live set until this has run, and before the
+    record exists the opening caller holds it.
+
+    Args:
+        core_ref: The session's core, weakly.
+        record: `SessionCore._worker_shut_down`, unbound.
+        stream_id: The table's `StreamId`.
+        stop: The thread's stop token.
+    """
+    stop.set()
+    _call(core_ref, record, stream_id)
+
+
 def _let_go(core: SessionCore) -> None:
     """Reaper job that holds a core leaving the live set, so its last reference usually drops there.
 
@@ -263,9 +308,12 @@ def _collect_session(
 
     A freed core has, by the live set's rule, no running stream or poll and no held diagnostics
     view. The closers (the session's leases on its connections, its REST client) are handed to
-    the reaper, which runs them, and the diagnostics writer's stop is queued behind them, so the
-    rows they write are applied. The reaper itself keeps running while results are still tracked
-    and ends once the last one has been collected (`ResultRegistry.retire`). Garbage collection
+    the reaper, which runs them, and the diagnostics writer's release is queued behind them, so
+    the rows they write are applied. That job waits for the writer to end, and the reaper's
+    retirement is queued after it, so the reaper outlives the writer: a writer that dies hands
+    its tables' failure pins and scope to the reaper (`Diagnostics`), which must still be there
+    to release them. The reaper itself keeps running while results are still tracked and ends
+    once the last one has been collected (`ResultRegistry.retire`). Garbage collection
     can run this on any thread at any allocation, so it takes no lock and makes no Deephaven
     call. The closer list needs no lock here: the core is unreachable, so no other thread can
     reach the list, and `close()` empties it, so a closed session's closers never run twice.
@@ -283,7 +331,9 @@ def _collect_session(
     if pending:
         reaper.submit(functools.partial(_close_collected, label, pending))
     reaper.submit(follows.stop)  # a freed session follows nothing: its results all stopped
-    reaper.submit(diagnostics.stop)  # after the closers, whose rows it still applies
+    # After the closers, whose rows it still applies; it waits for the writer to end, which
+    # never needs the reaper, and the reaper's retirement waits behind it.
+    reaper.submit(diagnostics.release)
     results.retire()  # the reaper ends once no result it may still have to release is tracked
 
 
@@ -430,6 +480,7 @@ class SessionCore:
             self.diagnostics: Final = Diagnostics(
                 exec_ctx,
                 f"{thread_prefix} diagnostics",
+                label=label,
                 release_later=self.release_later,
                 on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
             )
@@ -444,8 +495,10 @@ class SessionCore:
         # The worker tables (`poll()` tables and background reads), by stream id; they have no
         # key and no handle.
         self._workers: dict[int, _WorkerState] = {}
-        # The latest `m.symbol_reads()` row of each (followed read, symbol), for the session's
-        # life; guarded by `registry_lock`.
+        # The latest `m.symbol_reads()` row of each (followed read, symbol) still following:
+        # what `close()` marks `CLOSED`. A row in a final state leaves it, so it holds no more
+        # than the symbols the session's running followed reads follow. Guarded by
+        # `registry_lock`.
         self._symbol_reads: dict[tuple[int, str], SymbolReadRow] = {}
         # How many diagnostics views (`diagnostics_view`) users hold.
         self._views = 0
@@ -1306,14 +1359,87 @@ class SessionCore:
             if state.handle is not None:  # an opening stream's row is written by _open
                 self.diagnostics.write(row)
 
-    def register_worker(self, row: StreamRow, *, fail: Callable[[MassiveError], bool]) -> None:
+    def track_worker(
+        self, result: Table, scope: LivenessScope, make: Callable[[], tuple[_W, StreamRow]]
+    ) -> _W:
+        """Make a worker table's worker, register its row, and track its result, or undo it all.
+
+        The one way `poll()`, a background read, and a followed read register their table:
+        the worker and its first row are made (`make`), the row registered (`_register_worker`),
+        and the result
+        tracked (`ResultRegistry.track`), so releasing it marks the row released. If any step
+        raises, even `KeyboardInterrupt`, the worker is abandoned, a registered row released
+        (`release_worker`), and the result scope released, and the exception propagates. If
+        the session closed once the row was registered (`close()` failed the table meanwhile),
+        the worker is abandoned and the result released. Run it on the caller thread, under no
+        library lock; the caller starts the worker's thread only after it returns.
+
+        Args:
+            result: The result, built in `scope` (`make_result`).
+            scope: The result scope, which this call owns from now on.
+            make: Makes the worker and the table's first row, as `_register_worker` takes
+                it; it may also enlist the worker with the session (a poller joins the
+                session's pollers), and may raise if the session closed.
+
+        Returns:
+            The worker, not yet started.
+
+        Raises:
+            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), before
+                the row was registered or after.
+        """
+        worker: _W | None = None
+        registered: int | None = None  # the stream id, once the row is registered
+        try:
+            worker, row = make()
+            self._register_worker(row, fail=worker.fail)
+            registered = row.stream_id
+            self.results.track(result, scope, worker.release)
+        except BaseException:
+            try:
+                if worker is not None:
+                    worker.abandon()
+                if registered is not None:
+                    self.release_worker(registered)
+            finally:
+                release_scope(self.exec_ctx, scope)
+            raise
+        if self.closed:  # close() failed the table meanwhile; its thread must never start
+            logger.debug("%s: stream %d opened as the session closed", self.label, row.stream_id)
+            worker.abandon()
+            self.results.release(result)
+            raise MassiveError(f"{self.label} is closed")
+        return worker
+
+    def worker_shutdown_callback(self, stream_id: int, stop: threading.Event) -> Callable[[], None]:
+        """Return the shutdown callback of a `poll()` table's or a background read's blink table.
+
+        It sets the thread's stop token and records the shutdown (`_worker_shut_down`), and holds
+        the session only weakly, so the Java table that keeps it never keeps the session alive.
+
+        Args:
+            stream_id: The table's `StreamId`.
+            stop: The thread's stop token.
+
+        Returns:
+            The callback, for `blink_publisher`'s `on_shutdown`.
+        """
+        return functools.partial(
+            _worker_table_shut_down,
+            weakref.ref(self),
+            stream_id,
+            record=SessionCore._worker_shut_down,
+            stop=stop,
+        )
+
+    def _register_worker(self, row: StreamRow, *, fail: Callable[[MassiveError], bool]) -> None:
         """Register a new worker table in `m.streams()` and the live set, before its thread starts.
 
         A worker table, a `poll()` table or a background read, is no shared stream: it has no
         key, is never reused, and its one result is its only hold. Its record stays in the
         registry, keeping the session alive and taking its thread's updates (`update_streams`,
         `fail_stream`, `record_stream_drift`, `finish_read`), until its result is released
-        (`release_worker`) and its blink table has shut down (`worker_shut_down`), in either
+        (`release_worker`) and its blink table has shut down (`_worker_shut_down`), in either
         order. One short critical section under `registry_lock`; the row is queued for the
         diagnostics writer.
 
@@ -1341,7 +1467,7 @@ class SessionCore:
         The row is written with no held result and `State=RELEASED` when it was `RUNNING` or
         `LOADING`; a failed, closed, or done row keeps its state. A derived table may still use
         the table, so the thread runs on until the table's blink table shuts down
-        (`worker_shut_down`); if it already has, the record leaves the registry now and the
+        (`_worker_shut_down`); if it already has, the record leaves the registry now and the
         drift registry forgets it. Runs on the reaper thread when the result is released, or on
         the caller thread when the verb fails after registering the row; each table is released
         once. No Deephaven call, no wait.
@@ -1365,7 +1491,7 @@ class SessionCore:
                 self._workers[stream_id] = replace(state, row=row, held=False)
             self._sync_live()
 
-    def worker_shut_down(self, stream_id: int) -> None:
+    def _worker_shut_down(self, stream_id: int) -> None:
         """Record that a worker table's blink table has shut down: nothing uses the table.
 
         Called from the blink table's `on_shutdown_callback`, after the table's thread was told
@@ -1464,8 +1590,9 @@ class SessionCore:
         """Record and queue `m.symbol_reads()` rows, unless the session closed.
 
         The follow coordinator calls this for every change of a followed read's symbols. The
-        rows are kept for the session's life, so `close()` can write every unfinished symbol
-        `CLOSED`. The close marks the rows and the session closed in one section under
+        row of each unfinished symbol is kept, so `close()` can write it `CLOSED`; a row in a
+        final state (`FAILED`, `REMOVED`, `STOPPED`) drops the symbol's kept row, so a stopped
+        read keeps none. The close marks the rows and the session closed in one section under
         `registry_lock`, and nothing is written after it, so a read that lands while the
         session closes leaves its row `CLOSED`. No Deephaven call, no wait.
 
@@ -1476,7 +1603,10 @@ class SessionCore:
             if self._closed:
                 return
             for row in rows:
-                self._symbol_reads[row.stream_id, row.symbol] = row
+                if row.state in _FINAL_SYMBOL_READS:
+                    self._symbol_reads.pop((row.stream_id, row.symbol), None)
+                else:
+                    self._symbol_reads[row.stream_id, row.symbol] = row
                 self.diagnostics.write(row)
 
     def diagnostics_view(self, table: Table, schema: Schema) -> Table:
@@ -1489,7 +1619,8 @@ class SessionCore:
         keeps the diagnostics table, and so its final rows, alive. If building or tracking the view
         raises anything, even `KeyboardInterrupt`, the scope and the count are released first; a
         `DHError` from a `close()` that released the diagnostics tables meanwhile becomes the closed
-        session's `MassiveError`.
+        session's `MassiveError`, and one from a table that failed because the diagnostics writer
+        died (Deephaven's `TableAlreadyFailedException`) a `MassiveError` that says so.
 
         Args:
             table: `diagnostics.connections`, `diagnostics.streams`,
@@ -1502,7 +1633,9 @@ class SessionCore:
 
         Raises:
             MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), also when
-                the close ran while the view was built.
+                the close ran while the view was built; if the diagnostics writer died and failed
+                the table (`"MassiveSession #1: its diagnostics tables failed when their writer
+                thread died (...)"`).
         """
         with self.registry_lock:
             if self._closed:
@@ -1523,8 +1656,15 @@ class SessionCore:
                     release_scope(self.exec_ctx, scope)
             finally:
                 self._drop_view()
+            died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
                 raise MassiveError(f"{self.label} is closed") from error
+            if isinstance(error, DHError) and died is not None:
+                logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
+                raise MassiveError(
+                    f"{self.label}: its diagnostics tables failed when their writer thread died "
+                    f"({died!r}); see the ERROR logged then"
+                ) from error
             raise
         return result
 
@@ -1584,8 +1724,7 @@ class SessionCore:
         """
         core = core_ref()
         if core is not None:
-            text = f"{core.label}: its {what} thread died ({death!r}); this table no longer updates"
-            SessionCore._fail_live(core, MassiveError(text))
+            SessionCore._fail_live(core, thread_died(core.label, what, death))
 
     def _fail_live(self, error: MassiveError) -> int:
         """Fail every stream and worker table of the session that is still live.
@@ -1656,14 +1795,14 @@ class SessionCore:
     def _close_symbol_reads(self) -> None:
         """Mark every unfinished symbol of a followed read `CLOSED` in `m.symbol_reads()`.
 
-        Called by `close` under `registry_lock`; it only queues rows.
+        Called by `close` under `registry_lock`; it only queues rows. Every kept row is
+        unfinished (`write_symbol_reads`), and none is kept after it.
         """
         now = time.time_ns()
-        for key, read in tuple(self._symbol_reads.items()):
-            if read.state not in _FINAL_SYMBOL_READS:
-                closed_read = replace(read, state=SymbolReadState.CLOSED, updated_at=now)
-                self._symbol_reads[key] = closed_read
-                self.diagnostics.write(closed_read)
+        for read in self._symbol_reads.values():
+            self.diagnostics.write(replace(read, state=SymbolReadState.CLOSED, updated_at=now))
+        logger.debug("%s: %d followed symbols marked CLOSED", self.label, len(self._symbol_reads))
+        self._symbol_reads.clear()
 
     def close(self) -> None:
         """Close the session: fail every live table, run the closers, release the diagnostics.

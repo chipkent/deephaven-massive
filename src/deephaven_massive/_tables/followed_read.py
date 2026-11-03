@@ -83,7 +83,7 @@ row and keep the seed row, a removed symbol's old rows, behind the watchlist fil
 queued, loading, or waiting to retry, and `RUNNING` once every symbol has landed or failed. The
 coordinator keeps it current (`SessionCore.update_followed_read`); each symbol's own row is in
 `m.symbol_reads()`. The result is a worker table of the session core
-(`SessionCore.register_worker`), so its record keeps the session alive while the result is in
+(`SessionCore.track_worker`), so its record keeps the session alive while the result is in
 use, and `m.close()` fails it.
 
 **Lifetime.** Releasing the result (`m.release`, garbage collection) marks its row `RELEASED`;
@@ -124,8 +124,8 @@ from deephaven_massive._enums import Reread
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState, shown_query
-from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import make_result, release_scope
+from deephaven_massive._tables.execution_context import entered, update_cycle
+from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import SymbolRows
 from deephaven_massive._tables.watchlist import (
@@ -140,7 +140,6 @@ if TYPE_CHECKING:
 
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
-    from deephaven.update_graph import UpdateGraph
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._massive import Transport
@@ -355,7 +354,7 @@ class FollowedRead:
     def fail(self, error: MassiveError) -> bool:
         """Stop following and fail the table, once: the session closed, or a thread died.
 
-        The session's hook (`SessionCore.register_worker`), called outside every lock. The
+        The session's hook (`SessionCore.track_worker`), called outside every lock. The
         coordinator is told to stop the result's symbols.
 
         Args:
@@ -368,6 +367,10 @@ class FollowedRead:
         failed = self.fail_table(error)
         self.core.follows.stop_following(self)
         return failed
+
+    def abandon(self) -> None:
+        """Stop a result that will never be followed (`SessionCore.track_worker`)."""
+        self.stop_token.set()
 
     def release(self) -> None:
         """The result was released: mark the row `RELEASED`; it keeps following.
@@ -487,27 +490,11 @@ class _WatchRouter:
             self._replaying = False
 
 
-def _current_step(update_graph: UpdateGraph) -> int:
-    """Return the update cycle being run, or the last one run between cycles.
-
-    A read of the update graph's logical clock, which never waits, so the watch's listener
-    may call it.
-
-    Args:
-        update_graph: The session's update graph.
-
-    Returns:
-        The clock's step.
-    """
-    return int(update_graph.j_update_graph.clock().currentStep())
-
-
 def _shut_down(
     core_ref: weakref.ref[SessionCore],
     read_ref: weakref.ref[FollowedRead],
     *,
-    call: int,
-    stop: threading.Event,
+    worker_shut_down: Callable[[], None],
 ) -> None:
     """The result's blink-table shutdown callback: stop following, and tell the session.
 
@@ -518,17 +505,17 @@ def _shut_down(
     Args:
         core_ref: The session's core, weakly.
         read_ref: The result, weakly.
-        call: The result's `StreamId`.
-        stop: The result's stop token.
+        worker_shut_down: The session's shutdown callback of the result's worker table
+            (`SessionCore.worker_shutdown_callback`), run last.
     """
-    stop.set()
-    core = cast("SessionCore", core_ref())
     # Alive: the session's record of the result holds it until `worker_shut_down` below.
     read = cast("FollowedRead", read_ref())
+    read.stop_token.set()
+    core = cast("SessionCore", core_ref())
     read.shut_down_event.set()
     core.follows.stop_following(read)
     core.defer(read.stop_watch)  # a Deephaven call: never here
-    core.worker_shut_down(call)
+    worker_shut_down()
 
 
 # A table operation that takes a formula or column names copies its caller's local variables
@@ -708,13 +695,12 @@ def _build(
                 _shut_down,
                 weakref.ref(core),
                 weakref.ref(read),
-                call=read.call,
-                stop=read.stop_token,
+                worker_shut_down=core.worker_shutdown_callback(read.call, read.stop_token),
             ),
             release_later=core.release_later,
         )
         # No cycle runs: every symbol in the table now joined at this cycle or before.
-        built_step = int(blink.j_table.getUpdateGraph().clock().currentStep())
+        built_step = update_cycle(core.exec_ctx)
         seed = _seed(seeded, schema.column_names, built_step) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
         # A table of product codes is matched by its `ProductCode`, as by a partition's `Symbol`.
@@ -815,9 +801,7 @@ def open_followed_read(
             if isinstance(outcome, SymbolRows)
         }
     )
-    router = _WatchRouter(
-        core.follows, read, functools.partial(_current_step, core.exec_ctx.update_graph)
-    )
+    router = _WatchRouter(core.follows, read, functools.partial(update_cycle, core.exec_ctx))
     # The update graph's shared lock is held from the build until the watch has started, so no
     # update cycle runs between them. A symbol that left the table and came back in such a
     # cycle would stay hidden for good: its seed row, decided at the build's cycle, is older
@@ -840,37 +824,24 @@ def open_followed_read(
                 note=note,
             )
         read.attach(publisher, watch, built_step)
-        registered = False
-        try:
-            core.register_worker(
-                StreamRow(
-                    stream_id=call,
-                    kind=StreamKind.READ,
-                    dataset=spec.name,
-                    query=shown_query(query),
-                    symbol_count=0,
-                    symbols="",
-                    held_results=1,
-                    transport=plan.transport,
-                    state=StreamState.LOADING,
-                    loading=0,
-                    created_at=time.time_ns(),
-                ),
-                fail=read.fail,
+
+        def make() -> tuple[FollowedRead, StreamRow]:
+            row = StreamRow(
+                stream_id=call,
+                kind=StreamKind.READ,
+                dataset=spec.name,
+                query=shown_query(query),
+                symbol_count=0,
+                symbols="",
+                held_results=1,
+                transport=plan.transport,
+                state=StreamState.LOADING,
+                loading=0,
+                created_at=time.time_ns(),
             )
-            registered = True
-            core.results.track(result, scope, read.release)
-        except BaseException:
-            try:
-                stop.set()
-                if registered:
-                    core.release_worker(call)
-            finally:
-                release_scope(core.exec_ctx, scope)
-            raise
-        if core.closed:  # close() failed the table meanwhile; never start following
-            core.results.release(result)
-            raise MassiveError(f"{core.label} is closed")
+            return read, row
+
+        core.track_worker(result, scope, make)
         try:
             core.follows.follow(read, first)
             with entered(core.exec_ctx):

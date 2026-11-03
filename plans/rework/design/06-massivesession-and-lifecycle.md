@@ -122,9 +122,11 @@ A session freed without `close()` is cleaned up by a finalizer on its core (not 
 interpreter exit). By the rule above it has no live table left. The finalizer takes no lock
 and makes no Deephaven call: it hands the registered closers (connections, pollers) to the
 reaper, which logs at INFO ("MassiveSession #1 was garbage-collected without close(); closing
-its connections and pollers") and runs them, and then queues the diagnostics writer's stop
-behind them, so the rows they write are applied. The reaper keeps running while results are
-still tracked and stops once the last one has been collected and released. `close()` empties
+its connections and pollers") and runs them, and then queues the diagnostics writer's release
+behind them, so the rows they write are applied. That job waits for the writer to end, and the
+reaper's retirement is queued after it, so the reaper outlives the writer: a writer that dies
+hands work to the reaper (below), which must still be there to run it. The reaper keeps running
+while results are still tracked and stops once the last one has been collected and released. `close()` empties
 the closer list, so a closed session's closers never run twice. A closer must not refer to the
 core strongly, or the core could never be freed.
 
@@ -247,7 +249,7 @@ return result
   to the reaper as a job argument, so its last reference is not dropped under the lock. The
   thread that took it out still holds it while it returns, so the final release may also land
   there, on whatever thread that is; that is safe because a core's finalizer only queues work
-  (its closers and the diagnostics writer's stop go to the reaper) and never blocks or calls
+  (its closers and the diagnostics writer's release go to the reaper) and never blocks or calls
   Java.
 - **Opening a stream.** The session mints the stream id (a process-wide counter) and
   registers the stream's record, `OPENING`, with one hold for the opener, before it calls
@@ -397,7 +399,11 @@ return result
   those tables would be frozen without an error. A dead reaper can no longer release results,
   so its session stays in the live set until the process ends; that leak is accepted, because
   only an interrupt raised inside the reaper kills it, and its tables are failed, never left
-  looking live. The WebSocket client thread reports any internal failure as `FAILED`, which fails
+  looking live. A dying diagnostics writer also fails the four diagnostics tables through their
+  publishers, so a view a user holds, and every table derived from one, fails instead of showing
+  frozen rows as current; a new view then raises a `MassiveError` that says the writer died. The
+  writer hands their scope, and the failures' pins, to the reaper, since it will never release
+  them itself. The WebSocket client thread reports any internal failure as `FAILED`, which fails
   the connection's streams ([section 13.3](13-host-resolution-and-connection-protocol.md#133-connection-and-subscription-protocol)).
 
 Three documented behaviours that users will notice:

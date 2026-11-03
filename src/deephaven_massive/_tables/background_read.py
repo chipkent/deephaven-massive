@@ -30,7 +30,7 @@ recorded by a listener on the merged table (`_RowsLanded`), in the cycle that ad
 the row reaches `m.streams()` on a later cycle, so whoever sees `DONE` there sees the rows in the
 result. An empty result adds no rows and has nothing to wait for; the read records it `DONE`
 as soon as it is published. The read is a *worker table* of the session core
-(`SessionCore.register_worker`), as a `poll()` table is, so its record keeps the session alive
+(`SessionCore.track_worker`), as a `poll()` table is, so its record keeps the session alive
 while the result is held or still in use, and `m.close()` fails it while it is loading.
 
 **Lifetime.** Releasing the result (`m.release`, garbage collection) marks the row `RELEASED`
@@ -62,7 +62,6 @@ failure.
 
 from __future__ import annotations
 
-import functools
 import logging
 import threading
 import time
@@ -86,7 +85,7 @@ from deephaven_massive._tables.diagnostics import (
     shown_query,
 )
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import make_result, release_scope
+from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._types import override
 
@@ -204,6 +203,10 @@ class BackgroundRead:
         """Start the thread, which begins the transport call at once."""
         self._thread.start()
 
+    def abandon(self) -> None:
+        """Stop a read whose thread will never start (`SessionCore.track_worker`)."""
+        self._stop.set()
+
     def release(self) -> None:
         """The result was released: mark the row `RELEASED`; the read keeps running.
 
@@ -216,7 +219,7 @@ class BackgroundRead:
     def fail(self, error: MassiveError) -> bool:
         """Stop the read and fail its table, once: the session closed, or a library thread died.
 
-        The session's hook for the read (`SessionCore.register_worker`), called outside every
+        The session's hook for the read (`SessionCore.track_worker`), called outside every
         lock while the read is registered, so the session is alive.
 
         Args:
@@ -419,23 +422,6 @@ class _RowsLanded(TableListener):
         logger.debug("call %d: its result failed: %s", self._call, e)
 
 
-def _shut_down(core_ref: weakref.ref[SessionCore], call: int, stop: threading.Event) -> None:
-    """A read's blink-table shutdown callback: stop the read and tell the session.
-
-    Runs on whichever thread dropped the table's last reference, so it only sets a token and
-    updates the registry (`SessionCore.worker_shut_down`). The session is alive: the read's
-    record keeps it in the live set until this has run, and before the record exists the
-    opening caller holds it.
-
-    Args:
-        core_ref: The session's core, weakly.
-        call: The read's `StreamId`.
-        stop: The read's stop token.
-    """
-    stop.set()
-    cast("SessionCore", core_ref()).worker_shut_down(call)
-
-
 def _build(
     core: SessionCore, spec: DatasetSpec, *, call: int, stop: threading.Event, note: str | None
 ) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
@@ -461,7 +447,7 @@ def _build(
         blink, publisher = blink_publisher(
             f"massive.{spec.name}#{call}",
             {CONSTITUENT: TABLE},
-            on_shutdown=functools.partial(_shut_down, weakref.ref(core), call, stop),
+            on_shutdown=core.worker_shutdown_callback(call, stop),
             release_later=core.release_later,
         )
         built.append(publisher)
@@ -534,14 +520,26 @@ def open_read(
     Raises:
         MassiveError: If the session closed after the read was registered but before its
             thread started (`"MassiveSession #1 is closed"`). One closed before the read
-            could be registered raises the `MassiveError` of `SessionCore.register_worker`.
+            could be registered raises the `MassiveError` of `SessionCore.track_worker`.
     """
     stop = core.read_stop()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, call=call, stop=stop, note=note)
-    count, text = (None, "") if symbols is None else describe_symbols(symbols)
-    registered = False
-    try:
+
+    def make() -> tuple[BackgroundRead, StreamRow]:
+        count, text = (None, "") if symbols is None else describe_symbols(symbols)
+        row = StreamRow(
+            stream_id=call,
+            kind=StreamKind.READ,
+            dataset=spec.name,
+            query=shown_query(query),
+            symbol_count=count,
+            symbols=text,
+            held_results=1,
+            transport=transport,
+            state=StreamState.LOADING,
+            created_at=time.time_ns(),
+        )
         read = BackgroundRead(
             core,
             name=spec.name,
@@ -551,33 +549,8 @@ def open_read(
             stop=stop,
             run=run,
         )
-        core.register_worker(
-            StreamRow(
-                stream_id=call,
-                kind=StreamKind.READ,
-                dataset=spec.name,
-                query=shown_query(query),
-                symbol_count=count,
-                symbols=text,
-                held_results=1,
-                transport=transport,
-                state=StreamState.LOADING,
-                created_at=time.time_ns(),
-            ),
-            fail=read.fail,
-        )
-        registered = True
-        core.results.track(result, scope, read.release)
-    except BaseException:
-        try:
-            stop.set()
-            if registered:
-                core.release_worker(call)
-        finally:
-            release_scope(core.exec_ctx, scope)
-        raise
-    if core.closed:  # close() failed the table meanwhile; never start its thread
-        core.results.release(result)
-        raise MassiveError(f"{core.label} is closed")
+        return read, row
+
+    read = core.track_worker(result, scope, make)
     read.start()
     return result

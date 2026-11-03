@@ -109,7 +109,7 @@ stops at once a request still waiting for the rate governor (its stop token is t
 the REST transport hands `open_poll`, which every cycle's requests follow), and publishes
 nothing more; a failed table keeps its rows. The poller holds the
 session core only through a weak reference; the poll's record in the session keeps the session
-alive while the poll runs (`SessionCore.register_worker`).
+alive while the poll runs (`SessionCore.track_worker`).
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ from deephaven_massive._tables.diagnostics import (
     utc_text,
 )
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import make_result, release_scope
+from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
 
@@ -691,6 +691,14 @@ class Poller:
         """Ask the thread to stop after its current request; never waits."""
         self._stop.set()
 
+    def abandon(self) -> None:
+        """Stop a poller whose thread will never start, and leave the session's pollers.
+
+        For `SessionCore.track_worker`: a started thread leaves the pollers itself when it ends.
+        """
+        self._stop.set()
+        self._pollers.discard(self)
+
     def release(self) -> None:
         """The result was released: mark the row `RELEASED`; the poller keeps running.
 
@@ -704,7 +712,7 @@ class Poller:
     def fail(self, error: MassiveError) -> bool:
         """Stop the poller and fail its table, once: the session closed, or a thread died.
 
-        The session's hook for the poll (`SessionCore.register_worker`), called outside every lock
+        The session's hook for the poll (`SessionCore.track_worker`), called outside every lock
         while the poll is registered, so the session is alive. The row is updated first
         (`SessionCore.fail_stream`, which keeps a `CLOSED` row as it is), then the table fails;
         a table that already failed is left alone.
@@ -1505,7 +1513,7 @@ def build_table(
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
         on_shutdown: The blink table's `on_shutdown_callback`: it stops the poller and tells
-            the session (`_shut_down`).
+            the session (`SessionCore.worker_shutdown_callback`).
         release_later: Releases a failed table's pin later, on the session's reaper
             (`blink_publisher`, `SessionCore.release_later`).
 
@@ -1553,24 +1561,6 @@ def build_table(
     return (keyed.drop_columns(hidden) if hidden else keyed), publisher
 
 
-def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: threading.Event) -> None:
-    """A `poll()` blink table's shutdown callback: stop the poller and tell the session.
-
-    Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
-    thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
-    sets a token and updates the registry (`SessionCore.worker_shut_down`). The session is alive:
-    the poll's record keeps it in the live set until this has run, and before the record
-    exists the opening caller holds it.
-
-    Args:
-        core_ref: The session's core, weakly.
-        stream_id: The table's `StreamId`.
-        stop: The poller's stop token.
-    """
-    stop.set()
-    cast("SessionCore", core_ref()).worker_shut_down(stream_id)
-
-
 def _build(
     core: SessionCore,
     spec: DatasetSpec,
@@ -1601,7 +1591,7 @@ def _build(
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
-        on_shutdown = functools.partial(_shut_down, weakref.ref(core), stream_id, stop)
+        on_shutdown = core.worker_shutdown_callback(stream_id, stop)
         table, publisher = build_table(
             spec,
             schema,
@@ -1676,7 +1666,7 @@ def open_poll(
     Raises:
         MassiveError: If the session closed after the poll was registered but before its
             poller started (`"MassiveSession #1 is closed"`). One closed before the poll could
-            be registered raises the `MassiveError` of `SessionCore.register_worker` or
+            be registered raises the `MassiveError` of `SessionCore.track_worker` or
             `Pollers.add`.
     """
     stream_id = core.next_stream_id()
@@ -1689,9 +1679,24 @@ def open_poll(
             stop=stop,
             note=note,
         )
-    poller: Poller | None = None
-    registered = False
-    try:
+    symbols = request.symbols
+
+    def make() -> tuple[Poller, StreamRow]:
+        count, text = (None, "") if symbols is None else describe_symbols(symbols)
+        row = StreamRow(
+            stream_id=stream_id,
+            kind=StreamKind.POLL,
+            dataset=spec.name,
+            query=shown_query(query),
+            symbol_count=count,
+            symbols=text,
+            held_results=1,
+            transport=Transport.REST,
+            host=host,
+            path=path,
+            recency=recency,
+            created_at=time.time_ns(),
+        )
         poller = Poller(
             core,
             spec=spec,
@@ -1705,43 +1710,10 @@ def open_poll(
             publisher=publisher,
             stop=stop,
         )
-        symbols = request.symbols
-        count, text = (None, "") if symbols is None else describe_symbols(symbols)
-        core.register_worker(
-            StreamRow(
-                stream_id=stream_id,
-                kind=StreamKind.POLL,
-                dataset=spec.name,
-                query=shown_query(query),
-                symbol_count=count,
-                symbols=text,
-                held_results=1,
-                transport=Transport.REST,
-                host=host,
-                path=path,
-                recency=recency,
-                created_at=time.time_ns(),
-            ),
-            fail=poller.fail,
-        )
-        registered = True
-        pollers.add(poller)
-        core.results.track(result, scope, poller.release)
-    except BaseException:
-        try:
-            if poller is not None:
-                poller.stop()
-                pollers.discard(poller)
-            if registered:
-                core.release_worker(stream_id)
-        finally:
-            release_scope(core.exec_ctx, scope)
-        raise
-    if core.closed:  # close() failed the table meanwhile; never start its poller
-        poller.stop()
-        pollers.discard(poller)
-        core.results.release(result)
-        raise MassiveError(f"{core.label} is closed")
+        pollers.add(poller)  # raises if the session closed: the poller then joined nothing
+        return poller, row
+
+    poller = core.track_worker(result, scope, make)
     logger.debug(
         "%s: poll() stream %d started: %s every %.3f s, mode %s, symbols %s",
         core.label,
@@ -1753,7 +1725,7 @@ def open_poll(
         if symbols is None
         else bounded_list(symbols)
         if isinstance(symbols, tuple)
-        else text,
+        else describe_symbols(symbols)[1],
     )
     poller.start()
     return result

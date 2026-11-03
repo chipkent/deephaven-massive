@@ -50,7 +50,6 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from itertools import count
 from typing import TYPE_CHECKING, Final, Generic, TypeVar, cast
 
 from deephaven.liveness_scope import LivenessScope
@@ -173,7 +172,6 @@ class ResultRecord:
     `released` changes exactly once, from False to True.
 
     Attributes:
-        record_id: A process-unique identifier, for logs.
         scope: The result scope that holds the result.
         on_released: Runs on the reaper thread after the scope is released: for a stream it
             decrements the stream's held-result count, for a `poll()` table or a background
@@ -185,7 +183,6 @@ class ResultRecord:
         released: The once-only release flag.
     """
 
-    record_id: int
     scope: LivenessScope
     on_released: Callable[[], None]
     finalizer: weakref.finalize[[ResultRecord, int], Table] = field(init=False)
@@ -463,7 +460,7 @@ class ResultRegistry:
     `release()` of the same table finds it and does nothing.
     """
 
-    __slots__ = ("_exec_ctx", "_ids", "_lock", "_reaper", "_results", "_retired")
+    __slots__ = ("_exec_ctx", "_lock", "_reaper", "_results", "_retired")
 
     def __init__(self, lock: threading.RLock, reaper: Reaper, exec_ctx: ExecutionContext) -> None:
         """Create an empty registry.
@@ -478,7 +475,6 @@ class ResultRegistry:
         self._lock = lock
         self._reaper = reaper
         self._results: dict[int, ResultRecord] = {}
-        self._ids = count(1)
         self._retired = False
 
     def track(
@@ -502,8 +498,7 @@ class ResultRegistry:
             The new record.
         """
         key = id(result)
-        with self._lock:
-            record = ResultRecord(next(self._ids), scope, on_released)
+        record = ResultRecord(scope, on_released)
         # The finalizer, not the registry, roots the release path: it holds this registry (and
         # through it the reaper) and the record (whose owner callback holds the session core)
         # for exactly as long as the result lives, so a result that outlives every reference
