@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self
 import pytest
 import urllib3
 
-from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net import USER_AGENT, http
 from deephaven_massive._massive.refresh import fetch, knowledge_base
 from tests._fakes.rest import REFUSED_PORT, LoopbackHTTPServer
 
@@ -383,6 +383,14 @@ def test_a_proxy_reached_over_https_is_verified_like_massive(
         assert proxy_context.check_hostname
         # One context serves both legs: the proxy and the server are verified alike.
         assert proxy_context is pool.connection_pool_kw["ssl_context"]
+
+
+def test_each_hosts_pool_has_a_tls_context_of_its_own() -> None:
+    # urllib3 writes to the context of every connection it opens, so no context is shared.
+    with fetch.HttpGetter() as getter:
+        contexts = [getter._pool(host).connection_pool_kw["ssl_context"] for host in ("a", "b")]
+    assert contexts[0] is not contexts[1]
+    assert http.ssl_context() not in contexts
 
 
 def test_a_tunnel_the_proxy_refuses_names_https_proxy_never_the_password(

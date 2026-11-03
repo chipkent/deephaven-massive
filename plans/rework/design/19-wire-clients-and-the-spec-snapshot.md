@@ -28,7 +28,8 @@ net/                 shared by every client; imports nothing else in _massive
                      exception's whole chain of arguments, causes, and contexts), and
                      is_tls_failure and is_proxy_auth_failure, which search it
   http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); one shared TLS context
-                     per process, consumer, and certificate setting; proxy from HTTPS_PROXY/NO_PROXY
+                     per process and certificate setting for websockets, and a new one for each
+                     urllib3 pool; proxy from HTTPS_PROXY/NO_PROXY
   cancel.py          Cancel: a one-way threading.Event that follows parent tokens and runs
                      callbacks when set
   slots.py           ConnectionSlots: one slot per pooled connection, which every REST
@@ -238,9 +239,12 @@ to_batch(rows, rest_path, *, required) -> (pyarrow.RecordBatch, DriftReport)
 `rest_path` is the path's `RestPath` from `spec/rest.json`; the client reads its template,
 result key, and parameter kinds from that value, so its tests build `RestPath` values by hand.
 
-- **Transport.** One `urllib3.PoolManager` (or `ProxyManager`, below) with `retries=False` (the
-  client retries itself), a 10 s connect and 30 s read timeout, `maxsize` at least
-  `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
+- **Transport.** `max_concurrency` urllib3 `PoolManager`s (or `ProxyManager`s, below), one
+  per connection slot (`net.slots`), each with `maxsize=1`, its own `SSLContext`,
+  `retries=False` (the client retries itself), and a 10 s connect and 30 s read timeout. An
+  attempt takes a slot and an idle pool with it, uses that pool alone, and gives both back
+  together, so fan-out never discards connections and no two threads open connections on one
+  `SSLContext` (see the certificates entry below). Requests send `Accept-Encoding: gzip`
   (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
   The body is streamed (`preload_content=False`) into one buffer in 1 MiB decoded reads. A
   body that decodes to more than `MAX_BODY_BYTES` (256 MiB, a module constant, not a setting)
@@ -269,22 +273,32 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `HTTPS_PROXY` and `urllib.request.proxy_bypass` for `NO_PROXY` select a `ProxyManager` for
   the REST host or a plain `PoolManager`, read once at construction. A user and password in
   the proxy URL are sent as `Proxy-Authorization` (`net.http.proxy_credentials`; urllib3 does
-  not send them itself), and the pool holds the URL without them, so they never reach a log or
+  not send them itself), and the pools hold the URL without them, so they never reach a log or
   an error. HTTPS goes through the proxy in a `CONNECT` tunnel, so the proxy sees
   `Proxy-Authorization` and never the bearer key. A proxy reached over `https` is verified
-  with the same `net.http.ssl_context()` as Massive. The CA bundle is the
-  system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
-  `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise. One context is
-  built per process for each consumer (urllib3 or `websockets`) and certificate setting, under
-  a lock, and shared by every client of that consumer and every connection: building one parses
-  the bundle, a few milliseconds each, and a configured `SSLContext` is safe to share between
-  threads (CPython guards each context's OpenSSL state with its own lock). The certificate
+  with the same context as Massive, its pool's own. The CA bundle is the system default when
+  `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an `ssl.create_default_context()` honours both) and
+  `certifi`'s bundle otherwise. A context is not safe to share between threads that open
+  connections on it if any of them writes to it: urllib3 writes the ALPN list and verification
+  mode onto its context before every connection it opens, while another thread's `SSL_new` may
+  be copying the ALPN list with the GIL released, a use-after-free in CPython
+  (python/cpython#141012, unfixed in every release, the free-threaded build included) that
+  corrupts the handshake (`TLSV1_ALERT_DECODE_ERROR`) or crashes the process. So each of the
+  REST client's urllib3 pools gets a context of its own (`net.http.new_ssl_context()`, built
+  when the REST client is constructed: a few milliseconds each to parse the bundle), used by
+  one thread at a time; the refresh's downloads do the same per host. botocore's flat-file
+  pools build their own contexts. A pool's context does not examine `SSL_CERT_DIR`, so the
+  REST client calls `net.http.check_certificate_directories()` once when it is constructed: a
+  configured directory that cannot be listed, or an entry of one that cannot be examined,
+  logs a WARNING, once per process for each path and error, as the shared context does.
+  `websockets` and asyncio never write to a context,
+  so the WebSocket clients share one, `net.http.ssl_context()`, built per process and
+  certificate setting under a lock. The shared context's certificate
   setting is the values of `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, plus the
   modification time, size, and inode of the file and directory the first two name (nothing
   when the path does not exist), so a bundle created, replaced, or edited at runtime, the
   recovery the certificate error messages advise, takes effect for the next client without a
-  restart. urllib3 and `websockets` never share a context because urllib3 writes its
-  verification mode and ALPN list onto the context it is given before every connection. The
+  restart. A context of a urllib3 pool reads the files as they are when it is built. The
   proxy settings do not shape the context, so they are not part of its key. Every context
   offers ALPN `http/1.1`: REST and the WebSocket upgrade are both HTTP/1.1, and live handshakes
   with Massive's REST, real-time, and delayed hosts select it over verified TLS 1.3.

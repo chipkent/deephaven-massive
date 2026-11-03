@@ -53,7 +53,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.capture import capture_frame
 from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireAuthError, WireError
-from deephaven_massive._massive.net.http import TlsConsumer, ssl_context
+from deephaven_massive._massive.net.http import ssl_context
 from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
 from deephaven_massive._massive.ws.backoff import Backoff
@@ -290,7 +290,8 @@ class WsClient:
         self._path = parts.path or "/"
         self._api_key = api_key
         self._redactor = Redactor(api_key)
-        self._ssl = ssl_context(TlsConsumer.WEBSOCKETS) if parts.scheme == "wss" else None
+        # Shared with every WebSocket client: websockets and asyncio never write to a context.
+        self._ssl = ssl_context() if parts.scheme == "wss" else None
         self._decoder = FrameDecoder(sources, host=self._host, path=self._path)
         self._backoff = Backoff(reconnect_backoff, max_reconnect_backoff)
         self._min_wait = reconnect_backoff

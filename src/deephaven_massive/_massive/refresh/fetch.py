@@ -230,12 +230,12 @@ class HttpGetter:
 
         Returns:
             A `ProxyManager` when `net.http.https_proxy(host)` names a proxy, else a plain
-            `PoolManager`, both verifying certificates with `net.http.ssl_context()` for urllib3,
-            the proxy's own certificate included when it is an HTTPS proxy.
+            `PoolManager`, both verifying certificates with a `net.http.new_ssl_context()` of
+            their own, the proxy's own certificate included when it is an HTTPS proxy.
         """
         if host not in self._pools:
             proxy = http.https_proxy(host)
-            context = http.ssl_context(http.TlsConsumer.URLLIB3)
+            context = http.new_ssl_context()  # urllib3 writes to it: never shared
             if proxy:
                 proxy_url, proxy_headers = http.proxy_credentials(proxy)
                 self._pools[host] = urllib3.ProxyManager(

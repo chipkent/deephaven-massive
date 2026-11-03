@@ -2723,6 +2723,40 @@ def test_sixteen_threads_share_one_decision(
     assert len(snapshots.requests) == 1
 
 
+def test_a_caller_that_arrives_while_another_decides_waits_for_its_decision(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The second caller must reach the wait while the first holds the claim: the request is
+    # held until the second caller has started waiting on the first one's decision.
+    requested = threading.Event()
+    release = threading.Event()
+
+    def hold(_: object) -> None:
+        requested.set()
+        release.wait(30)
+
+    snapshots.on_request(hold)
+    waiting = threading.Event()
+
+    def debug(message: str, *_args: object) -> None:  # a caller logs that it starts waiting
+        if "another caller is making" in message:
+            waiting.set()
+
+    monkeypatch.setattr(shared_lookup.logger, "debug", debug)
+    transport = session._core.rest_transport()
+    decide = functools.partial(transport.resolve_host, AssetClass.STOCKS, ChannelFamily.TICK)
+    with ThreadPoolExecutor(2) as pool:
+        maker = pool.submit(decide)
+        assert requested.wait(30)
+        joiner = pool.submit(decide)
+        assert waiting.wait(30)
+        release.set()
+        decision = maker.result(30)
+        assert joiner.result(30) is decision
+    assert decision.host == "socket.massive.com"
+    assert len(snapshots.requests) == 1
+
+
 def test_the_transport_is_bound_to_its_core(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     assert isinstance(transport, rest.RestEndpoints)

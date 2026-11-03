@@ -18,14 +18,29 @@ same way for REST (urllib3), WebSocket (websockets), and flat files (boto3):
 
 The functions read the environment on every call, so they are safe from any thread and see a
 changed variable at once. The one piece of state is the cache of TLS contexts behind
-`ssl_context`: the latest context built for each consumer, rebuilt under a lock when the
-certificate setting changes. This module imports only the standard library and `certifi`.
+`ssl_context`: the latest shared context built, rebuilt under a lock when the certificate
+setting changes.
+
+**Which context a client gets.** urllib3 writes to the context it is given each time it opens a
+connection: it replaces the ALPN protocol list and sets the verification mode. Meanwhile
+another thread opening a connection on the same context may be copying that list in OpenSSL
+with the GIL released, and CPython does not guard the copy, so a context shared between threads
+that open connections can corrupt a handshake (`TLSV1_ALERT_DECODE_ERROR`) or crash the process
+(python/cpython#141012; no CPython release avoids it, the free-threaded build included). So
+urllib3 never gets a shared context: `new_ssl_context` builds one for each connection pool, and
+the REST client keeps each pool to one connection, used by one request at a time. Such a
+context does not examine the certificate directories, so the REST client calls
+`check_certificate_directories` once when it is created, to warn about one it cannot read.
+`websockets`
+and asyncio never write to a context, so the WebSocket client shares the one `ssl_context`
+returns.
+
+This module imports only the standard library and `certifi`.
 """
 
 from __future__ import annotations
 
 import base64
-import enum
 import logging
 import os
 import ssl
@@ -37,24 +52,16 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import certifi
 
-__all__ = ["TlsConsumer", "ca_file", "https_proxy", "proxy_credentials", "ssl_context"]
+__all__ = [
+    "ca_file",
+    "check_certificate_directories",
+    "https_proxy",
+    "new_ssl_context",
+    "proxy_credentials",
+    "ssl_context",
+]
 
 _log = logging.getLogger(__name__)
-
-
-class TlsConsumer(enum.Enum):
-    """The library a TLS context is built for; each gets its own shared contexts.
-
-    urllib3 writes its verification mode and ALPN list onto the context it is given before
-    every connection it opens. Keeping urllib3's contexts apart from those of `websockets`
-    means those writes never touch a context a WebSocket handshake is using.
-    """
-
-    URLLIB3 = "urllib3"
-    """The REST client's pools, and the refresh's downloads."""
-
-    WEBSOCKETS = "websockets"
-    """The WebSocket client's connections."""
 
 
 _ALPN_PROTOCOLS: Final = ("http/1.1",)
@@ -68,12 +75,13 @@ _OPENSSL_CAFILE: Final[str] = _DEFAULT_VERIFY_PATHS.openssl_cafile
 _OPENSSL_CAPATH: Final[str] = _DEFAULT_VERIFY_PATHS.openssl_capath
 """The certificate directory OpenSSL was built to search when `SSL_CERT_DIR` is unset."""
 
-_CONTEXTS_LOCK: Final = threading.Lock()
-"""Guards `_CONTEXTS`. A leaf lock: no other lock is taken while it is held."""
+_SHARED_LOCK: Final = threading.Lock()
+"""Guards `_SHARED`. A leaf lock: no other lock is taken while it is held."""
 
-_CONTEXTS: Final[dict[TlsConsumer, tuple[tuple[object, ...], ssl.SSLContext]]] = {}
-"""The latest TLS context built for each consumer, with the certificate setting it was built
-for (see `ssl_context`); guarded by `_CONTEXTS_LOCK`."""
+_SHARED: Final[list[tuple[tuple[object, ...], ssl.SSLContext]]] = []
+"""The latest shared TLS context built, with the certificate setting it was built for (see
+`ssl_context`): empty before the first call, and one pair after it. Guarded by
+`_SHARED_LOCK`."""
 
 _WARNED_LOCK: Final = threading.Lock()
 """Guards `_WARNED`. A leaf lock: no other lock is taken while it is held."""
@@ -83,17 +91,16 @@ _WARNED: Final[set[tuple[str, str]]] = set()
 examined, so each is logged once per process; guarded by `_WARNED_LOCK`."""
 
 
-def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
-    """Return the process's client TLS context for `consumer` and the current settings.
+def ssl_context() -> ssl.SSLContext:
+    """Return the process's shared client TLS context for the current settings.
 
-    The REST client hands it to urllib3 (for Massive and for an HTTPS proxy) and the
-    WebSocket client to `websockets`. Building a context reads and parses a certificate
-    bundle, a few milliseconds of CPU, so contexts are shared: the latest one built for each
-    consumer is kept, and returned to every later caller while the certificate setting stays
-    the same. A configured context is safe to share between threads and connections (CPython
-    guards each context's OpenSSL state with its own lock), so callers must not reconfigure
-    it; urllib3 writes the same verification mode and ALPN list on its own contexts before
-    each connection, which changes nothing.
+    For a client that never writes to its context: the WebSocket client hands it to
+    `websockets`. urllib3 writes to every context it is given, so a urllib3 pool takes
+    `new_ssl_context()` instead (the module docstring says why). Building a context reads and
+    parses a certificate bundle, a few milliseconds of CPU, so this one is shared: the latest
+    one built is kept, and returned to every later caller while the certificate setting stays
+    the same. Opening connections on one context from several threads at once is safe only
+    while nothing writes to it, so callers must never reconfigure it.
 
     The certificate setting is everything that shapes the context. With neither `SSL_CERT_FILE`
     nor `SSL_CERT_DIR` set, that is only `SSLKEYLOGFILE`, since the context trusts the
@@ -128,10 +135,6 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
     cannot be examined, logs a WARNING once per path and error (OpenSSL's built-in directory
     logs such failures only at DEBUG). All of it is logged after the locks are released.
 
-    Args:
-        consumer: The library that will use the context. urllib3 and `websockets` never share
-            one, because urllib3 writes to the contexts it is given.
-
     Returns:
         A context that verifies certificates and host names and offers ALPN `http/1.1`:
         `ssl.create_default_context()` when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set to a
@@ -153,23 +156,15 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
         else ()
     )
     key = (cert_file, cert_dir, key_log, _identity(bundle), directories)
-    with _CONTEXTS_LOCK:
-        cached = _CONTEXTS.get(consumer)
-        built = cached is None or cached[0] != key
-        if cached is not None and not built:
-            context = cached[1]
-        else:
-            if uses_openssl:
-                context = ssl.create_default_context()
-            else:
-                context = ssl.create_default_context(cafile=certifi.where())
-            context.set_alpn_protocols(_ALPN_PROTOCOLS)
-            _CONTEXTS[consumer] = (key, context)
+    with _SHARED_LOCK:
+        built = not _SHARED or _SHARED[0][0] != key
+        if built:
+            _SHARED[:] = [(key, _build(uses_openssl=uses_openssl))]
+        context = _SHARED[0][1]
     if built:
         _log.debug(
-            "built a TLS context for %s trusting %s (SSL_CERT_FILE=%r, SSL_CERT_DIR=%r, "
+            "built the shared TLS context trusting %s (SSL_CERT_FILE=%r, SSL_CERT_DIR=%r, "
             "bundle=%r, certificate directories=%r, directory entries: %d, SSLKEYLOGFILE=%r)",
-            consumer.value,
             "the OpenSSL locations" if uses_openssl else "certifi's bundle",
             cert_file,
             cert_dir,
@@ -178,6 +173,74 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
             sum(len(entries) for _, _, entries in directories),
             key_log,
         )
+    return context
+
+
+def new_ssl_context() -> ssl.SSLContext:
+    """Return a new client TLS context for the current settings, for one owner alone.
+
+    The REST client builds one for each of its connection pools, and the refresh's downloads
+    one for each host's pool: urllib3 writes to the context it is given before every
+    connection it opens, which is safe only while no other thread opens a connection on the
+    same context (the module docstring says why). The caller must never let two threads open
+    connections on it at once. Building one reads and parses the certificate bundle, a few
+    milliseconds of CPU, and reads the certificate variables then; it logs them at DEBUG.
+
+    Returns:
+        A context built exactly as `ssl_context()` builds the shared one, which no other
+        caller holds. It reads the certificate files as they are now, so a bundle created,
+        replaced, or edited since an earlier call is trusted as it now reads.
+    """
+    cert_file = os.environ.get("SSL_CERT_FILE", "")
+    cert_dir = os.environ.get("SSL_CERT_DIR", "")
+    uses_openssl = bool(cert_file or cert_dir)
+    context = _build(uses_openssl=uses_openssl)
+    _log.debug(
+        "built a TLS context of its own trusting %s (SSL_CERT_FILE=%r, SSL_CERT_DIR=%r, "
+        "SSLKEYLOGFILE=%r)",
+        "the OpenSSL locations" if uses_openssl else "certifi's bundle",
+        cert_file,
+        cert_dir,
+        os.environ.get("SSLKEYLOGFILE", ""),
+    )
+    return context
+
+
+def check_certificate_directories() -> None:
+    """Warn about every `SSL_CERT_DIR` directory or entry that cannot be examined.
+
+    A client whose pools each take a `new_ssl_context()` calls this once when it is created,
+    so a certificate directory the user configured but the process cannot list, or an entry
+    of one whose file cannot be examined, is reported as `ssl_context()` reports it for the
+    WebSocket client: OpenSSL itself skips such a location without a word, and the failure
+    would otherwise show only as a certificate verification error on the first connection.
+    It examines the directories exactly as `ssl_context()` does, one listing per directory and
+    one `stat` per entry, and reads no certificate. Safe from any thread.
+
+    Logs each such failure with its path and the error at WARNING, once per process for each
+    pair; nothing when `SSL_CERT_DIR` is unset or empty.
+    """
+    cert_dir = os.environ.get("SSL_CERT_DIR", "")
+    if cert_dir:
+        _directories_identity(cert_dir, configured=True)
+
+
+def _build(*, uses_openssl: bool) -> ssl.SSLContext:
+    """Build a client TLS context that offers ALPN `http/1.1`.
+
+    Args:
+        uses_openssl: Whether to trust the locations OpenSSL loads (`SSL_CERT_FILE` or
+            `SSL_CERT_DIR` is set) rather than `certifi`'s bundle.
+
+    Returns:
+        `ssl.create_default_context()` when `uses_openssl`, else a default context that trusts
+        only `certifi`'s bundle; either writes TLS secrets to `SSLKEYLOGFILE` when it is set.
+    """
+    if uses_openssl:
+        context = ssl.create_default_context()
+    else:
+        context = ssl.create_default_context(cafile=certifi.where())
+    context.set_alpn_protocols(_ALPN_PROTOCOLS)
     return context
 
 
