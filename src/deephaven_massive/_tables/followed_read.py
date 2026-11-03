@@ -1,65 +1,97 @@
 """Followed reads: a `history()` result that follows a refreshing symbol table.
 
-When `symbols` is a refreshing table, `history()` follows it: each symbol in the table is read
-over the call's fixed window and its rows land in the result whole, in one update cycle; each
-symbol removed from the table leaves the result in the cycle its row leaves the table. This
-module builds that result and holds what one result owns; the session's follow coordinator
-(`_tables/follow_coordinator.py`) decides what is read when.
+When `symbols` is a refreshing table, `history()` follows it: a symbol added to the table is
+downloaded over the call's fixed window and its rows appear in the result all at once; a symbol
+removed from the table leaves the result in the update cycle its row leaves the table. This
+module builds that result; the session's follow coordinator (`_tables/follow_coordinator.py`)
+decides which symbol is downloaded when and hands each download to `FollowedRead.publish`.
 
-**How the rows land without a copy.** Everything is created on the caller thread inside the
-result's own liveness scope (`open_followed_read`)::
+**The design: one partition per symbol.** The result is a `PartitionedTable` with one
+partition per symbol, merged into one table. Each partition is a static table holding that
+symbol's downloaded rows; Deephaven calls a partition's table its *constituent*.
 
-    blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long, "Constituent": TABLE,
-                                              "Heard": long})
-    latest = blink.last_by("Symbol")                  # each symbol's latest cell
-    held = latest                                     # wait=False; with wait=True, the seed:
-    held = merge([seed.natural_join(latest, "Symbol", "Over=Seq").where("isNull(Over)"),
-                  latest])                            # the seed's cell until a newer one
-    shown = watched_rows(held.where("!isNull(Constituent)"), symbol_table)
-    parts = PartitionedTable.from_partitioned_table(shown, key_cols=["Symbol"],
+Deephaven has no call that adds or removes a partition. A `PartitionedTable` is defined by an
+ordinary table with one row per partition, a *partition row*: `Symbol`, plus a `Constituent`
+column whose value is that symbol's table. Adding a partition means adding a partition row;
+removing one means removing its row; changing a row's table replaces the partition. A keyed
+input table would be the obvious holder of those rows, but the library never uses input
+tables, so it builds them from its own parts (`_build`)::
+
+    blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long,
+                                              "Constituent": TABLE, "DecidedAtStep": long})
+    latest_per_symbol = blink.last_by("Symbol").where("!isNull(Constituent)")
+    in_watchlist = watched_rows(latest_per_symbol, symbol_table)
+    parts = PartitionedTable.from_partitioned_table(in_watchlist, key_cols=["Symbol"],
                 unique_keys=True, constituent_column="Constituent", ...)
     result = describe(parts.merge(), spec, schema, note=...)
 
-A *cell* is one row of the blink table: a symbol, a sequence number, a static table of that
-symbol's complete rows, built off the update graph's lock by the read, and `Heard`, the latest
-update cycle of the symbol table the coordinator had applied when it published the cell; under
-`Reread.ALWAYS` a cell shows only when its symbol joined the table at that cycle or before
-(`_shown`), so a download of a symbol that has since left and returned never shows.
-Publishing a cell (`FollowedRead.publish`) replaces the symbol's constituent, so a symbol
-lands, is replaced, or leaves as one constituent, and no row is copied in the update cycle. A
-cell with no table (a *tombstone*) frees a symbol's rows. With `wait=True` the call-time
-symbols' cells form a static seed, so their rows are in the result when the call returns, even
-inside a console command, which holds the update graph's lock; a later cell of the same symbol
-masks its seed cell.
-`watched_rows` joins the user's table, so a symbol whose row leaves the table leaves the result
-in that same cycle. A blink symbol table is followed as its append-only form, so every symbol
-it has delivered stays. There is no `input_table` and no `add_async`: the publisher's `add`
-never waits for an update cycle and runs on no shared Java pool.
+- The blink publisher lets the coordinator send partition rows, `(Symbol, table)`.
+- `last_by("Symbol")` keeps one row per symbol, so a newer partition row of a symbol downloaded
+  again replaces its partition.
+- `watched_rows` keeps only the symbols in the user's symbol table, as `where_in` would (it is
+  a join; its docstring says why), so a symbol's partition leaves in the cycle its row leaves
+  that table. A blink symbol table is followed as its append-only form, so every symbol it has
+  delivered stays.
 
-**Its row in `m.streams()`.** `Kind=read`, keyed by the call's id, `LOADING` while a symbol is
-queued, loading, or waiting to retry, `RUNNING` once every symbol has landed or failed; the
-coordinator keeps it current (`SessionCore.update_followed_read`), and each symbol's own row
-is in `m.symbol_reads()`. The result is a worker table of the session core
-(`SessionCore.register_worker`), so its record keeps the session alive while the result is held
-or still in use, and `m.close()` fails it.
+A download builds its static table off the update graph's lock, and the one partition row that
+points at it lands in one cycle, so no data row is copied in the update cycle. `publisher.add`
+never waits for a cycle, so the coordinator can publish while a console command holds the lock.
+
+**The `wait=True` seed.** `history(wait=True)` must return with the call-time symbols' rows in
+place, even in a console command, which holds the update graph's lock, so no published
+partition row can land before the call returns. Those symbols' partition rows therefore form a
+static seed table, merged with the newest published rows (`_latest_per_symbol`). A
+`natural_join` of the seed against them, filtered on `isNull`, drops a seed row once its symbol
+has a published row, so no symbol has two partitions. Without the seed, a `wait=True` result
+would be empty when the call returns.
+
+**The empty partition row.** `last_by` keeps a removed symbol's newest partition row, and with
+it the symbol's table, for the life of the result; the watchlist filter only hides it. So under
+`Reread.ALWAYS` a removal publishes a partition row whose table is null, which replaces the old
+row and frees its data rows; the `!isNull(Constituent)` filter keeps it from making a
+partition. Without it, every symbol ever followed would keep its rows in memory. Under
+`Reread.NEVER` the old row is kept on purpose, so a re-added symbol shows its earlier download
+at once. The static seed keeps a call-time symbol's first download for the result's life,
+empty partition row or not.
+
+**The `DecidedAtStep` check, under `Reread.ALWAYS`.** A re-added symbol must show nothing until
+its new download lands. Without a check, its old partition row, still the newest until the
+empty one lands, would reappear the moment its row returns to the symbol table, and a download
+begun before the removal could land after the re-add and show stale rows. So each partition
+row carries `DecidedAtStep`, the latest update cycle of the symbol table the coordinator had
+seen when it decided to publish the row, and `_hide_stale_downloads` shows a row only when that
+is at or after the cycle its symbol last joined the table.
+
+**`Seq`.** Each partition row carries a number larger than every earlier one of the result; the
+seed's are 0. Nothing compares the numbers: the seed's `natural_join` copies `Seq` only because
+it is never null, so a non-null copy means "this symbol has a published row". An empty
+partition row's `Constituent` is null, so a join that copied it would take an empty row for no
+row and keep the seed row, a removed symbol's old rows, behind the watchlist filter.
+
+**Its row in `m.streams()`.** `Kind=read`, keyed by the call's id: `LOADING` while a symbol is
+queued, loading, or waiting to retry, and `RUNNING` once every symbol has landed or failed. The
+coordinator keeps it current (`SessionCore.update_followed_read`); each symbol's own row is in
+`m.symbol_reads()`. The result is a worker table of the session core
+(`SessionCore.register_worker`), so its record keeps the session alive while the result is in
+use, and `m.close()` fails it.
 
 **Lifetime.** Releasing the result (`m.release`, garbage collection) marks its row `RELEASED`;
 it keeps following while a derived table uses it. Once nothing does, the blink table shuts
-down: its callback sets the result's stop token, which every read in flight listens to, tells
-the coordinator, queues the watch's stop on the reaper, and tells the session, making no
-Deephaven call itself.
+down. Its callback, which makes no Deephaven call, sets the stop token that every download in
+flight listens to, tells the coordinator, queues the watch's stop on the reaper, and tells the
+session.
 
 **Failures.** A failure of the whole result (`fail_table`) is recorded first
-(`SessionCore.fail_stream`) and then published through the blink table's `BlinkPublisher`,
-under the result's publish lock, which also guards every cell's publish: a failed result never
-gets another cell. The coordinator fails a result; `m.close()` and a dying session thread fail
-it through `fail`, the session's hook.
+(`SessionCore.fail_stream`), then published through the blink table's `BlinkPublisher`, both
+under the result's publish lock, which also guards every partition row's publish: a failed
+result never gets another row. The coordinator fails a result; `m.close()` and a dying session
+thread fail it through `fail`, the session's hook.
 
 **Threads.** `open_followed_read` runs on the caller thread, which may hold the update graph's
-lock (a console command): it creates tables, registers the row, and starts the watch, and waits
-for nothing. The watch's listener only queues events for the coordinator (`_WatchRouter`).
-`publish` and `fail_table` run on the coordinator thread, `fail` on a closing or dying thread,
-and the shutdown callback on whichever thread shut the blink table down.
+lock: it creates the tables inside the result's own liveness scope, registers the row, starts
+the watch, and waits for nothing. The watch's listener only queues events for the coordinator
+(`_WatchRouter`). `publish` and `fail_table` run on the coordinator thread, `fail` on a closing
+or dying thread, and the shutdown callback on whichever thread shut the blink table down.
 """
 
 from __future__ import annotations
@@ -106,26 +138,26 @@ __all__ = ["CONSTITUENT", "SEQ", "SYMBOL", "FollowPlan", "FollowedRead", "open_f
 logger = logging.getLogger(__name__)
 
 SYMBOL: Final = "Symbol"
-"""The cell column that names the symbol, the partition key."""
+"""The partition row column that names the symbol, the partition key."""
 
 SEQ: Final = "Seq"
-"""The cell column that numbers a result's cells in the order they were published."""
+"""The partition row column that numbers a result's partition rows in publish order."""
 
 CONSTITUENT: Final = "Constituent"
-"""The cell column that holds the symbol's static rows, or null for a tombstone."""
+"""The partition row column that holds the symbol's static rows; null in an empty row."""
 
 TABLE: Final = dtypes.DType(j_name="io.deephaven.engine.table.Table")
-"""The Deephaven type of `CONSTITUENT`: a column whose cells are tables."""
+"""The Deephaven type of `CONSTITUENT`: a column whose values are tables."""
 
-_OVER: Final = "__MassiveOver"
-"""The hidden column that marks a seed cell a newer cell masks; dataset columns are PascalCase
-wire names, so none can take this name."""
+_NEWER_SEQ: Final = "__MassiveNewerSeq"
+"""The hidden column of a seed row that holds the `SEQ` of its symbol's newest published row,
+null while there is none; dataset columns are PascalCase wire names, so none can take it."""
 
-HEARD: Final = "Heard"
-"""The cell column of the latest update cycle of the symbol table that the coordinator had
-applied when it published the cell (the result's build cycle for a seed cell)."""
+DECIDED_AT_STEP: Final = "DecidedAtStep"
+"""The partition row column of the latest update cycle of the symbol table that the coordinator
+had applied when it decided to publish the row (the result's build cycle for a seed row)."""
 
-_JOINED: Final = "__MassiveJoined"
+_JOINED_AT_STEP: Final = "__MassiveJoinedAtStep"
 """The hidden column of the update cycle a symbol's row last joined the symbol table."""
 
 _STEP: Final = (
@@ -244,36 +276,40 @@ class FollowedRead:
         self._watch = watch
         self.built_step = built_step
 
-    def publish(self, symbol: str, seq: int, table: Table | None, *, heard: int) -> None:
-        """Publish a symbol's cell: its rows, or a tombstone; nothing once the result stopped.
+    def publish(self, symbol: str, seq: int, table: Table | None, *, decided_at_step: int) -> None:
+        """Publish a symbol's partition row: its rows, or an empty row; nothing once stopped.
 
         Runs on the coordinator thread, in the session's execution context. The rows are viewed
-        as the dataset's columns, in schema order, so they match the merged result. The cell
+        as the dataset's columns, in schema order, so they match the merged result. The row
         lands on the next update cycle; `add` waits for none.
 
         Args:
             symbol: The symbol.
-            seq: The cell's number, larger than every earlier cell of the result.
-            table: The symbol's static rows, or None to free them.
-            heard: The latest update cycle of the symbol table whose change the coordinator
-                had applied when it decided to publish the cell; under `Reread.ALWAYS` the
-                cell shows only if its symbol last joined the table at that cycle or before.
+            seq: The row's number, larger than every earlier partition row of the result.
+            table: The symbol's static rows, or None for an empty row that drops its
+                partition and frees its rows.
+            decided_at_step: The latest update cycle of the symbol table whose change the
+                coordinator had applied when it decided to publish the row; under
+                `Reread.ALWAYS` the row shows only if its symbol last joined the table at that
+                cycle or before.
         """
         rows = None if table is None else _viewed(table, self._columns).j_table
-        cell = new_table(
+        partition_row = new_table(
             [
                 string_col(SYMBOL, [symbol]),
                 long_col(SEQ, [seq]),
                 InputColumn(name=CONSTITUENT, data_type=TABLE, input_data=[rows]),
-                long_col(HEARD, [heard]),
+                long_col(DECIDED_AT_STEP, [decided_at_step]),
             ]
         )
         with self._publish_lock:
             # Checked under the lock: a failure sets the token before it publishes.
             if self._failed or self.stop_token.is_set():
-                logger.debug("call %d %s: stopped, so its cell is not published", self.call, symbol)
+                logger.debug(
+                    "call %d %s: stopped, so its partition row is not published", self.call, symbol
+                )
                 return
-            cast("BlinkPublisher", self._publisher).add(cell)
+            cast("BlinkPublisher", self._publisher).add(partition_row)
 
     def fail_table(self, error: MassiveError) -> bool:
         """Mark the row `FAILED`, then fail the table, once.
@@ -499,69 +535,98 @@ def _viewed(table: Table, columns: tuple[str, ...]) -> Table:
     return table.view(list(columns))
 
 
-def _shown(blink: Table, seed: Table | None, followed: Table, *, reread: Reread) -> Table:
-    """Return each symbol's cell that the result shows now: one per symbol in the table.
+def _latest_per_symbol(blink: Table, seed: Table | None) -> Table:
+    """Return each symbol's newest partition row that holds rows, the seed's until one lands.
 
-    A symbol's cell is its latest published one, or its seed cell while none was published,
-    when it holds rows and the symbol is in the symbol table (the table is joined, so a symbol
-    whose row leaves takes its cell with it in that cycle).
-
-    Under `Reread.ALWAYS` a returning symbol must show no rows until its new download lands,
-    though its earlier cell stays the latest until the empty cell that frees it lands. So each
-    symbol is stamped with the update cycle its row last joined the table (`_JOINED`), and a
-    cell shows only when its `HEARD` stamp, the latest cycle of the table whose change the
-    coordinator had applied when it decided to publish the cell, is that join cycle or later.
-    The coordinator hears of a join, with its cycle, before it starts the read, so the new
-    download's cell always shows. A read of the earlier membership was decided before the
-    coordinator heard of the removal, so its cell is stamped with an earlier cycle and never
-    shows, even when the coordinator publishes it after the symbol has left and come back
-    (the removal and re-add were queued behind its outcome). The landing cycle could not
-    tell these apart: such a stale cell lands after the re-add. Cycle numbers come from one
-    logical clock, so, unlike readings of two wall clocks, they never run backwards against
-    each other. A seed cell, read at the call, is stamped with the build cycle, so it shows
-    while its symbol has not left the table since the result was made. Under `Reread.NEVER` a
-    returning symbol shows its kept cell at once, so the stamp is not used. The caller holds
-    the update graph's shared lock, so no cycle runs while this is built.
+    `last_by` keeps one row per symbol, so a newer published row replaces the symbol's
+    partition. With `wait=True`, the seed's row of a symbol stands in until a row of that symbol
+    is published: the seed's `natural_join` copies the newest published row's `SEQ`, never
+    null, so a symbol never has a seed row and a published one at once, even when the published
+    one is empty. An empty row is dropped last, so it drops the symbol's partition.
 
     Args:
-        blink: The result's blink table of cells.
-        seed: The call-time symbols' cells (`wait=True`), or None.
-        followed: The user's symbol table, made append-only when it is a blink table.
-        reread: Whether a returning symbol is read again.
+        blink: The result's blink table of partition rows.
+        seed: The call-time symbols' partition rows (`wait=True`), or None.
 
     Returns:
-        The shown cells: `Symbol`, `Seq`, and `Constituent`.
+        At most one partition row per symbol, with every column of the blink table.
     """
-    latest = blink.last_by(SYMBOL)
-    held = latest
+    latest_per_symbol = blink.last_by(SYMBOL)
+    with_seed = latest_per_symbol
     if seed is not None:
-        masked = (
-            seed.natural_join(latest, on=SYMBOL, joins=f"{_OVER}={SEQ}")
-            .where(f"isNull({_OVER})")
-            .drop_columns(_OVER)
+        unpublished_seed = (
+            seed.natural_join(latest_per_symbol, on=SYMBOL, joins=f"{_NEWER_SEQ}={SEQ}")
+            .where(f"isNull({_NEWER_SEQ})")
+            .drop_columns(_NEWER_SEQ)
         )
-        held = merge([masked, latest])
-    cells = held.where(f"!isNull({CONSTITUENT})")
-    if reread is Reread.NEVER:
-        return watched_rows(cells, followed).drop_columns(HEARD)
-    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED} = {_STEP}")
+        with_seed = merge([unpublished_seed, latest_per_symbol])
+    return with_seed.where(f"!isNull({CONSTITUENT})")
+
+
+def _hide_stale_downloads(rows: Table, followed: Table) -> Table:
+    """Under `Reread.ALWAYS`, hide each partition row decided before its symbol last joined.
+
+    A returning symbol must show no rows until its new download lands, though its earlier
+    partition row stays the newest until the empty row that frees it lands. So each symbol is
+    stamped with the update cycle its row last joined the table (`_JOINED_AT_STEP`), and a row
+    shows only when its `DECIDED_AT_STEP`, the latest cycle of the table whose change the
+    coordinator had applied when it decided to publish the row, is that join cycle or later.
+    The coordinator hears of a join, with its cycle, before it starts the read, so the new
+    download's row always shows. A read of the earlier membership was decided before the
+    coordinator heard of the removal, so its row is stamped with an earlier cycle and never
+    shows, even when the coordinator publishes it after the symbol has left and come back (the
+    removal and re-add were queued behind its outcome). The landing cycle could not tell these
+    apart: such a stale row lands after the re-add. Cycle numbers come from one logical clock,
+    so, unlike readings of two wall clocks, they never run backwards against each other. A seed
+    row, read at the call, is stamped with the build cycle, so it shows while its symbol has not
+    left the table since the result was made. The caller holds the update graph's shared lock,
+    so no cycle runs while this is built.
+
+    Args:
+        rows: The partition rows of the symbols in the symbol table.
+        followed: The user's symbol table, made append-only when it is a blink table.
+
+    Returns:
+        The rows that are not stale, with the same columns.
+    """
+    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED_AT_STEP} = {_STEP}")
     return (
-        cells.natural_join(joined, on=SYMBOL, joins=_JOINED)
-        .where(f"!isNull({_JOINED}) && {HEARD} >= {_JOINED}")
-        .drop_columns([HEARD, _JOINED])
+        rows.natural_join(joined, on=SYMBOL, joins=_JOINED_AT_STEP)
+        .where(f"!isNull({_JOINED_AT_STEP}) && {DECIDED_AT_STEP} >= {_JOINED_AT_STEP}")
+        .drop_columns(_JOINED_AT_STEP)
     )
 
 
+def _partition_rows(blink: Table, seed: Table | None, followed: Table, *, reread: Reread) -> Table:
+    """Return the table that defines the result's partitions: one row per symbol it shows.
+
+    Args:
+        blink: The result's blink table of partition rows.
+        seed: The call-time symbols' partition rows (`wait=True`), or None.
+        followed: The user's symbol table, made append-only when it is a blink table.
+        reread: Whether a returning symbol is read again. Under `Reread.NEVER` a returning
+            symbol shows its kept row at once, so no row is stale.
+
+    Returns:
+        The partition rows: `Symbol`, `Seq`, and `Constituent`.
+    """
+    # A symbol whose row leaves the symbol table loses its partition in that cycle.
+    in_watchlist = watched_rows(_latest_per_symbol(blink, seed), followed)
+    if reread is Reread.ALWAYS:
+        in_watchlist = _hide_stale_downloads(in_watchlist, followed)
+    return in_watchlist.drop_columns(DECIDED_AT_STEP)
+
+
 def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...], built_step: int) -> Table:
-    """Return the static table of the call-time symbols' cells.
+    """Return the static table of the call-time symbols' partition rows.
 
     Args:
         seeded: Each symbol's static rows.
         columns: The dataset's columns, in schema order.
-        built_step: The update cycle the result is built at, each cell's `HEARD` stamp.
+        built_step: The update cycle the result is built at, each row's `DECIDED_AT_STEP`.
 
     Returns:
-        One cell per symbol, numbered 0.
+        One partition row per symbol, numbered 0.
     """
     names = sorted(seeded)
     return new_table(
@@ -573,7 +638,7 @@ def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...], built_step: int
                 data_type=TABLE,
                 input_data=[_viewed(seeded[name], columns).j_table for name in names],
             ),
-            long_col(HEARD, [built_step] * len(names)),
+            long_col(DECIDED_AT_STEP, [built_step] * len(names)),
         ]
     )
 
@@ -609,9 +674,19 @@ def _build(
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
+        # The result is a PartitionedTable with one partition per symbol, merged into one table.
+        # Deephaven has no call that adds or removes a partition: the rows of the partition
+        # table define them, one row per symbol holding its static table. A blink publisher
+        # plus `last_by` stands in for a keyed input table, which the library never uses, and
+        # `watched_rows` (a `where_in` against the user's table) removes a symbol's partition.
         blink, publisher = blink_publisher(
             f"massive.{spec.name}#{read.call}",
-            {SYMBOL: dtypes.string, SEQ: dtypes.long, CONSTITUENT: TABLE, HEARD: dtypes.long},
+            {
+                SYMBOL: dtypes.string,
+                SEQ: dtypes.long,
+                CONSTITUENT: TABLE,
+                DECIDED_AT_STEP: dtypes.long,
+            },
             on_shutdown=functools.partial(
                 _shut_down,
                 weakref.ref(core),
@@ -625,9 +700,9 @@ def _build(
         built_step = int(blink.j_table.getUpdateGraph().clock().currentStep())
         seed = _seed(seeded, schema.column_names, built_step) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
-        shown = _shown(blink, seed, followed, reread=read.reread)
+        partition_rows = _partition_rows(blink, seed, followed, reread=read.reread)
         parts = PartitionedTable.from_partitioned_table(
-            shown,
+            partition_rows,
             key_cols=[SYMBOL],
             unique_keys=True,
             constituent_column=CONSTITUENT,

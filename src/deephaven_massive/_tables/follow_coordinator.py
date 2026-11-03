@@ -1,10 +1,11 @@
 """The follow coordinator: the one owner of every followed read's per-symbol state in a session.
 
-A `history()` whose `symbols` is a refreshing table follows it (`_tables/followed_read.py`):
-each symbol added to the table is read over the call's fixed window and lands in the result
-whole, and each symbol removed leaves it. This module decides, for every such result of a
-session, which symbol is read when, what its read's outcome does, and what the diagnostics
-show. It owns:
+A `history()` whose `symbols` is a refreshing table follows it (`_tables/followed_read.py`): each
+symbol added to the table is read over the call's fixed window and lands in the result whole, as one
+partition of a merged `PartitionedTable`, and each symbol removed leaves it. The coordinator adds,
+replaces, and drops a symbol's partition by publishing its partition row (`FollowedRead.publish`);
+`followed_read.py` explains that model. This module decides, for every such result of a session,
+which symbol is read when, what its read's outcome does, and what the diagnostics show. It owns:
 
 - **One coordinator thread per session** (`massive #1 follow`), started by the session's first
   followed read and kept until the session closes or is collected (a `QueueWorker`), so one
@@ -13,8 +14,8 @@ show. It owns:
   queues), each read's start and outcome (from the read pool), and each result's stop (from its
   blink table's shutdown). It is the only thread that reads or changes per-symbol state, so that
   state needs no lock. It makes no request and waits on nothing: it publishes each symbol's
-  cell (`FollowedRead.publish`, which never waits for an update cycle), times the retries, and
-  queues the `m.streams()` and `m.symbol_reads()` rows.
+  partition row (`FollowedRead.publish`, which never waits for an update cycle), times the
+  retries, and queues the `m.streams()` and `m.symbol_reads()` rows.
 - **One read pool per session**, a `ThreadPoolExecutor` of `MassiveConfig.max_concurrency`
   threads (`massive #1 follow-read_0`), made and ended with the coordinator thread.
   A read's outcome that arrives once its result's stop token is set is dropped: the result was
@@ -25,16 +26,16 @@ show. It owns:
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
-`DONE`. A failure that may pass (`FailureKind.TRANSIENT`) makes it `RETRYING`, read again 1, 5,
-and 15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after
-the fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under
-`Reread.ALWAYS` its cell is replaced by an empty one (a *tombstone*) so its rows are freed, and
-a re-add reads it again; under `Reread.NEVER` its cell is kept, so a re-add shows the earlier
-download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
+`DONE`. A failure that may pass (`FailureKind.TRANSIENT`) makes it `RETRYING`, read again 1, 5, and
+15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
+fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
+an empty partition row replaces its partition row, dropping its partition and freeing its rows, and
+a re-add reads it again; under `Reread.NEVER` its partition row is kept, so a re-add shows the
+earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
 and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
-dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once
-(a re-add during a read waits for it to end). When the result stops (released and unused, or
-failed), every symbol still following is `STOPPED`.
+dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
+re-add during a read waits for it to end). When the result stops (released and unused, or failed),
+every symbol still following is `STOPPED`.
 
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
@@ -240,8 +241,8 @@ class _Symbol:
         next_attempt_at: The same instant, epoch nanoseconds.
         added_at: When its row last entered the table, epoch nanoseconds.
         read_at: When the download whose rows the result holds began, or None.
-        rows: The rows of its cell in the result (0 for none).
-        kept: Whether the result's latest cell for it holds rows (not a tombstone).
+        rows: The rows of its partition in the result (0 for none).
+        kept: Whether the result's newest partition row for it holds rows (is not empty).
         error: Its latest failure's text, until a read succeeds.
         cause: Its latest failure's cause, which groups it in `Error`.
         transport: The source of its latest read, as `m.symbol_reads()` shows it.
@@ -273,20 +274,20 @@ class _Result:
         symbols: Every symbol it has followed, by name.
         queue: The symbols waiting for a read, in the order they began to wait.
         scanning: Whether a flat-file scan of the result is in flight.
-        seq: The number of the result's latest cell.
-        ended: Whether it failed or stopped: no read starts, and no cell is published.
+        seq: The number of the result's latest partition row.
+        ended: Whether it failed or stopped: no read starts, and no partition row is published.
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
         skipped: The text of its skipped symbol-table values, or None.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
-        heard: The latest update cycle of the symbol table whose change the coordinator has
-            applied (the result's build cycle until the first), stamped on every cell it
-            publishes; see `FollowedRead.publish`.
+        decided_at_step: The latest update cycle of the symbol table whose change the
+            coordinator has applied (the result's build cycle until the first), stamped on
+            every partition row it publishes; see `FollowedRead.publish`.
     """
 
     read: FollowedRead
-    heard: int
+    decided_at_step: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
     queue: list[str] = field(default_factory=list)
     scanning: bool = False
@@ -621,7 +622,7 @@ class FollowCoordinator:
             added, removed = message.symbols - held, frozenset(held - message.symbols)
         else:
             added, removed = message.added, message.removed
-        result.heard = max(result.heard, message.step)
+        result.decided_at_step = max(result.decided_at_step, message.step)
         now = _now_ns()
         for name in sorted(removed):
             self._remove(result, name)
@@ -644,7 +645,7 @@ class FollowCoordinator:
             Its state.
         """
         read = message.read
-        result = _Result(read, heard=read.built_step)
+        result = _Result(read, decided_at_step=read.built_step)
         self._results[id(read)] = result
         if read.core.closed:  # the close failed the table while it was handed over
             result.ended = True
@@ -667,7 +668,7 @@ class FollowCoordinator:
                     attempts=1,
                 )
                 result.symbols[name] = symbol
-                if isinstance(outcome, SymbolRows):  # its cell is in the result's seed
+                if isinstance(outcome, SymbolRows):  # its partition row is in the result's seed
                     symbol.kept = True
                 self._record(result, name, outcome, began_at=first.began_at, seconds=first.seconds)
         logger.debug(
@@ -715,7 +716,7 @@ class FollowCoordinator:
         """A symbol left the table: drop its pending read and retry, and its rows under `ALWAYS`.
 
         Its rows leave the result in the cycle its row left the table (the result joins the
-        table), so the tombstone only frees them.
+        table), so the empty partition row only frees them.
 
         Args:
             result: The result's state.
@@ -732,7 +733,7 @@ class FollowCoordinator:
             result.queue.remove(name)
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
-            result.read.publish(name, result.seq, None, heard=result.heard)
+            result.read.publish(name, result.seq, None, decided_at_step=result.decided_at_step)
             symbol.kept = False
             symbol.read_at = None
             symbol.rows = 0
@@ -803,7 +804,7 @@ class FollowCoordinator:
             outcome: Its rows or failure.
             began_at: When the read began, epoch nanoseconds.
             seconds: How long it took.
-            publish: True to publish its cell; False for a symbol already in the seed.
+            publish: True to publish its partition row; False for a symbol already in the seed.
         """
         symbol = result.symbols[name]
         read = result.read
@@ -814,7 +815,9 @@ class FollowCoordinator:
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
-                read.publish(name, result.seq, outcome.table, heard=result.heard)
+                read.publish(
+                    name, result.seq, outcome.table, decided_at_step=result.decided_at_step
+                )
             symbol.state = SymbolReadState.DONE
             symbol.kept = True
             symbol.rows = outcome.table.size
@@ -822,14 +825,14 @@ class FollowCoordinator:
             symbol.error = symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
-                "call %d %s: %d rows in %.1f s from %s (cell %d, heard cycle %d)",
+                "call %d %s: %d rows in %.1f s from %s (partition row %d, decided at step %d)",
                 read.call,
                 name,
                 symbol.rows,
                 seconds,
                 transport,
                 result.seq,
-                result.heard,
+                result.decided_at_step,
             )
             return
         self._failed(result, name, outcome)
