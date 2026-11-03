@@ -139,7 +139,7 @@ Each test declares the plans it needs, such as `@pytest.mark.needs("currencies:s
 |---|---|
 | The key lacks the plans | Skips before any request, naming the plan and its monthly price, such as "needs Currencies Starter ($49/month)" |
 | A test of what a delayed plan receives declares `<class>:delayed`, such as `futures:delayed` | Only Starter or Developer (Starter for indices) meets it, since a real-time plan cannot answer it |
-| Refused as "Your plan doesn't include this data timeframe", for a day before the first day the plan keeps | Skips as "outside the plan's history", by the history windows Massive documents per plan (two years on every Basic plan) |
+| Refused as "Your plan doesn't include this data timeframe", for a day before the first day the plan keeps | Skips as "outside the plan's history", by the history windows Massive documents per plan (two years on Stocks, Options, Currencies, and Futures Basic; all history on Indices Basic) |
 | The same refusal, for a day the plan keeps | Fails: it may be a library bug |
 | Any other refusal of a test whose plans the key holds | Fails, and the refusal is recorded: either the probe or the documented plan table is wrong |
 | A refused dataset in the smoke tests | Reported as "not entitled: needs <plan>", and counted apart from failures |
@@ -345,8 +345,10 @@ The threshold and its gate change only on that evidence.
 
 ### Which days the tests read
 
-No test reads a fixed date. Each computes its days from the run's New York day, with the US
-exchanges' holiday rules, so every read stays inside a Basic plan's two years of history:
+Most tests compute their days from the run's New York day, with the US exchanges' holiday
+rules, so their reads stay inside the shortest Basic history window: two years, on Stocks,
+Options, Currencies, and Futures Basic (Indices Basic keeps all history). The
+[fixed-date exceptions](#fixed-date-tests) follow the table.
 
 | Test | Days it reads |
 |---|---|
@@ -357,15 +359,21 @@ exchanges' holiday rules, so every read stays inside a Basic plan's two years of
 | The split and dividend checks | The year's most recent forward split and special cash dividend, found through the library's own `stocks.splits` and `stocks.dividends`, choosing common stocks with no later split |
 | The bar-stamp checks | The most recent half day whose week has ended, and the full trading day before it; the month and quarter reads are the two whole ones before the run's; the index year read runs from January 1 to the run's day |
 
-Exceptions and edge cases:
+<a id="fixed-date-tests"></a>
 
-- **The option split check** reads NVDA's 10-for-1 split of 2024-06-10, whose thin OTC
-  neighbors list no options, and needs Options Developer, which keeps four years.
-- **The deliverable check's three adjusted option roots** (from 2014, 2021, and 2024) are each
-  read only when the key's Options plan keeps their day, by the documented history windows;
-  otherwise each is recorded as outside the plan's history.
+Fixed-date tests:
+
+| Test | Fixed date | When the plan does not keep it |
+|---|---|---|
+| The option split check | NVDA's 10-for-1 split of 2024-06-10, whose thin OTC neighbors list no options | It needs Options Developer, which keeps four years |
+| The deliverable check's adjusted option roots | `AAPL7` (2014-06-10), `DELL1` (2021-11-15), `FF1` (2024-04-15) | Each is read only when the key's Options plan keeps its day, by the documented history windows; otherwise it is recorded as outside the plan's history |
+| `tests/tables/test_followed_read_integration.py` | The week of 2025-06-02 to 2025-06-06 | Every plan keeps it until June 2027 |
+| The live-run `responses` group | NVDA's daily bars from 2024-06-03 to 2024-06-14 | The example is skipped, naming the Stocks plan whose history keeps the day |
+
+Edge cases:
+
 - **A December 24 half day** stays the latest until the next Thanksgiving week ends, so the
-  bar-stamp reads can be about eleven months old: still inside every plan's two years.
+  bar-stamp reads can be about eleven months old: still inside two years.
 - **Before the year's first trading day** there is no year bar yet, and the index year read is
   recorded as skipped.
 

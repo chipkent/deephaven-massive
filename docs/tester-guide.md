@@ -121,7 +121,7 @@ each item, note anything that surprised you.
 |---|---|
 | Terminal | The program where you type commands. On macOS it is the Terminal app, in Applications, Utilities. Type a command and press Return to run it. |
 | [Massive](https://massive.com) | The market-data vendor, formerly Polygon.io. It sells stock, option, index, futures, currency, and crypto data. |
-| Subscription, plan | Massive sells one subscription per market (Stocks, Options, Indices, Currencies, Futures), each on a plan: the free Basic plan, or a paid one (Starter, Developer, Advanced, Business). Basic allows 5 requests a minute per subscription, has no live data, and keeps two years of history. |
+| Subscription, plan | Massive sells one subscription per market (Stocks, Options, Indices, Currencies, Futures), each on a plan: the free Basic plan, or a paid one (Starter, Developer, Advanced, Business). Basic allows 5 requests a minute per subscription, has no live data, and keeps two years of history (all history on Indices Basic). |
 | API key | The key that lets a program use your Massive account. Keep it private. |
 | [Deephaven](https://deephaven.io) | A real-time query engine. It holds static and live data as tables, and its table operations work the same on both. |
 | Server | The Deephaven process you start on your computer. |
@@ -567,8 +567,8 @@ print(daily.size)
 - `Date`, the trading day, as text;
 - split-adjusted prices.
 
-Hover over the `Close` header. **You should see** a description of the column. If you do not,
-note it.
+Hover over the `Close` header. **You should see** a description of the column. If your IDE
+shows something different, note it in your report.
 
 ### 4. Your first Deephaven queries (`04_first_queries.py`)
 
@@ -693,8 +693,9 @@ table made from it.
 ```python
 # Compares the year of the two stocks: daily returns, growth, volatility, correlation, a
 # chart, and a saved file. Run it once year's row in streams reads DONE. You should see a
-# correlation between 0 and 1, new tables (pair, returns, growth, summary_year, and
-# side_by_side), a chart named growth_chart, and the file growth.parquet in your test folder.
+# correlation between -1 and 1 (positive for these two stocks), new tables (pair, returns,
+# growth, summary_year, and side_by_side), a chart named growth_chart, and the file
+# growth.parquet in your test folder.
 from deephaven import parquet
 from deephaven.pandas import to_pandas
 from deephaven.plot.figure import Figure
@@ -752,8 +753,8 @@ parquet.write(growth, os.path.join(FOLDER, "growth.parquet"))
 
 **You should see**:
 
-- a number between 0 and 1, usually between 0.4 and 0.8: how closely the two stocks' daily
-  moves agreed;
+- the correlation, a number between -1 and 1: how closely the two stocks' daily moves
+  agreed. Expect a positive value for these two stocks, usually between 0.4 and 0.8;
 - `summary_year`, with two rows. `TotalReturn` is the year's price change as a fraction (0.15
   is 15%). `AnnualVolatility`, how much the price swings, is typically between 0.15 and 0.45;
 - `growth_chart`, with two lines that both start at 1.0;
@@ -1033,6 +1034,9 @@ These examples make each watchlist an input table, a table you edit in its panel
 - **Add a row**: click the empty row at the bottom of the panel, type the symbol, press
   **Enter**, then click **Commit** below the table. Nothing is added until you commit.
 - **Delete a row**: click the row, right-click it, and choose **Delete Selected Rows**.
+
+If your IDE shows something different, such as other button or menu names, note it in your
+report.
 
 ### 21. A watchlist that drives a poll (`21_watchlist_poll.py`)
 

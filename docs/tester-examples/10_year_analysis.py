@@ -1,7 +1,8 @@
 # Compares the year of the two stocks: daily returns, growth, volatility, correlation, a
 # chart, and a saved file. Run it once year's row in streams reads DONE. You should see a
-# correlation between 0 and 1, new tables (pair, returns, growth, summary_year, and
-# side_by_side), a chart named growth_chart, and the file growth.parquet in your test folder.
+# correlation between -1 and 1 (positive for these two stocks), new tables (pair, returns,
+# growth, summary_year, and side_by_side), a chart named growth_chart, and the file
+# growth.parquet in your test folder.
 from deephaven import parquet
 from deephaven.pandas import to_pandas
 from deephaven.plot.figure import Figure
