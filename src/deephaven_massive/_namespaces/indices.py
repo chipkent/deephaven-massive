@@ -362,8 +362,8 @@ class _Indices(Namespace):
 
         One row per index for the day, with the day's window as an index day bar's and, where
         Massive has them, the pre-market and after-hours levels, one request per index. `dm.ALL` is
-        refused: `snapshots(dm.ALL)` gives every index's current session, and `bars(dm.ALL,
-        dm.Timespan.DAY).history(date, date)` every index's day bar.
+        refused, since Massive has no grouped daily endpoint for indices: `bars(dm.ALL,
+        dm.Timespan.DAY).history(day, day)` reads every index's bar of that day.
 
         Args:
             symbols: Indices with the `I:` prefix. See README.md#symbols.
@@ -388,7 +388,10 @@ class _Indices(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="use m.indices.snapshots(dm.ALL)",
+                all_alternative=(
+                    "use m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                    "every index's bar of that day"
+                ),
                 params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

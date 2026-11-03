@@ -871,8 +871,10 @@ class _Options(Namespace):
         """The open, high, low, close, and volume of each options contract on one day.
 
         One row per contract for the day, with its pre-market and after-hours prices and the day's
-        window as a 1-day bar's, one request per contract. `dm.ALL` is refused: `snapshots(dm.ALL)`
-        gives every contract's session prices. Massive does not echo the adjustment basis here, so
+        window as a 1-day bar's, one request per contract. `dm.ALL` is refused, since Massive has
+        no grouped daily endpoint for options: `bars(dm.ALL, dm.Timespan.DAY,
+        adjusted=False).history(day, day)` reads every contract's bar of that day from the flat
+        files. Massive does not echo the adjustment basis here, so
         it cannot be checked.
 
         Args:
@@ -902,7 +904,10 @@ class _Options(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="use m.options.snapshots(dm.ALL)",
+                all_alternative=(
+                    "use m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)"
+                    ".history(day, day), every contract's bar of that day"
+                ),
                 adjusted=require_bool("adjusted", adjusted),
                 params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
