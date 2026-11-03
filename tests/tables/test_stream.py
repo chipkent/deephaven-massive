@@ -1984,3 +1984,12 @@ def test_benchmark_flush_conversion(
             f"\nflush of {len(rows)} rows from frames of {rows_per_frame}: "
             f"{seconds * 1000:.2f} ms, {seconds * 1e6 / len(rows):.2f} us a row\n"
         )
+
+
+def test_a_streams_blink_table_is_created_under_the_update_graphs_shared_lock(
+    massive_session: dm.MassiveSession, blink_creations: list[bool]
+) -> None:
+    before = len(blink_creations)
+    sink, _blink = make_sink(massive_session._core, ("AAPL",))
+    assert blink_creations[before:] == [True]
+    sink.fail(MassiveError("done"))

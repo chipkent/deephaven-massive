@@ -1,6 +1,8 @@
 """The live diagnostics tables behind `m.connections()`, `m.streams()`, and `m.rate_limits()`.
 
-All three are keyed Deephaven `input_table`s that the library writes and users read:
+Each is a keyed table that the library writes and users read: a blink table that the
+library's writer adds rows to through its publisher (`blink_publisher`), and the latest row of
+each key of it (`last_by` on the keys), which a later row of the key replaces:
 
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
@@ -22,22 +24,24 @@ rows hold the `Transport` member, and `as_row` writes its label. A stream's `Que
 `QUERY_SHOWN` characters (`shown_query`), as `Symbols` is cut to its first symbols, so a query
 over a long list stays readable.
 
+The tables are not input tables: nobody can edit them in the web UI, and the library never
+deletes a row, so each keeps one row per key it was ever written (a stream ended long ago
+keeps its last row), as the session's history of what it opened.
+
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
-thread, under the update graph's shared lock, and released by `m.close()`. The lock keeps an
-update cycle from running while a table is created: Deephaven stamps a new table with the
-current cycle's step, and a cycle that then refreshed the table and found the writer's first
-rows would notify twice in one step, a fatal error that ends the process. Users never get the
-tables themselves: `m.connections()` and `m.streams()` return a view of one, tracked like a
-live result (`SessionCore.diagnostics_view`), which keeps the session alive and current while
-it is held and keeps the table, with its final rows, after the scope is released. One daemon
-writer thread per session applies every row: the rest of the library hands it immutable row
-snapshots through a queue, so no caller, reaper,
-or flush thread ever waits on the update graph for bookkeeping, and nothing is written from a
-Deephaven listener callback. The writer applies whatever is queued in one batch per table,
-keeping the latest row per key. Each row replaces the whole row for its key; the queue is first
-in, first out, and the session queues each snapshot while holding its
-`registry_lock`, so rows land in the order the registry changed. Once the writer is stopped,
-rows are no longer queued.
+thread and released by `m.close()`. Users never get the tables themselves: `m.connections()`,
+`m.streams()`, and `m.rate_limits()` return a view of one, tracked like a live result
+(`SessionCore.diagnostics_view`), which keeps the session alive and current while it is held
+and keeps the table, with its final rows, after the scope is released. One daemon writer
+thread per session adds every row: the rest of the library hands it immutable row snapshots
+through a queue, so no caller, reaper, or flush thread ever waits on the update graph for
+bookkeeping, and nothing is written from a Deephaven listener callback. The writer adds
+whatever is queued in one batch per table, keeping the latest row per key, and waits at least
+`WRITE_INTERVAL` between batches, so a burst of rows costs a few adds. An add returns at once;
+its rows reach the table on the next update cycle (`Diagnostics.wait_until_shown` waits for
+that). Each row replaces the whole row for its key; the queue is first in, first out, and the
+session queues each snapshot while holding its `registry_lock`, so rows land in the order the
+registry changed. Once the writer is stopped, rows are no longer queued.
 
 The module also holds the session's `DriftRegistry`, the policy half of runtime schema drift.
 The wire package detects drift (each decoder returns a `DriftReport` of the fields a payload had
@@ -64,7 +68,6 @@ from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
-from deephaven import input_table
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
@@ -72,14 +75,17 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
+from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
+from deephaven_massive._tables.publisher import blink_publisher
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
-    from deephaven.table_factory import InputTable
+    from deephaven.liveness_scope import LivenessScope
+    from deephaven.table import Table
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
@@ -96,6 +102,7 @@ __all__ = [
     "SCHEMA_DRIFT_SHOWN",
     "STREAMS",
     "STREAM_KEYS",
+    "WRITE_INTERVAL",
     "ConnectionRow",
     "ConnectionState",
     "Diagnostics",
@@ -130,6 +137,10 @@ SCHEMA_DRIFT_SHOWN: Final = 200
 
 GAPS_SHOWN: Final = 5
 """How many of a live table's latest gaps the `Gaps` column lists; it counts the earlier ones."""
+
+WRITE_INTERVAL: Final = 0.1
+"""The fewest seconds between two batches of the diagnostics writer: what is queued meanwhile
+is added as one batch, so a burst of rows costs each table one add per interval."""
 
 DROPPED_COUNT_INTERVAL: Final = 60.0
 """The fewest seconds between two DEBUG lines of one dataset's running count of rows dropped
@@ -1009,30 +1020,123 @@ _RATE_LIMITS_CHANGED: Final = object()
 _Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event | object"
 
 
+class _KeyedTable:
+    """One diagnostics table: a blink table's publisher and the latest row per key of it.
+
+    The writer adds each batch of rows to the blink table through its publisher, and the table
+    users see is `last_by` of the blink table on the keys: it keeps the latest row of each key,
+    copied out of the blink rows, so a later row of a key replaces the earlier one as a modify
+    (also when two adds of one key land in one update cycle), and a new key is appended after
+    the keys seen before it. Rows are never deleted, so the table keeps one row per key ever
+    written. It is not an input table: nobody can edit it in the web UI, and no row can be
+    removed.
+
+    Created by `Diagnostics` on the caller thread, inside the diagnostics scope and the
+    session's execution context. Only the writer thread calls `add`, so the publisher needs no
+    lock of its own.
+
+    Attributes:
+        name: The publisher's name, such as `massive #1 diagnostics streams`, for the log.
+        schema: The table's columns, keys first.
+        publisher: The blink table's publisher.
+        table: The `last_by` table users see a view of.
+    """
+
+    __slots__ = ("name", "publisher", "schema", "table")
+
+    def __init__(
+        self,
+        name: str,
+        schema: Schema,
+        keys: Sequence[str],
+        *,
+        release_later: Callable[[LivenessScope], None],
+    ) -> None:
+        """Create the blink table, its publisher, and its `last_by` on the keys.
+
+        Args:
+            name: The publisher's name.
+            schema: The table's columns, keys first.
+            keys: The key columns.
+            release_later: Releases a scope on the session's reaper (`blink_publisher`).
+        """
+        self.name: Final = name
+        self.schema: Final = schema
+        blink, self.publisher = blink_publisher(
+            name,
+            col_defs(schema),
+            on_shutdown=functools.partial(_log_shut_down, name),
+            release_later=release_later,
+        )
+        self.table: Final = blink.last_by(list(keys))
+
+    def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow]) -> None:
+        """Add rows with one conversion and one `add`, skipping rows that do not fit.
+
+        The whole batch is converted at once; only if that fails is each row converted on its
+        own, so the rows that fit are still added and each one that does not is logged at
+        ERROR. The rows are in the table after the next update cycle.
+
+        Args:
+            rows: The rows, at most one per key.
+        """
+        if not rows:
+            return
+        schema = self.schema
+        dicts = [as_row(row) for row in rows]
+        try:
+            batch = schema.to_arrow(dicts)
+        except MassiveError:  # a row does not fit: find it, keep the others
+            batches = []
+            for one in dicts:
+                try:
+                    batches.append(schema.to_arrow([one]))
+                except Exception:
+                    logger.exception(
+                        "diagnostics: failed to write a %s row. %s", schema.name, LIBRARY_BUG
+                    )
+            if not batches:
+                return
+            batch = pa.concat_tables(batches)
+        self.publisher.add(dh_arrow.to_table(batch))
+
+
+def _log_shut_down(name: str) -> None:
+    """A diagnostics blink table's shutdown callback: it only logs.
+
+    Args:
+        name: The table's publisher name.
+    """
+    logger.debug("%s: its blink table has shut down", name)
+
+
 class Diagnostics:
     """The session's three diagnostics tables and the single thread that writes them.
 
     Created by `SessionCore` on the caller thread, inside the session's execution context, so
     the tables live in a session-owned liveness scope. A daemon writer (`QueueWorker`) takes
     row snapshots off its queue in batches: everything queued since it last woke is coalesced
-    to the latest row per key and applied with one `InputTable.add` per table, so the queue
-    cannot grow without bound when rows arrive faster than update-graph cycles. No other thread
-    waits on the update graph for diagnostics. `write` only enqueues and is safe from any
-    thread, including one that holds the session's `registry_lock`: its internal lock is a leaf
-    held only around a non-blocking `put`. A row that does not fit its schema is logged at ERROR
-    and skipped; the rest of its batch is applied. The rate-limit rows are pulled rather than
-    queued: `watch_rate_limits` names their pull, and `rate_limits_changed` (safe from any
-    thread, never blocking) asks the writer to pull them again, at most once per batch.
+    to the latest row per key and added with one `BlinkPublisher.add` per table, and the
+    writer starts its next batch no sooner than `WRITE_INTERVAL` after the last, so a burst of
+    rows costs few adds and the queue cannot grow without bound. No thread waits on the
+    update graph for diagnostics: an add returns at once, and its rows are in the table after
+    the next update cycle. `write` only enqueues and is safe from any thread, including one
+    that holds the session's `registry_lock`: its internal lock is a leaf held only around a
+    non-blocking `put`. A row that does not fit its schema is logged at ERROR and skipped; the
+    rest of its batch is added. The rate-limit rows are pulled rather than queued:
+    `watch_rate_limits` names their pull, and `rate_limits_changed` (safe from any thread,
+    never blocking) asks the writer to pull them again, at most once per batch.
 
-    `release()` lets the writer apply the rows already queued, release the scope, and exit, and
+    `release()` lets the writer add the rows already queued, release the scope, and exit, and
     waits for it unless told not to (a caller that holds the update graph's lock must not: the
-    writer's adds cannot finish until it lets go); `stop()` does the same without waiting and
+    writer releases the scope under that lock); `stop()` does the same without waiting and
     without taking any lock, for use from a finalizer. A writer that dies on something it
     cannot carry on after calls `on_death` first (the session fails its live tables there).
     """
 
     __slots__ = (
         "_connections",
+        "_exec_ctx",
         "_rate_due",
         "_rate_limits",
         "_rate_pending",
@@ -1049,24 +1153,26 @@ class Diagnostics:
         exec_ctx: ExecutionContext,
         name: str,
         *,
+        release_later: Callable[[LivenessScope], None],
         on_death: Callable[[BaseException], None] | None = None,
     ) -> None:
-        """Create the three input tables inside a new session-owned scope and start the writer.
+        """Create the three tables inside a new session-owned scope and start the writer.
 
-        The tables are created under the update graph's shared lock, so this waits for a
-        running update cycle to end; it must not run on an update-graph thread or under a
-        library lock. A thread that already holds the update graph's lock, as the console
-        does, takes it again at once.
-
-        If creating a table or starting the writer fails, the scope (with any table already
-        created in it) is released and the exception propagates.
+        Each blink table is created under the update graph's shared lock (`blink_publisher`),
+        so this waits for a running update cycle to end; it must not run on an update-graph
+        thread or under a library lock. If creating a table or starting the writer fails, the
+        scope (with any table already created in it) is released and the exception propagates.
 
         Args:
             exec_ctx: The session's execution context, entered by the writer thread.
-            name: The writer thread's name, for thread dumps.
+            name: The writer thread's name, for thread dumps, such as
+                `massive #1 diagnostics`; each table's publisher adds the table's name.
+            release_later: Releases a scope on the session's reaper, under the update graph's
+                shared lock (`SessionCore.release_later`), for the blink tables' publishers.
             on_death: Runs if the writer dies on something it cannot carry on after
                 (`QueueWorker`).
         """
+        self._exec_ctx = exec_ctx
         self._release_lock = threading.Lock()
         self._released = False
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
@@ -1075,26 +1181,24 @@ class Diagnostics:
         # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
         # read and written only by the writer thread.
         self._rate_due: float | None = None
-        # No update cycle runs under the lock, so none can refresh a table in the step that
-        # stamped it (see the module). The Java lock itself: `deephaven.update_graph.
-        # shared_lock` would wrap a failed creation's own error in a `DHError`.
-        lock = exec_ctx.update_graph.j_update_graph.sharedLock()
         self._scope = new_scope()
         try:
             with self._scope.open():
-                lock.lock()
-                try:
-                    self._connections: InputTable = input_table(
-                        col_defs(CONNECTIONS), key_cols=list(CONNECTION_KEYS)
-                    )
-                    self._streams: InputTable = input_table(
-                        col_defs(STREAMS), key_cols=list(STREAM_KEYS)
-                    )
-                    self._rate_limits: InputTable = input_table(
-                        col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
-                    )
-                finally:
-                    lock.unlock()
+                self._connections = _KeyedTable(
+                    f"{name} {CONNECTIONS.name}",
+                    CONNECTIONS,
+                    CONNECTION_KEYS,
+                    release_later=release_later,
+                )
+                self._streams = _KeyedTable(
+                    f"{name} {STREAMS.name}", STREAMS, STREAM_KEYS, release_later=release_later
+                )
+                self._rate_limits = _KeyedTable(
+                    f"{name} {RATE_LIMITS.name}",
+                    RATE_LIMITS,
+                    RATE_LIMIT_KEYS,
+                    release_later=release_later,
+                )
             self._writer: QueueWorker[_Item] = QueueWorker(
                 exec_ctx,
                 name,
@@ -1103,25 +1207,26 @@ class Diagnostics:
                 timeout=self._rate_wait,
                 on_timeout=self._rate_due_now,
                 on_death=on_death,
+                interval=WRITE_INTERVAL,
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
             release_scope(exec_ctx, self._scope)
             raise
 
     @property
-    def connections(self) -> InputTable:
-        """The table behind `m.connections()`."""
-        return self._connections
+    def connections(self) -> Table:
+        """The table behind `m.connections()`: the latest row per key (`CONNECTION_KEYS`)."""
+        return self._connections.table
 
     @property
-    def streams(self) -> InputTable:
-        """The table behind `m.streams()`."""
-        return self._streams
+    def streams(self) -> Table:
+        """The table behind `m.streams()`: the latest row per key (`STREAM_KEYS`)."""
+        return self._streams.table
 
     @property
-    def rate_limits(self) -> InputTable:
-        """The table behind `m.rate_limits()`."""
-        return self._rate_limits
+    def rate_limits(self) -> Table:
+        """The table behind `m.rate_limits()`: the latest row per key (`RATE_LIMIT_KEYS`)."""
+        return self._rate_limits.table
 
     @property
     def thread(self) -> threading.Thread:
@@ -1172,28 +1277,51 @@ class Diagnostics:
             self._rate_pending = True
             self._writer.put(_RATE_LIMITS_CHANGED)
 
-    def barrier(self) -> threading.Event:
-        """Return an event that is set once every row queued before this call is applied.
+    def wait_until_shown(self, timeout: float) -> bool:
+        """Wait until every row queued before the call is in the tables, and so in every view.
 
-        Only for a live session's diagnostics, whose writer is running (tests use it to wait
-        for rows). After `release()` the event comes back already set, even when a release
-        that did not wait still has rows to apply: join `thread` to wait for those. After
-        `stop()` (the finalizer of a collected session) the writer may already have exited, so
-        the event might never be set: do not call it then.
+        It waits for the writer to add those rows (after `release()`, for the writer to end),
+        then for an update cycle that started after that (`wait_for_update_cycle`), which takes
+        the rows into the tables and updates every view of them. For tests and for a caller
+        that must read the rows right away; nothing in the library's normal work waits on it.
+
+        Do not call it on an update-graph thread or while holding the update graph's lock, under
+        which no cycle runs, nor after `stop()` (the finalizer of a collected session), whose
+        writer may already be gone.
+
+        Args:
+            timeout: The most seconds to wait, in all.
 
         Returns:
-            The event; already set when the writer has been released.
+            True once the rows are shown; False, after a WARNING, if the writer or the update
+            cycle took longer than `timeout`.
+
+        Raises:
+            ValueError: On an update-graph thread (`wait_for_update_cycle`).
+            RuntimeError: While the calling thread holds the update graph's lock.
         """
-        event = threading.Event()
+        deadline = time.monotonic() + timeout
+        added = threading.Event()
         with self._release_lock:
-            if self._released:
-                event.set()
-            else:
-                self._writer.put(event)
-        return event
+            released = self._released
+            if not released:
+                self._writer.put(added)
+        if released:
+            self._writer.thread.join(timeout)
+            done = not self._writer.thread.is_alive()
+        else:
+            done = added.wait(timeout)
+        if not done:
+            logger.warning(
+                "%s: the diagnostics writer did not add the queued rows within %.1f s",
+                self._writer.thread.name,
+                timeout,
+            )
+            return False
+        return wait_for_update_cycle(self._exec_ctx, max(deadline - time.monotonic(), 0.0))
 
     def stop(self) -> None:
-        """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
+        """Ask the writer to add the queued rows, release the tables, and exit; no wait.
 
         Takes no lock, so the session's finalizer can call it from garbage collection. Later
         rows and rate-limit notices are not queued, as after `release()`.
@@ -1202,17 +1330,20 @@ class Diagnostics:
         self._writer.stop()
 
     def release(self, *, wait: bool = True) -> None:
-        """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
+        """Add the queued rows, release the tables' scope, and end the writer. Idempotent.
 
-        No row is queued after it. The writer applies the rows queued before it, then releases
-        the scope, under the update graph's shared lock (`release_scope`), and exits.
+        No row is queued after it. The writer adds the rows queued before it, then releases
+        the scope, under the update graph's shared lock (`release_scope`), and exits. The added
+        rows reach the tables on the next update cycle: a table that a held view still keeps
+        alive takes them in then; a table nothing keeps is destroyed by the release, and its
+        rows with it, since nobody can see them.
 
         Args:
-            wait: True to block until the writer has finished, so the rows are in the tables
-                when it returns; it must then not run on an update-graph thread, nor on a
-                thread that holds the update graph's lock, where the writer's adds could never
-                finish. False to return at once, as a caller holding that lock must: the
-                writer finishes once the lock is released.
+            wait: True to block until the writer has ended; it must then not run on an
+                update-graph thread, nor on a thread that holds the update graph's lock, where
+                the writer's release of the scope could never take the lock. False to return
+                at once, as a caller holding that lock must: the writer ends once the lock is
+                released.
         """
         with self._release_lock:
             self._released = True
@@ -1221,24 +1352,24 @@ class Diagnostics:
             self._writer.thread.join()
 
     def _apply(self, items: list[_Item]) -> None:
-        """Apply one batch: the latest row per key, one `add` per table, then the barriers.
+        """Add one batch: the latest row per key, one `add` per table, then mark the waits.
 
         The rate-limit rows are pulled when a marker is in the batch, or when their
         time-driven change has come, so a queue that never goes quiet cannot hold them back.
 
         Args:
-            items: Rows, barrier events, and rate-limit markers, in queue order.
+            items: Rows, `wait_until_shown` events, and rate-limit markers, in queue order.
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
-        barriers: list[threading.Event] = []
+        added: list[threading.Event] = []
         # The rows' time-driven change is due: a queue too busy for the timed wait to expire
         # must not starve that pull.
         due = self._rate_due
         pull = due is not None and time.monotonic() >= due
         for item in items:
             if isinstance(item, threading.Event):
-                barriers.append(item)
+                added.append(item)
             elif isinstance(item, StreamRow):
                 streams[item.stream_id] = item
             elif isinstance(item, ConnectionRow):
@@ -1246,20 +1377,22 @@ class Diagnostics:
             else:
                 pull = True
         try:
-            for table, schema, rows in (
-                (self._streams, STREAMS, lambda: list(streams.values())),
-                (self._connections, CONNECTIONS, lambda: list(connections.values())),
-                (self._rate_limits, RATE_LIMITS, self._pull_rate_limits if pull else list),
+            for table, rows in (
+                (self._streams, lambda: list(streams.values())),
+                (self._connections, lambda: list(connections.values())),
+                (self._rate_limits, self._pull_rate_limits if pull else list),
             ):
                 try:  # one table's failure never costs the others their rows
-                    self._add(table, schema, rows())
+                    table.add(rows())
                 except Exception:
                     logger.exception(
-                        "diagnostics: failed to update the %s table. %s", schema.name, LIBRARY_BUG
+                        "diagnostics: failed to update the %s table. %s",
+                        table.schema.name,
+                        LIBRARY_BUG,
                     )
         finally:
-            for barrier in barriers:
-                barrier.set()
+            for event in added:
+                event.set()
 
     def _pull_rate_limits(self) -> list[RateLimitRow]:
         """Take the pending marker, pull the rate-limit rows, and note when they next change.
@@ -1291,41 +1424,6 @@ class Diagnostics:
         """Pull the rate-limit rows again: their time-driven change has come."""
         self._rate_due = None
         self._apply([_RATE_LIMITS_CHANGED])
-
-    @staticmethod
-    def _add(
-        table: InputTable,
-        schema: Schema,
-        rows: list[ConnectionRow] | list[StreamRow] | list[RateLimitRow],
-    ) -> None:
-        """Add rows to a table with one conversion and one `add`, skipping rows that do not fit.
-
-        The whole batch is converted at once; only if that fails is each row converted on its
-        own, so the rows that fit are still added and each one that does not is logged.
-
-        Args:
-            table: The target table.
-            schema: Its schema.
-            rows: The rows, at most one per key.
-        """
-        if not rows:
-            return
-        dicts = [as_row(row) for row in rows]
-        try:
-            batch = schema.to_arrow(dicts)
-        except MassiveError:  # a row does not fit: find it, keep the others
-            batches = []
-            for one in dicts:
-                try:
-                    batches.append(schema.to_arrow([one]))
-                except Exception:
-                    logger.exception(
-                        "diagnostics: failed to write a %s row. %s", schema.name, LIBRARY_BUG
-                    )
-            if not batches:
-                return
-            batch = pa.concat_tables(batches)
-        table.add(dh_arrow.to_table(batch))
 
 
 def pascal_case(path: str) -> str:

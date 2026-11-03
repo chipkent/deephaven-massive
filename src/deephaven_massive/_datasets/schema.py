@@ -31,9 +31,9 @@ the dataset's table shape:
   from here. `Catalog` caches the result per dataset; this module holds no state.
 
 The merge runs from the committed generated files only, never from data. The Deephaven types of
-these columns, and the column definitions `table_publisher` and `input_table` take, come from
-`_tables/columns.py`: this module makes no Deephaven call. Epoch timestamps keep their wire
-unit here (`source_columns.SourceColumn.unit`); the transports convert them with
+these columns, and the column definitions a blink table's publisher takes (`blink_publisher`),
+come from `_tables/columns.py`: this module makes no Deephaven call. Epoch timestamps keep
+their wire unit here (`source_columns.SourceColumn.unit`); the transports convert them with
 `timestamps.py`.
 """
 

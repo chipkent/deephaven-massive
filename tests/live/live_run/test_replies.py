@@ -195,7 +195,7 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
     def wait_failed(m: MassiveSession) -> None:
         def failed() -> bool:
             harness[-1].flush()
-            assert m._core.diagnostics.barrier().wait(15.0)
+            assert m._core.diagnostics.wait_until_shown(15.0)
             return any(r["State"] == "FAILED" for r in dh_to_pylist(m.streams()))
 
         fake_ws_server.wait_for(lambda _: failed())

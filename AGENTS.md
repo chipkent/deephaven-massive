@@ -213,6 +213,13 @@ These prevent deadlocks and leaks.
   a published failure until the next update cycle; if another thread destroys the table
   meanwhile, Deephaven can deliver the failure twice and exit the process. `publish_failure`
   pins the table until the failure has been delivered.
+- **The library never uses input tables.** They are for people editing data by hand, such as a
+  watchlist typed in the web UI, not for code and not for volume. Every table the library
+  writes is a `blink_publisher` blink table or a shape of one; a keyed one is `last_by` on its
+  keys. Tests may use an input table to stand in for a user's watchlist. `blink_publisher`
+  creates its table under the UG shared lock: a table's creation stamp counts as its
+  notification for the cycle it was created in, so if it is registered while that cycle runs,
+  its first change in the same cycle is fatal.
 - **Connection state is loop-confined.** Only a connection's client thread touches its
   subscription sets; other threads use `loop.call_soon_threadsafe` with plain data.
 - **Never rely on the atomicity of `dict`, `set`, or `list` operations.** Every shared container

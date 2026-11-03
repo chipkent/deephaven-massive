@@ -153,6 +153,8 @@ def test_a_stream_day_records_rows_counts_delays_and_samples(
             lambda: all(list((tmp_path / "rows").glob(f"{n}-*.parquet")) for n in names),
             "every stream's Parquet file",
         )
+        # The later samples must see the streams in the session's diagnostics.
+        assert harness.session._core.diagnostics.wait_until_shown(15.0)
 
     day.action = publish
     seen, report = _reports()
@@ -318,7 +320,7 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
 
     def diagnostics_caught_up() -> None:
         # The first sample may run before the session's diagnostics show the new stream.
-        assert harness.session._core.diagnostics.barrier().wait(15.0)
+        assert harness.session._core.diagnostics.wait_until_shown(15.0)
 
     day = _Day(stop_after=2, action=diagnostics_caught_up)
     seen, report = _reports()
@@ -553,6 +555,11 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
     ws_session: WsSession, tmp_path: Path
 ) -> None:
     seen, report = _reports()
+
+    def diagnostics_caught_up() -> None:
+        # The samples after the first wait must see the streams in the session's diagnostics.
+        assert ws_session.session._core.diagnostics.wait_until_shown(15.0)
+
     stream_capture.run_throughput(
         ws_session.session,
         units=["stocks real-time", "currencies real-time"],
@@ -560,7 +567,7 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
         folder=tmp_path / "covered",
         until=START + timedelta(seconds=50),
         report=report,
-        clock=_Day().clock(),
+        clock=_Day(action=diagnostics_caught_up).clock(),
         window=(START, START + timedelta(seconds=40)),
     )
     assert seen == [("stocks real-time", "passed", ""), ("currencies real-time", "passed", "")]
@@ -716,7 +723,7 @@ def test_a_stream_that_failed_fails_its_unit(
     def refused() -> None:
         def failed() -> bool:
             harness.flush()
-            assert harness.session._core.diagnostics.barrier().wait(15.0)
+            assert harness.session._core.diagnostics.wait_until_shown(15.0)
             states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
             return any(r["State"] == "FAILED" for r in states)
 
@@ -770,7 +777,7 @@ def test_a_throughput_stream_that_failed_fails_its_unit(
     def refused() -> None:
         def failed() -> bool:
             harness.flush()
-            assert harness.session._core.diagnostics.barrier().wait(15.0)
+            assert harness.session._core.diagnostics.wait_until_shown(15.0)
             states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
             return any(r["State"] == "FAILED" for r in states)
 

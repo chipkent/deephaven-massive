@@ -2,22 +2,25 @@
 
 import contextlib
 import dataclasses
+import functools
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 import pyarrow as pa
 import pytest
-from deephaven import input_table, new_table
+from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.dtypes import DType
 from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
-from deephaven.update_graph import exclusive_lock, has_shared_lock
+from deephaven.table_listener import TableUpdate, listen
+from deephaven.update_graph import exclusive_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
@@ -25,13 +28,18 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
+from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import (
+    CONNECTION_KEYS,
     CONNECTIONS,
     GAPS_SHOWN,
     QUERY_SHOWN,
+    RATE_LIMIT_KEYS,
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
+    STREAM_KEYS,
     STREAMS,
+    WRITE_INTERVAL,
     ConnectionRow,
     ConnectionState,
     Diagnostics,
@@ -50,7 +58,9 @@ from deephaven_massive._tables.diagnostics import (
     pascal_case,
     shown_query,
 )
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.execution_context import wait_for_update_cycle
+from deephaven_massive._tables.liveness import new_scope, release_scope
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
@@ -236,10 +246,46 @@ def test_describe_symbols(dh_exec_ctx: ExecutionContext) -> None:
     assert describe_symbols(table) == (None, "reactive table")
 
 
+def _diagnostics(exec_ctx: ExecutionContext) -> Diagnostics:
+    # The session passes its reaper's `release_later`; releasing at once is the same here, where
+    # no table is ever failed.
+    return Diagnostics(
+        exec_ctx,
+        "test diagnostics",
+        release_later=functools.partial(release_scope, exec_ctx),
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "keys"),
+    [(CONNECTIONS, CONNECTION_KEYS), (STREAMS, STREAM_KEYS), (RATE_LIMITS, RATE_LIMIT_KEYS)],
+    ids=["connections", "streams", "rate_limits"],
+)
+def test_each_table_has_its_schemas_columns_keys_first(
+    dh_exec_ctx: ExecutionContext, schema: Schema, keys: tuple[str, ...]
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    table = getattr(diagnostics, schema.name)
+    names = [column.name for column in schema.columns]
+    assert names[: len(keys)] == list(keys)  # `last_by` puts the keys first
+    assert [column.name for column in table.columns] == names
+    assert [column.data_type for column in table.columns] == list(col_defs(schema).values())
+    diagnostics.release()
+
+
+def test_the_tables_are_not_input_tables(dh_exec_ctx: ExecutionContext) -> None:
+    # Nobody can edit them in the web UI: no table carries the input-table attribute.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    for table in (diagnostics.connections, diagnostics.streams, diagnostics.rate_limits):
+        assert not isinstance(table, InputTable)
+        assert not table.j_table.hasAttribute("InputTable")
+    diagnostics.release()
+
+
 def test_rows_replace_rows_by_key_in_order(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     diagnostics.write(STREAM)
     diagnostics.write(_stream(held_results=0, state=StreamState.RELEASED))
     diagnostics.write(_stream(stream_id=8))
@@ -261,7 +307,7 @@ def test_rows_replace_rows_by_key_in_order(
             state=ConnectionState.CONNECTED,
         )
     )
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["HeldResults"], r["State"], r["Transport"]) for r in rows] == [
         (7, 0, "RELEASED", "WebSocket"),
@@ -275,21 +321,65 @@ def test_rows_replace_rows_by_key_in_order(
     diagnostics.release()
 
 
+def test_two_adds_of_one_key_in_one_cycle_show_the_latest(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # Two batches can land in one update cycle: `last_by` keeps the later row, as a keyed
+    # input table did. No cycle runs under the lock, so both adds wait for the same one.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    streams = diagnostics._streams
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        streams.add([_stream(held_results=1)])
+        streams.add([_stream(held_results=2)])
+    assert wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
+    assert [r["HeldResults"] for r in dh_to_pylist(diagnostics.streams)] == [2]
+    diagnostics.release()
+
+
+def test_new_keys_append_in_first_seen_order_and_an_update_is_a_modify(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    for stream_id in (7, 3, 9):
+        diagnostics.write(_stream(stream_id=stream_id))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    updates: list[tuple[int, int, int]] = []
+
+    def on_update(update: TableUpdate, is_replay: bool) -> None:
+        j_update = update.j_table_update
+        updates.append(
+            (j_update.added().size(), j_update.modified().size(), j_update.removed().size())
+        )
+
+    handle = listen(diagnostics.streams, on_update)
+    try:
+        diagnostics.write(_stream(stream_id=5))
+        assert diagnostics.wait_until_shown(TIMEOUT)
+        diagnostics.write(_stream(stream_id=3, held_results=4))
+        assert diagnostics.wait_until_shown(TIMEOUT)
+    finally:
+        handle.stop()
+    rows = dh_to_pylist(diagnostics.streams)
+    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(7, 1), (3, 4), (9, 1), (5, 1)]
+    assert updates == [(1, 0, 0), (0, 1, 0)]  # the new key is added, the known one modified
+    diagnostics.release()
+
+
 def test_failed_writes_are_logged_and_the_writer_continues(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
         diagnostics.write(STREAM)
-        assert diagnostics.barrier().wait(TIMEOUT)
+        assert diagnostics.wait_until_shown(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.release()
 
 
-class _BrokenTable:
-    # A diagnostics table whose add fails.
+class _BrokenPublisher:
+    # A diagnostics table's publisher whose add fails.
     def add(self, rows: Table) -> None:
         raise RuntimeError("the streams table is broken")
 
@@ -297,18 +387,44 @@ class _BrokenTable:
 def test_a_failing_table_does_not_cost_the_other_its_rows(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    diagnostics._streams = cast("InputTable", _BrokenTable())
+    diagnostics = _diagnostics(dh_exec_ctx)
+    diagnostics._streams.publisher = cast("BlinkPublisher", _BrokenPublisher())
     connection = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(STREAM)
         diagnostics.write(connection)
-        assert diagnostics.barrier().wait(TIMEOUT)
+        assert diagnostics.wait_until_shown(TIMEOUT)
     assert "failed to update the streams table" in caplog.text
-    assert len(dh_to_pylist(diagnostics.connections)) == 1  # applied despite the failure
+    assert len(dh_to_pylist(diagnostics.connections)) == 1  # added despite the failure
     diagnostics.release()
+
+
+class _CountingPublisher:
+    # Wraps a publisher, records when each `add` began and ended, and holds the first one until
+    # released, so rows queued meanwhile reach the writer as one batch.
+    def __init__(self, publisher: BlinkPublisher, *, hold: bool = True) -> None:
+        self.publisher = publisher
+        self.adds: list[float] = []
+        self.ends: list[float] = []
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        if not hold:
+            self.gate.set()
+
+    def add(self, rows: Table) -> None:
+        self.adds.append(time.monotonic())
+        self.entered.set()
+        assert self.gate.wait(TIMEOUT)
+        self.publisher.add(rows)
+        self.ends.append(time.monotonic())
+
+
+def _count_adds(diagnostics: Diagnostics, *, hold: bool = True) -> _CountingPublisher:
+    counting = _CountingPublisher(diagnostics._streams.publisher, hold=hold)
+    diagnostics._streams.publisher = cast("BlinkPublisher", counting)
+    return counting
 
 
 def test_a_batch_is_converted_once(
@@ -321,19 +437,15 @@ def test_a_batch_is_converted_once(
         calls.append(len(rows))
         return to_arrow(self, rows)
 
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     monkeypatch.setattr(Schema, "to_arrow", counting)
-    diagnostics.write(STREAM)  # the writer may take this one alone; then the rest as one batch
-    assert diagnostics.barrier().wait(TIMEOUT)
-    calls.clear()
-    counting_table = CountingTable(diagnostics.streams)
-    diagnostics._streams = cast("InputTable", counting_table)
+    counting_adds = _count_adds(diagnostics)
     diagnostics.write(_stream(stream_id=100))
-    assert counting_table.entered.wait(TIMEOUT)  # the writer now holds its next batch back
+    assert counting_adds.entered.wait(TIMEOUT)  # the writer now holds its next batch back
     for n in range(3):
         diagnostics.write(_stream(stream_id=n))
-    counting_table.gate.set()
-    assert diagnostics.barrier().wait(TIMEOUT)
+    counting_adds.gate.set()
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert calls == [1, 3]  # one conversion per batch, never one per row
     diagnostics.release()
 
@@ -341,51 +453,106 @@ def test_a_batch_is_converted_once(
 def test_a_batch_of_rows_that_do_not_fit_adds_nothing(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
+    counting = _count_adds(diagnostics, hold=False)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
-        assert diagnostics.barrier().wait(TIMEOUT)
+        assert diagnostics.wait_until_shown(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
+    assert counting.adds == []
     assert dh_to_pylist(diagnostics.streams) == []
     diagnostics.release()
 
 
-def test_release_applies_queued_rows_then_releases(
+def test_queued_rows_are_coalesced_into_few_adds_at_least_an_interval_apart(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
+    counting = _count_adds(diagnostics)
+    diagnostics.write(_stream(stream_id=0, held_results=-1))
+    assert counting.entered.wait(TIMEOUT)  # the burst queues while the first add is held
+    for n in range(1_000):
+        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
+    counting.gate.set()
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    # The writer waited out the interval after the held add before it took the burst.
+    assert len(counting.adds) == 2
+    gaps = [start - end for end, start in zip(counting.ends, counting.adds[1:], strict=False)]
+    assert all(gap >= WRITE_INTERVAL for gap in gaps), gaps
+    rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
+    diagnostics.release()
 
+
+def test_a_held_first_batch_coalesces_the_rest_into_one_add(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    counting = _count_adds(diagnostics)
+    diagnostics.write(STREAM)
+    assert counting.entered.wait(TIMEOUT)
+    for n in range(1_000):
+        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
+    counting.gate.set()
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    assert len(counting.adds) == 2  # the held first row, then one add for the other 1,000
+    rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
+    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
+    diagnostics.release()
+
+
+def test_release_adds_queued_rows_then_releases(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
     keeper = new_scope()
     keeper.manage(diagnostics.streams)
     diagnostics.write(STREAM)
     diagnostics.release()
     diagnostics.release()  # idempotent
-    assert diagnostics.barrier().is_set()  # nothing left to wait for
     assert not diagnostics.thread.is_alive()
+    assert diagnostics.wait_until_shown(TIMEOUT)  # the kept table takes the rows in
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
-    keeper.release()
+    release_scope(dh_exec_ctx, keeper)
 
 
 def test_a_release_that_does_not_wait_lets_the_writer_finish_later(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     # A caller holding the update graph's lock, as a console command does, cannot wait for the
-    # writer, whose add needs an update cycle: the release returns at once, and the writer
-    # applies the queued rows, releases the tables, and ends once the lock is let go.
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    # writer, which releases the scope under that lock: the release returns at once, and the
+    # writer adds the queued rows, releases the tables, and ends once the lock is let go.
+    diagnostics = _diagnostics(dh_exec_ctx)
     keeper = new_scope()
     keeper.manage(diagnostics.streams)
     with exclusive_lock(dh_exec_ctx.update_graph):
         diagnostics.write(STREAM)
         diagnostics.release(wait=False)
         diagnostics.write(_stream(stream_id=9))  # dropped: released
-        assert diagnostics.barrier().is_set()  # the rows queued before are still the writer's
-    diagnostics.thread.join(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)  # the writer ends, then a cycle shows its rows
     assert not diagnostics.thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
-    keeper.release()
+    release_scope(dh_exec_ctx, keeper)
+
+
+def test_wait_until_shown_gives_up_after_its_timeout(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    counting = _count_adds(diagnostics)
+    diagnostics.write(STREAM)
+    assert counting.entered.wait(TIMEOUT)  # the writer is stuck in its add
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.diagnostics"):
+        assert not diagnostics.wait_until_shown(0.0)
+        diagnostics.release(wait=False)
+        assert not diagnostics.wait_until_shown(0.0)  # the writer has not ended either
+    assert caplog.text.count("did not add the queued rows within 0.0 s") == 2
+    counting.gate.set()
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()
 
 
 def test_a_failed_table_creation_releases_the_scope(
@@ -393,86 +560,74 @@ def test_a_failed_table_creation_releases_the_scope(
 ) -> None:
     scopes: list[LivenessScope] = []
     real_scope = new_scope
-    real_table = input_table
-    created: list[InputTable] = []
+    real_publisher = blink_publisher
+    created: list[Table] = []
 
     def tracking_scope() -> LivenessScope:
         scope = real_scope()
         scopes.append(scope)
         return scope
 
-    def second_fails(col_defs: dict[str, DType], *, key_cols: list[str]) -> InputTable:
+    def second_fails(
+        name: str,
+        columns: dict[str, DType],
+        *,
+        on_shutdown: Callable[[], None],
+        release_later: Callable[[LivenessScope], None],
+    ) -> tuple[Table, BlinkPublisher]:
         if created:
             raise RuntimeError("no second table")
-        created.append(real_table(col_defs, key_cols=key_cols))
-        return created[0]
+        blink, publisher = real_publisher(
+            name, columns, on_shutdown=on_shutdown, release_later=release_later
+        )
+        created.append(blink)
+        return blink, publisher
 
-    monkeypatch.setattr("deephaven_massive._tables.diagnostics.new_scope", tracking_scope)
-    monkeypatch.setattr("deephaven_massive._tables.diagnostics.input_table", second_fails)
+    monkeypatch.setattr(diagnostics, "new_scope", tracking_scope)
+    monkeypatch.setattr(diagnostics, "blink_publisher", second_fails)
     with pytest.raises(RuntimeError, match="no second table"):
-        Diagnostics(dh_exec_ctx, "test diagnostics")
+        _diagnostics(dh_exec_ctx)
     assert scopes[0].j_scope is None  # released, with the first table in it
 
 
-def test_the_tables_are_created_under_the_update_graph_lock(
-    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A table created while an update cycle runs can be refreshed in the step that stamped it;
-    # with the writer's first rows already queued, that refresh is a second notification in
-    # one step, which Deephaven treats as fatal. No cycle runs while the lock is held.
-    real_table = input_table
-    locked: list[bool] = []
-
-    def recording(col_defs: dict[str, DType], *, key_cols: list[str]) -> InputTable:
-        locked.append(has_shared_lock(dh_exec_ctx.update_graph))
-        return real_table(col_defs, key_cols=key_cols)
-
-    monkeypatch.setattr("deephaven_massive._tables.diagnostics.input_table", recording)
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    diagnostics.release()
-    assert locked == [True, True, True]
-    assert not has_shared_lock(dh_exec_ctx.update_graph)  # let go once they exist
-
-
 def test_stop_does_not_wait(dh_exec_ctx: ExecutionContext) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     diagnostics.stop()
     diagnostics.thread.join(TIMEOUT)
     assert not diagnostics.thread.is_alive()
 
 
-class CountingTable:
-    # Wraps an input table, counts `add` calls, and holds the first one until released, so
-    # rows queued meanwhile reach the writer as one batch.
-    def __init__(self, table: InputTable) -> None:
-        self.table = table
-        self.adds = 0
-        self.entered = threading.Event()
-        self.gate = threading.Event()
-
-    def add(self, rows: Table) -> None:
-        self.adds += 1
-        self.entered.set()
-        assert self.gate.wait(TIMEOUT)
-        self.table.add(rows)
-
-
-def test_queued_rows_are_coalesced_into_few_adds(
+def test_concurrent_writes_racing_a_release_leave_one_consistent_row_per_key(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    counting = CountingTable(diagnostics.streams)
-    diagnostics._streams = cast("InputTable", counting)
-    diagnostics.write(STREAM)
-    assert counting.entered.wait(TIMEOUT)
-    for n in range(1_000):
-        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
-    counting.gate.set()
-    assert diagnostics.barrier().wait(TIMEOUT)
-    assert counting.adds == 2  # the held first row, then one add for the other 1,000
-    rows = sorted(dh_to_pylist(counting.table), key=lambda r: r["StreamId"])
-    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
+    # Many threads write while the release runs (free-threaded too): nothing deadlocks, every
+    # key shows one row, and each shown row is one that was written.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    keeper = new_scope()
+    keeper.manage(diagnostics.streams)
+    start = threading.Barrier(9)
+
+    def writer(stream_id: int) -> None:
+        start.wait(TIMEOUT)
+        for n in range(200):
+            diagnostics.write(_stream(stream_id=stream_id, held_results=n))
+
+    threads = [threading.Thread(target=writer, args=(stream_id,)) for stream_id in range(8)]
+    for thread in threads:
+        thread.start()
+    diagnostics.write(STREAM)  # queued before the release, so it is always shown
+    start.wait(TIMEOUT)
     diagnostics.release()
+    for thread in threads:
+        thread.join(TIMEOUT)
+        assert not thread.is_alive()
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    rows = dh_to_pylist(diagnostics.streams)
+    ids = [r["StreamId"] for r in rows]
+    assert len(ids) == len(set(ids))  # one row per key
+    assert 7 in ids
+    assert all(0 <= r["HeldResults"] < 200 for r in rows)
+    release_scope(dh_exec_ctx, keeper)
 
 
 def test_describe_symbols_at_the_truncation_boundary() -> None:
@@ -508,7 +663,7 @@ def test_fresh_rows_start_at_zero() -> None:
 
 
 def test_writes_after_release_are_not_queued(dh_exec_ctx: ExecutionContext) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     diagnostics.release()
     diagnostics.write(STREAM)
     assert diagnostics._writer._queue.empty()  # nothing would ever drain it
@@ -517,7 +672,7 @@ def test_writes_after_release_are_not_queued(dh_exec_ctx: ExecutionContext) -> N
 def test_connection_rows_replace_by_their_key(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     tick = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
@@ -526,7 +681,7 @@ def test_connection_rows_replace_by_their_key(
     diagnostics.write(
         dataclasses.replace(tick, family=ChannelFamily.FMV, state=ConnectionState.FAILED)
     )
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     rows = sorted(dh_to_pylist(diagnostics.connections), key=lambda r: r["Family"])
     assert [(r["Family"], r["State"], r["Reconnects"]) for r in rows] == [
         ("FMV", "FAILED", 0),
@@ -574,7 +729,7 @@ def test_stream_updates_keep_schema_drift() -> None:
 def test_schema_drift_reaches_both_tables(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     diagnostics.write(_stream(schema_drift="REST:halted+", error="boom"))
     diagnostics.write(
         ConnectionRow(
@@ -585,7 +740,7 @@ def test_schema_drift_reaches_both_tables(
             schema_drift="T:trfi-",
         )
     )
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     (stream,) = dh_to_pylist(diagnostics.streams)
     assert (stream["SchemaDrift"], stream["Error"]) == ("REST:halted+", "boom")
     (connection,) = dh_to_pylist(diagnostics.connections)
@@ -960,17 +1115,17 @@ def _rate_row(bucket: str, state: RateLimitState, **changes: object) -> RateLimi
 def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     diagnostics.rate_limits_changed()  # no pull yet: nothing is queued
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert source.pulls == 0
     source.rows = [
         _rate_row("stocks", RateLimitState.READY),
         _rate_row("other", RateLimitState.READY),
     ]
     diagnostics.watch_rate_limits(source)  # pulls once
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert source.pulls == 1
     source.rows = [
         _rate_row(
@@ -983,7 +1138,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
         )
     ]
     diagnostics.rate_limits_changed()
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     rows = {r["Bucket"]: r for r in dh_to_pylist(diagnostics.rate_limits)}
     assert set(rows) == {"stocks", "other"}
     stocks = rows["stocks"]
@@ -1002,7 +1157,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
 
 
 def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     started, go = threading.Event(), threading.Event()
 
@@ -1017,7 +1172,7 @@ def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
         diagnostics.rate_limits_changed()  # one marker queued, the rest dropped
     assert diagnostics._writer._queue.qsize() == 1  # the queue stays bounded
     go.set()
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert source.pulls == 2
     diagnostics.release()
 
@@ -1025,7 +1180,7 @@ def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
 def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     # The pause has already ended (change due now): the writer must not wait for an item.
     source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]
@@ -1034,7 +1189,7 @@ def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
     assert source.pulled.acquire(timeout=TIMEOUT)
     # Nothing is queued: only the writer's timed wait can pull the rows again.
     assert source.pulled.acquire(timeout=TIMEOUT)
-    assert diagnostics.barrier().wait(TIMEOUT)
+    assert diagnostics.wait_until_shown(TIMEOUT)
     assert [r["State"] for r in dh_to_pylist(diagnostics.rate_limits)] == ["READY"]
     assert source.pulls == 2  # and with no change due, it waits for an item again
     diagnostics.release()
@@ -1044,7 +1199,7 @@ def test_a_release_right_after_a_change_leaves_no_thread_behind(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
     before = set(threading.enumerate())
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     source.change = 30.0  # a change due later
     diagnostics.watch_rate_limits(source)
@@ -1054,7 +1209,7 @@ def test_a_release_right_after_a_change_leaves_no_thread_behind(
 
 
 def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     diagnostics.watch_rate_limits(source)
     assert source.pulled.acquire(timeout=TIMEOUT)
@@ -1064,7 +1219,7 @@ def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> Non
     diagnostics.thread.join(TIMEOUT)
     assert not diagnostics.thread.is_alive()
     assert source.pulls == 1
-    assert diagnostics.barrier().is_set()  # nothing is queued for a writer that is gone
+    assert diagnostics.wait_until_shown(TIMEOUT)  # nothing is queued for a writer that is gone
 
 
 def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
@@ -1073,7 +1228,7 @@ def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
     # A queue that never goes quiet never lets the timed wait expire. Stand that in
     # deterministically: the wait never times out, so only the batch itself can pull.
     monkeypatch.setattr(Diagnostics, "_rate_wait", lambda _self: None)
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]  # due at once
     try:
@@ -1089,7 +1244,7 @@ def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
 def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
     dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
 ) -> None:
-    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     source.script = [([], 0.0), RuntimeError("source broke")]  # due at once, then it fails
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
@@ -1125,3 +1280,11 @@ def test_a_long_query_is_cut_like_the_symbol_list() -> None:
 )
 def test_pascal_case(path: str, expected: str) -> None:
     assert pascal_case(path) == expected
+
+
+def test_the_tables_are_created_under_the_update_graphs_shared_lock(
+    dh_exec_ctx: ExecutionContext, blink_creations: list[bool]
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    assert blink_creations == [True, True, True]
+    diagnostics.release()
