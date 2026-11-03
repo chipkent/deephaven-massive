@@ -479,15 +479,12 @@ UI; `columns()` serves a notebook, an IDE, or a script.
 **3. The dataset reference documents them on GitHub.** `docs/datasets/` holds an index,
 `README.md`, which GitHub shows when a reader opens the directory, and one generated page per
 dataset, named after its dotted name (`stocks.trades.md`, `stocks.financials.ratios.md`, and
-`snapshots.md` for `m.snapshots`, a dataset of the session itself). The index has a line that
-says what each Deephaven type a page names holds (`long`, `String`, `long[]`, …); a grid of
+`snapshots.md` for `m.snapshots`, a dataset of the session itself). The index has a grid of
 the dataset names two or more asset-class namespaces share (`trades`, `bars`, `snapshots`, …)
 by asset class, each mark linking that class's page; the recipe that merges tables of two
 asset classes on the columns they share, `merge([t.view(common) for t in tables])`, or, to
 keep every column, a typed null added for each missing one first
-(`update("Tape = NULL_LONG")`), and the shared columns whose type differs between classes,
-listed from the merged schemas with the cast that merges them (a snapshot's `LastTradeSize` is a
-`long` for stocks and a `double` for crypto, as Massive declares them); and one table per namespace listing each dataset's page,
+(`update("Tape = NULL_LONG")`); and one table per namespace listing each dataset's page,
 summary, and verbs. A dataset's page has its call path as title (`m.stocks.trades`), its
 `DatasetSpec.summary`, its call with every argument's default (`DatasetCall.signature`), and a
 table of facts: its verbs, the transports that serve it, the wire parameters its `start` and
@@ -506,10 +503,7 @@ it, and, folded in `<details>`, one **Wire field** column per transport the data
 wire keys of that transport's sources that feed the column, in source order and before any
 projection, or `request` for a key filled from the request. Then a list headed "Massive's
 documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
-distinct, from the `Provenance` passed to the renderer ([section 19.4](19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas)),
-each a link to the web page (the URL without its trailing `.md`) labeled with the page's title
-(`Provenance.titles`) and documentation area, and, where two listed pages share a label, the asset
-class their URL names;
+distinct, from the `Provenance` passed to the renderer ([section 19.4](19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas));
 a dataset whose sources have no URLs gets no list. A source several asset classes share (the
 unified snapshot `/v3/snapshot`, `/v3/reference/tickers`) has one page per class; for a dataset
 with an `asset_class`, only the pages whose URL path has a segment equal to that class's value
