@@ -308,7 +308,7 @@ _SYMBOL_SETTINGS = "test_config.py::test_symbol_settings_are_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
-    "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
+    "MassiveConfig.__init__.websocket_hosts": "test_config.py::test_websocket_hosts_types",
     "MassiveConfig.__init__.rest_basic_subscriptions": (
         "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
     ),

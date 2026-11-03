@@ -281,15 +281,17 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
         assert caplog.records == []
         sharing.close()
         apart = dm.MassiveSession(
-            dm.MassiveConfig(api_key="shared-key", flush_interval=0.5, ack_timeout=9.0)
+            dm.MassiveConfig(
+                api_key="shared-key", flush_interval=0.5, subscription_confirmation_timeout=9.0
+            )
         )
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
             f"{label(apart)} uses the same API key as {label(first)} with different connection "
-            "settings (ack_timeout, flush_interval), so the two cannot share WebSocket "
-            "connections; on an individual plan, which allows one connection per cluster, they "
-            "compete for it"
+            "settings (subscription_confirmation_timeout, flush_interval), so the two cannot "
+            "share WebSocket connections; on an individual plan, which allows one connection per "
+            "cluster, they compete for it"
         )
     ]
     caplog.clear()

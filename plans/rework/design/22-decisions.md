@@ -48,7 +48,7 @@ document already reflects them.
     including the Deephaven web console, and typo safety at both type-check time and run time.
 15. **Base Business key, TICK family:** `business.massive.com` with a WARNING, verified by a
     live integration test. A wrong guess yields an explicit server refusal that fails one stream
-    and names `ws_hosts`; it cannot misbehave silently, and it spares every base Business user a
+    and names `websocket_hosts`; it cannot misbehave silently, and it spares every base Business user a
     configuration line.
 16. **WebSocket frames are decoded by the client.** `WsClient` decodes each frame once, against
     `ws.json`, into status events, rows, rejects, and drift; the library parses no frame text.
@@ -714,7 +714,7 @@ document already reflects them.
     between feeds, and the server-verdict move to the delayed feed is gone. A listed
     subscription whose snapshot shows real-time data logs one WARNING saying so. `CURRENCIES`
     cannot be listed (Massive has no delayed forex or crypto feed), FMV cannot stream on a
-    listed subscription (it is real-time only), and a `ws_hosts` pin that contradicts the list
+    listed subscription (it is real-time only), and a `websocket_hosts` pin that contradicts the list
     is refused at construction. `fetch()` and `poll()` of a subscription's current data fail
     when Massive labels a response or a row `DELAYED` and the subscription it labels is not
     listed (each row of the cross-class snapshot is held to its own class;

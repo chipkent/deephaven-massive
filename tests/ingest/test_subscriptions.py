@@ -97,7 +97,7 @@ def make_loop(*, cap: int | None = None) -> Loop:
     subs = Subscriptions(
         sender,
         call_later=timers.call_later,
-        ack_timeout=5.0,
+        subscription_confirmation_timeout=5.0,
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_change=lambda: changes.append(subs.counts()),

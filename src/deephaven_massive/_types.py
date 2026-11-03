@@ -139,12 +139,22 @@ asset class's day zone.
 """
 
 FilterValue: TypeAlias = (
-    str | int | float | bool | date | datetime | Sequence[str | int | float | date]
+    str
+    | int
+    | float
+    | bool
+    | date
+    | datetime
+    | np.datetime64
+    | Sequence[str | int | float | date | np.datetime64]
 )
 """A value in the `filters` mapping, keyed by a wire parameter name with its dots written as
 underscores, such as `strike_price_gte` or `ticker_any_of`. A sequence is the value of an
 `_any_of` key: text items, numbers for a list of numbers (`strike_price_any_of`), or dates for
-a list of dates (`date_any_of`)."""
+a list of dates (`date_any_of`). A date or time takes every object `DateLike` names: a `date`,
+an aware `datetime` or `pandas.Timestamp`, a Java `LocalDate`, `Instant`, or `ZonedDateTime`,
+or a `numpy.datetime64`; a sequence of dates takes the day forms. Whether text is a date or
+a time depends on the parameter, so a filter reads only ISO-8601 text as one."""
 
 StreamSpan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
 """Bar timespans that have a WebSocket channel (with `multiplier=1`)."""

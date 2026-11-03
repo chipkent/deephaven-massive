@@ -43,6 +43,7 @@ from dataclasses import replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, TypeVar, cast, get_overloads, overload
 
+from deephaven import dtypes
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
@@ -51,7 +52,6 @@ from deephaven_massive._datasets.dates import (
     calendar_day,
     check_order,
     parse_date_like,
-    require_aware,
 )
 from deephaven_massive._datasets.filters import (
     check_filters,
@@ -416,6 +416,30 @@ def optional_text(name: str, value: object) -> str | None:
     return value
 
 
+def _require_text_column(table: Table, column: str, *, what: str) -> None:
+    """Refuse a table whose column of tickers or codes does not hold text.
+
+    A ticker or product code is text, and the library reads the column as text: a column of
+    numbers or dates would otherwise fail deep inside a verb, with no word of what to fix.
+
+    Args:
+        table: The table as passed, which has the column.
+        column: The column, `Symbol` or `ProductCode`.
+        what: The table as the message names it, such as `"a symbol table"`.
+
+    Raises:
+        ValueError: If the column is not a `String` column; the message names its type.
+    """
+    data_type = next(c.data_type for c in table.columns if c.name == column)
+    if data_type != dtypes.string:
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: column %s is %s, not String", what, column, data_type)
+        raise ValueError(
+            f"the {column} column of {what} must be a String column; this one holds "
+            f"{data_type}: each row holds one value as text, such as 'AAPL' or 'ES'"
+        )
+
+
 def value_table(table: Table, *, argument: str, parameter: str, underlying: bool) -> ValueTable:
     """Box a table passed where a dataset takes one value, after checking its column.
 
@@ -434,7 +458,8 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
         The boxed table (`ValueTable`).
 
     Raises:
-        ValueError: If the table lacks the column; the message names the columns it has.
+        ValueError: If the table lacks the column; the message names the columns it has. If
+            the column is not a `String` column (`_require_text_column`).
     """
     column = "Symbol" if underlying else "ProductCode"
     if column not in table.column_names:
@@ -445,6 +470,7 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
             f"a table passed as {argument} must have a {column} column; this one has: "
             f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
         )
+    _require_text_column(table, column, what=f"a table passed as {argument}")
     return ValueTable(argument, parameter, column, underlying, table)
 
 
@@ -485,16 +511,34 @@ def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
     return {name: None, plural: tuple(value)}
 
 
-def _list_item(item: object) -> bool:
-    """Tell whether a sequence element is one a list parameter can take: text or a day.
+def _time_value(name: str, value: object) -> object:
+    """Read a date or time object as the `date` or aware `datetime` it names.
+
+    `filters` take the same date and time objects as `start`, `end`, `as_of`, and `date`: a
+    `date`, an aware `datetime`, a Java `LocalDate`, `Instant`, or `ZonedDateTime`, a
+    `numpy.datetime64`, or a `pandas.Timestamp`, each read by `parse_date_like`. An instant
+    finer than a microsecond is rounded up for an upper bound (a name ending in `lt` or `lte`)
+    and down for any other, as a filter's ISO-8601 text is, so no row is lost.
 
     Args:
-        item: The element.
+        name: The parameter or filter key, for messages and the rounding direction.
+        value: The value as passed.
 
     Returns:
-        True for a `str` or a `date` that is not a `datetime`.
+        The `date` or aware `datetime`; a value that is no date or time object, text among
+        them, unchanged. Whether a filter's text is a time depends on its parameter, which
+        `check_filters` reads.
+
+    A naive `datetime` or `pandas.Timestamp`, a `NaT`, or a `numpy.datetime64` of a week,
+    month, or year raises the `ValueError` of `parse_date_like`.
     """
-    return isinstance(item, str) or (isinstance(item, date) and not isinstance(item, datetime))
+    if isinstance(value, str | int | float):
+        return value
+    upper = name.replace(".", "_").rpartition("_")[2] in ("lt", "lte")
+    try:
+        return parse_date_like(cast("DateLike", value), name, upper=upper)
+    except TypeError:
+        return value
 
 
 def _value(name: str, value: object) -> ParamValue:
@@ -505,31 +549,33 @@ def _value(name: str, value: object) -> ParamValue:
         value: The value as passed.
 
     Returns:
-        The value; a list or tuple becomes a tuple, its strings as `str` and its dates (for a
-        list of dates, such as `date_any_of`) as given.
+        The value; a date or time object as the `date` or aware `datetime` it names
+        (`_time_value`); a list or tuple as a tuple of `str` and `date` (for a list of
+        dates, such as `date_any_of`).
 
     Raises:
-        TypeError: If the value is not a `str`, `int`, `float`, `bool`, `date`, `datetime`,
-            enum member, or a sequence of `str` and `date`; for a list or tuple, the message
-            names the first element that is neither (a `datetime` is not a day).
+        TypeError: If the value is not a `str`, `int`, `float`, `bool`, enum member, date or
+            time object, or a sequence of `str` and dates; for a list or tuple, the message
+            names the first element that is neither (an instant is not a day).
 
-    A naive `datetime` raises the `ValueError` of `require_aware` in `_datasets/dates.py`, the
-    same message as a naive time bound.
+    A naive `datetime`, or another time `parse_date_like` refuses, raises its `ValueError`,
+    the same message as a refused time bound.
     """
-    if isinstance(value, datetime):
-        require_aware(name, value, value)
-    if isinstance(value, str | int | float | date | datetime):
-        return value
     if isinstance(value, list | tuple):
-        bad = next(((i, item) for i, item in enumerate(value) if not _list_item(item)), None)
-        if bad is None:
-            return tuple(item if isinstance(item, date) else str(item) for item in value)
-        index, item = bad
-        raise TypeError(
-            f"{name}: element {index} of the sequence is {type(item).__name__}, not str or date"
-        )
+        items = [_time_value(name, item) for item in value]
+        for index, item in enumerate(items):
+            if not isinstance(item, str | date) or isinstance(item, datetime):
+                raise TypeError(
+                    f"{name}: element {index} of the sequence is {type(value[index]).__name__}, "
+                    "not str or date"
+                )
+        return tuple(item if isinstance(item, date) else str(item) for item in items)
+    found = _time_value(name, value)
+    if isinstance(found, str | int | float | date):
+        return found
     raise TypeError(
-        f"{name} must be a str, int, float, bool, date, datetime, or sequence of str or date; "
+        f"{name} must be a str, int, float, bool, date, datetime, Java LocalDate, Instant, or "
+        "ZonedDateTime, numpy.datetime64, pandas.Timestamp, or sequence of str or date; "
         f"got {type(value).__name__}"
     )
 
@@ -775,7 +821,9 @@ def build_query(
             as underscores. `filters.check_filters` validates it and parses each value into
             the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
             `date` or an aware `datetime`, and a list parameter's value the tuple of its
-            comma-separated items); the `Request` holds those parsed values.
+            comma-separated items), and a Java, numpy, or pandas date or time object the
+            `date` or aware `datetime` it names (`_time_value`); the `Request` holds those
+            parsed values.
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
             a positive `int`.
         values: A table passed where the dataset takes one value (`value_table`), or None.
@@ -791,13 +839,13 @@ def build_query(
         ValueError: If `symbols` is None for an instrument dataset that needs symbols (the
             message names the forms it takes, `dm.ALL` among them where the dataset takes
             it), `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
-            `Symbol` column, `params` or `filters` holds `adjusted`, which has its own typed
-            argument, or `params` names one of the dataset's `fixed_params`; or if `params`
-            sets `order` without `sort` and none of the dataset's REST paths has an `order`
-            parameter, so the direction could only travel as the `.asc` or `.desc` suffix of
-            `sort` (`Catalog.takes_param`). Where some path has `order`, the REST transport
-            sends it as is there, folds it into `sort` on a path without it, and fails the verb
-            on a chosen path that has neither.
+            `Symbol` column or one that is not a `String` column, `params` or `filters` holds
+            `adjusted`, which has its own typed argument, or `params` names one of the dataset's
+            `fixed_params`; or if `params` sets `order` without `sort` and none of the dataset's
+            REST paths has an `order` parameter, so the direction could only travel as the `.asc` or
+            `.desc` suffix of `sort` (`Catalog.takes_param`). Where some path has `order`, the REST
+            transport sends it as is there, folds it into `sort` on a path without it, and fails the
+            verb on a chosen path that has neither.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
@@ -830,6 +878,7 @@ def build_query(
                 "another way (lower case, another convention), convert them first with "
                 'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
             )
+        _require_text_column(symbols, "Symbol", what="a symbol table")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)

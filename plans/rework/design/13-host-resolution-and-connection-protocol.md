@@ -67,9 +67,9 @@ FMV family (any class):
        -> business.massive.com, REALTIME, evidence="FMV is Business-only; fixed host (docs)"
 
 TICK family:
-  1. ws_hosts[asset_class] present (checked against MassiveConfig.delayed_subscriptions at
+  1. websocket_hosts[asset_class] present (checked against MassiveConfig.delayed_subscriptions at
      construction)
-       -> that host, the host's recency, evidence="ws_hosts"
+       -> that host, the host's recency, evidence="websocket_hosts"
   2. subscription listed in MassiveConfig.delayed_subscriptions
        -> delayed.massive.com, DELAYED, evidence="MassiveConfig.delayed_subscriptions"
           (no REST call: the user chose the delayed feed, so no answer changes the host)
@@ -144,13 +144,13 @@ real-time key there is **UNVERIFIED** (a live check records it), and a refusal s
 `timeframe` in its snapshot, so it streams from `socket.massive.com` like any unlabelled
 snapshot (rule 5e); no host is guessed from the snapshot's `fmv` field. If Massive serves that
 plan's TICK channels elsewhere, the server refuses the topic (an explicit `error` that fails
-that stream and names `ws_hosts[AssetClass.STOCKS]`), and the user pins the host there.
+that stream and names `websocket_hosts[AssetClass.STOCKS]`), and the user pins the host there.
 
 **Indices `V`.** The Value page lists only `wss://business.massive.com/indices`, while its plan
 table says Starter delayed and Advanced real-time, and the indices `A`/`AM` pages list
 `socket.` and `delayed.`. **UNVERIFIED.** Conservative rule: `V` is in the TICK family and uses
 the class's TICK host. A `not authorized` reply for a `V` topic fails that stream with a message
-naming `ws_hosts[AssetClass.INDICES]` and `business.massive.com`. A fixture test covers both
+naming `websocket_hosts[AssetClass.INDICES]` and `business.massive.com`. A fixture test covers both
 replies; the live integration test must retire this note before 1.0.
 
 ### 13.3 Connection and subscription protocol
@@ -289,9 +289,9 @@ Status(REFUSED, no topic)
       unmarked. See "Refusals name the feed" below.
 Status(MAX_CONNECTIONS) after authentication
    -> nothing for the library to do: the client reports WAITING_SLOT once its socket closes
-no acknowledgement within ack_timeout, the topic still in S and W, same generation
+no acknowledgement within subscription_confirmation_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
-still none after another ack_timeout, same check
+still none after another subscription_confirmation_timeout, same check
    -> topic state NO_ACK; it counts in NoAckTopics of m.connections(), and each stream that
       wants it shows "no acknowledgement from Massive for <topic>; its rows may be missing"
       in its Error without failing, beside its other warnings (each its own part); after a
@@ -300,7 +300,7 @@ still none after another ack_timeout, same check
       stays desired and subscribed. Every 60 s (NO_ACK_RESEND) one round re-sends all NO_ACK
       topics on the wire together, in one subscribe frame, until each is acknowledged, leaves
       the wire, or the generation ends. A round due while a step is in flight, or while the
-      previous round still awaits its answer, waits ack_timeout and tries again; a sent round awaits its answer for ack_timeout, and no
+      previous round still awaits its answer, waits subscription_confirmation_timeout and tries again; a sent round awaits its answer for subscription_confirmation_timeout, and no
       step goes out meanwhile. A
       late acknowledgement or a new generation clears the state and the streams' Error.
       Streams never fail on it, and the connection is never reconnected for it: a reconnect
@@ -324,7 +324,7 @@ a connection with no stream attached for 30 s (no lease, so no stream opening ei
 
 A socket that the server stops answering is detected by websockets' keepalive pings and closed,
 which starts a reconnect. A server that goes silent after authentication leaves the topics of the
-in-flight step unacknowledged, so they reach `NO_ACK` within 2 × `ack_timeout` of their send. A
+in-flight step unacknowledged, so they reach `NO_ACK` within 2 × `subscription_confirmation_timeout` of their send. A
 server that goes silent before `auth_success` is cut off by the handshake timeout.
 
 **Closing.** `m.close()` and the idle close call `WsClient.close()`, which is safe from any
@@ -384,7 +384,7 @@ table". Tables derived from the stream fail with it, as with every stream failur
 `max_outage=0` fails them at the drop: the timers fire on the loop's next turn. The
 connection itself keeps reconnecting. So that a held-down stream always gets one full attempt
 before its timer fires, the client asks the connection before each reconnect wait for its
-deadline: the earliest held-down stream's time left, less `ack_timeout`. A wait that would start
+deadline: the earliest held-down stream's time left, less `subscription_confirmation_timeout`. A wait that would start
 the next attempt later than that deadline less `HANDSHAKE_TIMEOUT` is shortened to fit, but never
 below `reconnect_backoff` or a 429's `Retry-After`. Without it, the default waits (30, 60, then
 100 to 120 seconds) would put the fourth attempt at 290 to 348 seconds, after a 300-second
@@ -406,11 +406,11 @@ refused there, unless the host decision's snapshot labelled the class's data `RE
 plan is real-time, so the refused data (an add-on such as stocks imbalances, or a higher tier) is
 something its plan or add-ons may not include, and the delayed feed is not suggested; when
 that snapshot carried no `timeframe` at all (a base Business key's), that the plan may serve the
-data on another host, pinned with `MassiveConfig.ws_hosts[dm.AssetClass.<X>]`, and the delayed
+data on another host, pinned with `MassiveConfig.websocket_hosts[dm.AssetClass.<X>]`, and the delayed
 feed only if the plan's data is delayed; on the delayed feed, that the subscription is listed in `MassiveConfig.delayed_subscriptions`
 and that removing it uses the real-time feed (Massive acknowledges a real-time key's
 subscription on the delayed feed; whether rows then flow is **UNVERIFIED**); on a pinned host,
-`MassiveConfig.ws_hosts`.
+`MassiveConfig.websocket_hosts`.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or for `poll()` REST 403 or a `DELAYED` label on a subscription not in `MassiveConfig.delayed_subscriptions`), a fatal WebSocket handshake error

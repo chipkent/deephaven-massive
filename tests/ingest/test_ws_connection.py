@@ -278,7 +278,7 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    custom_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
     fake_ws_server.silent.add("T.AAPL")
     quiet = custom_session.query(TRADES, ["AAPL"]).blink()
     custom_session.wait(lambda s: s.opens == 1)
@@ -333,12 +333,12 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
         ),
         (
             # A snapshot without a label (a base Business key's) proves nothing about the
-            # plan: its data may be served on another host, which ws_hosts pins.
+            # plan: its data may be served on another host, which websocket_hosts pins.
             on_host(REALTIME_HOST, "no timeframe in the futures snapshot"),
             (
                 "the futures snapshot carried no recency label, as a Business plan's without "
                 "the trades and quotes expansion does, so the plan may serve this data on "
-                "another host: pin it with MassiveConfig(ws_hosts={dm.AssetClass.FUTURES: "
+                "another host: pin it with MassiveConfig(websocket_hosts={dm.AssetClass.FUTURES: "
                 "\"<host>\"}); if the plan's data is delayed instead, use Massive's delayed "
                 "futures feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
             ),
@@ -374,10 +374,10 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             ),
         ),
         (
-            on_host("futures.example.com", "ws_hosts"),
+            on_host("futures.example.com", "websocket_hosts"),
             (
-                "MassiveConfig.ws_hosts[AssetClass.FUTURES] pins this host; the plan may not "
-                "include this data here"
+                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the plan may "
+                "not include this data here"
             ),
         ),
     ],
@@ -546,7 +546,7 @@ def test_an_index_value_refusal_names_the_business_host(ws_session: WsSession) -
     connection._refused(("V.I:SPX",), "not authorized")
     assert connection._last_error is not None
     assert "index values may need business.massive.com" in connection._last_error
-    assert "ws_hosts[AssetClass.INDICES]" in connection._last_error
+    assert "websocket_hosts[AssetClass.INDICES]" in connection._last_error
     connection.close()
     assert connection.join(TIMEOUT)
 
@@ -799,8 +799,8 @@ def test_sessions_with_equal_settings_share_one_group() -> None:
 # One value differing from the default for each connection setting.
 OTHER_SETTINGS: dict[str, object] = {
     "api_key": "another-key",
-    "ws_hosts": {AssetClass.STOCKS: "pinned.test"},
-    "ack_timeout": 7.0,
+    "websocket_hosts": {AssetClass.STOCKS: "pinned.test"},
+    "subscription_confirmation_timeout": 7.0,
     "reconnect_backoff": 45.0,
     "max_reconnect_backoff": 300.0,
     "max_outage": 60.0,
@@ -1446,7 +1446,7 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: ToPylist,
 ) -> None:
-    custom_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
     result = custom_session.query(TRADES, ["AAPL"]).blink()
     other = custom_session.query(TRADES, ["MSFT"]).blink()
     custom_session.subscribed("T.AAPL", "T.MSFT")
@@ -1499,7 +1499,7 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: ToPylist,
 ) -> None:
-    custom_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
     result = custom_session.query(TRADES, ["AAPL"]).last_by()
     other = custom_session.query(TRADES, ["MSFT"]).last_by()
     custom_session.subscribed("T.AAPL", "T.MSFT")
@@ -1544,7 +1544,7 @@ def test_a_stream_that_never_received_a_row_runs_on_with_its_topic_unacknowledge
 ) -> None:
     # Before the drop and after the reconnect, Massive never confirms MSFT. Its table has no
     # row that could look current, so it keeps running with its no-ack note.
-    custom_session = make_ws_session(ack_timeout=0.05)
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
     result = custom_session.query(TRADES, ["MSFT"]).last_by()
     custom_session.subscribed("T.MSFT")
     connection = custom_session.connection()
@@ -1689,7 +1689,7 @@ def test_a_reconnect_that_drops_before_every_topic_is_acknowledged_keeps_the_out
     ws_session.session.release(other)
 
 
-def test_the_reconnect_deadline_is_the_earliest_held_down_stream_less_the_ack_timeout(
+def test_the_reconnect_deadline_is_the_earliest_held_down_stream_less_the_confirmation_wait(
     *, ws_session: WsSession, fake_ws_server: FakeMassiveServer
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
@@ -1921,7 +1921,7 @@ def test_a_reconnect_keeps_the_one_summary_timer(
 
 
 def test_a_refused_fmv_topic_needs_a_business_plan(ws_session: WsSession) -> None:
-    # FMV is never pinned, so the refusal names the plan, not `ws_hosts`.
+    # FMV is never pinned, so the refusal names the plan, not `websocket_hosts`.
     connection = ws_connection.Connection(
         ws_session.connections.group,
         exec_ctx=ws_session.session._core.exec_ctx,
@@ -1935,7 +1935,7 @@ def test_a_refused_fmv_topic_needs_a_business_plan(ws_session: WsSession) -> Non
     assert connection._last_error is not None
     assert connection._last_error.endswith(
         "fair-market-value (FMV) data needs a Business plan of the currencies subscription; "
-        "MassiveConfig.ws_hosts never applies to it"
+        "MassiveConfig.websocket_hosts never applies to it"
     )
     connection.close()
     assert connection.join(TIMEOUT)

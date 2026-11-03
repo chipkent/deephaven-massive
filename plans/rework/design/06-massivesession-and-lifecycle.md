@@ -41,7 +41,7 @@ Sessions in one process that use the same API key **share their WebSocket connec
 ([section 13.1](13-host-resolution-and-connection-protocol.md#131-invariants)). Individual plans allow one connection per cluster per
 account, so two sessions with connections of their own would knock each other off and both
 stall in `WAITING_SLOT`. Sessions share only when the settings that shape a connection are
-equal: the API key, `ws_hosts`, `ack_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
+equal: the API key, `websocket_hosts`, `subscription_confirmation_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
 `max_outage`, `flush_interval`, and `rest_base_url` (the group's futures schedule calendar reads through any
 of its sessions' REST clients, which must read the same API); they must also run on the same Deephaven update graph, because a
 connection's flush thread enters one execution context for all its streams (a worker normally

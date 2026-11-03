@@ -86,7 +86,7 @@ NO_ACK_RESEND: Final = 60.0
 
 A round sends every such topic in one subscribe frame on the open socket, so it costs the other
 streams nothing; one a minute stays well above the 15 s Massive asks between reconnects. Each
-round awaits its answer for `ack_timeout`, which must therefore be shorter.
+round awaits its answer for `subscription_confirmation_timeout`, which must therefore be shorter.
 """
 
 REALTIME_HOST: Final = "socket.massive.com"
@@ -177,7 +177,7 @@ class MassiveConfig:
             # Stocks streams always from Massive's real-time host, socket.massive.com; at
             # most 4 REST requests or flat-file reads at once.
             pinned = dm.MassiveConfig(
-                ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"},
+                websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"},
                 max_concurrency=4,
             )
             m = dm.MassiveSession(pinned)
@@ -198,8 +198,9 @@ class MassiveConfig:
             An unlisted one is real-time: a stream, or a `fetch()` or `poll()` of current data,
             raises `EntitlementError` naming the line to add when Massive shows the data is
             delayed. Past data and `history()` are never checked. `dm.Subscription.CURRENCIES`
-            cannot be listed and is never refused; FMV streams are real-time only; a `ws_hosts`
-            pin must match. Defaults to an empty set. See README.md#real-time-or-delayed.
+            cannot be listed and is never refused; FMV streams are real-time only; a
+            `websocket_hosts` pin must match. Defaults to an empty set. See
+            README.md#real-time-or-delayed.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no
@@ -211,14 +212,14 @@ class MassiveConfig:
             Basic and paces it from then on. Forex and crypto are one subscription,
             `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
             Defaults to an empty set: every subscription is unpaced until a refusal.
-        ws_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
+        websocket_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
             for example `{dm.AssetClass.STOCKS: "socket.massive.com"}` (Massive's real-time
             feed), instead of letting the library decide from REST evidence. A pin must agree with
             `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
             FMV family is never pinned; it is always `business.massive.com`. Defaults to
             an empty mapping: the library decides every host.
-        ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
-            once. Must be below 60 seconds, the spacing of the later re-sends of
+        subscription_confirmation_timeout: Seconds to wait for a subscription acknowledgement before
+            re-sending it once. Must be below 60 seconds, the spacing of the later re-sends of
             unacknowledged subscriptions, each of which awaits its answer this long.
             Defaults to 5 seconds.
         reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
@@ -294,24 +295,25 @@ class MassiveConfig:
             above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under
             both. `OnError.RAISE` fails the request or stream that received the row, naming the
             spelling, and the dataset has no `RawSymbol`. Defaults to `LOG`.
-        unavailable_symbols: What a `poll()` table does with a symbol it cannot read from
-            Massive: one Massive answers with HTTP 404 (no data), or one whose endpoint does
-            not take an argument the poll sends (such as a crypto pair added to an indicator
-            poll with `adjusted=False`). `OnError.LOG`, the default, leaves the symbol out of
-            each cycle, logs it once at WARNING per session, and lists it in the table's
-            `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or
-            removed, while the other symbols keep polling; a `REPLACE` table drops its rows.
-            `OnError.IGNORE` does the same with nothing logged above DEBUG; `Error` still
-            lists it. `OnError.RAISE` fails the table, naming the symbol and the reason.
-            `fetch()` and `history()` always leave a symbol with no data out, with a WARNING.
-            Defaults to `LOG`.
+        unavailable_symbols: What a read does with a symbol it cannot read from Massive: one
+            Massive answers with HTTP 404 (no data), in `fetch()`, `history()`, or `poll()`,
+            or, in a `poll()`, one whose endpoint does not take an argument the poll sends
+            (such as a crypto pair added to an indicator poll with `adjusted=False`).
+            `OnError.LOG`, the default, leaves the symbol out and logs it once at WARNING per
+            session; `OnError.IGNORE` does the same with nothing logged above DEBUG. Under
+            both, a `poll()` table lists the symbol in its `m.streams()` `Error` (`no rows this
+            cycle for ...`) until it is readable again or removed, while the other symbols keep
+            polling, and a `REPLACE` table drops its rows. `OnError.RAISE` fails the read,
+            naming the symbol and the reason: a `fetch()` or `history()` raises `MassiveError`,
+            one that follows a table marks the symbol `FAILED` in `m.symbol_reads()` and reads
+            the others, and a `poll()` table fails. Defaults to `LOG`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
     s3_access_key_id: str | None = field(default_factory=_env_s3_access_key_id)
     s3_secret_access_key: str | None = field(default_factory=_env_s3_secret_access_key, repr=False)
-    ws_hosts: Mapping[AssetClass, str] = field(default_factory=dict)
-    ack_timeout: float = 5.0
+    websocket_hosts: Mapping[AssetClass, str] = field(default_factory=dict)
+    subscription_confirmation_timeout: float = 5.0
     reconnect_backoff: float = 30.0
     max_reconnect_backoff: float = 120.0
     max_outage: float = 300.0
@@ -329,10 +331,10 @@ class MassiveConfig:
     unavailable_symbols: OnError = OnError.LOG
 
     def __post_init__(self) -> None:
-        """Validate every field; freeze `ws_hosts` and the two subscription sets into copies.
+        """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
         A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, or
-        `unavailable_symbols` that is not a `dm.OnError`, a `ws_hosts` key that is not a
+        `unavailable_symbols` that is not a `dm.OnError`, a `websocket_hosts` key that is not a
         `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
@@ -341,16 +343,16 @@ class MassiveConfig:
         Raises:
             TypeError: If `api_key` is not a `str`.
             AuthenticationError: If no API key was given and none is in the environment.
-            ValueError: If `ack_timeout` is not below 60 seconds, `reconnect_backoff` is
-                below 15 seconds, `max_reconnect_backoff` is below `reconnect_backoff`,
-                `max_outage` is negative or not finite, a timeout, backoff, interval, or count
-                is not positive, only one of the two S3 credentials is set, `api_key` or an S3
-                credential has leading or trailing whitespace (or an S3 credential is blank),
-                `rest_base_url` or `s3_endpoint_url` is not an `http` or `https` URL with a host,
-                `s3_bucket` is blank, a `ws_hosts` value is not a bare lower-case hostname, an
-                environment variable read for a default has leading or trailing whitespace,
-                `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or a `ws_hosts`
-                pin of a delayed host does not match `delayed_subscriptions`.
+            ValueError: If `subscription_confirmation_timeout` is not below 60 seconds,
+                `reconnect_backoff` is below 15 seconds, `max_reconnect_backoff` is below
+                `reconnect_backoff`, `max_outage` is negative or not finite, a timeout, backoff,
+                interval, or count is not positive, only one of the two S3 credentials is set,
+                `api_key` or an S3 credential has leading or trailing whitespace (or an S3
+                credential is blank), `rest_base_url` or `s3_endpoint_url` is not an `http` or
+                `https` URL with a host, `s3_bucket` is blank, a `websocket_hosts` value is not a
+                bare lower-case hostname, an environment variable read for a default has leading or
+                trailing whitespace, `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or
+                a `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
@@ -370,7 +372,12 @@ class MassiveConfig:
                 "flat files need both s3_access_key_id and s3_secret_access_key "
                 "(MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
             )
-        for name in ("ack_timeout", "reconnect_backoff", "max_reconnect_backoff", "flush_interval"):
+        for name in (
+            "subscription_confirmation_timeout",
+            "reconnect_backoff",
+            "max_reconnect_backoff",
+            "flush_interval",
+        ):
             require_positive_number(name, getattr(self, name))
         for name in ("flat_file_symbol_threshold", "max_concurrency"):
             require_positive_int(name, getattr(self, name))
@@ -380,11 +387,12 @@ class MassiveConfig:
                 f"{self.reconnect_backoff:g}: Massive takes roughly 10 to 30 s to release a "
                 "dropped connection, and a sooner retry can be refused for holding it"
             )
-        if self.ack_timeout >= NO_ACK_RESEND:
+        if self.subscription_confirmation_timeout >= NO_ACK_RESEND:
             raise ValueError(
-                f"ack_timeout must be below {NO_ACK_RESEND:g} s, not {self.ack_timeout:g}: "
+                f"subscription_confirmation_timeout must be below {NO_ACK_RESEND:g} s, not "
+                f"{self.subscription_confirmation_timeout:g}: "
                 f"unacknowledged subscriptions are re-sent every {NO_ACK_RESEND:g} s, and each "
-                "re-send awaits its answer for ack_timeout"
+                "re-send awaits its answer for subscription_confirmation_timeout"
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
@@ -396,11 +404,11 @@ class MassiveConfig:
         _check_url("rest_base_url", self.rest_base_url)
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
         _check_bucket(self.s3_bucket)
-        object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
+        object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))
         basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
         object.__setattr__(self, "rest_basic_subscriptions", basic)
         delayed = _validate_subscriptions(self.delayed_subscriptions, "delayed_subscriptions")
-        _check_delayed_subscriptions(delayed, self.ws_hosts)
+        _check_delayed_subscriptions(delayed, self.websocket_hosts)
         object.__setattr__(self, "delayed_subscriptions", delayed)
 
     @classmethod
@@ -474,7 +482,7 @@ class MassiveConfig:
         it, so the text is safe to log (`shown_setting`).
 
         Returns:
-            `"MassiveConfig(s3_access_key_id=None, ws_hosts={}, ...)"`, field by field.
+            `"MassiveConfig(s3_access_key_id=None, websocket_hosts={}, ...)"`, field by field.
         """
         shown = ", ".join(
             f"{f.name}={shown_setting(f.name, getattr(self, f.name))}"
@@ -609,9 +617,9 @@ DELAYED_PREFIX: Final = "delayed."
 
 
 def _check_delayed_subscriptions(
-    delayed: frozenset[Subscription], ws_hosts: Mapping[AssetClass, str]
+    delayed: frozenset[Subscription], websocket_hosts: Mapping[AssetClass, str]
 ) -> None:
-    """Refuse a `delayed_subscriptions` Massive cannot serve, or one a `ws_hosts` pin contradicts.
+    """Refuse a `delayed_subscriptions` Massive cannot serve, or one a host pin contradicts.
 
     A host whose name starts with `delayed.` is a delayed feed: pinning one is asking for
     delayed data, which only a listed subscription may do, and a listed subscription may pin
@@ -619,11 +627,11 @@ def _check_delayed_subscriptions(
 
     Args:
         delayed: The validated `delayed_subscriptions`.
-        ws_hosts: The validated `ws_hosts`.
+        websocket_hosts: The validated `websocket_hosts`.
 
     Raises:
         ValueError: If `delayed` holds `dm.Subscription.CURRENCIES` (Massive has no delayed
-            forex or crypto feed), or `ws_hosts` pins a `delayed.` host for forex or crypto,
+            forex or crypto feed), or `websocket_hosts` pins a `delayed.` host for forex or crypto,
             or for a class whose subscription is not listed, or pins any other host for one
             that is. Each message names both settings and what to change.
     """
@@ -632,26 +640,26 @@ def _check_delayed_subscriptions(
             "delayed_subscriptions cannot hold dm.Subscription.CURRENCIES: Massive has no "
             "delayed forex or crypto feed, so their streams are always real-time"
         )
-    for asset_class, host in ws_hosts.items():
+    for asset_class, host in websocket_hosts.items():
         subscription = subscription_of(asset_class)
         listed = subscription in delayed
         pins_delayed = host.startswith(DELAYED_PREFIX)
         if pins_delayed and subscription is Subscription.CURRENCIES:
             raise ValueError(
-                f"ws_hosts pins {asset_class} to {host}, but Massive has no delayed forex or "
-                "crypto feed; remove the pin"
+                f"websocket_hosts pins {asset_class} to {host}, but Massive has no delayed forex "
+                "or crypto feed; remove the pin"
             )
         if pins_delayed and not listed:
             raise ValueError(
-                f"ws_hosts pins {asset_class} to the delayed feed {host}, but "
+                f"websocket_hosts pins {asset_class} to the delayed feed {host}, but "
                 f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
                 f"to use the delayed feed write {delayed_fix(subscription)}"
             )
         if listed and not pins_delayed:
             raise ValueError(
                 f"delayed_subscriptions lists dm.Subscription.{subscription.name}, "
-                f"whose streams use Massive's delayed feed {DELAYED_HOST}, but ws_hosts pins "
-                f"{asset_class} to {host}; remove one of the two"
+                f"whose streams use Massive's delayed feed {DELAYED_HOST}, but websocket_hosts "
+                f"pins {asset_class} to {host}; remove one of the two"
             )
 
 
@@ -764,37 +772,37 @@ def _check_bucket(value: object) -> None:
         raise ValueError(f"s3_bucket must name a bucket, such as 'flatfiles', not {value!r}")
 
 
-def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
-    """Validate the `ws_hosts` mapping and return a read-only, normalized copy.
+def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, str]:
+    """Validate the `websocket_hosts` mapping and return a read-only, normalized copy.
 
     Args:
-        ws_hosts: The value passed as `MassiveConfig.ws_hosts`.
+        websocket_hosts: The value passed as `MassiveConfig.websocket_hosts`.
 
     Returns:
         A read-only mapping of the hostnames as passed.
 
     Raises:
-        TypeError: If `ws_hosts` is not a mapping, a key is not a `dm.AssetClass`, or a value
+        TypeError: If `websocket_hosts` is not a mapping, a key is not a `dm.AssetClass`, or a value
             is not a `str`.
         ValueError: If a value is not a bare lower-case hostname (a scheme, port, path,
             upper-case letter, or surrounding whitespace is present); nothing is cleaned, and
             a value that would be a hostname once trimmed and lower-cased names that form.
     """
-    if not isinstance(ws_hosts, Mapping):
-        raise TypeError("ws_hosts must be a mapping of dm.AssetClass to hostname")
+    if not isinstance(websocket_hosts, Mapping):
+        raise TypeError("websocket_hosts must be a mapping of dm.AssetClass to hostname")
     hosts: dict[AssetClass, str] = {}
-    for key, value in ws_hosts.items():
-        asset_class = _require_enum(key, AssetClass, "ws_hosts key")
+    for key, value in websocket_hosts.items():
+        asset_class = _require_enum(key, AssetClass, "websocket_hosts key")
         if not isinstance(value, str):
-            raise TypeError(f"ws_hosts[{asset_class}] must be a hostname str")
+            raise TypeError(f"websocket_hosts[{asset_class}] must be a hostname str")
         if value != value.strip().lower() and _HOSTNAME.match(value.strip().lower()):
             raise ValueError(
-                f"ws_hosts[{asset_class}]={value!r} must be written exactly as a lower-case "
+                f"websocket_hosts[{asset_class}]={value!r} must be written exactly as a lower-case "
                 f"hostname; write {value.strip().lower()!r}"
             )
         if not _HOSTNAME.match(value):
             raise ValueError(
-                f"ws_hosts[{asset_class}] must be a bare hostname such as "
+                f"websocket_hosts[{asset_class}] must be a bare hostname such as "
                 f"'delayed.massive.com', got {without_userinfo(value)!r}"
             )
         hosts[asset_class] = value
@@ -802,7 +810,7 @@ def _validate_ws_hosts(ws_hosts: object) -> Mapping[AssetClass, str]:
 
 
 class HostMap(Mapping[AssetClass, str]):
-    """The read-only, hashable `ws_hosts` mapping of a `MassiveConfig`.
+    """The read-only, hashable `websocket_hosts` mapping of a `MassiveConfig`.
 
     `MassiveConfig` is a frozen dataclass compared and hashed by value, so its fields must be
     hashable; a dict or `MappingProxyType` is not. Equal mappings hash equally.
@@ -912,7 +920,7 @@ def _place(file: Path, position: _Position | None) -> str:
 
 _NESTING_LIMIT: Final = 10
 """The deepest a settings file's lists and mappings may nest. A setting needs two levels at
-most (the top-level mapping, and the `ws_hosts` mapping or a subscriptions list in it);
+most (the top-level mapping, and the `websocket_hosts` mapping or a subscriptions list in it);
 PyYAML composes nested nodes by recursion, so a file nested hundreds deep would otherwise end
 in a `RecursionError` instead of a message naming the line."""
 
@@ -1106,7 +1114,7 @@ def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
 
 
 def _hosts(node: yaml.Node) -> dict[AssetClass, str]:
-    """Convert `ws_hosts`: a mapping of asset-class word to hostname.
+    """Convert `websocket_hosts`: a mapping of asset-class word to hostname.
 
     Args:
         node: The value's node.
@@ -1220,8 +1228,8 @@ def _text(node: yaml.Node) -> str:
 
 
 _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
-    "ws_hosts": _hosts,
-    "ack_timeout": _seconds,
+    "websocket_hosts": _hosts,
+    "subscription_confirmation_timeout": _seconds,
     "reconnect_backoff": _seconds,
     "max_reconnect_backoff": _seconds,
     "max_outage": _seconds,

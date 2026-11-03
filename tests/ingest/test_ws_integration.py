@@ -159,7 +159,7 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
     Massive refused the stream; the evidence quotes its text, which the error message shows.
     """
     config = dm.MassiveConfig(
-        api_key=delayed_key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
+        api_key=delayed_key, websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
     )
     errors = _subscribe_minute_bars(
         config,

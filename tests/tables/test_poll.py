@@ -1959,21 +1959,13 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
     assert any("no data for 1 [MSFT]" in r.getMessage() for r in caplog.records)
-    # The quiet poll never uses up the WARNING a later fetch() of the symbol owes.
+    # A fetch() of the same session follows the same setting: the symbol is left out quietly.
     caplog.clear()
     fetched = build_query(ignoring_session._core, SMA, symbols=["MSFT"])
     assert isinstance(fetched, Query)
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
         fetched.fetch()
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (
-            logging.WARNING,
-            (
-                "indicators.sma: no data for 1 [MSFT]: Massive answered HTTP 404 from "
-                "/v1/indicators/sma/{stockTicker}, so they are left out"
-            ),
-        )
-    ]
+    assert caplog.records == []
 
 
 def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(

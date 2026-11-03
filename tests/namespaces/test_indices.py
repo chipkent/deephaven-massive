@@ -901,7 +901,7 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
     assert (
         "socket.test/indices refused the subscription to V.I:SPX; Massive said: not authorized"
     ) in message
-    assert "MassiveConfig.ws_hosts[AssetClass.INDICES]" in message
+    assert "MassiveConfig.websocket_hosts[AssetClass.INDICES]" in message
     assert "business.massive.com" in message
     assert [type(error) for error in failures] == [dm.EntitlementError]
     del result

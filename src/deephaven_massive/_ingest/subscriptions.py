@@ -160,19 +160,19 @@ class Subscriptions:
     and so not on the wire meanwhile: the wildcard may go at any time, and a static contract
     must never be deferred then.
 
-    Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
-    an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`
-    (the topic's data may be missing; `no_ack` lists them, and the connection shows them in
-    its streams' `Error`). Once the step in flight has resolved, one WARNING per step counts
-    its `NO_ACK` topics. The topic stays wanted and on the wire, and every `NO_ACK_RESEND`
-    seconds one round re-sends all `NO_ACK` topics together in one subscribe frame, until each
-    is acknowledged, leaves the wire, or the generation ends. A step and a round never await
-    answers together: a round waits while a step is in flight, and a step waits while a round
-    awaits its answer (for `ack_timeout`). An acknowledgement naming no topic is credited to
-    the step in flight, else to the round awaiting its answer, else to the latest step's
-    `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming no topic
-    fails streams, so it is credited only when exactly one topic on the connection awaits an
-    answer (`_refuse_status`); any other is logged and fails nothing. An acknowledgement that
+    Each subscribed topic has a watchdog bound to its generation. After
+    `subscription_confirmation_timeout` without an acknowledgement it re-sends the topic alone;
+    after another it marks the topic `NO_ACK` (the topic's data may be missing; `no_ack` lists them,
+    and the connection shows them in its streams' `Error`). Once the step in flight has resolved,
+    one WARNING per step counts its `NO_ACK` topics. The topic stays wanted and on the wire, and
+    every `NO_ACK_RESEND` seconds one round re-sends all `NO_ACK` topics together in one subscribe
+    frame, until each is acknowledged, leaves the wire, or the generation ends. A step and a round
+    never await answers together: a round waits while a step is in flight, and a step waits while a
+    round awaits its answer (for `subscription_confirmation_timeout`). An acknowledgement naming no
+    topic is credited to the step in flight, else to the round awaiting its answer, else to the
+    latest step's `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming
+    no topic fails streams, so it is credited only when exactly one topic on the connection awaits
+    an answer (`_refuse_status`); any other is logged and fails nothing. An acknowledgement that
     arrives later clears `NO_ACK`. The connection is never reconnected for it: a reconnect
     would cut every other stream on the connection over one late answer. A watchdog whose
     topic has left the wire or whose generation has ended does nothing more.
@@ -187,7 +187,7 @@ class Subscriptions:
             subscriptions = Subscriptions(
                 client,
                 call_later=client.loop.call_later,
-                ack_timeout=5.0,
+                subscription_confirmation_timeout=5.0,
                 cap=None,
                 on_refused=lambda topics, message: None,
                 on_change=lambda: None,
@@ -201,7 +201,7 @@ class Subscriptions:
         sender: Sender,
         *,
         call_later: Callable[..., Timer],
-        ack_timeout: float,
+        subscription_confirmation_timeout: float,
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
         on_change: Callable[[], None],
@@ -212,14 +212,15 @@ class Subscriptions:
             sender: The client, for its sending methods.
             call_later: Schedules a watchdog: `call_later(delay, callback, *args)` returning a
                 cancellable handle (the loop's `call_later`).
-            ack_timeout: Seconds to wait for each acknowledgement (`MassiveConfig.ack_timeout`).
+            subscription_confirmation_timeout: Seconds to wait for each acknowledgement
+                (`MassiveConfig.subscription_confirmation_timeout`).
             cap: The most explicit topics on the wire (1,000 for `/options`), or None.
             on_refused: Called with refused topics and the server's message.
             on_change: Called after every change of the counts or the deferred topics.
         """
         self._sender = sender
         self._call_later = call_later
-        self._ack_timeout = ack_timeout
+        self._subscription_confirmation_timeout = subscription_confirmation_timeout
         self._cap = cap
         self._on_refused = on_refused
         self._on_change = on_change
@@ -238,7 +239,7 @@ class Subscriptions:
         # The topics of the latest step, which a late acknowledgement naming no topic is
         # credited to once the step has resolved, until a re-send goes out; the `NO_ACK` topics
         # of the re-send that awaits an answer, with the timer that ends the wait after
-        # `ack_timeout`; and the timer of the next round of re-sends.
+        # `subscription_confirmation_timeout`; and the timer of the next round of re-sends.
         self._step: frozenset[str] = frozenset()
         self._resend: frozenset[str] = frozenset()
         self._resend_timer: Timer | None = None
@@ -593,7 +594,7 @@ class Subscriptions:
     # --- watchdogs -----------------------------------------------------------------------------
 
     def _arm(self, topic: str, generation: int, *, attempt: int) -> None:
-        """Start a topic's watchdog, which fires after `ack_timeout`.
+        """Start a topic's watchdog, which fires after `subscription_confirmation_timeout`.
 
         Args:
             topic: The topic just sent.
@@ -602,7 +603,7 @@ class Subscriptions:
         """
         self._cancel(topic)
         self._watchdogs[topic] = self._call_later(
-            self._ack_timeout, self._fire, topic, generation, attempt
+            self._subscription_confirmation_timeout, self._fire, topic, generation, attempt
         )
 
     def _cancel(self, topic: str) -> None:
@@ -647,11 +648,11 @@ class Subscriptions:
         """Re-send every `NO_ACK` topic still on the wire, together in one subscribe frame.
 
         Runs every `NO_ACK_RESEND` seconds while any topic is in `NO_ACK`. While a step is in
-        flight, or the previous round still awaits its answer, the round waits `ack_timeout`
-        and tries again, so the two never await answers
-        together. A sent round awaits its answer for `ack_timeout` (`_resend_unanswered`),
-        during which no step goes out, and makes the latest step's topics no longer the
-        target of a late acknowledgement naming no topic.
+        flight, or the previous round still awaits its answer, the round waits
+        `subscription_confirmation_timeout` and tries again, so the two never await answers
+        together. A sent round awaits its answer for `subscription_confirmation_timeout`
+        (`_resend_unanswered`), during which no step goes out, and makes the latest step's topics no
+        longer the target of a late acknowledgement naming no topic.
 
         Args:
             generation: The generation the round is bound to; a later one ignores it.
@@ -670,7 +671,9 @@ class Subscriptions:
                 generation,
                 len(due),
             )
-            self._round = self._call_later(self._ack_timeout, self._resend_round, generation)
+            self._round = self._call_later(
+                self._subscription_confirmation_timeout, self._resend_round, generation
+            )
             return
         logger.debug(
             "generation %d: re-sending the subscribe of %s, still unacknowledged",
@@ -680,14 +683,17 @@ class Subscriptions:
         self._sender.subscribe(generation, due)
         self._step = frozenset()
         self._resend = frozenset(due)
-        self._resend_timer = self._call_later(self._ack_timeout, self._resend_unanswered)
+        self._resend_timer = self._call_later(
+            self._subscription_confirmation_timeout, self._resend_unanswered
+        )
         self._round = self._call_later(NO_ACK_RESEND, self._resend_round, generation)
 
     def _resend_unanswered(self) -> None:
-        """A round of re-sends got no complete answer within `ack_timeout`: stop awaiting one.
+        """Stop awaiting the answer to a round of re-sends that got none in time.
 
-        Any answer that resolves the round's last topic cancels this timer, so it runs only
-        while the round still awaits one. A step held back meanwhile goes out now.
+        It runs `subscription_confirmation_timeout` after the round was sent. Any answer that
+        resolves the round's last topic cancels this timer, so it runs only while the round
+        still awaits one. A step held back meanwhile goes out now.
         """
         self._resend_timer = None
         self._resend = frozenset()
@@ -714,7 +720,7 @@ class Subscriptions:
             "NoAckTopics of m.connections() and in their streams' Error, and the connection is "
             "not reconnected for them",
             self.generation,
-            2 * self._ack_timeout,
+            2 * self._subscription_confirmation_timeout,
             bounded_list(sorted(self._unreported)),
             NO_ACK_RESEND,
         )

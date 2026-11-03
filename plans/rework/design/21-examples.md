@@ -53,13 +53,13 @@ fmv = m.stocks.fmv(dm.ALL).last_by()                        # FMV family -> busi
 bars = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
     # TICK family: socket.massive.com. With a Full Market expansion the snapshot carries
     # last_trade.timeframe=REAL-TIME; without one it carries no timeframe, and a refusal from
-    # Massive names ws_hosts.
+    # Massive names websocket_hosts.
 xfmv = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).append_only() # business.massive.com/crypto
 es = m.futures.quotes(["ESZ5"]).last_by()                   # /futures; per-venue plans receive
                                                             # their venue on the same path
 
 # If your expansion is served from a different host, pin the TICK family. FMV is never pinned.
-m2 = dm.MassiveSession(dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}))
+m2 = dm.MassiveSession(dm.MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}))
 ```
 
 **4. Flat-file history (static results only, so `with` is right).**

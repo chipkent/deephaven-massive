@@ -10,7 +10,7 @@ first connection, and never by opening a connection to try:
 
 - the FMV family is always `business.massive.com`, real-time only, so a subscription listed as
   delayed refuses it;
-- a TICK host pinned in `MassiveConfig.ws_hosts` is used as is (the configuration has checked
+- a TICK host pinned in `MassiveConfig.websocket_hosts` is used as is (the configuration has checked
   it against `delayed_subscriptions`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
   delayed feed, so no answer from Massive changes the host;
@@ -133,7 +133,7 @@ def unlabelled(evidence: str) -> bool:
 
     Such a snapshot proves nothing about the plan: a base Business key's (without the trades
     and quotes expansion) carries none, and its plan may serve the class's streams on another
-    host than the real-time one, so a refusal's message names `MassiveConfig.ws_hosts`.
+    host than the real-time one, so a refusal's message names `MassiveConfig.websocket_hosts`.
 
     Args:
         evidence: The decision's evidence, such as `"no timeframe in the stocks snapshot"`.
@@ -185,16 +185,16 @@ def recency_of(host: str) -> Recency:
     return Recency.UNKNOWN
 
 
-def _ws_hosts_hint(asset_class: AssetClass) -> str:
+def _websocket_hosts_hint(asset_class: AssetClass) -> str:
     """Return the configuration that pins the class's host, for log messages.
 
     Args:
         asset_class: The class.
 
     Returns:
-        For example `MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "<host>"})`.
+        For example `MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "<host>"})`.
     """
-    return f'MassiveConfig(ws_hosts={{dm.AssetClass.{asset_class.name}: "<host>"}})'
+    return f'MassiveConfig(websocket_hosts={{dm.AssetClass.{asset_class.name}: "<host>"}})'
 
 
 def _real_time(asset_class: AssetClass, evidence: str) -> HostDecision:
@@ -227,7 +227,7 @@ def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecisi
         asset_class.value,
         evidence,
         REALTIME_HOST,
-        _ws_hosts_hint(asset_class),
+        _websocket_hosts_hint(asset_class),
     )
     return HostDecision(REALTIME_HOST, Recency.REALTIME, evidence)
 
@@ -272,14 +272,14 @@ def decide(
     asset_class: AssetClass,
     family: ChannelFamily,
     *,
-    ws_hosts: Mapping[AssetClass, str],
+    websocket_hosts: Mapping[AssetClass, str],
     delayed_subscriptions: AbstractSet[Subscription],
     fetch: Callable[[SnapshotProbe], SnapshotAnswer],
 ) -> HostDecision:
     """Decide the WebSocket host of an asset class and channel family.
 
     The rules, in order: the FMV family is `business.massive.com`; a TICK host pinned in
-    `ws_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
+    `websocket_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
     uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
     drops the per-ticker rows that carry an `error` (a ticker the plan does not include counts
@@ -294,7 +294,7 @@ def decide(
     Args:
         asset_class: The class of the stream.
         family: Its channel family.
-        ws_hosts: `MassiveConfig.ws_hosts`, the pinned TICK hosts.
+        websocket_hosts: `MassiveConfig.websocket_hosts`, the pinned TICK hosts.
         delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
         fetch: Makes the probe's request and returns its envelope status and raw JSON rows.
             It raises the public errors of the REST transport: `AuthenticationError`,
@@ -324,9 +324,9 @@ def decide(
         return HostDecision(
             BUSINESS_HOST, Recency.REALTIME, "FMV is Business-only; fixed host (docs)"
         )
-    pinned = ws_hosts.get(asset_class)
+    pinned = websocket_hosts.get(asset_class)
     if pinned is not None:
-        return HostDecision(pinned, recency_of(pinned), "ws_hosts")
+        return HostDecision(pinned, recency_of(pinned), "websocket_hosts")
     if asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
         return HostDecision(
             REALTIME_HOST, Recency.REALTIME, "single documented host; Starter is real-time"

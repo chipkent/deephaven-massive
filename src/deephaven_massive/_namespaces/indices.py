@@ -192,8 +192,9 @@ class _Indices(Namespace):
         `history()` reads the flat files only (it needs S3 credentials;
         `source=dm.HistorySource.REST` raises `ValueError`); an index's current level is in
         `snapshots(symbols)`. If the session's indices stream host refuses the `V` topic, the stream
-        fails with `EntitlementError` naming the host, `MassiveConfig.ws_hosts[AssetClass.INDICES]`,
-        and `business.massive.com`, the host Massive documents for index values.
+        fails with `EntitlementError` naming the host,
+        `MassiveConfig.websocket_hosts[AssetClass.INDICES]`, and `business.massive.com`, the host
+        Massive documents for index values.
 
         Args:
             symbols: Indices with the `I:` prefix, such as `"I:SPX"` (`"SPX"` is refused), or
