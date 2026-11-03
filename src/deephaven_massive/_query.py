@@ -692,9 +692,10 @@ class QueryBase:
         previous day's bar; the other datasets of the same kind and asset class that serve the
         verb (a stream's one-row dataset, such as `stocks.last_trade` for `fetch()` of
         `stocks.trades`, and back); for `fetch()` or `poll()`, the class's `snapshots` dataset,
-        the current state on a paid plan; for `history()` of a dataset with a time axis, its
-        `start=` and `end=` arguments; for a stream verb of bars that do not stream, the
-        timespans that do.
+        the current state on a paid plan, with its `Fmv` column named for a fair market value
+        dataset, since Massive's REST serves fair market value only there; for `history()` of
+        a dataset with a time axis, its `start=` and `end=` arguments; for a stream verb of bars
+        that do not stream, the timespans that do.
 
         Args:
             verb: The missing verb's name, one of `_VERBS`.
@@ -723,7 +724,14 @@ class QueryBase:
             return f"use {siblings}"
         snapshots = by_name.get(f"{spec.name.partition('.')[0]}.snapshots")
         if verb in ("fetch", "poll") and snapshots is not None:
-            return f"for each symbol's current state use m.{snapshots.name}(...).{verb}()"
+            # Massive's REST serves fair market value only as a column of the snapshot.
+            fair_value = (
+                spec.kind == "fmv"
+                and "Fmv" in self._core.catalog.dataset_schema(snapshots).column_names
+            )
+            what = "fair market value" if fair_value else "state"
+            column = ", its Fmv column" if fair_value else ""
+            return f"for each symbol's current {what} use m.{snapshots.name}(...).{verb}(){column}"
         if verb == "history" and spec.time_axis is not None:
             return f"pass start= and end= to m.{spec.name}(...) instead"
         if verb in _STREAM_VERBS and spec.is_bars and spec.has_channels:

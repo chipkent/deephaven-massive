@@ -586,6 +586,18 @@ def test_a_missing_verb_without_a_sibling_names_what_else_serves(
         "last_by(), history(); for each symbol's current state use "
         "m.options.snapshots(...).fetch()"
     )
+    # Massive's REST has no fair market value endpoint: the snapshot's Fmv column carries it.
+    for asset_class, symbol in (
+        ("stocks", "AAPL"),
+        ("options", "O:AAPL250117C00150000"),
+        ("forex", "C:EURUSD"),
+        ("crypto", "X:BTCUSD"),
+    ):
+        assert _missing(getattr(m, asset_class).fmv(symbol), "fetch") == (
+            f"{asset_class}.fmv has no fetch(); its verbs are blink(), append_only(), ring(), "
+            f"last_by(); for each symbol's current fair market value use "
+            f"m.{asset_class}.snapshots(...).fetch(), its Fmv column"
+        )
     assert _missing(m.stocks.dividends("AAPL"), "history") == (
         "stocks.dividends has no history(); its verbs are fetch(), poll(); pass start= and end= "
         "to m.stocks.dividends(...) instead"
