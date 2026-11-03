@@ -186,7 +186,12 @@ from under it and requires the crypto stream to reconnect, return to `RUNNING`, 
 trades, recording any `WAITING_SLOT` on the way; one reads AAPL's minute bars from the previous
 trading day through today on `AUTO` and on REST, before today's flat file exists, and requires
 the same minutes from both, no day missing or doubled, recording `AUTO`'s warning that it
-filled days from REST (it needs Stocks Starter and the S3 credentials).
+filled days from REST (it needs Stocks Starter and the S3 credentials). A third,
+`test_a_crypto_stream_follows_its_watchlist` in `tests/ingest/test_ws_integration.py`, is the
+live check of a watchlist: it streams crypto trades from an input table, adds `X:ETHUSD`,
+deletes it, and adds it again, and requires a row after each add, the row and the stream's
+`Symbols` entry gone after the delete, and no row from before the re-add (Currencies Starter;
+each step waits at most 60 s).
 
 Two checks are about a delayed plan's labels. The past-data check records the envelope status
 Massive gives AAPL's previous day bar, and counts only when that status is `DELAYED`: on a key
@@ -222,11 +227,11 @@ plan keeps its access to the month's end ([S4], [S5]).
 | Plans | Per month | What it settles |
 |---|---|---|
 | Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, whether past stock data (the previous day's bar, a day's open and close) reads on the default configuration though Massive labels it `DELAYED`, the futures session labels around the 17:00 Chicago roll and Good Friday; the futures spread ticker forms of every venue, how Massive writes a futures contract's year (one digit or two), the crypto ticker list's currencies, whether `fetch()` of futures contracts follows a live table of product codes (a code added lands, a code deleted leaves); plus the 429 text, the rate buckets, whether a market-filtered ticker lookup is charged to its class, how a spent minute frees its requests, and whether a learned limit outlives the key's sessions |
-| Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
+| Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, the watchlist follow, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds whether a delayed plan's option chain says `DELAYED` (its envelope status or `last_trade.timeframe`, which `fetch()` and `poll()` refuse unless options are listed in `delayed_subscriptions`; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file), and whether `fetch()` of the option chain follows a live table of underlyings (an underlying added lands, one deleted leaves) |
 | Stocks Starter | $29 | adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
-| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, and live cattle (where each session and longer bar falls, the 2-session grid, and clipping at `{from}`): most of the open questions |
+| the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields and envelope status (whether a delayed futures plan's REST answers say `DELAYED`, the only futures evidence of a delayed plan the library reads, for streams and for `fetch()` and `poll()` alike; **UNVERIFIED**, and only on Starter or Developer: a real-time plan skips it), its ticker location, the streamed futures dates and one-second bar ends, and the futures bar buckets of ES, corn, live cattle, and Micro Bitcoin (where each session and longer bar falls, the 2-session grid, whether any session opens on a Friday evening or a Saturday, and clipping at `{from}`): most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), with `s3`, whether an index minute file holds exactly its New York day (`I:AAVE100`, which updates around the clock, against its REST minutes) and the day windows and file agreement of about ten indices over recent days, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Options Developer | $79 | adds option bars across NVDA's 2024 split under both bases (whether `adjusted=true` adjusts option bars for the underlying's split) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
@@ -333,11 +338,13 @@ uv run pytest -m integration tests/namespaces/test_indices_integration.py -k min
   minute files have gaps or other prices; (c) whether `I:AAVE100`'s wrong values (a day file
   in no window, or other minute prices) are an isolated case.
 - **Futures bar buckets** (`test_futures_bar_buckets_against_the_bars_inside_them`, in the main
-  run; it needs Futures Starter): for ES, corn, and live cattle over the most recent whole
-  month, where each 1-session bar's `window_start` falls against its first minute bar, whether
-  2-session bars follow a fixed grid, the day 1-week bars start on, whether each longer bar
-  holds exactly the whole sessions that start in its UTC days, and whether a 2-month bar read
-  from inside its bucket is clipped at `{from}`. It sends about 30 REST requests; its
+  run; it needs Futures Starter): for ES, corn, live cattle, and Micro Bitcoin over the most
+  recent whole month, where each 1-session bar's `window_start` falls against its first minute
+  bar, whether any session opens on a Friday evening or a Saturday (the UTC days 1-session bars
+  start on and their labels' weekdays), whether 2-session bars follow a fixed grid, the day
+  1-week bars start on, whether each longer bar holds exactly the whole sessions that start in
+  its UTC days, and whether a 2-month bar read from inside its bucket is clipped at `{from}`.
+  It sends about 40 REST requests; its
   `VERDICT` lines answer each question per contract.
 
 To run these two alone:
@@ -353,7 +360,8 @@ can be diagnosed afterwards without another live run. Once the run's tests are c
 before any of them opens a session, it creates a new folder for the run,
 `live-debug-logs/<UTC time>-<process id>/`, and logs to `debug.log` inside it; git ignores the
 folder. The last lines of the run, under "live debug log", give the log's full path: send that
-file with a report of any failure. A run of unit tests only writes no log.
+file with a report of any failure. A run of unit tests only writes no log, and a run whose live
+tests opened no session (each skipped, say, for want of a key) removes its empty folder.
 
 The log never holds a secret: the library keeps the API key and the S3 pair out of every line,
 and the run checks anyway, scanning the folder for each secret set in its environment. If one
@@ -412,8 +420,11 @@ Monday to Thursday evening that is itself a full trading day. Holidays and early
 from the exchanges' fixed rules and from the closures Massive's market status lists as
 upcoming, which each probe reads. A night never shares a day with a stream day. That evening
 no other group starts from 16:15, and one still running is stopped then; a child that dies is
-started again, up to five times, until 09:00. The night writes what a stream day writes (rows
-by hour, per-minute counts, latency, samples, gaps), and at its end:
+started again, up to five times, until 09:00. No other group starts from 16:30 until 09:00 the
+next morning, even when the night's child has stopped for good. A night whose child has used
+its five starts is over: the next probe, even the morning's before 09:30, plans the next
+night. The night writes what a stream day writes (rows by hour, per-minute counts, latency,
+samples, gaps), and at its end:
 
 - `hours.csv`, the rows of each stream per UTC hour;
 - `boundaries.csv`, the rows within 90 minutes before and after the 16:00 Chicago close
@@ -427,8 +438,11 @@ market was open went without a row (futures pause from 16:00 to 17:00 Chicago ti
 never closes), or a row near a boundary carries the wrong `Date`. The next day,
 `stream-night-reconcile` compares the night's minute bars with REST history of both dates,
 kept to the night's hours, over the whole night and within 90 minutes on each side of each
-boundary; a bar whose `Date` differs from history's fails its unit. `status` shows the next
-stream night, and `REPORT.md` in each zip has a section per night.
+boundary. A futures bar whose `Date` differs from history's fails its unit, and so does a crypto
+bar, on either side, whose `Date` is not the UTC date of its start. Each unit is compared with
+the night it passed in, so a reconciliation that runs late, after the next night, still reads
+the right night: one night per run, the oldest first. `status` shows the next stream night, and
+`REPORT.md` in each zip has a section per night.
 
 Each group runs in a child process, with the probed plans in `MASSIVE_LIVE_PLANS`, the
 library's debug log in the attempt's folder (`<group>/<date>-<n>/debug.log`), and a pytest

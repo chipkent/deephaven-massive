@@ -104,11 +104,9 @@ class Request:
             underscores), sorted by name. Each value is the one sent, as
             `filters.check_filters` parsed it: ISO-8601 text of a date or timestamp parameter
             is held as a `date` or an aware `datetime`, never as the text.
-        limit: The cap on each named symbol's rows across pages, or on the total rows without
-            named symbols (`ALL`, or None), or None for every row. It is not a wire parameter:
-            the page size is internal (`DatasetSpec.page_size`), and the REST transport sends
-            one request per named symbol under it and stops paging once `limit` rows have
-            arrived.
+        limit: The cap on the total number of rows across pages, or None for every row. It is
+            not a wire parameter: the page size is internal (`DatasetSpec.page_size`), and
+            the REST transport stops paging once `limit` rows have arrived.
         value_table: The table passed where the dataset takes one value (`ValueTable`), or
             None. Its parameter is then absent from `params`: each verb reads the table's
             values and sends each one through `for_value`.

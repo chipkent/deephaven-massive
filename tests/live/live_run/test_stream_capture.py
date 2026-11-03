@@ -498,6 +498,15 @@ def test_a_recorder_with_nothing_writes_nothing(tmp_path: Path) -> None:
     assert not (tmp_path / "latency.csv").exists()
 
 
+def test_a_csv_written_again_holds_only_the_new_rows(tmp_path: Path) -> None:
+    path = tmp_path / "hours.csv"
+    stream_capture.write_csv(path, [{"hour": "22", "rows": 1}])
+    stream_capture.write_csv(path, [{"hour": "22", "rows": 1}, {"hour": "23", "rows": 2}])
+    assert path.read_text() == "hour,rows\n22,1\n23,2\n"
+    stream_capture.write_csv(path, [])
+    assert not path.exists()
+
+
 # --- gaps -----------------------------------------------------------------------------------
 
 

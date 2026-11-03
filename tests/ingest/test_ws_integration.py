@@ -19,6 +19,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
+from deephaven import dtypes, input_table, new_table
+from deephaven import update_graph as dh_update_graph
+from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
@@ -29,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from typing import TypeAlias
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
 pytestmark = pytest.mark.integration
@@ -53,6 +57,10 @@ this long after the session opens."""
 
 _RECOVERY_WAIT = 120.0
 """Seconds the reconnect check waits for the stream to deliver rows again after the drop."""
+
+_FOLLOW_WAIT = 60.0
+"""Seconds the watchlist check waits for each step: a pair's first trade, or a row's leaving.
+Bitcoin and Ether trade every few seconds at any hour."""
 
 
 class _Socket(Protocol):
@@ -79,6 +87,26 @@ def _wait_for_state(
         if any(r["State"] in states for r in rows) or time.monotonic() >= deadline:
             return rows
         pause.wait(0.5)
+
+
+def _wait_until(
+    read: Callable[[], list[dict[str, Any]]],
+    done: Callable[[list[dict[str, Any]]], bool],
+    *,
+    wait: float = _FOLLOW_WAIT,
+) -> list[dict[str, Any]]:
+    """Read rows until `done` accepts them, or until `wait` seconds have passed.
+
+    Returns:
+        The last rows read, which the caller checks again, so a timeout fails with them.
+    """
+    pause = threading.Event()  # never set; only paces the polling
+    deadline = time.monotonic() + wait
+    while True:
+        rows = read()
+        if done(rows) or time.monotonic() >= deadline:
+            return rows
+        pause.wait(0.25)
 
 
 def _subscribe_minute_bars(
@@ -315,3 +343,75 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     for line in stream_report(live_session):
         evidence(f"    {line}")
     live_session.release(first)
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.timeout(330)
+def test_a_crypto_stream_follows_its_watchlist(
+    live_session: dm.MassiveSession,
+    *,
+    dh_exec_ctx: ExecutionContext,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """Whether a stream subscribes and unsubscribes as rows of its watchlist come and go.
+
+    Streams `m.crypto.trades(watchlist).last_by()` from a keyed input table holding `X:BTCUSD`,
+    then adds `X:ETHUSD`, deletes it, and adds it again, as a user typing in the web UI would.
+    Crypto trades all the time, so each step waits at most 60 s. Passes when `X:ETHUSD` gets a
+    row after it is added and joins the stream's `Symbols` in `m.streams()`; its row leaves the
+    table and `Symbols` drops it once it is deleted, with `X:BTCUSD` still streaming; and after
+    it is added again, the table shows no row of it from before (each `X:ETHUSD` row was
+    received after the re-add) until a new trade arrives. A failure here means a watchlist edit
+    did not reach Massive, or a deleted pair's row outlived its subscription.
+    """
+    btc, eth = "X:BTCUSD", "X:ETHUSD"
+    with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watchlist.add(new_table([string_col("Symbol", [btc])]))
+    board = live_session.crypto.trades(watchlist).last_by()
+
+    def board_rows() -> list[dict[str, Any]]:
+        return table_rows(board)
+
+    def symbols() -> str:
+        (stream,) = [
+            r for r in table_rows(live_session.streams()) if r["Dataset"] == "crypto.trades"
+        ]
+        return str(stream["Symbols"])
+
+    def pairs(rows: list[dict[str, Any]]) -> set[str]:
+        return {str(r["Symbol"]) for r in rows}
+
+    first = _wait_until(board_rows, lambda rows: btc in pairs(rows))
+    evidence(f"{btc} first row: {btc in pairs(first)}; Symbols {symbols()!r}")
+    assert btc in pairs(first), f"no {btc} trade arrived in {_FOLLOW_WAIT:.0f} s"
+
+    watchlist.add(new_table([string_col("Symbol", [eth])]))
+    added = _wait_until(board_rows, lambda rows: eth in pairs(rows) and eth in symbols())
+    shown = symbols()
+    evidence(f"after adding {eth}: pairs {sorted(pairs(added))}; Symbols {shown!r}")
+    assert eth in pairs(added), f"no {eth} row arrived in {_FOLLOW_WAIT:.0f} s after adding it"
+    assert eth in shown, f"m.streams() Symbols does not list {eth}: {shown!r}"
+
+    watchlist.delete(new_table([string_col("Symbol", [eth])]))
+    deleted = _wait_until(board_rows, lambda rows: eth not in pairs(rows) and symbols() == btc)
+    shown = symbols()
+    evidence(f"after deleting {eth}: pairs {sorted(pairs(deleted))}; Symbols {shown!r}")
+    assert eth not in pairs(deleted), f"the {eth} row stayed after its watchlist row was deleted"
+    assert shown == btc, f"m.streams() Symbols still reads {shown!r}"
+    assert btc in pairs(deleted), f"{btc} lost its row when {eth} was deleted"
+
+    readded_at = time.time_ns()
+    watchlist.add(new_table([string_col("Symbol", [eth])]))
+    at_once = [r for r in board_rows() if r["Symbol"] == eth]
+    again = _wait_until(board_rows, lambda rows: eth in pairs(rows))
+    rows = [r for r in again if r["Symbol"] == eth]
+    stale = [r for r in at_once + rows if int(r["TimestampInsert"]) <= readded_at]
+    for line in stream_report(live_session):
+        evidence(line)
+    evidence(f"after re-adding {eth}: rows at once {len(at_once)}; later {len(rows)}")
+    live_session.release(board)
+    assert not stale, f"the table showed an {eth} row from before the re-add: {stale}"
+    assert rows, f"no new {eth} trade arrived in {_FOLLOW_WAIT:.0f} s after re-adding it"

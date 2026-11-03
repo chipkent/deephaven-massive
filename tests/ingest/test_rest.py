@@ -89,18 +89,6 @@ DIVIDENDS = DatasetSpec(
     page_size=1000,
     symbols_per_request=2,
 )
-STATEMENTS_PATH = "/stocks/financials/v1/balance-sheets"
-STATEMENTS = DatasetSpec(
-    summary="A dataset for the tests.",
-    name="stocks.financials.balance_sheets",
-    asset_class=AssetClass.STOCKS,
-    fetch_path=STATEMENTS_PATH,
-    symbol_param="tickers.any_of",
-    symbols_overlap=True,
-    poll_keys=("Cik", "FiscalQuarter"),
-    nullable_poll_keys={"FiscalQuarter": "empty on an annual statement"},
-    page_size=10_000,
-)
 CRYPTO_LAST_PATH = "/v1/last/crypto/{from}/{to}"
 CRYPTO_LAST = DatasetSpec(
     summary="A dataset for the tests.",
@@ -341,7 +329,6 @@ UNIFIED = DatasetSpec(
 )
 SPECS = (
     UNIFIED,
-    STATEMENTS,
     DIVIDENDS,
     MIXED,
     CRYPTO_LAST,
@@ -1708,69 +1695,24 @@ def test_a_list_symbol_parameter_without_a_limit_takes_every_symbol_at_once(
     assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["I:DJI,I:NDX,I:SPX"]]
 
 
-def dividends_of(ticker: str, count: int) -> list[dict[str, object]]:
-    # `count` dividends of one ticker, each with its own id.
-    return [{**AAPL_DIVIDEND, "ticker": ticker, "id": f"{ticker}{n}"} for n in range(count)]
-
-
-def test_limit_caps_each_named_symbol_s_rows_on_a_list_symbol_parameter(
+def test_a_list_symbol_parameter_under_a_limit_still_takes_every_symbol_at_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Sent together, B's rows would fill a shared cap of 2 before A's or C's arrived. Under a
-    # `limit`, each named ticker is its own request with its own cap.
-    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(dividends_of("B", 4) + dividends_of("A", 3))))
-    for ticker, count in (("A", 3), ("B", 4), ("C", 3)):
-        fake_rest.reply(
-            f"{DIVIDENDS_PATH}?limit=2&ticker.any_of={ticker}",
-            Reply(envelope(dividends_of(ticker, count))),
-        )
-    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
-    assert sorted(row["Symbol"] for row in out) == ["A", "A", "B", "B", "C", "C"]
+    # `limit` is Massive's cap on the request's total rows, so the named symbols share one
+    # request and one cap instead of a request each.
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
+    fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:NDX", "I:DJI"], limit=2)
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["I:DJI,I:NDX,I:SPX"]]
+
+
+def test_limit_caps_rows_across_requests(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
+    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
+    assert len(out) == 3
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
-    assert sorted((q["ticker.any_of"], q["limit"]) for _, q in fake_rest.get_queries()) == [
-        (["A"], ["2"]),
-        (["B"], ["2"]),
-        (["C"], ["2"]),
-    ]
-
-
-@pytest.mark.parametrize("symbols", [None, dm.ALL], ids=["None", "ALL"])
-def test_limit_caps_the_total_without_named_symbols(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, symbols: object
-) -> None:
-    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(dividends_of("A", 2) + dividends_of("B", 2))))
-    out = fetch(session, DIVIDENDS, symbols=symbols, limit=3)
-    assert [row["Symbol"] for row in out] == ["A", "A", "B"]
-    assert fake_rest.get_queries() == [(DIVIDENDS_PATH, {"limit": ["3"]})]
-
-
-def test_without_a_limit_named_symbols_still_share_requests(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
-    fetch(session, DIVIDENDS, symbols=["A", "B", "C"])
-    assert sorted(q["ticker.any_of"][0] for _, q in fake_rest.get_queries()) == ["A,B", "C"]
-
-
-def test_a_row_two_named_symbols_return_under_a_limit_is_kept_once(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # A statement lists every ticker of its company, so GOOG's and GOOGL's requests both
-    # return it: GOOGL's copy goes. GOOG's own rows all stay, though the restatement shares
-    # the original's poll keys and the repeat equals it in every column: Massive sent them.
-    original = {"cik": "1652044", "fiscal_quarter": 1, "total_assets": 100.0, "tickers": ["GOOG"]}
-    restated = {**original, "total_assets": 90.0}
-    other = {**original, "fiscal_quarter": 2}
-    target = f"{STATEMENTS_PATH}?limit=5&tickers.any_of="
-    fake_rest.reply(f"{target}GOOG", Reply(envelope([original, restated, original])))
-    fake_rest.reply(f"{target}GOOGL", Reply(envelope([original, other])))
-    out = fetch(session, STATEMENTS, symbols=["GOOG", "GOOGL"], limit=5)
-    assert [(row["FiscalQuarter"], row["TotalAssets"]) for row in out] == [
-        (1, 100.0),
-        (1, 90.0),
-        (1, 100.0),
-        (2, 100.0),
-    ]
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["3"]]
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -2814,7 +2756,7 @@ def test_a_read_fans_out_on_the_callers_pool(
         CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
-        table, requests, _ = reader.read(
+        table, requests = reader.read(
             CRYPTO_LAST,
             path,
             calls,
@@ -3582,20 +3524,11 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
         m.close()
 
 
-@pytest.mark.parametrize(
-    ("limit", "requests", "seconds"),
-    # Six tickers go two a request, or one a request under a `limit`, which caps each.
-    [(None, 3, 37), (5, 6, 73)],
-    ids=["no limit", "limit"],
-)
 def test_a_poll_whose_cycles_outlast_their_interval_warns(
     *,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    limit: int | None,
-    requests: int,
-    seconds: int,
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
@@ -3606,7 +3539,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     )
     m = dm.MassiveSession(config)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
-    q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"], limit=limit)
+    q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
     assert isinstance(q, Query)
     warned = threading.Event()
 
@@ -3627,9 +3560,9 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
         logging.getLogger(rate_limits.__name__).removeHandler(late)
         m.close()
     assert (
-        f"stocks.dividends poll(): each cycle makes {requests} stocks requests, but they are "
-        f"paced at 5 per minute, so a cycle takes at least {seconds} s, longer than the 30 s "
-        "interval; cycles run late"
+        "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
+        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
+        "late"
     ) in caplog.messages
 
 

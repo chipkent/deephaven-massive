@@ -49,10 +49,11 @@ StampedBar: TypeAlias = "tuple[int, tuple[float | None, ...]]"
 StampDays: TypeAlias = "dict[str, tuple[date, date]]"
 RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
 ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
+DayBars: TypeAlias = "dict[date, list[StampedBar]]"
 DayBarReport: TypeAlias = (
-    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], DayBars]"
 )
-PrevBarReport: TypeAlias = "Callable[[str], int]"
+PrevBarReport: TypeAlias = "Callable[[str], list[StampedBar]]"
 PeriodBarReport: TypeAlias = (
     "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
@@ -465,7 +466,7 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     complete = {}
     for index in _STAMP_INDICES:
         rebuilds = _day_rebuilds(range_bars, index, days, evidence=evidence)
-        missing = day_bar_report(index, days, rebuilds)
+        ranged = day_bar_report(index, days, rebuilds)
         prevs = prev_bar_report(index)
         weeks = _record_weeks(
             index,
@@ -486,9 +487,9 @@ def test_index_day_and_longer_bar_stamps_from_rest(
             evidence=evidence,
         )
         complete[index] = {
-            "a range bar on both days": not missing,
+            "a range bar on both days": all(ranged.values()),
             "every minute-bar rebuild": all(all(d.values()) for d in rebuilds.values()),
-            "a /prev bar": prevs > 0,
+            "a /prev bar": bool(prevs),
             "one bar for each of two weeks": weeks == 2,
             "the expected month, quarter, and year bars": periods,
         }

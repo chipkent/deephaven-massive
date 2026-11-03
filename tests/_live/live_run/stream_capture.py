@@ -347,6 +347,17 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write rows to a CSV file, replacing what it held, so writing them again duplicates none.
+
+    Args:
+        path: The file; removed when there are no rows, so no stale rows stay.
+        rows: The rows; the first one's keys name the columns.
+    """
+    path.unlink(missing_ok=True)
+    append_csv(path, rows)
+
+
 @dataclass
 class _Batch:
     """One update's added rows of one stream, as the listener copied them."""

@@ -724,6 +724,13 @@ class SessionCore:
         own steps is covered, and the windows that remain are inside the cleanup code itself (an
         interrupt while a hold or a scope is being released).
 
+        The stream subscribes before its first result exists, so a new stream holds the rows it
+        receives meanwhile, and this call adds them right after it built the result
+        (`StreamHandle.publish_held`, also when the build failed, for a result another verb
+        built on the stream meanwhile): an aggregation such as `last_by` sees only rows that
+        reach the blink table after it exists, and these reach it in a later update cycle. A
+        reused stream holds nothing; its new result starts from the rows that arrive next.
+
         A stream that failed while it was opening, or between the claim and the build, serves no
         result: every shape, `blink()` included, raises `MassiveError` naming the stream's
         failure, with the hold released. A failure that lands while the shape is being derived
@@ -762,12 +769,20 @@ class SessionCore:
                 closed"`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         scope: LivenessScope | None = None
+        handle, opened = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         try:
-            self._require_unfailed(spec, handle.stream_id)
-            with entered(self.exec_ctx):
-                result, scope = make_result(self.exec_ctx, lambda: build(handle))
+            # Another verb may hold the stream already, so its held rows are added whatever
+            # happens from here on, an interrupt included; otherwise they would pile up forever
+            # and that verb's result would show none of them.
+            try:
+                with entered(self.exec_ctx):
+                    self._require_unfailed(spec, handle.stream_id)
+                    result, scope = make_result(self.exec_ctx, lambda: build(handle))
+            finally:
+                if opened:  # the rows received while the stream opened, after the result
+                    with entered(self.exec_ctx):
+                        handle.publish_held()
             self.results.track(
                 result,
                 scope,
@@ -839,7 +854,7 @@ class SessionCore:
         channel: str,
         query: str,
         verb: str,
-    ) -> StreamHandle:
+    ) -> tuple[StreamHandle, bool]:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
         Every hold `_claim` takes is reported in `holds` right after it is stored, and the claim,
@@ -874,7 +889,9 @@ class SessionCore:
         was reused.
 
         Returns:
-            The stream's handle, with one hold taken for the caller.
+            The stream's handle, with one hold taken for the caller, and whether this call
+            opened the stream (so the caller must call its `publish_held` once it has built its
+            result).
 
         A closed session, or one that closes while the stream opens, raises the `MassiveError`
         of `_claim` or `_open`.
@@ -882,13 +899,17 @@ class SessionCore:
         may_wait = not holds_update_graph_lock(self.exec_ctx)
         while True:
             holds: list[tuple[int, threading.Event | None]] = []
+            opened_handle: StreamHandle | None = None
             try:
                 claim = self._claim(spec, request, key, query=query, may_wait=may_wait, holds=holds)
                 if isinstance(claim, threading.Event):
                     claim.wait()  # another thread is opening the stream; never under a lock
                     continue
+                opened = isinstance(claim, int)
                 if isinstance(claim, int):
-                    claim = self._open(spec, request, channel=channel, stream_id=claim)
+                    claim = opened_handle = self._open(
+                        spec, request, channel=channel, stream_id=claim
+                    )
                     symbols = request.symbol_key()
                     shown = (
                         bounded_list(symbols)
@@ -920,14 +941,21 @@ class SessionCore:
                     if ready is not None:
                         ready.set()
             except BaseException:  # the hold did not reach the caller
-                for stream_id, ready in holds:
-                    try:
-                        self._release_hold(stream_id)
-                    finally:
-                        if ready is not None:
-                            ready.set()  # waiters must wake whatever happens
+                try:
+                    # The stream opened, and another verb may reuse it already: add the rows it
+                    # held, or they pile up forever and that verb's result shows none of them.
+                    if opened_handle is not None:
+                        with entered(self.exec_ctx):
+                            opened_handle.publish_held()
+                finally:
+                    for stream_id, ready in holds:
+                        try:
+                            self._release_hold(stream_id)
+                        finally:
+                            if ready is not None:
+                                ready.set()  # waiters must wake whatever happens
                 raise
-            return claim  # no checkpoint between the try and the caller's own cleanup
+            return claim, opened  # no checkpoint between the try and the caller's own cleanup
 
     def _claim(
         self,

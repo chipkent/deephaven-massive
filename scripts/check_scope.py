@@ -3,8 +3,10 @@ r"""Decide how much of the local full check a branch's changes need, by CI's own
 `scripts/check.sh full`, which the pre-push hook runs, asks this script which scope to run. CI
 already skips its test jobs when a pull request changes only files the tests cannot read, such
 as the developer guides or the plans; the local check makes the same choice, so a push of such
-a change no longer waits minutes for the whole suite. The script never picks less than CI would
-run for the same change, so a push the hook passes cannot fail CI on a step the hook skipped.
+a change no longer waits minutes for the whole suite. The local check never runs fewer tests
+than CI's test jobs run for the same change, so a push the hook passes cannot fail one of those
+jobs on a test the hook skipped. CI also builds the package and tests other Python versions and
+the lowest dependency versions, which the local check does not.
 
 The path rules are not copied here. The script reads them from the `Decide which jobs the
 change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `unread`, and
@@ -49,14 +51,12 @@ Decision(scope='full', reason='3 changed files; src/deephaven_massive/__init__.p
 Decision(scope='full', reason='2 changed files; docs/datasets/stocks.trades.md is a test input')
 >>> decide(["plans/x.md", ".github/workflows/ci.yml"], rules)
 Decision(scope='full', reason='2 changed files; .github/workflows/ci.yml is a workflow')
->>> decide(["plans/x.md", "CONTRIBUTING.md"], rules)
-Decision(scope='full', reason='2 changed files; no rule covers CONTRIBUTING.md')
+>>> decide(["plans/x.md", "docs/tester-guide.md"], rules)
+Decision(scope='full', reason='2 changed files; no rule covers docs/tester-guide.md')
 >>> decide(['"docs/dev/caf\\303\\251.md"'], rules)
 Decision(scope='full', reason='1 changed file; no rule covers "docs/dev/caf\\303\\251.md"')
 >>> decide([], rules)
 Decision(scope='lint', reason='no changed files')
->>> read_rules(WORKFLOW.read_text(encoding="utf-8")).workflows
-'^\\.github/(workflows|actions)/'
 >>> read_rules("lint='x'\n")
 Traceback (most recent call last):
 ...

@@ -178,6 +178,89 @@ def test_concurrent_verbs_on_one_key_share_one_open(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
+def test_only_the_verb_that_opened_a_stream_adds_its_held_rows(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    # The opener adds the rows received while the stream opened, once its result exists; a
+    # verb that reuses the stream must not add them before the opener's result exists.
+    first = stream_query(massive_session).blink()
+    second = stream_query(massive_session).append_only()
+    assert fake_streams.published_held == [1]
+    massive_session.release(first)
+    massive_session.release(second)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_a_failed_first_build_still_adds_the_held_rows(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another verb may have built a result on the stream meanwhile; it must get the rows.
+    def broken(_exec_ctx: object, _build: object) -> object:
+        raise ValueError("the build broke")
+
+    monkeypatch.setattr(_core, "make_result", broken)
+    with pytest.raises(ValueError, match="the build broke"):
+        stream_query(massive_session).blink()
+    assert fake_streams.published_held == [1]
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+@pytest.mark.parametrize("window", ["while the open is logged", "before the result is built"])
+def test_an_interrupt_after_the_open_still_adds_the_held_rows(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    window: str,
+) -> None:
+    # Once the stream opens, another verb may reuse it before the opener builds its result.
+    # An interrupt in either window must still add the held rows, or they pile up forever and
+    # that verb's result shows none of them.
+    core = massive_session._core
+    if window == "while the open is logged":
+        debug = _core.logger.debug
+
+        def interrupting_debug(message: str, *args: object) -> None:
+            if message.startswith("%s: stream %d opened"):
+                raise KeyboardInterrupt
+            debug(message, *args)
+
+        monkeypatch.setattr(_core.logger, "debug", interrupting_debug)
+    else:  # at the first statement after `_acquire` returns the stream it opened
+        acquire = core._acquire
+        armed: list[bool] = []
+        real_entered = entered
+
+        def arming(
+            spec: DatasetSpec,
+            request: Request,
+            key: StreamKey,
+            *,
+            channel: str,
+            query: str,
+            verb: str,
+        ) -> tuple[StreamHandle, bool]:
+            found = acquire(spec, request, key, channel=channel, query=query, verb=verb)
+            armed.append(True)
+            return found
+
+        def interrupting_entered(exec_ctx: ExecutionContext) -> ExecutionContext:
+            if armed:
+                armed.clear()
+                raise KeyboardInterrupt
+            return real_entered(exec_ctx)
+
+        monkeypatch.setattr(core, "_acquire", arming)
+        monkeypatch.setattr(_core, "entered", interrupting_entered)
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session).blink()
+    assert fake_streams.published_held == [1]
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener's hold was released too
+    assert core._streams == {}
+
+
 def test_a_console_command_never_waits_for_another_threads_open(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,

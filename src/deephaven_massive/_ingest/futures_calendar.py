@@ -206,7 +206,7 @@ class FuturesCalendar:
                 label="MassiveSession #1",
             )
             sessions.watch(["ESZ5"])  # looks up ESZ5's product and its schedule
-            sessions.wait_loaded(["ESZ5"], 5.0)  # before the stream subscribes
+            sessions.wait_loaded(["ESZ5"], 5.0, stop=threading.Event())  # before it subscribes
             dates = sessions.correct(symbols, instants, rule_dates)
             sessions.close()
     """
@@ -271,7 +271,7 @@ class FuturesCalendar:
         """
         self._ask_contracts({symbol for symbol in symbols if is_futures_contract(symbol)})
 
-    def wait_loaded(self, symbols: Iterable[str], timeout: float) -> bool:
+    def wait_loaded(self, symbols: Iterable[str], timeout: float, *, stop: threading.Event) -> bool:
         """Wait until the products and schedules of some contracts are loaded, or failed.
 
         A futures stream's verb calls it after `watch`, before the stream subscribes, so its
@@ -284,11 +284,13 @@ class FuturesCalendar:
             symbols: Canonical futures symbols; spreads are skipped, as they are never looked
                 up.
             timeout: The most seconds to wait.
+            stop: Ends the wait early: set it, then call `wake()`. The waiting session's close
+                does so, while the calendar, which other sessions share, stays open.
 
         Returns:
             True once every contract's product is known (or known to be unlisted, or failed)
             and every product's schedule is loaded (or failed), or the calendar has closed;
-            False when `timeout` passed first.
+            False when `timeout` passed first or `stop` ended the wait.
         """
         contracts = {symbol for symbol in symbols if is_futures_contract(symbol)}
 
@@ -304,8 +306,20 @@ class FuturesCalendar:
                     return False
             return True
 
+        def ended() -> bool:
+            return stop.is_set() or settled()
+
         with self._served:
-            return self._served.wait_for(settled, timeout)
+            return self._served.wait_for(ended, timeout) and settled()
+
+    def wake(self) -> None:
+        """Wake every `wait_loaded` call, so each checks its `stop` event again. Never blocks.
+
+        A session's close sets its stop event and then calls this, so its `symbol changes`
+        worker stops waiting for schedules at once rather than after up to the full wait.
+        """
+        with self._served:
+            self._served.notify_all()
 
     def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
         """Return streamed futures rows' session dates, corrected by the schedules.
