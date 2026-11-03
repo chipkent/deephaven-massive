@@ -308,6 +308,24 @@ Massive leaves the greeks out for some contracts, such as those deep in the mone
 columns are null then. On Options Starter or Developer the chain is delayed (see
 [real-time or delayed](#real-time-or-delayed)).
 
+A polled chain can choose what to stream. This re-reads SPY's nearest expirations every five
+minutes, keeps the contracts within 2% of the underlying's price, and streams their quotes: as
+the price moves, contracts that come near are subscribed and those that drift away are dropped
+(see [`symbols`](#symbols)):
+
+```python
+spy_chain = m.options.chain("SPY", sort="expiration_date", limit=200).poll(300)
+near = spy_chain.where(
+    "abs(DetailsStrikePrice - UnderlyingAssetPrice) <= 0.02 * UnderlyingAssetPrice"
+)
+near_quotes = m.options.quotes(near).last_by()
+```
+
+`UnderlyingAssetPrice` depends on your Stocks plan; where it is null, no contract passes the
+filter. Keep the filter narrow: the options connection carries at most 1,000 topics, one per
+contract's quotes, and a live watchlist's contracts past that wait, counted in the `Deferred`
+column of `m.streams()`, until room frees up.
+
 <a id="history-of-a-watchlist"></a>
 
 ### History of a watchlist
@@ -860,6 +878,9 @@ wrong.
   row, with none delivered, fail the streams, since Massive has most likely changed its format.
   A `history()` or `fetch()` that follows a live symbol table has a row too: `LOADING` while a
   symbol is still being read, then `RUNNING`, with `Loading` counting the symbols left.
+  `Symbols` and `SymbolCount` show what a stream is subscribed to: for one that follows a
+  live table, the symbols it holds now, updated as you add and delete rows; for a `poll()` of
+  one, `SymbolCount` counts the symbols its latest cycle read.
 - **`m.connections()`**: one row per WebSocket connection, with its `Host`, `Recency`
   (`REALTIME`, `DELAYED`, `UNKNOWN`), `State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when
   another program uses your key's connection, `FAILED`), subscriptions confirmed and pending,
@@ -930,10 +951,16 @@ watchlist.add(new_table([string_col("Symbol", ["NVDA"])]))
 watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
 ```
 
-Delete rows by passing a static table of the keys, as above: a live view of the watchlist
-itself can hang the server. Any live table with a `Symbol` column is a watchlist, so one dataset
-can choose another's symbols. This streams the trades of the day's top gainers, re-checked every
-minute, and the trades of every E-mini S&P 500 futures contract:
+In the web UI, open the `watchlist` panel. To add a symbol, click the empty row at the bottom,
+type it, press **Enter**, and click **Commit**: rows you type are not added until you commit
+them. To delete one, select its row, right-click, and choose **Delete Selected Rows**.
+
+In code, delete rows by passing a static table of the keys, as above: a live view of the
+watchlist itself can hang the server. Any table with a `Symbol` column can choose symbols, so
+one dataset can choose another's: a live one, such as a `poll()`, is followed, and a static one,
+such as a `fetch()` of a list, is a fixed list read at the call. This streams the trades of the
+day's top gainers, re-checked every minute, and the trades of every E-mini S&P 500 futures
+contract listed when you call:
 
 ```python
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
@@ -962,18 +989,47 @@ rejected API key, a closed session, a failed watchlist, or a library bug fails t
 With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
 and raises only if every one of them failed. A symbol that comes back after you deleted it is
 downloaded again, unless you choose otherwise (`reread`, in
-[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows. The same holds for
-`underlying=` of `m.options.chain` and `m.options.contracts`, which take a table with a
-`Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode` column.
+[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows.
+
+`underlying=` of `m.options.chain` and `m.options.contracts` takes one ticker today, and
+futures `product_code=` one code or a list of codes; neither takes a table. Following a table
+there is planned; until then, call once per underlying.
 
 A large live result costs memory and time downstream: every table you derive from it updates
 when a symbol lands or leaves, and sorting tens of millions of rows takes seconds each time.
 Derive from `snapshot()` of it when you need a fixed copy.
 
-In a live table, `last_by()` by `Symbol` (the default) drops the row of a symbol that leaves
-the watchlist, and shows nothing for a symbol added back until it trades again; with keys that
+In a live table, `last_by()` by `Symbol` (the default) shows a symbol's row once the row
+reaches the table in or after the update cycle in which the symbol joined the watchlist, so each
+symbol's first trade shows as soon as it arrives. It drops the row of a symbol that leaves the
+watchlist, and shows nothing for a symbol added back until it trades again; with keys that
 span symbols, such as `last_by("Exchange")`, a group keeps its row after the symbol behind it
-leaves. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
+leaves. To replace the list, add the new list first, then delete only the symbols that left: a
+symbol on both lists never leaves the watchlist, so its row stays, while one deleted and added
+back waits for its next trade.
+
+```python
+watchlist.add(new_table([string_col("Symbol", ["AAPL", "AMD"])]))  # the new list: AAPL, AMD
+watchlist.delete(new_table([string_col("Symbol", ["NVDA"])]))  # only the symbol that left
+```
+
+To show every symbol before it trades, put a snapshot under the stream, as in
+[seed a live board](#seed-a-live-board), with a snapshot poll that follows the same watchlist:
+
+```python
+from deephaven import merge
+
+seed = (
+    m.stocks.snapshots(watchlist)
+    .poll(60)
+    .view(["Symbol", "Price = LastTradePrice", "Timestamp = LastTradeSipTimestamp"])
+)
+trades = m.stocks.trades(watchlist).last_by().view(["Symbol", "Price", "Timestamp"])
+live_board = merge([seed, trades]).last_by("Symbol")
+```
+
+The stream's rows come after the snapshot's in the merge, so `last_by("Symbol")` shows a
+symbol's latest trade once it has one, and its snapshot until then. `append_only()` and `ring()` keep the rows a removed symbol already produced. A
 watchlist row that is not Massive's spelling is skipped, logged once, and listed in the
 stream's `Error` in `m.streams()`; fix the row and it subscribes. A watchlist whose every row is
 bad is refused. To fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.

@@ -57,8 +57,24 @@ Every agent brief includes:
 - **The reserved numbers**, or "none".
 - **The PR-description standard**: `docs/dev/pull-requests.md`, including "Builds on #<n>" and
   the reserved number.
+- **Keep context small**: the rules of the next section, copied in.
 
-## 6. Review loop
+## 6. Keep context small
+
+Almost all of an agent's cost is context re-read on every turn: one analysis found 1.48 billion
+cached tokens re-read against 0.5 million of output. Put these rules into every brief:
+
+- **Read only what the task needs**: `grep -n`, then the exact section with an offset and limit,
+  never a whole large file (`plans/rework/DESIGN.md` is about 180k tokens).
+- **Quiet commands**: `pytest -q`, `| tail -n 40`, `git diff --stat` before a full diff, and
+  `gh pr checks` summarized. Write a large output to a scratch file; read only what you need.
+- **Never re-read a file you just edited.**
+- **A fresh agent for each new round**: after a review, start a new agent with a short brief
+  instead of resuming a long-running one. Resume only for a small follow-up.
+- **The coordinator** keeps its own turns short and starts a fresh session at each phase change,
+  with a handover note.
+
+## 7. Review loop
 
 1. As soon as a PR's CI passes, run one review that reports blockers only.
 2. Minor findings go into one follow-up issue, never another push.
@@ -67,7 +83,7 @@ Every agent brief includes:
    reply, and every blocker is fixed.
 5. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it.
 
-## 7. Questions for the owner
+## 8. Questions for the owner
 
 Follow the `writing-to-the-owner` skill. In short:
 

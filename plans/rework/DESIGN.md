@@ -1032,14 +1032,19 @@ return result
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
   during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
   if the failure had arrived just after it: every shape, `blink()` included, raises
-  `MassiveError` naming the stream's failure, with the hold released. `SessionCore.stream_result`
-  checks the stream's recorded failure before it builds the shape, and wraps in the same
+  `MassiveError` naming the stream's failure, with the hold released. A new stream subscribes
+  before its first result exists, so its sink holds the rows routed to it until the verb that
+  opened it has built that result, and `SessionCore.stream_result` then adds them
+  (`StreamHandle.publish_held`, also after a failed build), so an aggregation such as
+  `last_by` sees every row the stream received; a reused stream holds nothing.
+  `SessionCore.stream_result` checks the stream's recorded failure before it builds the shape, and wraps in the same
   `MassiveError` the `DHError` ("Can not listen to failed table") Deephaven raises when the
   failure lands while the shape derives from the blink table. A stream's failure is recorded
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
   meets the failed table always finds the failure to name.
 - **A failure pins its table.** Every blink table the library feeds (a stream's, a `poll()`
-  table's) is created by `blink_publisher` (`_tables/publisher.py`), whose
+  table's, a background read's, a diagnostics table's) is created by `blink_publisher`
+  (`_tables/publisher.py`), whose
   `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table, then
   publishes the failure. While the failure is queued nothing can destroy the table, so only
   the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
@@ -1117,13 +1122,17 @@ return result
      write holds, the session gets the last row written for each family it shows, marked
      `CLOSED` with no topics and no buffered rows (a `FAILED` row keeps its state and counts),
      and leaves the connection's users, so no later row replaces it.
-  5. It writes the final rows, then releases the diagnostics scope, and returns once the
-     update cycle that applied the rows has ended (it takes the shared update-graph lock once),
-     so a held `m.streams()` view, which updates later in that cycle, shows them. On a thread
-     that holds the UG lock it waits for neither: the writer's `InputTable.add` waits for an
-     update cycle, which cannot run until the caller releases the lock, so `close()` asks the
-     writer to apply the rows, release the scope, and end, and returns at once; the rows, and
-     a held view, follow once the console command is over.
+  5. It has the writer add the final rows, release the diagnostics scope under the shared
+     update-graph lock, and end, and waits for it. The rows reach the tables on the next update
+     cycle, so while a diagnostics view is held `close()` then waits for a cycle that started
+     after the writer ended (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then
+     a WARNING), and a held `m.streams()` view shows them when it returns. A held view keeps
+     its table, the blink table under it, and the publisher alive, so the release does not
+     drop the pending rows; with no view held nothing could show them, and `close()` does not
+     wait. On a thread that holds the UG lock it waits for neither: the writer's release
+     cannot take the lock until the caller lets it go, so `close()` asks the writer to add the
+     rows, release the scope, and end, and returns at once; the rows, and a held view, follow
+     once the console command is over.
   6. It logs "MassiveSession #1 closed; N live tables failed, streams N [...]", at WARNING
      when N > 0 and at INFO when N is 0. N counts the tables that are failed once the close is
      done, including one a racing failure failed first; the line names their stream ids (the
@@ -1491,17 +1500,24 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`rows_since_added(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted
+`latest_rows_since_added(blink, symbol_table, keys)`, so rows of removed symbols are evicted
 from the result. The underlying `last_by` state keeps every symbol ever seen, so the filter also
-hides a row received before its symbol last joined the table: a symbol that is removed and
-re-added shows no row until its next tick. `rows_since_added` (`_tables/watchlist.py`) joins
-each row with the time its symbol joined, computed by the engine in the cycle the symbol appears
-(`symbol_table.select_distinct("Symbol").update("AddedAt = now()")`, under a hidden name), and
-keeps rows with `TimestampInsert >= AddedAt`. The time comes from the engine, not from a library
-publisher, which would lag the table by a cycle and let the stale row through; the stream
-subscribes the symbol in reaction to the same change, so every row received for it comes later.
-A row a shared stream received just before the symbol joined is hidden until the next one. With
-keys that span symbols (for
+hides a row that reached the table before the update cycle in which its symbol last joined the
+symbol table: a symbol that is removed and re-added shows no row until its next tick, while a
+symbol's first row shows as soon as it reaches the table, in or after the cycle in which the
+symbol joined (decision 91, owner decision, 2026-11-02). `latest_rows_since_added`
+(`_tables/watchlist.py`) compares update-cycle numbers, the logical clock's step
+(`ExecutionContext.getContext().getUpdateGraph().clock().currentStep()` in a formula), never
+wall-clock times. Under one hold of the update graph's shared lock it creates the symbol
+table's distinct symbols stamped with the step (`select_distinct("Symbol").update(...)`, first)
+and the blink table stamped with the step before the aggregation
+(`blink.update(...).last_by(keys)`), then joins the two and keeps rows whose row step is at
+least their symbol's added step, dropping both hidden columns. The watchlist side comes first,
+so a symbol's added step is never later than the step of a row the aggregation starts from,
+even if a cycle ran between the two creations; the lock makes the two equal. The stamp precedes
+the aggregation because a formula that reads no column is not recomputed when a row is
+modified, and both sides use `update`, never `update_view`, so the step is the cycle in which
+the row changed, not the one in which it is read. With keys that span symbols (for
 example `by="Exchange"`) the filter comes first, `watched_rows(blink,
 symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
@@ -4304,6 +4320,19 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Library threads never create refreshing tables outside an explicit scope.** Refreshing
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
+- **The library never uses input tables.** They are for people editing data by hand, such as a
+  watchlist typed in the web UI. Every table the library writes is a `blink_publisher` blink
+  table or a shape of one; a keyed one is `last_by` on its keys (decision 92).
+- **Every blink table is created under the UG shared lock.** `blink_publisher` holds the shared
+  lock (the Java lock, as `release_scope` takes it) around `table_publisher`, so no update cycle
+  runs while the table is created. Deephaven stamps a new table with the current cycle's step,
+  and the creation stamp counts as the table's notification for that step: a table registered
+  while a cycle runs can be refreshed in that cycle, and a first change delivered in the same
+  step is fatal (Deephaven exits the process). Keyed input tables were seen to fail this way;
+  a publisher's blink table is registered the same way, so the lock is a precaution for every
+  blink table. It suffices because a cycle holds the exclusive lock from its start until it
+  has listed its sources. A thread that already holds either lock (a console command) takes it
+  again at once.
 - Each stream owns one
   `blink_publisher(name=f"massive.{dataset}#{stream_id}", columns=<dataset schema>, on_shutdown=..., defer=<the session's reaper>)`
   (a `table_publisher` whose failure pins its table, section 6.1), created inside the stream scope under the session's captured `ExecutionContext` by
@@ -4638,15 +4667,31 @@ whatever that request returned.
 
 ## 17. Diagnostics
 
-The diagnostics tables are keyed `input_table`s. They live in one session-owned
+Each diagnostics table is a blink table that the diagnostics writer adds rows to through its
+`blink_publisher` publisher, and `last_by` of it on the table's keys, which keeps the latest
+row of each key: a later row of a key replaces the earlier one as a modify, also when two adds
+of one key land in one cycle, and a new key is appended in first-seen order. The tables are not
+input tables, so nobody can edit them in the web UI. **Memory:** rows are never deleted, so
+each table keeps one row per key ever written, copied out of the blink rows, plus `last_by`'s
+hash state: a few dozen `connections()` rows, six `rate_limits()` rows, one `streams()` row per
+stream, poll, and background read the session ever opened, and one `symbol_reads()` row per
+symbol of each followed read. That is the same as the keyed input tables the library used
+before, which never deleted rows either; a session that ever needs pruning would add a
+tombstone filter, as `poll(mode=REPLACE)` does. They live in one session-owned
 `LivenessScope` that `m.close()` releases. `m.connections()`, `m.streams()`, and
 `m.symbol_reads()` each return a new view of one of them, built in its own result scope and tracked like any live result: while the view is held it
 keeps the session alive and current, and after `close()` it keeps showing the final rows. They
 are written by one diagnostics writer thread per session, which
-applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
+adds immutable row snapshots from a queue in order; other threads only enqueue, never wait on
 the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
-writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
-table, so the queue stays bounded however fast rows arrive.
+writer takes everything queued, keeps the latest row per key, and adds it with one Arrow
+conversion and one `publisher.add` per table; it starts its next batch no sooner than
+`WRITE_INTERVAL` (0.1 s) after the last, so a burst of rows costs each table one add per
+interval and the queue stays bounded however fast rows arrive. An add returns at once; the
+rows reach the tables on the next update cycle. Only the writer touches the publishers, so they
+need no lock of their own. `Diagnostics.wait_until_shown(timeout)` waits for the writer to add
+every row queued before the call and then for an update cycle that started after that; tests
+use it to read rows.
 
 **`m.connections()`**: one row per connection plus one `Transport=REST` row per resolved
 (class, family).
@@ -5000,8 +5045,8 @@ without the GIL.
 | follow coordinator, one per session from its first followed read (`fetch()` or `history()` of a refreshing symbol table) until the session closes or is collected | library | owns all per-symbol state of the session's followed reads: takes the symbol tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`; starts reads on the follow read pool (flat-file scans of one result one at a time); times the retries; publishes each symbol's cell (`publisher.add`) and a failure of the whole table (`publish_failure`, after `SessionCore.fail_stream`) under the result's publish lock, checking its failed flag; queues `m.streams()` and `m.symbol_reads()` row snapshots | any I/O; wait for an update cycle or on a read; take `registry_lock` across a Deephaven call; let another thread touch per-symbol state |
 | follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session, made and ended with the follow coordinator | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| diagnostics writer, one per session | library | adds row snapshots from its queue to the blink tables under `connections()`, `streams()`, and `symbol_reads()` through their publishers: each batch coalesced to the latest row per key, one `publisher.add` per table, batches at least `WRITE_INTERVAL` (0.1 s) apart, never waiting for an update cycle; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); a lookup error whose cause is `LIBRARY_DEFECT` is neither retried nor skipped; any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`), a `LIBRARY_DEFECT` `MassiveError` as it is and any other wrapped in one; `m.close()` ends a wait for schedules or for a retry at once, and the change is dropped (DEBUG); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
@@ -5114,15 +5159,18 @@ The order is **UG lock, then `registry_lock`**. Listeners run on the UG thread w
 lock is held and may take `registry_lock`. Therefore no library thread acquires the UG lock,
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
 `deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
-registry deadlock. Verbs called on the UG thread raise `ValueError`.
+registry deadlock. Verbs called on the UG thread raise `ValueError`. `blink_publisher` takes
+the UG shared lock on the caller thread while it creates a blink table, never under
+`registry_lock` or a publish lock. `wait_for_update_cycle`, which waits for a cycle that
+started after the call to end, refuses to run on a UG thread or under either UG lock.
 
 **A caller holding the UG lock never waits on a thread that may need the UG lock or an update
 cycle** (the diagnostics writer, a poller, another caller's stream open, the reaper). The
 caller may hold the UG lock without being a UG thread: the console holds the exclusive lock
 for every command, and a user thread may hold the shared lock. No update cycle runs meanwhile,
 and any other thread that needs the lock blocks, so a wait on such a thread could never end.
-Which library threads can need the lock: the diagnostics writer (`InputTable.add` waits for the cycle that applies it, and its exit
-releases the tables' scope under the shared lock), a poller (`Table.snapshot()` of a
+Which library threads can need the lock: the diagnostics writer (its exit releases the
+tables' scope under the shared lock; its adds never wait for a cycle), a poller (`Table.snapshot()` of a
 watchlist), another caller's stream open (starting a watchlist's listener, reading a crypto
 watchlist), and the reaper (every scope release takes the shared lock; nothing joins the reaper
 or waits for its jobs). The flush threads, the WebSocket client threads, the REST and flat-file
@@ -7801,6 +7849,22 @@ document already reflects them.
     (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
     of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
     read whole ([section 8](#8-namespace-tree)).
+91. **`last_by()` on a live symbol table shows a row by update cycle, not by receive time**
+    (owner decision, 2026-11-02). A symbol's row shows when it reached the table in or after
+    the update cycle in which the symbol last joined the symbol table; it was "received after
+    the symbol was added", which compared the library's `TimestampInsert` with the engine's
+    `now()` and hid a symbol's first row until its next tick, for hours on a quiet option
+    contract. A symbol removed and added again still shows no row until its next tick
+    ([section 7](#7-query-classes-and-verbs)).
+92. **The library never uses input tables** (owner decision, 2026-11-02). An input table is
+    for a person editing data by hand, such as a watchlist typed in the web UI, not for code
+    and not for volume. The diagnostics tables, the library's last keyed input tables, are
+    now a `blink_publisher` blink table each with `last_by` on its keys: the same columns,
+    keys, and rows, and the same memory, one row per key; nobody can edit them in the web UI.
+    Every blink table is created under the UG shared lock, because a table registered while a
+    cycle runs can be refreshed in the step its creation stamp claims, and a first change in
+    that step is fatal ([section 14](#14-publishers-fan-out-and-failure-semantics)). Tests may
+    still use an input table to stand in for a user's watchlist.
 
 ## 23. Open verification items
 

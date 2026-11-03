@@ -104,6 +104,10 @@ class StreamHandle:
             False when the stream had already failed. Takes the stream's publish lock and
             makes a Deephaven call, so never call it under `registry_lock` or on an
             update-graph thread (`StreamSink.fail`).
+        publish_held: Adds the rows the stream received while it opened, and every later row
+            as it comes; the verb that opened the stream calls it right after it built the
+            stream's first result, so that result sees every row (`StreamSink.publish_held`).
+            Same constraints as `fail`.
         stop_watch: Stops a reactive stream's watchlist listener (a Deephaven call, run on the
             reaper once the stream has shut down); None for a stream of fixed symbols.
     """
@@ -115,6 +119,7 @@ class StreamHandle:
     path: str
     evidence: str
     fail: Callable[[MassiveError], bool]
+    publish_held: Callable[[], None]
     stop_watch: Callable[[], None] | None = None
     recency: Recency = field(kw_only=True)
 

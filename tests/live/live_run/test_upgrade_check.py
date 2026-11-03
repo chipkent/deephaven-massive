@@ -11,7 +11,7 @@ import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -184,8 +184,11 @@ def test_no_upgrade_is_a_rehearsal(
 
 
 def test_a_limit_never_learned_stops_the_check(
-    fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession]
+    fake_rest: FakeRestServer,
+    open_session: Callable[[], MassiveSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(upgrade_check, "LEARN_SHOWN", 0.0)  # one read after each call
     fake_rest.reply(PREV, BAR)
     with open_session() as m, pytest.raises(RuntimeError, match="no limit was learned after 2"):
         upgrade_check.learn_limit(m, "stocks", limit=2)
@@ -227,3 +230,15 @@ def test_the_options_call_reads_an_endpoint_basic_includes(
         upgrade_check.CALLS["options"](m)
     [request] = fake_rest.requests
     assert request.target.startswith("/v2/aggs/ticker/O%3ASPY261218C00600000/prev")
+
+
+def test_a_limit_learned_after_the_call_is_read_once_the_row_shows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The call's effect reaches m.rate_limits() on a later update cycle: the first read after
+    # the call misses it, and a later one, still within the wait, sees it.
+    rows: list[dict[str, Any]] = [{}, {"LimitSource": "LEARNED"}]
+    monkeypatch.setitem(upgrade_check.CALLS, "stocks", lambda _m: None)
+    monkeypatch.setattr(upgrade_check, "_row", lambda _m, _subscription: rows.pop(0))
+    assert upgrade_check.learn_limit(cast("MassiveSession", None), "stocks") == 1
+    assert rows == []

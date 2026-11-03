@@ -578,7 +578,7 @@ class ReadCase:
 
 def read_state(m: dm.MassiveSession, to_pylist: Callable[[Table], list[dict[str, Any]]]) -> str:
     # The read's state in m.streams(), once every row queued so far is applied.
-    assert m._core.diagnostics.barrier().wait(TIMEOUT)
+    assert m._core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = to_pylist(m.streams())
     return cast("str", row["State"])
 
@@ -710,3 +710,12 @@ def test_a_landed_read_survives_a_close_unfailed(
     assert not any(failed(table) for table in (case.result, *case.derived))
     assert [row["Symbol"] for row in dh_to_pylist(case.derived[0])] == ["AAPL"]
     rest_session.release(case.result)
+
+
+def test_a_reads_blink_table_is_created_under_the_update_graphs_shared_lock(
+    massive_session: dm.MassiveSession, blink_creations: list[bool]
+) -> None:
+    before = len(blink_creations)
+    result = open_test_read(massive_session, returning(static_rows(massive_session, "AAPL")))
+    assert blink_creations[before:] == [True]
+    massive_session.release(result)

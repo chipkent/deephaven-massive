@@ -6,7 +6,7 @@ description and the transports that fill it. This module is the Deephaven half o
 description:
 
 - `dh_type` maps each `ColumnType` to its Deephaven `DType`, and `col_defs` turns a `Schema`
-  into the `{name: DType}` column definitions that `table_publisher` and `input_table` take.
+  into the `{name: DType}` column definitions that `blink_publisher` takes.
 - `describe` returns a copy of a result table in the dataset's column order that carries the
   dataset's column descriptions (the web UI's column-header tooltips) and its table
   description, `"<dataset>: <summary>"`. Every verb calls it on the exact table it returns,
@@ -125,8 +125,8 @@ def col_defs(schema: Schema) -> dict[str, dtypes.DType]:
         schema: The schema.
 
     Returns:
-        A `{name: DType}` mapping in the schema's column order, as
-        `table_publisher(col_defs=...)` and `input_table(col_defs=...)` take it.
+        A `{name: DType}` mapping in the schema's column order, as `blink_publisher` takes
+        it.
     """
     return {column.name: dh_type(column.type) for column in schema.columns}
 

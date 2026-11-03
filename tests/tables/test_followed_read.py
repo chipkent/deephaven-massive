@@ -16,9 +16,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
-from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import table_publisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
@@ -45,6 +44,7 @@ from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skip
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
+    from deephaven.table_factory import InputTable
 
 TIMEOUT = 30.0
 
@@ -111,14 +111,16 @@ class Script:
             return sum(name in call for call in self.calls)
 
 
-def watchlist(*symbols: str | None, keyed: bool = True) -> Table:
-    # A user's watchlist, created under the update graph's lock: a table created while a cycle
-    # runs and written at once can notify twice in one step, which ends the process.
-    with shared_lock(get_exec_ctx().update_graph):
-        table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
-    if symbols:
-        table.add(new_table([string_col("Symbol", list(symbols))]))
-    return table
+@pytest.fixture
+def watchlist(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+    # Makes a user's watchlist holding the symbols, keyed on `Symbol` unless `keyed=False`.
+    def make(*symbols: str | None, keyed: bool = True) -> Table:
+        table = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
+        if symbols:
+            table.add(new_table([string_col("Symbol", list(symbols))]))
+        return table
+
+    return make
 
 
 def add(table: Table, *symbols: str) -> None:
@@ -188,7 +190,7 @@ def wait_rows(to_list: ToList, table: Table, expected: dict[str, int]) -> None:
 
 
 def test_each_symbol_lands_whole_in_one_update(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     script.sizes = {"AAPL": 3, "MSFT": 5}
@@ -215,7 +217,7 @@ def test_each_symbol_lands_whole_in_one_update(
 
 
 def test_seeded_rows_are_in_the_result_when_it_is_returned(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "MSFT")
@@ -226,6 +228,8 @@ def test_seeded_rows_are_in_the_result_when_it_is_returned(
 
 
 def test_seeded_rows_are_there_inside_a_console_command(
+    *,
+    watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
     dh_to_pylist: ToList,
     console_command: Callable[[Callable[[], None]], None],
@@ -244,7 +248,7 @@ def test_seeded_rows_are_there_inside_a_console_command(
 
 
 def test_an_empty_symbol_table_fills_as_symbols_are_added(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist()
@@ -256,7 +260,7 @@ def test_an_empty_symbol_table_fills_as_symbols_are_added(
 
 
 def test_a_removed_symbol_leaves_in_the_cycle_its_row_does(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "MSFT")
@@ -268,7 +272,7 @@ def test_a_removed_symbol_leaves_in_the_cycle_its_row_does(
 
 
 def test_a_seeded_symbol_removed_leaves_too(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "MSFT")
@@ -282,7 +286,7 @@ def test_a_seeded_symbol_removed_leaves_too(
 
 
 def test_always_reads_a_returning_symbol_again(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -300,7 +304,7 @@ def test_always_reads_a_returning_symbol_again(
 
 
 def test_never_gives_a_returning_symbol_its_earlier_download(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -315,7 +319,7 @@ def test_never_gives_a_returning_symbol_its_earlier_download(
 
 
 def test_null_and_duplicate_rows_count_once(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "AAPL", None, keyed=False)
@@ -345,7 +349,7 @@ def test_a_blink_symbol_table_keeps_every_symbol_it_delivered(
 
 
 def test_flat_file_reads_take_the_waiting_symbols_in_one_scan(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -365,6 +369,7 @@ def test_flat_file_reads_take_the_waiting_symbols_in_one_scan(
 
 
 def test_a_rejected_key_fails_the_table(
+    watchlist: Callable[..., Table],
     *,
     massive_session: dm.MassiveSession,
     stream_rows: Rows,
@@ -407,7 +412,11 @@ def test_a_symbol_table_that_fails_fails_the_result_once(
 
 
 def test_a_bad_row_added_under_raise_fails_the_table(
-    massive_session: dm.MassiveSession, stream_rows: Rows, monkeypatch: pytest.MonkeyPatch
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = dataclasses.replace(
         massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
@@ -423,7 +432,11 @@ def test_a_bad_row_added_under_raise_fails_the_table(
 
 
 def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
-    massive_session: dm.MassiveSession, stream_rows: Rows, dh_to_pylist: ToList
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: ToList,
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "msft")
@@ -437,7 +450,7 @@ def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
 
 
 def test_a_defect_of_a_read_fails_the_table_naming_it(
-    massive_session: dm.MassiveSession, stream_rows: Rows
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, stream_rows: Rows
 ) -> None:
     script = Script(massive_session)
     script.answers["AAPL"] = ZeroDivisionError("oops")
@@ -454,7 +467,11 @@ def test_a_defect_of_a_read_fails_the_table_naming_it(
 
 
 def test_release_marks_the_row_released_and_stops_the_reads(
-    massive_session: dm.MassiveSession, stream_rows: Rows, drain: Callable[[], None]
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    drain: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -472,7 +489,11 @@ def test_release_marks_the_row_released_and_stops_the_reads(
 
 
 def test_a_derived_table_keeps_the_result_following(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList, stream_rows: Rows
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    stream_rows: Rows,
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -494,6 +515,8 @@ def test_a_derived_table_keeps_the_result_following(
 
 
 def test_close_inside_a_console_command_fails_the_table_and_joins_nothing(
+    *,
+    watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
     console_command: Callable[[Callable[[], None]], None],
     cycles_ended: Callable[[], None],
@@ -511,7 +534,9 @@ def test_close_inside_a_console_command_fails_the_table_and_joins_nothing(
 
 
 def test_the_shutdown_callback_makes_no_deephaven_call(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -531,7 +556,9 @@ def test_the_shutdown_callback_makes_no_deephaven_call(
 
 
 def test_a_failed_registration_undoes_everything(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -548,7 +575,11 @@ def test_a_failed_registration_undoes_everything(
 
 
 def test_an_interrupt_while_the_watch_starts_releases_the_result(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, drain: Callable[[], None]
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -565,14 +596,18 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
     assert script.calls == []
 
 
-def test_a_closed_session_refuses_to_follow(massive_session: dm.MassiveSession) -> None:
+def test_a_closed_session_refuses_to_follow(
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession
+) -> None:
     massive_session.close()
     with pytest.raises(MassiveError, match=r"is closed$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
 
 
 def test_a_close_racing_the_registration_releases_the_result(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     core = massive_session._core
     track = ResultRegistry.track
@@ -590,6 +625,7 @@ def test_a_close_racing_the_registration_releases_the_result(
 
 
 def test_a_cell_is_never_published_after_the_table_failed(
+    watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
 ) -> None:
     script = Script(massive_session)
@@ -621,7 +657,11 @@ def test_the_router_drops_a_report_for_a_collected_result(
 
 
 def test_a_failure_during_the_first_read_is_kept_for_the_coordinator(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList, drain: Callable[[], None]
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    drain: Callable[[], None],
 ) -> None:
     failure = SymbolFailure(
         MassiveError("HTTP 403: not in the plan", status=403), FailureKind.PERMANENT
@@ -642,7 +682,11 @@ _ = (weakref, exclusive_lock, follow_coordinator)
 
 
 def test_always_hides_an_old_download_before_its_empty_cell_lands(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList, monkeypatch: pytest.MonkeyPatch
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The symbol leaves and returns while the empty cell that frees its rows is held back:
     # the old download is still the symbol's latest cell, and must not show again.
@@ -671,7 +715,11 @@ def test_always_hides_an_old_download_before_its_empty_cell_lands(
 
 
 def test_always_never_shows_a_download_published_after_its_symbol_left_and_returned(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList, monkeypatch: pytest.MonkeyPatch
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The coordinator has taken the first read's outcome and is publishing it when the symbol
     # leaves and returns: the removal and the re-add queue behind the outcome, so its cell lands
@@ -713,7 +761,7 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
 
 
 def test_never_shows_its_kept_download_in_the_cycle_the_symbol_returns(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -726,7 +774,11 @@ def test_never_shows_its_kept_download_in_the_cycle_the_symbol_returns(
 
 
 def test_an_add_remove_and_re_add_inside_one_cycle_changes_nothing(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList, drain: Callable[[], None]
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    drain: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
     wl = cast("Any", watchlist("AAPL"))
@@ -746,7 +798,7 @@ def test_an_add_remove_and_re_add_inside_one_cycle_changes_nothing(
 
 
 def test_an_empty_table_s_row_counts_no_symbol(
-    massive_session: dm.MassiveSession, stream_rows: Rows
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, stream_rows: Rows
 ) -> None:
     result = follow(massive_session, watchlist(), Script(massive_session))
     (row,) = stream_rows()
@@ -819,7 +871,7 @@ def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSes
 
 
 def test_never_shows_a_seeded_symbol_until_it_leaves(
-    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
