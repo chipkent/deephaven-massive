@@ -346,9 +346,11 @@ dates from the last frame the connection received (when data stopped, which on a
 socket is well before the drop is noticed), or from that report when none ever arrived; the
 note and the failure name that time. The outage holds every stream on the connection *down*,
 and decides recovery per stream: once the connection is `CONNECTED` again, a down stream
-recovers when rows have reached it since the new socket opened, or when each of its topics
+recovers when rows that arrived on the new socket have reached it, or when each of its topics
 the options cap admits is acknowledged, directly or through its channel's acknowledged
-wildcard. A topic in `NO_ACK` keeps down a stream that has received rows, since Massive never
+wildcard. Each row carries the generation of the socket it arrived on, so rows of the dropped
+socket that a stalled flush publishes after the reconnect never count, and the flush that
+first gives a down stream rows of the new socket checks its recovery at once. A topic in `NO_ACK` keeps down a stream that has received rows, since Massive never
 confirmed it: a `last_by` on that stream would otherwise show the rows from before the drop as
 current, so with neither confirmation nor data it fails at `max_outage`. A stream that has
 never received a row shows no stale data: once each of its topics is acknowledged or in
