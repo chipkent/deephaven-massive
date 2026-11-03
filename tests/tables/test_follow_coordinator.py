@@ -428,6 +428,33 @@ def test_a_removal_cancels_a_pending_retry(
     massive_session.release(result)
 
 
+def test_a_re_added_symbol_retries_on_its_new_schedule_alone(
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+) -> None:
+    # The first failure's retry stays in the heap after the removal; when it comes due, the
+    # symbol waits for its second failure's retry, so the stale one reads nothing.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503)]
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    clock.advance(RETRY_DELAYS[0] / 2)
+    delete(wl, "AAPL")
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    add(wl, "AAPL")
+    until(lambda: script.reads_of("AAPL") == 2)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    follows = massive_session._core.follows
+    clock.advance(RETRY_DELAYS[0] / 2)  # the first retry's time: no read
+    follows.wake()
+    until(lambda: len(follows._retries) == 1)
+    assert script.reads_of("AAPL") == 2
+    clock.advance(RETRY_DELAYS[0] / 2)  # the second retry's time
+    follows.wake()
+    until(lambda: script.reads_of("AAPL") == 3)
+    massive_session.release(result)
+
+
 def test_a_retry_of_a_released_result_never_reads(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
@@ -953,7 +980,8 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     script = Script(massive_session)
     script.answers["NVDA"] = [refused(403)]
     gate = script.gates["TSLA"] = threading.Event()
-    result = follow(massive_session, watchlist("AAPL", "MSFT", "NVDA", "TSLA"), script)
+    wl = watchlist("AAPL", "MSFT", "NVDA", "TSLA")
+    result = follow(massive_session, wl, script)
     for name, expected in (("AAPL", "DONE"), ("MSFT", "DONE"), ("NVDA", "FAILED")):
         wait_state(massive_session, name, SymbolReadState(expected))
     wait_state(massive_session, "TSLA", SymbolReadState.LOADING)
@@ -969,6 +997,12 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     assert summary["Loading"] == sum(
         r["State"] in ("QUEUED", "LOADING", "RETRYING") for r in symbols
     )
+    assert "NVDA" in (summary["Error"] or "")
+    delete(wl, "AAPL", "NVDA")  # a landed and a failed symbol leave: so do their counts
+    until(lambda: stream(massive_session, drain, dh_to_pylist)["SymbolCount"] == 2)
+    after = stream(massive_session, drain, dh_to_pylist)
+    assert (after["Symbols"], after["RowsPublished"], after["Loading"]) == ("MSFT, TSLA", 2, 1)
+    assert "NVDA" not in (after["Error"] or "")
     gate.set()
     massive_session.release(result)
 
