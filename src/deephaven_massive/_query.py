@@ -522,6 +522,26 @@ def _shown_symbols(symbols: object) -> str:
     return "[" + ", ".join(listed) + "]"
 
 
+def _window_text(first: date | datetime, last: date | datetime | None, now: datetime) -> str:
+    """Write a followed `history()`'s fixed window for its table description.
+
+    Args:
+        first: The parsed `start`.
+        last: The parsed `end`, or None for the call's instant.
+        now: The call's instant (`HistoryWindow.now`).
+
+    Returns:
+        Such as `"2026-10-01 through 2026-11-02T14:05:12Z"`: a date as itself, an instant
+        as UTC text to the second, and an open end as the call's instant.
+    """
+
+    def shown(value: date | datetime) -> str:
+        return utc_text(value.timestamp()) if isinstance(value, datetime) else value.isoformat()
+
+    end = utc_text(now.timestamp()) if last is None else shown(last)
+    return f"{shown(first)} through {end}"
+
+
 @dataclass(frozen=True, slots=True)
 class QueryCall:
     """The dataset-method call that built a query, as its repr shows it.
@@ -2071,26 +2091,6 @@ class HistoryQuery(QueryBase):
         schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return dh_arrow.to_table(schema.arrow_schema().empty_table())
-
-
-def _window_text(first: date | datetime, last: date | datetime | None, now: datetime) -> str:
-    """Write a followed `history()`'s fixed window for its table description.
-
-    Args:
-        first: The parsed `start`.
-        last: The parsed `end`, or None for the call's instant.
-        now: The call's instant (`HistoryWindow.now`).
-
-    Returns:
-        Such as `"2026-10-01 through 2026-11-02T14:05:12Z"`: a date as itself, an instant
-        as UTC text to the second, and an open end as the call's instant.
-    """
-
-    def shown(value: date | datetime) -> str:
-        return utc_text(value.timestamp()) if isinstance(value, datetime) else value.isoformat()
-
-    end = utc_text(now.timestamp()) if last is None else shown(last)
-    return f"{shown(first)} through {end}"
 
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery):

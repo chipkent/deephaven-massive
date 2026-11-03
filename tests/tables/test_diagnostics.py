@@ -56,7 +56,6 @@ from deephaven_massive._tables.diagnostics import (
     as_row,
     describe_symbols,
     gaps_text,
-    pascal_case,
     shown_query,
 )
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
@@ -260,7 +259,9 @@ def _diagnostics(exec_ctx: ExecutionContext) -> Diagnostics:
     return Diagnostics(
         exec_ctx,
         "test diagnostics",
+        label="TestSession",
         release_later=functools.partial(release_scope, exec_ctx),
+        on_death=print,
     )
 
 
@@ -589,13 +590,6 @@ def test_a_failed_table_creation_releases_the_scope(
     with pytest.raises(RuntimeError, match="no second table"):
         _diagnostics(dh_exec_ctx)
     assert scopes[0].j_scope is None  # released, with the first table in it
-
-
-def test_stop_does_not_wait(dh_exec_ctx: ExecutionContext) -> None:
-    diagnostics = _diagnostics(dh_exec_ctx)
-    diagnostics.stop()
-    diagnostics.thread.join(TIMEOUT)
-    assert not diagnostics.thread.is_alive()
 
 
 def test_concurrent_writes_racing_a_release_leave_one_consistent_row_per_key(
@@ -1223,12 +1217,12 @@ def test_a_release_right_after_a_change_leaves_no_thread_behind(
     assert set(threading.enumerate()) <= before
 
 
-def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
+def test_after_release_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     diagnostics.watch_rate_limits(source)
     assert source.pulled.acquire(timeout=TIMEOUT)
-    diagnostics.stop()  # as a collected session's finalizer does
+    diagnostics.release()  # as a collected session's reaper does
     diagnostics.rate_limits_changed()
     diagnostics.write(STREAM)
     diagnostics.thread.join(TIMEOUT)
@@ -1284,17 +1278,16 @@ def test_a_long_query_is_cut_like_the_symbol_list() -> None:
 
 
 @pytest.mark.parametrize(
-    ("path", "expected"),
+    ("name", "expected"),
     [
         ("sip_timestamp", "SipTimestamp"),
-        ("last_trade.sip_timestamp", "LastTradeSipTimestamp"),
         ("id", "Id"),
         ("filer_cik", "FilerCik"),
         ("alreadyCamel", "AlreadyCamel"),
     ],
 )
-def test_pascal_case(path: str, expected: str) -> None:
-    assert pascal_case(path) == expected
+def test_a_field_name_becomes_a_pascal_case_column_name(name: str, expected: str) -> None:
+    assert diagnostics._pascal_case(name) == expected
 
 
 # --- A followed read's row ----------------------------------------------------------------------

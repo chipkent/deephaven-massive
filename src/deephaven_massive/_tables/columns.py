@@ -158,8 +158,10 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     large batches it is faster than `to_table`, since the date strings are never made per row
     (about 29 against 46 ms on 200,000 rows), all on one loaded machine.
 
-    Runs on any thread inside the session's execution context; the table is static and is
-    created in the liveness scope at the top of the calling thread's stack. Rows with neither
+    Runs on any thread inside the session's execution context. The table is static, and
+    Deephaven's liveness scopes manage only refreshing tables, so no scope holds it: it lives
+    as long as something refers to it, such as its Python wrapper or a table built from it,
+    whatever scope the calling thread has open. Rows with neither
     a date column nor such a list column are converted as is. `rows` must hold at least one
     column of another kind (every dataset has `TimestampInsert`).
 

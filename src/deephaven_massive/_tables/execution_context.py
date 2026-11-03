@@ -168,7 +168,8 @@ def update_cycle(exec_ctx: ExecutionContext) -> int:
 
     The number grows by one with each update cycle and never changes while a thread holds the
     update graph's lock, so two calls that see one number ran within one pause of the live
-    tables. A Java call: never make it under `registry_lock`.
+    tables. A Java call that never waits, so a table listener may make it; never make it under
+    `registry_lock`.
 
     Args:
         exec_ctx: The session's execution context.

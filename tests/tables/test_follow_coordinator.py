@@ -32,7 +32,13 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
-from deephaven_massive._tables.diagnostics import FLAT_FILES_AND_REST
+from deephaven_massive._tables.diagnostics import (
+    FLAT_FILES_AND_REST,
+    ConnectionRow,
+    Diagnostics,
+    StreamRow,
+    StreamUpdate,
+)
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
 from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
@@ -44,9 +50,11 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
 TIMEOUT = 30.0
@@ -178,10 +186,31 @@ def follow(
     )
 
 
+_written: dict[int, dict[tuple[int, str], SymbolReadRow]] = {}
+_written_lock = threading.Lock()
+
+
+@pytest.fixture(autouse=True)
+def _record_symbol_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keeps every m.symbol_reads() row each session writes, by its diagnostics: the core keeps
+    # only the rows of unfinished symbols, and the tests also read the finished ones.
+    write = Diagnostics.write
+
+    def recording(diagnostics: Diagnostics, row: ConnectionRow | StreamRow | SymbolReadRow) -> None:
+        if isinstance(row, SymbolReadRow):
+            with _written_lock:
+                _written.setdefault(id(diagnostics), {})[row.stream_id, row.symbol] = row
+        write(diagnostics, row)
+
+    monkeypatch.setattr(Diagnostics, "write", recording)
+    with _written_lock:
+        _written.clear()
+
+
 def reads(m: dm.MassiveSession) -> dict[tuple[int, str], SymbolReadRow]:
-    # The latest m.symbol_reads() row of each (result, symbol), as the core recorded it.
-    with m._core.registry_lock:
-        return dict(m._core._symbol_reads)
+    # The latest m.symbol_reads() row of each (result, symbol) the session wrote.
+    with _written_lock:
+        return dict(_written.get(id(m._core.diagnostics), {}))
 
 
 def row(m: dm.MassiveSession, symbol: str) -> SymbolReadRow:
@@ -399,6 +428,26 @@ def test_a_removal_cancels_a_pending_retry(
     massive_session.release(result)
 
 
+def test_a_retry_of_a_released_result_never_reads(
+    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+) -> None:
+    # The released result is forgotten with its retry still in the heap; the retry, when it
+    # comes due, finds no result and is dropped.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503)]
+    result = follow(massive_session, watchlist("AAPL"), script)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    follows = massive_session._core.follows
+    massive_session.release(result)
+    del result
+    until(lambda: not follows._results)
+    assert len(follows._retries) == 1
+    clock.advance(RETRY_DELAYS[0])
+    follows.wake()
+    until(lambda: not follows._retries)
+    assert script.reads_of("AAPL") == 1
+
+
 def test_a_removal_cancels_a_queued_read(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
@@ -601,10 +650,15 @@ def test_release_while_loading_stops_every_symbol(
     gate = script.gates["AAPL"] = threading.Event()
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    core = massive_session._core
+    with core.registry_lock:  # what a close would mark CLOSED: both, loading and done
+        assert {name for _, name in core._symbol_reads} == {"AAPL", "MSFT"}
     massive_session.release(result)
     del result
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
     wait_state(massive_session, "MSFT", SymbolReadState.STOPPED)
+    with core.registry_lock:  # a stopped symbol is finished: the core keeps no row of it
+        assert core._symbol_reads == {}
     gate.set()
     until(lambda: massive_session._core.follows.following == 0)
     drain()
@@ -1251,7 +1305,7 @@ def _calls(m: dm.MassiveSession) -> set[int]:
     ("method", "step"),
     [
         ("_start", "starting"),
-        ("_queue_due_retries", "queuing its due retries"),
+        ("_queue_retry", "queuing a due retry"),
         ("_schedule", "starting its reads"),
         ("_show", "writing its rows"),
         ("_forget", "forgetting it"),
@@ -1266,24 +1320,35 @@ def test_a_defect_in_any_step_fails_only_its_result(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     dh_to_pylist: ToList,
+    clock: FakeClock,
 ) -> None:
     # Every step the coordinator runs for one result is guarded: its error fails that result,
     # named in the log and the table's error, and the rest of the batch still runs.
+    retry = method == "_queue_retry"  # that step runs only for a retry that came due
     healthy_list, broken_list = watchlist("AAPL"), watchlist("NVDA")
     healthy = follow(massive_session, healthy_list, Script(massive_session))
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
     healthy_id = max(_calls(massive_session))
     original = getattr(follow_coordinator.FollowCoordinator, method)
 
-    def breaks(coordinator: follow_coordinator.FollowCoordinator, *step_args: object) -> None:
+    def breaks(
+        coordinator: follow_coordinator.FollowCoordinator, *step_args: object, **named: object
+    ) -> None:
         result = cast("Any", step_args[0])
         if result.read.call != healthy_id:
             raise RuntimeError(f"a defect in {method}")
-        original(coordinator, *step_args)
+        original(coordinator, *step_args, **named)
 
     monkeypatch.setattr(follow_coordinator.FollowCoordinator, method, breaks)
+    broken_script = Script(massive_session)
+    if retry:
+        broken_script.answers["NVDA"] = [refused(503)]
     with caplog.at_level(logging.ERROR, logger=LOGGER):
-        broken = follow(massive_session, broken_list, Script(massive_session))
+        broken = follow(massive_session, broken_list, broken_script)
+        if retry:
+            wait_state(massive_session, "NVDA", SymbolReadState.RETRYING)
+            clock.advance(RETRY_DELAYS[0])
+            massive_session._core.follows.wake()
         until(lambda: bool(broken.j_table.isFailed()))
     broken_id = max(_calls(massive_session))
     assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
@@ -1638,3 +1703,99 @@ def test_an_unlisted_pair_fails_the_result_under_raise(
     shown = stream(massive_session, drain, dh_to_pylist)
     assert shown["State"] == "FAILED"
     assert "does not list it" in shown["Error"]
+
+
+# --- The coordinator's work grows with the symbols that change --------------------------------
+
+
+class _CountedSymbol(follow_coordinator._Symbol):
+    # A symbol's coordinator state that counts every read of one of its fields.
+    looks = 0
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        _CountedSymbol.looks += 1
+        return super().__getattribute__(name)
+
+
+class _QuietCore:
+    # The core a followed read reports to, reduced to the calls the coordinator makes.
+    closed = False
+    config = dm.MassiveConfig(api_key="k")
+
+    def __init__(self) -> None:
+        self.progress: list[int | None] = []
+
+    def write_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
+        del rows
+
+    def update_followed_read(self, call: int, update: StreamUpdate, *, loading: bool) -> None:
+        del call, loading
+        self.progress.append(update.loading)
+
+
+class _QuietRead:
+    # A followed read with no table: it only takes the coordinator's partition rows.
+    call = 1
+    dataset = "test.trades"
+    reread = Reread.ALWAYS
+    built_step = 0
+    shut_down = False
+
+    def __init__(self) -> None:
+        self.core = _QuietCore()
+        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
+        self.stop_token = threading.Event()
+
+    @staticmethod
+    def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
+        raise AssertionError(names, stop)  # the coordinator has no pool: nothing is read
+
+    def publish(self, name: str, seq: int, table: object, *, decided_at_step: int) -> None:
+        del name, seq, table, decided_at_step
+
+
+def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
+    dh_exec_ctx: ExecutionContext, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: each batch looked at every symbol of every result (to find due retries, and
+    # to count the progress), so 10,000 symbols landing one by one cost 10,000 passes over all
+    # 10,000. Now a batch looks at the symbols it changed, plus a constant few.
+    count = 2_000
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "work test", 1)
+    read = _QuietRead()
+    handle = coordinator._handle
+    names = [f"S{i:04}" for i in range(count)]
+    monkeypatch.setattr(follow_coordinator, "_Symbol", _CountedSymbol)
+    monkeypatch.setattr(_CountedSymbol, "looks", 0)
+    handle([follow_coordinator._Follow(cast("FollowedRead", read), None)])
+    result = coordinator._results[id(read)]
+    handle([follow_coordinator._Baseline(cast("FollowedRead", read), frozenset(names), 1)])
+    rows = SymbolRows(cast("Table", dataclasses.make_dataclass("Rows", [("size", int)])(2)))
+    failure = refused(503)
+    for i, name in enumerate(names):  # every tenth symbol retries once
+        handle([follow_coordinator._Began(cast("FollowedRead", read), {name: 1})])
+        outcome = failure if i % 10 == 0 else rows
+        handle(
+            [
+                follow_coordinator._Outcome(
+                    cast("FollowedRead", read), {name: 1}, {name: outcome}, 0, 0.0
+                )
+            ]
+        )
+    assert read.core.progress[-1] == count // 10  # the retrying symbols still load
+    clock.advance(RETRY_DELAYS[0])
+    coordinator._retry_due()  # the retries come due, and each is read and lands
+    for name in names[::10]:
+        handle([follow_coordinator._Began(cast("FollowedRead", read), {name: 1})])
+        handle(
+            [
+                follow_coordinator._Outcome(
+                    cast("FollowedRead", read), {name: 1}, {name: rows}, 0, 0.0
+                )
+            ]
+        )
+    assert read.core.progress[-1] == 0
+    assert result.progress.rows == 2 * count
+    # About 60 field reads per symbol; one pass over every symbol per batch made it 54 million.
+    assert _CountedSymbol.looks < 100 * count

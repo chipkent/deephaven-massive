@@ -51,6 +51,11 @@ Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`.
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
 with a virtual one and wake the coordinator (`wake`) after moving it.
 
+**Cost.** The retries wait in a heap ordered by due time, and each result keeps its
+`m.streams()` progress as running counts (`_Progress`), so a batch costs work in the symbols it
+changed, never a pass over every symbol: a read of 10,000 symbols that land one by one stays
+linear in them.
+
 The module is one subject although it runs past 1,000 lines: every event of a followed read
 (a change of its symbol table, a read's start or outcome, a retry coming due, a stop) changes
 the same per-symbol state on the one coordinator thread, so the state machine and the rows it
@@ -60,6 +65,8 @@ shows read whole only here.
 from __future__ import annotations
 
 import functools
+import heapq
+import itertools
 import logging
 import threading
 import time
@@ -81,9 +88,10 @@ from deephaven_massive._log_limits import bounded_list, log_failure, mark_failur
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
+    SYMBOLS_LISTED,
     NotePart,
     StreamUpdate,
-    describe_symbols,
+    symbol_list_text,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
@@ -92,7 +100,7 @@ from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolRead
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping
 
     from deephaven.execution_context import ExecutionContext
 
@@ -253,6 +261,8 @@ class _Symbol:
         error: Its latest failure's text, until a read succeeds.
         cause: Its latest failure's cause, which groups it in `Error`.
         transport: The source of its latest read, as `m.symbol_reads()` shows it.
+        counted: What its result's progress last counted of it (`_Counted`), or None while
+            it is not counted: it was never shown, or it left the table.
     """
 
     state: SymbolReadState
@@ -270,6 +280,89 @@ class _Symbol:
     error: str | None = None
     cause: str | None = None
     transport: str | None = None
+    counted: _Counted | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Counted:
+    """What one symbol in the table adds to its result's `m.streams()` progress.
+
+    Attributes:
+        state: Its state, which counts it as loading, retrying, or failed.
+        rows: Its rows in the result.
+        cause: Its latest failure's cause, which groups a retrying or failed symbol.
+    """
+
+    state: SymbolReadState
+    rows: int
+    cause: str
+
+
+@dataclass(slots=True)
+class _Progress:
+    """A followed read's `m.streams()` progress, kept current one changed symbol at a time.
+
+    `_show` updates it from the symbols whose row changed since it last ran (`_Result.dirty`),
+    so writing a result's row costs work in the symbols that changed, not in all of them: a
+    read of 10,000 symbols that land one by one would otherwise cost 10,000 passes over all
+    10,000. Touched only by the coordinator thread.
+
+    Attributes:
+        members: The symbols the table holds now.
+        loading: How many of them still wait for their rows (`QUEUED`, `LOADING`, `RETRYING`).
+        rows: Their rows in the result, in all.
+        troubled: Of them, the `RETRYING` and `FAILED` ones, by state, then by cause.
+        members_changed: Whether `members` changed since `symbols` was last made.
+        troubled_changed: Whether `troubled` changed since `notes` were last made.
+        symbols: The `SymbolCount` and `Symbols` shown (`symbol_list_text`).
+        notes: The `Error` parts shown (`FollowCoordinator._note`).
+    """
+
+    members: set[str] = field(default_factory=set)
+    loading: int = 0
+    rows: int = 0
+    troubled: dict[SymbolReadState, dict[str, set[str]]] = field(
+        default_factory=lambda: {SymbolReadState.RETRYING: {}, SymbolReadState.FAILED: {}}
+    )
+    members_changed: bool = True
+    troubled_changed: bool = True
+    symbols: tuple[int | None, str] = (0, "")
+    notes: dict[NotePart, str | None] = field(default_factory=dict)
+
+    def count(self, name: str, symbol: _Symbol) -> None:
+        """Replace what a symbol added to the progress with what it adds now.
+
+        Args:
+            name: The symbol.
+            symbol: Its state.
+        """
+        before = symbol.counted
+        after = _Counted(symbol.state, symbol.rows, symbol.cause or "") if symbol.in_table else None
+        if before == after:
+            return
+        for counted, sign in ((before, -1), (after, 1)):
+            if counted is None:
+                continue
+            self.loading += sign * (counted.state in _FOLLOWING)
+            self.rows += sign * counted.rows
+            causes = self.troubled.get(counted.state)
+            if causes is None:
+                continue
+            self.troubled_changed = True
+            names = causes.setdefault(counted.cause, set())
+            if sign > 0:
+                names.add(name)
+                continue
+            names.discard(name)
+            if not names:
+                del causes[counted.cause]
+        if (before is None) != (after is None):
+            self.members_changed = True
+            if after is None:
+                self.members.discard(name)
+            else:
+                self.members.add(name)
+        symbol.counted = after
 
 
 @dataclass(slots=True)
@@ -279,7 +372,8 @@ class _Result:
     Attributes:
         read: The result's handle.
         symbols: Every symbol it has followed, by name.
-        queue: The symbols waiting for a read, in the order they began to wait.
+        queue: The symbols waiting for a read, in the order they began to wait: a dict used as
+            an ordered set, so taking a symbol out costs no scan.
         scanning: Whether a flat-file scan of the result is in flight.
         seq: The number of the result's latest partition row.
         ended: Whether it failed or stopped: no read starts, and no partition row is published.
@@ -287,6 +381,7 @@ class _Result:
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
         skipped: The text of its skipped symbol-table values, or None.
+        progress: Its `m.streams()` progress, kept current by `_show`.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
             coordinator has applied (the result's build cycle until the first), stamped on
@@ -296,7 +391,7 @@ class _Result:
     read: FollowedRead
     decided_at_step: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
-    queue: list[str] = field(default_factory=list)
+    queue: dict[str, None] = field(default_factory=dict)
     scanning: bool = False
     seq: int = 0
     ended: bool = False
@@ -304,6 +399,7 @@ class _Result:
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
     skipped: str | None = None
+    progress: _Progress = field(default_factory=_Progress)
     shown: object = None
 
 
@@ -376,6 +472,8 @@ class FollowCoordinator:
         "_max_workers",
         "_pool",
         "_results",
+        "_retries",
+        "_retry_numbers",
         "_thread_prefix",
         "_worker",
     )
@@ -403,6 +501,13 @@ class FollowCoordinator:
         self._closed = False
         # Touched only by the coordinator thread.
         self._results: dict[int, _Result] = {}
+        # A heap of the retries waiting for their time: (due, number, result key, symbol),
+        # due in `CLOCK.monotonic()` seconds; the number breaks ties in the order they were
+        # made. An entry outlives a retry that a removal, a stop, or a re-add cancelled: when
+        # its time comes, `_queue_retry` finds the symbol no longer waiting for it and drops
+        # it. So a due retry costs a heap pop, and a batch with none costs a look at the top.
+        self._retries: list[tuple[float, int, int, str]] = []
+        self._retry_numbers = itertools.count()
 
     @property
     def thread(self) -> threading.Thread | None:
@@ -794,7 +899,7 @@ class FollowCoordinator:
         result.dirty.add(name)
         if symbol.waiting:
             symbol.waiting = False
-            result.queue.remove(name)
+            del result.queue[name]
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
             result.read.publish(name, result.seq, None, decided_at_step=result.decided_at_step)
@@ -812,7 +917,7 @@ class FollowCoordinator:
             name: The symbol.
         """
         result.symbols[name].waiting = True
-        result.queue.append(name)
+        result.queue[name] = None
 
     def _landed(self, result: _Result, message: _Outcome) -> None:
         """Apply a read's outcome: each symbol whose generation still matches takes it.
@@ -936,6 +1041,9 @@ class FollowCoordinator:
             delay = RETRY_DELAYS[attempts - 1]
             symbol.state = SymbolReadState.RETRYING
             symbol.due = CLOCK.monotonic() + delay
+            heapq.heappush(
+                self._retries, (symbol.due, next(self._retry_numbers), id(result.read), name)
+            )
             symbol.next_attempt_at = _now_ns() + int(delay * 1e9)
             logger.debug(
                 "call %d follow %s: attempt %d failed in a way that may pass; read again in "
@@ -971,7 +1079,7 @@ class FollowCoordinator:
         )
 
     def _retry_due(self, touched: dict[int, _Result] | None = None) -> None:
-        """Queue every retry whose time has come.
+        """Queue every retry whose time has come, taking each off the heap of retries.
 
         Args:
             touched: Receives each result with a retry queued; None when the coordinator woke
@@ -980,47 +1088,62 @@ class FollowCoordinator:
         now = CLOCK.monotonic()
         woke = touched is None
         touched = {} if touched is None else touched
-        for result in list(self._results.values()):
+        retries = self._retries
+        while retries and retries[0][0] <= now:
+            due, _, key, name = heapq.heappop(retries)
+            result = self._results.get(key)
+            if result is None:  # forgotten: the retry ended with its result
+                logger.debug("follow %s: a retry of a forgotten result is dropped", name)
+                continue
             self._guarded(
                 result,
-                "queuing its due retries",
-                functools.partial(self._queue_due_retries, result, now, touched),
+                "queuing a due retry",
+                functools.partial(self._queue_retry, result, name, due=due, touched=touched),
             )
         if woke:
             self._schedule_and_show(touched)
 
-    def _queue_due_retries(self, result: _Result, now: float, touched: dict[int, _Result]) -> None:
-        """Queue one result's retries whose time has come.
+    def _queue_retry(
+        self, result: _Result, name: str, *, due: float, touched: dict[int, _Result]
+    ) -> None:
+        """Queue one symbol's retry that came due, unless it was cancelled meanwhile.
 
         Args:
             result: The result's state.
-            now: The monotonic clock's reading, seconds.
-            touched: Receives the result when a retry of it is queued.
+            name: The symbol.
+            due: When the retry was due, monotonic seconds: a symbol whose retry a removal,
+                a stop, or a re-add replaced no longer waits for this one.
+            touched: Receives the result when the retry is queued.
         """
-        if result.ended:
+        # `get`: a result started after this retry's result was forgotten may reuse its key.
+        symbol = result.symbols.get(name)
+        if (
+            result.ended
+            or symbol is None
+            or symbol.state is not SymbolReadState.RETRYING
+            or symbol.due != due
+        ):
+            logger.debug(
+                "call %d follow %s: a cancelled or replaced retry came due; dropped",
+                result.read.call,
+                name,
+            )
             return
-        for name, symbol in result.symbols.items():
-            if symbol.state is SymbolReadState.RETRYING and (symbol.due or 0.0) <= now:
-                symbol.state = SymbolReadState.QUEUED
-                symbol.due = symbol.next_attempt_at = None
-                result.dirty.add(name)
-                self._enqueue(result, name)
-                touched[id(result.read)] = result
+        symbol.state = SymbolReadState.QUEUED
+        symbol.due = symbol.next_attempt_at = None
+        result.dirty.add(name)
+        self._enqueue(result, name)
+        touched[id(result.read)] = result
 
     def _next_due(self) -> float | None:
         """Return the seconds until the next retry is due, for the queue wait.
 
+        A cancelled retry still in the heap wakes the coordinator early, once, at its time.
+
         Returns:
             The seconds (0 or less: at once), or None when no retry waits.
         """
-        dues = [
-            symbol.due
-            for result in self._results.values()
-            if not result.ended
-            for symbol in result.symbols.values()
-            if symbol.due is not None
-        ]
-        return None if not dues else min(dues) - CLOCK.monotonic()
+        return self._retries[0][0] - CLOCK.monotonic() if self._retries else None
 
     def _schedule(self, result: _Result) -> None:
         """Start the reads the result's queue allows: REST groups, or one flat-file scan.
@@ -1037,7 +1160,7 @@ class FollowCoordinator:
         if not ready:
             return
         for name in ready:
-            result.queue.remove(name)
+            del result.queue[name]
             result.symbols[name].waiting = False
         size = len(ready) if result.read.plan.one_scan else result.read.plan.symbols_per_read
         batches = [ready[i : i + size] for i in range(0, len(ready), size)]
@@ -1151,25 +1274,37 @@ class FollowCoordinator:
     def _show(self, result: _Result) -> None:
         """Write the result's changed `m.symbol_reads()` rows and its `m.streams()` progress.
 
+        The work is in the symbols whose row changed (`_Result.dirty`), not in all of them: the
+        progress is updated from those alone (`_Progress.count`), and its symbol list and
+        `Error` parts are made again only when the table's symbols, or its retrying and failed
+        ones, changed.
+
         Args:
             result: The result's state.
         """
         read = result.read
         core = read.core
+        progress = result.progress
         if result.dirty:
             now = _now_ns()
-            rows = [self._row(result, name, now) for name in sorted(result.dirty)]
+            names = sorted(result.dirty)
             result.dirty.clear()
-            core.write_symbol_reads(rows)
-        current = sorted(name for name, symbol in result.symbols.items() if symbol.in_table)
-        loading = sum(1 for name in current if result.symbols[name].state in _FOLLOWING)
-        rows_now = sum(result.symbols[name].rows for name in current)
-        notes = {
-            NotePart.RETRYING_SYMBOLS: self._note(result, current, SymbolReadState.RETRYING),
-            NotePart.FAILED_SYMBOLS: self._note(result, current, SymbolReadState.FAILED),
-        }
-        count, text = describe_symbols(tuple(current))
-        shown = (tuple(current), loading, rows_now, tuple(notes.items()), result.skipped)
+            for name in names:
+                progress.count(name, result.symbols[name])
+            core.write_symbol_reads([self._row(result, name, now) for name in names])
+        if progress.members_changed:
+            progress.members_changed = False
+            first = heapq.nsmallest(SYMBOLS_LISTED, progress.members)
+            progress.symbols = symbol_list_text(len(progress.members), first)
+        if progress.troubled_changed:
+            progress.troubled_changed = False
+            progress.notes = {
+                NotePart.RETRYING_SYMBOLS: self._note(result, SymbolReadState.RETRYING),
+                NotePart.FAILED_SYMBOLS: self._note(result, SymbolReadState.FAILED),
+            }
+        count, text = progress.symbols
+        loading, rows_now, notes = progress.loading, progress.rows, progress.notes
+        shown = (text, count, loading, rows_now, tuple(notes.items()), result.skipped)
         if shown == result.shown:
             return
         result.shown = shown
@@ -1218,35 +1353,31 @@ class FollowCoordinator:
         )
 
     @staticmethod
-    def _note(result: _Result, current: Sequence[str], state: SymbolReadState) -> str | None:
-        """Return the `Error` part of the current symbols in one state, grouped by cause.
+    def _note(result: _Result, state: SymbolReadState) -> str | None:
+        """Return the `Error` part of the table's symbols in one state, grouped by cause.
+
+        Each cause shows the error text of its first symbol in name order, and its first
+        symbols by name.
 
         Args:
-            result: The result's state.
-            current: The symbols the table holds now, sorted.
+            result: The result's state, whose progress groups the symbols.
             state: `RETRYING` or `FAILED`.
 
         Returns:
             Such as `"2 symbols failed (delete and re-add a row to read one again):
             EntitlementError: HTTP 403 ...: AAPL, MSFT"`, or None when no symbol is in `state`.
         """
-        groups: dict[str, list[str]] = {}
-        texts: dict[str, str] = {}
-        for name in current:
-            symbol = result.symbols[name]
-            if symbol.state is state:
-                cause = symbol.cause or ""
-                groups.setdefault(cause, []).append(name)
-                texts.setdefault(cause, symbol.error or "")
+        groups = result.progress.troubled[state]
         if not groups:
             return None
         total = sum(len(names) for names in groups.values())
         parts = []
         for cause in sorted(groups)[:_CAUSES_SHOWN]:
-            names = groups[cause]
-            shown = ", ".join(names[:_SYMBOLS_SHOWN])
-            more = f" (+{len(names) - _SYMBOLS_SHOWN} more)" if len(names) > _SYMBOLS_SHOWN else ""
-            text = texts[cause]
+            names = heapq.nsmallest(_SYMBOLS_SHOWN, groups[cause])
+            shown = ", ".join(names)
+            hidden = len(groups[cause]) - _SYMBOLS_SHOWN
+            more = f" (+{hidden} more)" if hidden > 0 else ""
+            text = result.symbols[names[0]].error or ""
             text = text if len(text) <= _CAUSE_SHOWN else text[: _CAUSE_SHOWN - 1] + "…"
             parts.append(f"{text}: {shown}{more}")
         if len(groups) > _CAUSES_SHOWN:
@@ -1278,6 +1409,7 @@ class FollowCoordinator:
         """
         logger.debug("follow: the coordinator ends with %d results", len(self._results))
         self._results.clear()
+        self._retries.clear()
         with self._lock:
             self._following.clear()
 
@@ -1299,6 +1431,7 @@ class FollowCoordinator:
         for result in self._results.values():
             result.ended = True
         self._results.clear()  # before the next thread can start: never two owners
+        self._retries.clear()
         with self._lock:
             reads = list(self._following.values())
             self._following.clear()

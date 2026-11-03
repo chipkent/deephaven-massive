@@ -53,8 +53,14 @@ from deephaven_massive._tables.diagnostics import (
     StreamState,
     StreamUpdate,
 )
-from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, new_scope
+from deephaven_massive._tables.execution_context import entered, wait_for_update_cycle
+from deephaven_massive._tables.liveness import (
+    Reaper,
+    ResultRegistry,
+    make_result,
+    new_scope,
+    release_scope,
+)
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._types import override
 from tests._fakes.stream import transport_of
@@ -987,7 +993,7 @@ def test_a_followed_read_s_progress_after_close_changes_nothing(
     # The coordinator may report progress after the close: the row keeps what the close wrote.
     core = massive_session._core
     call = core.next_stream_id()
-    core.register_worker(
+    core._register_worker(
         StreamRow(
             stream_id=call,
             kind=StreamKind.READ,
@@ -1011,7 +1017,7 @@ def test_a_followed_read_s_progress_after_close_changes_nothing(
         assert core._workers[call].row == closed
     assert closed.state is StreamState.CLOSED
     core.release_worker(call)  # as releasing the result, then its shutdown, do
-    core.worker_shut_down(call)
+    core.worker_shutdown_callback(call, threading.Event())()
 
 
 def test_a_session_collected_unclosed_runs_its_closers(
@@ -2059,10 +2065,14 @@ class _FatalPublisher:
     # test sets `go`: the test picks when the writer dies.
     def __init__(self) -> None:
         self.go = threading.Event()
+        self.failures: list[Exception] = []
 
     def add(self, rows: Table) -> None:
         assert self.go.wait(TIMEOUT)
         raise _Fatal
+
+    def publish_failure(self, error: Exception) -> None:
+        self.failures.append(error)
 
 
 def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
@@ -2118,6 +2128,132 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the call released its hold
+
+
+def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A view a user holds fails instead of showing frozen rows as if they were current, a new
+    # view is refused with the reason, and the tables' scope goes to the reaper.
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)  # the death still escapes
+    core = massive_session._core
+    diagnostics = core.diagnostics
+    writer = diagnostics.thread
+    publisher = _FatalPublisher()
+    diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    handed: list[LivenessScope] = []
+    hand = diagnostics._release_later
+
+    def handing(scope: LivenessScope) -> None:
+        handed.append(scope)
+        hand(scope)
+
+    monkeypatch.setattr(diagnostics, "_release_later", handing)
+    held = massive_session.connections()
+    assert not held.j_table.isFailed()
+    publisher.go.set()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.diagnostics"):
+        result = stream_query(massive_session).append_only()  # its row kills the writer
+        writer.join(TIMEOUT)
+    assert not writer.is_alive()
+    assert [args.exc_type for args in escaped] == [_Fatal]
+    text = f"{label(massive_session)}: its diagnostics writer thread died (_Fatal()); this table"
+    assert fake_streams.failed[1].startswith(text)  # the live table fails as before
+    assert [str(error) for error in publisher.failures] == [f"{text} no longer updates"]
+    assert diagnostics._scope in handed
+    assert "their scope is handed to the reaper" in caplog.text
+    assert wait_for_update_cycle(core.exec_ctx, TIMEOUT)  # the cycle that delivers the failures
+    assert held.j_table.isFailed()
+    with pytest.raises(
+        dm.MassiveError,
+        match=rf"^{re.escape(label(massive_session))}: its diagnostics tables failed when their "
+        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then$",
+    ):
+        massive_session.connections()
+    assert core._views == 1  # the refused view counted nothing
+    massive_session.release(held)
+    massive_session.release(result)
+
+
+class _UnfailablePublisher:
+    # A diagnostics publisher whose failure raises.
+    def publish_failure(self, error: Exception) -> None:
+        raise RuntimeError(f"cannot fail: {error}")
+
+
+def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
+    dh_exec_ctx: ExecutionContext,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Releasing a scope twice raises: a writer that dies in its own release hands only its
+    # tables' failures on, never the scope. A table that cannot fail costs the others nothing.
+    monkeypatch.setattr(threading, "excepthook", [].append)  # the death still escapes
+    release = Diagnostics._release_tables
+
+    def release_then_die(diagnostics: Diagnostics) -> None:
+        release(diagnostics)
+        raise _Fatal
+
+    monkeypatch.setattr(Diagnostics, "_release_tables", release_then_die)
+    handed: list[LivenessScope] = []
+    deaths: list[BaseException] = []
+    diagnostics = Diagnostics(
+        dh_exec_ctx,
+        "dying diagnostics",
+        label="TestSession",
+        release_later=handed.append,
+        on_death=deaths.append,
+    )
+    diagnostics._connections.publisher = cast("BlinkPublisher", _UnfailablePublisher())
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
+        diagnostics.release()
+    assert [type(death) for death in deaths] == [_Fatal]
+    assert diagnostics._scope not in handed
+    assert len(handed) == 3  # the three other tables' unused pins: they were destroyed
+    assert f"could not fail the connections table. {LIBRARY_BUG}" in caplog.text
+    for scope in handed:
+        release_scope(dh_exec_ctx, scope)
+
+
+def test_the_reaper_outlives_the_diagnostics_writer_of_a_collected_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A writer that dies hands its work to the reaper: when a session is collected, the reaper
+    # waits for the writer to end before it retires, so that work is still done.
+    monkeypatch.setattr(threading, "excepthook", [].append)  # the death still escapes
+    gate = threading.Event()
+    release = Diagnostics._release_tables
+
+    def held_then_die(diagnostics: Diagnostics) -> None:
+        assert gate.wait(TIMEOUT)
+        release(diagnostics)
+        raise _Fatal
+
+    ran: list[str] = []
+    real_release_on = _core._release_on
+
+    def release_on(reaper: Reaper, exec_ctx: ExecutionContext, scope: LivenessScope) -> None:
+        real_release_on(reaper, exec_ctx, scope)
+        reaper.submit(lambda: ran.append("handed work"))
+
+    monkeypatch.setattr(Diagnostics, "_release_tables", held_then_die)
+    monkeypatch.setattr(_core, "_release_on", release_on)
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="outlived"))
+    reaper, writer = m._core._reaper.thread, m._core.diagnostics.thread
+    del m
+    gc.collect()
+    gate.set()  # the writer releases its tables and dies: its failures go to the reaper
+    writer.join(TIMEOUT)
+    reaper.join(TIMEOUT)
+    assert not writer.is_alive()
+    assert not reaper.is_alive()
+    assert ran  # the reaper ran the dead writer's work before it ended
 
 
 def test_a_thread_of_a_freed_session_dies_quietly() -> None:
