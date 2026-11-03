@@ -105,7 +105,7 @@ _INDEX_GUIDE: Final = (
     "Every dataset the library serves, one page each. A page shows how to call the dataset, "
     "its verbs, the `sort` values and `filters` keys it accepts, which of Massive's plans "
     "include it, and every column of its tables, in the order every verb returns them. The "
-    "same column descriptions appear in the web UI's column tooltips and in a query's "
+    "same column descriptions appear in the Deephaven IDE's column tooltips and in a query's "
     "`columns()`, and `dm.datasets()` lists these datasets as a table."
 )
 """The paragraph under the index's title."""

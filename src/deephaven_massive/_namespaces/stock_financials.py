@@ -10,8 +10,9 @@ touches the network until a verb is called on the query. This module owns the na
 `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
 `_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
 the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and `end` bound the
-statement period, and `sort`, `order`, `limit`, and `filters` work as README.md#sort-order-limit
-and README.md#filters describe. `m.stocks` (`stocks.py`) creates the namespace.
+statement period, and `sort`, `order`, `limit`, and `filters` work as
+docs/guide/arguments.md#sort-order-limit and docs/guide/arguments.md#filters describe. `m.stocks`
+(`stocks.py`) creates the namespace.
 """
 
 from __future__ import annotations
@@ -205,21 +206,23 @@ class _StockFinancials(Namespace):
         Each row is a company's assets, liabilities, and equity at the end of a quarter or fiscal
         year, as filed with the SEC. A filing can name several share classes, so its `Tickers`
         column holds the filing's tickers, `symbols` selects the filings that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols). `poll()`
-        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        a row is listed under each named ticker it lists, in `Symbol`
+        (docs/guide/arguments.md#symbols). `poll()` replaces the table each cycle, keyed by `Cik`,
+        `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; None, the default, for both. A balance
                 sheet is a position, so it has no trailing twelve months.
-            start: The first period end date. See README.md#start-and-end.
-            end: The last period end date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            start: The first period end date. See docs/guide/arguments.md#start-and-end.
+            end: The last period end date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.financials.balance_sheets.md.
@@ -274,21 +277,23 @@ class _StockFinancials(Namespace):
         Each row is a company's revenue, expenses, earnings, and per-share figures for a quarter or
         fiscal year, as filed with the SEC. A filing can name several share classes, so its
         `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        them, and a row is listed under each named ticker it lists, in `Symbol`
+        (docs/guide/arguments.md#symbols). `poll()` replaces the table each cycle, keyed by `Cik`,
+        `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
                 default, for every timeframe.
-            start: The first period end date. See README.md#start-and-end.
-            end: The last period end date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            start: The first period end date. See docs/guide/arguments.md#start-and-end.
+            end: The last period end date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.financials.income_statements.md.
@@ -337,21 +342,23 @@ class _StockFinancials(Namespace):
         Each row is a company's operating, investing, and financing cash flows for a quarter or
         fiscal year, as filed with the SEC. A filing can name several share classes, so its
         `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        them, and a row is listed under each named ticker it lists, in `Symbol`
+        (docs/guide/arguments.md#symbols). `poll()` replaces the table each cycle, keyed by `Cik`,
+        `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
                 default, for every timeframe.
-            start: The first period end date. See README.md#start-and-end.
-            end: The last period end date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"period_end"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            start: The first period end date. See docs/guide/arguments.md#start-and-end.
+            end: The last period end date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"period_end"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.financials.cash_flow_statements.md.
@@ -398,12 +405,14 @@ class _StockFinancials(Namespace):
         replaces the table each cycle, keyed by `Symbol` and `Date`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            sort: The field to sort by, such as `"market_cap"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
+            sort: The field to sort by, such as `"market_cap"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.financials.ratios.md.

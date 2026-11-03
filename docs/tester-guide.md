@@ -1464,8 +1464,8 @@ on Docker Desktop's WSL integration for Ubuntu (**Settings > Resources > WSL int
 
 4. Optional: a settings file. To give the container settings such as `delayed_subscriptions`
    without typing them into every example, write them in `~/massive-test/settings.yaml` (the
-   README's [settings file](../README.md#settings-file) section shows a full example), then add
-   two options to the `docker run` line of step 2, before the image name:
+   user guide's [settings file](guide/install.md#settings-file) section shows a full example),
+   then add two options to the `docker run` line of step 2, before the image name:
 
    ```bash
      -v "$HOME/massive-test/settings.yaml:/settings/settings.yaml:ro" \

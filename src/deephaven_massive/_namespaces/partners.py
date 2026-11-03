@@ -404,10 +404,10 @@ class _Benzinga(Namespace):
 
         Args:
             sort: The wire field to sort by, such as `"smart_score"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"firm_name": "Wedbush"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"firm_name": "Wedbush"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.analysts.md.
@@ -453,12 +453,12 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"date_gte": "2025-01-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"date_gte": "2025-01-01"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.analyst_insights.md.
@@ -505,12 +505,12 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"rating_action": "upgrades"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"rating_action": "upgrades"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.ratings.md.
@@ -550,9 +550,10 @@ class _Benzinga(Namespace):
         to the ratings published in a range. `poll()` re-reads it, keyed by `Symbol`.
 
         Args:
-            symbols: US stock tickers; required (`dm.ALL` is refused). See README.md#symbols.
+            symbols: US stock tickers; required (`dm.ALL` is refused).
+                See docs/guide/arguments.md#symbols.
             filters: The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...);
-                None aggregates every rating. See README.md#filters.
+                None aggregates every rating. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.consensus_ratings.md.
@@ -596,12 +597,13 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"last_updated"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"last_updated_gte": "2025-06-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"last_updated_gte": "2025-06-01"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.bulls_bears_say.md.
@@ -648,12 +650,12 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"positioning": "primary"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"positioning": "primary"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.guidance.md.
@@ -700,12 +702,12 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"importance_gte": 3}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"importance_gte": 3}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.earnings.md.
@@ -750,10 +752,11 @@ class _Benzinga(Namespace):
 
         Args:
             sort: The wire field to sort by, such as `"name"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.firms.md.
@@ -794,22 +797,23 @@ class _Benzinga(Namespace):
 
         One row per article, at its publication `Timestamp`. An article names any number of tickers,
         in its `Tickers` array; `symbols` selects the articles that name any of them, and an article
-        is listed under each named ticker it names, in `Symbol` (README.md#symbols). `poll()`
-        appends the articles it has not seen, keyed by `BenzingaId` and `Symbol`, and needs `start`
-        or `limit`, since each cycle reads the whole range; a fixed `start` widens the window of a
-        poll that runs for days.
+        is listed under each named ticker it names, in `Symbol` (docs/guide/arguments.md#symbols).
+        `poll()` appends the articles it has not seen, keyed by `BenzingaId` and `Symbol`, and needs
+        `start` or `limit`, since each cycle reads the whole range; a fixed `start` widens the
+        window of a poll that runs for days.
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             start: The earliest publication time; `poll()` needs it or a `limit`.
-                See README.md#start-and-end.
-            end: The end of the range. See README.md#start-and-end.
+                See docs/guide/arguments.md#start-and-end.
+            end: The end of the range. See docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"published"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"channels_any_of": ["earnings"]}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"channels_any_of": ["earnings"]}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.benzinga.news.md.
@@ -887,12 +891,13 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"effective_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.etf_global.analytics.md.
@@ -938,12 +943,13 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"effective_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"effective_date": "2025-09-18"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"effective_date": "2025-09-18"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.etf_global.constituents.md.
@@ -990,12 +996,13 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"effective_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.etf_global.fund_flows.md.
@@ -1041,12 +1048,13 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"effective_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.etf_global.profiles.md.
@@ -1091,12 +1099,13 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused). See README.md#symbols.
+                refused). See docs/guide/arguments.md#symbols.
             sort: The wire field to sort by, such as `"effective_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.etf_global.taxonomies.md.
@@ -1171,14 +1180,14 @@ class _Tmx(Namespace):
 
         Args:
             symbols: Tickers as TMX writes them; None, the default, for no ticker filter
-                (`dm.ALL` is refused). See README.md#symbols.
-            start: The first event day. See README.md#start-and-end.
-            end: The end of the range. See README.md#start-and-end.
+                (`dm.ALL` is refused). See docs/guide/arguments.md#symbols.
+            start: The first event day. See docs/guide/arguments.md#start-and-end.
+            end: The end of the range. See docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"type": "earnings"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"type": "earnings"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.tmx.corporate_events.md.
@@ -1258,13 +1267,13 @@ class _Fable(Namespace):
         `PublishedDate` to `TransactionCurrency`.
 
         Args:
-            start: The first transaction day. See README.md#start-and-end.
-            end: The end of the range. See README.md#start-and-end.
+            start: The first transaction day. See docs/guide/arguments.md#start-and-end.
+            end: The end of the range. See docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"transaction_date"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"parent_name": "Amazon Inc"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"parent_name": "Amazon Inc"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.fable.merchant_aggregates.md.
@@ -1313,10 +1322,10 @@ class _Fable(Namespace):
 
         Args:
             sort: The wire field to sort by, such as `"lookup_name"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"listing_status": "public"}`. See README.md#filters.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"listing_status": "public"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns: docs/datasets/partners.fable.merchant_hierarchy.md.

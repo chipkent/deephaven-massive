@@ -1973,7 +1973,7 @@ class RestReader:
             cancel: A background read's stop token, which ends the read's waits when set; None
                 when only the session's close should.
             pauses_live_tables: True when the calling thread holds the update graph's lock (a
-                console command), so the read pauses every live table of the worker while it
+                console command), so the read pauses every live table of the server while it
                 runs.
             unlisted: What a crypto pair Massive's crypto ticker list does not hold does:
                 `RAISE` (always for symbols passed in code) raises its

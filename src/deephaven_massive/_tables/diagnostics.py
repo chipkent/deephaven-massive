@@ -32,7 +32,7 @@ rows hold the `Transport` member, and `as_row` writes its label. A stream's `Que
 `QUERY_SHOWN` characters (`shown_query`), as `Symbols` is cut to its first symbols, so a query
 over a long list stays readable.
 
-The tables are not input tables: nobody can edit them in the web UI, and the library never
+The tables are not input tables: nobody can edit them in the Deephaven IDE, and the library never
 deletes a row, so each keeps one row per key it was ever written (a stream ended long ago
 keeps its last row), as the session's history of what it opened.
 
@@ -1098,7 +1098,7 @@ class _KeyedTable:
     copied out of the blink rows, so a later row of a key replaces the earlier one as a modify
     (also when two adds of one key land in one update cycle), and a new key is appended after
     the keys seen before it. Rows are never deleted, so the table keeps one row per key ever
-    written. It is not an input table: nobody can edit it in the web UI, and no row can be
+    written. It is not an input table: nobody can edit it in the Deephaven IDE, and no row can be
     removed.
 
     Created by `Diagnostics` on the caller thread, inside the diagnostics scope and the

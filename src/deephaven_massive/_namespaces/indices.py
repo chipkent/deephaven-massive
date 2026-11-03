@@ -198,7 +198,7 @@ class _Indices(Namespace):
 
         Args:
             symbols: Indices with the `I:` prefix, such as `"I:SPX"` (`"SPX"` is refused), or
-                `dm.ALL`. See README.md#symbols.
+                `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query with the stream verbs and `history()`. Columns: docs/datasets/indices.values.md.
@@ -234,14 +234,14 @@ class _Indices(Namespace):
         Each row is one bar of one index. Index bars are computed from index levels, so they have no
         volume columns and no `adjusted` argument, and a window in which the index did not change
         has no bar. One-second and one-minute bars also stream; every other length is history only.
-        Bar rules follow README.md#bars, with two index differences: a bar of a day or longer ends
-        an hour after the midnight that follows its last day (01:00 New York time), and a week or
-        longer covers its whole calendar period, weekends included. REST `history()` takes explicit
-        indices; `dm.ALL` reads the minute and day flat files.
+        Bar rules follow docs/guide/history.md#bars, with two index differences: a bar of a day or
+        longer ends an hour after the midnight that follows its last day (01:00 New York time), and
+        a week or longer covers its whole calendar period, weekends included. REST `history()` takes
+        explicit indices; `dm.ALL` reads the minute and day flat files.
 
         Args:
-            symbols: Indices with the `I:` prefix, or `dm.ALL`. See README.md#symbols.
-            timespan: The bar unit; required. See README.md#timespan-and-multiplier.
+            symbols: Indices with the `I:` prefix, or `dm.ALL`. See docs/guide/arguments.md#symbols.
+            timespan: The bar unit; required. See docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
 
         Returns:
@@ -270,12 +270,12 @@ class _Indices(Namespace):
 
         One row per index: its 1-day bar of the previous completed session, one request per index.
         The volume columns are always null; the bar ends at 01:00 New York time the next day, as
-        index day bars do (README.md#bars). An index with no bar (HTTP 404) is left out, with a
-        WARNING. `dm.ALL` is refused: `bars(dm.ALL, dm.Timespan.DAY).history(day, day)` reads every
-        index's bar of a day from the flat files.
+        index day bars do (docs/guide/history.md#bars). An index with no bar (HTTP 404) is left out,
+        with a WARNING. `dm.ALL` is refused: `bars(dm.ALL, dm.Timespan.DAY).history(day, day)` reads
+        every index's bar of a day from the flat files.
 
         Args:
-            symbols: Indices with the `I:` prefix. See README.md#symbols.
+            symbols: Indices with the `I:` prefix. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.previous_day_bar.md.
@@ -321,12 +321,12 @@ class _Indices(Namespace):
         and `daily_open_close()` are the alternatives.
 
         Args:
-            symbols: Indices with the `I:` prefix, or `dm.ALL`. See README.md#symbols.
-            sort: `"ticker"`. See README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Indices with the `I:` prefix, or `dm.ALL`. See docs/guide/arguments.md#symbols.
+            sort: `"ticker"`. See docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
-                `ticker_lte`. See README.md#filters.
+                `ticker_lte`. See docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.snapshots.md.
@@ -365,8 +365,9 @@ class _Indices(Namespace):
         dm.Timespan.DAY).history(day, day)` reads every index's bar of that day.
 
         Args:
-            symbols: Indices with the `I:` prefix. See README.md#symbols.
-            date: The day, a calendar date (a `datetime` raises). See README.md#start-and-end.
+            symbols: Indices with the `I:` prefix. See docs/guide/arguments.md#symbols.
+            date: The day, a calendar date (a `datetime` raises).
+                See docs/guide/arguments.md#start-and-end.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.daily_open_close.md.

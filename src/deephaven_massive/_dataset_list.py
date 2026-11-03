@@ -70,7 +70,7 @@ def datasets() -> Table:
         `ring`, `last_by`, `history`), `Transports` (String[], the transports that serve it,
         spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
-        Each column carries a description, shown as its tooltip in the web UI.
+        Each column carries a description, shown as its tooltip in the Deephaven IDE.
 
     The table is created on the calling thread, in the liveness scope at the top of its stack,
     as any static table the caller makes is.

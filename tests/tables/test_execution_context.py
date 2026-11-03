@@ -37,7 +37,9 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
     update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
     # The refusal names the recipe that does a listener's usual job without one.
-    with pytest.raises(ValueError, match=r"update-graph thread.*README\.md#symbols$"):
+    with pytest.raises(
+        ValueError, match=r"update-graph thread.*docs/guide/watchlists\.md#schedules$"
+    ):
         refuse_update_graph_thread(cast("ExecutionContext", update_thread))
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         refuse_update_graph_thread(dh_exec_ctx)

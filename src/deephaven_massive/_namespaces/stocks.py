@@ -17,7 +17,8 @@ generated schemas.
 The REST list datasets (dividends through share float) share one shape: `symbols` is optional
 and only filters the request, `dm.ALL` is refused in favour of `symbols=None` (`EVERY_TICKER`),
 `start` and `end` bound the dataset's date axis where it has one, and `sort`, `order`,
-`limit`, and `filters` work as README.md#sort-order-limit and README.md#filters describe.
+`limit`, and `filters` work as docs/guide/arguments.md#sort-order-limit and
+docs/guide/arguments.md#filters describe.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -417,7 +418,7 @@ class _Stocks(Namespace):
         trade alone is `last_trade()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.trades.md.
@@ -447,7 +448,7 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.last_trade.md.
@@ -480,7 +481,7 @@ class _Stocks(Namespace):
         `last_quote()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.quotes.md.
@@ -509,7 +510,7 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.last_quote.md.
@@ -563,17 +564,18 @@ class _Stocks(Namespace):
 
         Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
         stream from the WebSocket; every other length is history only. Windows, stamps, `Date`, and
-        which bars `history()` returns follow README.md#bars. Daily `dm.ALL` history reads Massive's
-        grouped daily bars, one request per day. Intraday `dm.ALL` history needs `adjusted=False`,
-        since only REST adjusts and its intraday bars need named symbols. The previous session's bar
-        alone is `previous_day_bar()`.
+        which bars `history()` returns follow docs/guide/history.md#bars. Daily `dm.ALL` history
+        reads Massive's grouped daily bars, one request per day. Intraday `dm.ALL` history needs
+        `adjusted=False`, since only REST adjusts and its intraday bars need named symbols. The
+        previous session's bar alone is `previous_day_bar()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
             timespan: The bar unit, any but `SESSION`; required. See
-                README.md#timespan-and-multiplier.
+                docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar, 1 by default; only 1 streams.
-            adjusted: Split-adjusted prices, served by REST only. See README.md#adjusted.
+            adjusted: Split-adjusted prices, served by REST only.
+                See docs/guide/arguments.md#adjusted.
 
         Returns:
             A query of the class the timespan picks. Columns: docs/datasets/stocks.bars.md.
@@ -607,12 +609,12 @@ class _Stocks(Namespace):
         request per symbol; a symbol with no bar (HTTP 404) is left out, with a WARNING. `poll()`
         replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps each new
         day's bar. Massive stamps the bar at the session close, which is moved to the day's start as
-        README.md#bars describes; an unexpected stamp is served with a WARNING.
+        docs/guide/history.md#bars describes; an unexpected stamp is served with a WARNING.
 
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
-                dm.Timespan.DAY).history(day, day)`). See README.md#symbols.
-            adjusted: Split-adjusted prices and volume. See README.md#adjusted.
+                dm.Timespan.DAY).history(day, day)`). See docs/guide/arguments.md#symbols.
+            adjusted: Split-adjusted prices and volume. See docs/guide/arguments.md#adjusted.
 
         Returns:
             A query. Columns: docs/datasets/stocks.previous_day_bar.md.
@@ -648,7 +650,7 @@ class _Stocks(Namespace):
         and the tape. The bands only stream from the WebSocket; there is no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.luld.md.
@@ -674,7 +676,7 @@ class _Stocks(Namespace):
         WebSocket; there is no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.imbalances.md.
@@ -699,7 +701,7 @@ class _Stocks(Namespace):
         Massive's Business host, so it needs a Business plan; there is no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/stocks.fmv.md.
@@ -724,10 +726,11 @@ class _Stocks(Namespace):
         last trade and quote, today's change, and the fair market value where the plan includes it.
         `poll()` replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps
         each new state by its `Updated` time. Snapshots need a paid plan
-        (README.md#plans-and-errors).
+        (docs/guide/plans.md#plans-and-errors).
 
         Args:
-            symbols: Stock tickers, or `dm.ALL` for the full market. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for the full market.
+                See docs/guide/arguments.md#symbols.
             include_otc: True to include OTC securities; False, the default, leaves them out.
 
         Returns:
@@ -794,11 +797,11 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
-                dm.Timespan.DAY).history(day, day)`). See README.md#symbols.
+                dm.Timespan.DAY).history(day, day)`). See docs/guide/arguments.md#symbols.
             date: The trading day, a calendar date; a `datetime` or an instant raises. See
-                README.md#time.
+                docs/guide/concepts.md#time.
             adjusted: Split-adjusted prices and volume. Massive does not echo the basis here, so it
-                cannot be checked. See README.md#adjusted.
+                cannot be checked. See docs/guide/arguments.md#adjusted.
 
         Returns:
             A query. Columns: docs/datasets/stocks.daily_open_close.md.
@@ -846,16 +849,17 @@ class _Stocks(Namespace):
         `poll()` replaces the table each cycle, keyed by `Id`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first ex-dividend date. See README.md#start-and-end.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
+            start: The first ex-dividend date. See docs/guide/arguments.md#start-and-end.
             end: The last ex-dividend date; without it, announced dividends still to come are
-                returned too. See README.md#start-and-end.
+                returned too. See docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"ex_dividend_date"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"distribution_type": "special"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.dividends.md.
@@ -901,17 +905,19 @@ class _Stocks(Namespace):
         Each row is one split: its `ExecutionDate`, the ratio (`SplitFrom` to `SplitTo`), the
         adjustment type, and `HistoricalAdjustmentFactor`, the cumulative factor that adjusts
         earlier prices. `poll()` replaces the table each cycle, keyed by `Id`. Use it to adjust
-        as-traded bars yourself, with the recipe in README.md#split-adjustment.
+        as-traded bars yourself, with the recipe in docs/guide/history.md#split-adjustment.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first execution date. See README.md#start-and-end.
-            end: The last execution date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"execution_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
+            start: The first execution date. See docs/guide/arguments.md#start-and-end.
+            end: The last execution date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"execution_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
-                See README.md#filters.
+                See docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.splits.md.
@@ -962,14 +968,16 @@ class _Stocks(Namespace):
         document: a renamed issuer would leave its old row beside the new one.
 
         Args:
-            symbols: Stock tickers; None, the default, for every offering. See README.md#symbols.
-            start: The first listing date. See README.md#start-and-end.
-            end: The last listing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"listing_date"`. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every offering.
+                See docs/guide/arguments.md#symbols.
+            start: The first listing date. See docs/guide/arguments.md#start-and-end.
+            end: The last listing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"listing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
             order: The sort direction; here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
             filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.ipos.md.
@@ -1017,14 +1025,16 @@ class _Stocks(Namespace):
         replaces the table each cycle, keyed by `Symbol` and `SettlementDate`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first settlement date. See README.md#start-and-end.
-            end: The last settlement date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"settlement_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
+            start: The first settlement date. See docs/guide/arguments.md#start-and-end.
+            end: The last settlement date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"settlement_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.short_interest.md.
@@ -1072,14 +1082,16 @@ class _Stocks(Namespace):
         cycle, keyed by `Symbol` and `Date`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first trading day. See README.md#start-and-end.
-            end: The last trading day. See README.md#start-and-end.
-            sort: The field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
+            start: The first trading day. See docs/guide/arguments.md#start-and-end.
+            end: The last trading day. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.short_volume.md.
@@ -1125,13 +1137,14 @@ class _Stocks(Namespace):
         `poll()` replaces the table each cycle, keyed by `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
+            symbols: Stock tickers; None, the default, for every ticker.
+                See docs/guide/arguments.md#symbols.
             sort: The field to sort by, such as `"free_float_percent"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.share_float.md.

@@ -200,7 +200,7 @@ class MassiveConfig:
             delayed. Past data and `history()` are never checked. `dm.Subscription.CURRENCIES`
             cannot be listed and is never refused; FMV streams are real-time only; a
             `websocket_hosts` pin must match. Defaults to an empty set. See
-            README.md#real-time-or-delayed.
+            docs/guide/plans.md#real-time-or-delayed.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no
@@ -241,7 +241,7 @@ class MassiveConfig:
             its cycles have kept failing, or a late cycle has received nothing, for this long.
             Until then, `m.streams()` says so in `Error`. Call the verb again for a new table.
             `0` fails at the first drop or failed cycle. Defaults to 300 seconds. See
-            README.md#live-tables.
+            docs/guide/concepts.md#live-tables.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -421,8 +421,8 @@ class MassiveConfig:
         credentials are never read from the file; they come from code or from their
         environment variables, as for `MassiveConfig()`. Every scalar is read as text and
         converted by the setting's own rule, so a ticker such as `ON` or `NO` stays text, and
-        an enum word is taken only as spelled exactly (`raise`, not `Raise`). The README's
-        "Settings file" section shows a full file (README.md#settings-file).
+        an enum word is taken only as spelled exactly (`raise`, not `Raise`). The user guide's
+        "Settings file" section shows a full file (docs/guide/install.md#settings-file).
 
         Example:
             ::

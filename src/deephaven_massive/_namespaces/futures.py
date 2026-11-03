@@ -318,16 +318,17 @@ class _Futures(Namespace):
         """Trades of futures contracts, tick by tick.
 
         Each row is one trade: price, size, and the exchange's sequence numbers. `Date` is the
-        trading session (README.md#time). The stream waits up to 15 s for the contracts'
-        schedules; a row they can't place has a null `Date`, with a WARNING. A date bound of
-        `history()` is a whole session. There is no `fetch()`: `snapshots(symbols)` gives each
+        trading session (docs/guide/concepts.md#time). The stream waits up to 15 s for the
+        contracts' schedules; a row they can't place has a null `Date`, with a WARNING. A date bound
+        of `history()` is a whole session. There is no `fetch()`: `snapshots(symbols)` gives each
         contract's latest trade. REST `history()` takes explicit contracts; `dm.ALL` streams
         every contract and reads the flat files.
 
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`. See
-                README.md#symbols.
-            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
+                docs/guide/arguments.md#symbols.
+            venues: The exchanges whose flat files `history()` reads.
+                See docs/guide/arguments.md#venues.
 
         Returns:
             A query with the stream verbs and `history()`. Columns: docs/datasets/futures.trades.md.
@@ -361,8 +362,9 @@ class _Futures(Namespace):
 
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`. See
-                README.md#symbols.
-            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
+                docs/guide/arguments.md#symbols.
+            venues: The exchanges whose flat files `history()` reads.
+                See docs/guide/arguments.md#venues.
 
         Returns:
             A query with the stream verbs and `history()`. Columns: docs/datasets/futures.quotes.md.
@@ -417,15 +419,18 @@ class _Futures(Namespace):
         `previous_day_bar()`. One-second and one-minute bars also stream; every other length is
         history only. A bar of a session or longer starts at 00:00 UTC on the first day of
         Massive's block of days and ends at 17:00 Chicago time on its last session; with dates,
-        `history()` keeps it only when all its sessions lie in the range (README.md#bars). REST
-        rejects a multiplier above its unit's maximum (`60` minutes; use one hour) with
-        `MassiveError`.
+        `history()` keeps it only when all its sessions lie in the range
+        (docs/guide/history.md#bars). REST rejects a multiplier above its unit's maximum (`60`
+        minutes; use one hour) with `MassiveError`.
 
         Args:
-            symbols: Contract tickers, a contracts table, or `dm.ALL`. See README.md#symbols.
-            timespan: Any `dm.Timespan` but `DAY`; required. See README.md#timespan-and-multiplier.
+            symbols: Contract tickers, a contracts table, or `dm.ALL`.
+                See docs/guide/arguments.md#symbols.
+            timespan: Any `dm.Timespan` but `DAY`; required.
+                See docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
-            venues: The exchanges whose flat files `history()` reads. See README.md#venues.
+            venues: The exchanges whose flat files `history()` reads.
+                See docs/guide/arguments.md#venues.
 
         Returns:
             A query of the class the timespan picks. Columns: docs/datasets/futures.bars.md.
@@ -472,15 +477,16 @@ class _Futures(Namespace):
         every contract of those products.
 
         Args:
-            symbols: Contract tickers, a contracts table, or `dm.ALL`. See README.md#symbols.
+            symbols: Contract tickers, a contracts table, or `dm.ALL`.
+                See docs/guide/arguments.md#symbols.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
                 for every product. A table of codes, in a `ProductCode` column, reads each code
                 as if passed alone; a refreshing one is followed by `fetch()` and re-read by each
-                `poll()` cycle. See README.md#symbols.
-            sort: Such as `"ticker"`. See README.md#sort-order-limit.
-            order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Such as `{"ticker_gte": "ES"}`. See README.md#filters.
+                `poll()` cycle. See docs/guide/arguments.md#symbols.
+            sort: Such as `"ticker"`. See docs/guide/arguments.md#sort-order-limit.
+            order: Needs `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Such as `{"ticker_gte": "ES"}`. See docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.snapshots.md.
@@ -533,18 +539,19 @@ class _Futures(Namespace):
 
         Args:
             symbols: Only these contracts; None, the default, lists every contract. `dm.ALL` is
-                refused. See README.md#symbols.
+                refused. See docs/guide/arguments.md#symbols.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
                 for every product. A table of codes, in a `ProductCode` column, reads each code
                 as if passed alone; a refreshing one is followed by `fetch()` and re-read by each
-                `poll()` cycle. See README.md#symbols.
-            as_of: The day whose specifications to list; None for today. See README.md#as-of.
+                `poll()` cycle. See docs/guide/arguments.md#symbols.
+            as_of: The day whose specifications to list; None for today.
+                See docs/guide/arguments.md#as-of.
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
-                README.md#sort-order-limit.
-            order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: Needs `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.contracts.md.
@@ -605,13 +612,15 @@ class _Futures(Namespace):
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
                 alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
-                cycle. See README.md#symbols.
-            as_of: The day whose specifications to list; None for today. See README.md#as-of.
-            sort: Such as `"name"`; the endpoint sorts by `date`. See README.md#sort-order-limit.
-            order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                cycle. See docs/guide/arguments.md#symbols.
+            as_of: The day whose specifications to list; None for today.
+                See docs/guide/arguments.md#as-of.
+            sort: Such as `"name"`; the endpoint sorts by `date`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: Needs `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.products.md.
@@ -654,7 +663,7 @@ class _Futures(Namespace):
         neither has this method. It takes no symbols and has no `Symbol` column.
 
         Args:
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.exchanges.md.
@@ -688,8 +697,8 @@ class _Futures(Namespace):
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
                 alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
-                cycle. See README.md#symbols.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                cycle. See docs/guide/arguments.md#symbols.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
@@ -732,15 +741,16 @@ class _Futures(Namespace):
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
                 alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
-                cycle. See README.md#symbols.
+                cycle. See docs/guide/arguments.md#symbols.
             start: The first session, by `SessionEndDate`, inclusive; a calendar date. See
-                README.md#start-and-end.
+                docs/guide/arguments.md#start-and-end.
             end: The last session, inclusive; None also returns future sessions.
-            sort: The endpoint sorts by `product_code`. See README.md#sort-order-limit.
-            order: Needs `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            sort: The endpoint sorts by `product_code`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: Needs `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"trading_venue": "XCME"}`; never `session_end_date`, which `start`
-                and `end` set. See README.md#filters.
+                and `end` set. See docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.schedules.md.

@@ -54,13 +54,14 @@ Status:
     The library is not on PyPI yet.
 
 Read next:
-    The README, https://github.com/chipkent/deephaven-massive (a docstring's
-    `README.md#symbols` means its section of that name); the dataset finder,
-    `docs/datasets/README.md`; and `help()` on any object.
+    The README, https://github.com/chipkent/deephaven-massive; the user guide's reference
+    pages in `docs/guide/` (a docstring's `docs/guide/arguments.md#symbols` means the section of
+    that name on that page, in the repository); the dataset finder, `docs/datasets/README.md`;
+    and `help()` on any object.
 
 `import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
 `datasets()`, the `canonical_symbol*` converters, and `canonicalize_symbols` need a running
-Deephaven JVM: use them inside a Deephaven worker, or after starting `deephaven_server.Server`.
+Deephaven JVM: use them inside a Deephaven server, or after starting `deephaven_server.Server`.
 The exceptions, the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and
 `__version__` do not.
 
@@ -79,7 +80,7 @@ Public API:
       exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
       `C:EURUSD`, `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol`
       column, and a live one is followed as rows are added and deleted: see
-      README.md#symbols. The converters turn other spellings into Massive's:
+      docs/guide/arguments.md#symbols. The converters turn other spellings into Massive's:
       `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function
       per class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
       `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,

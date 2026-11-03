@@ -171,7 +171,7 @@ def _register(core: SessionCore) -> None:
     key gets connections of its own, which compete with the other session's for the slot, so
     a WARNING names the first such session and the settings that differ. Sessions on
     different Deephaven update graphs never share either; that is not warned about, since a
-    worker normally has one graph. Sessions are held weakly; closed and collected ones do not
+    server normally has one graph. Sessions are held weakly; closed and collected ones do not
     count.
 
     Args:
@@ -203,7 +203,7 @@ def _register(core: SessionCore) -> None:
 class MassiveSession:
     """A connection to Massive for one API key: the namespaces, diagnostics, and lifecycle.
 
-    Create it inside a Deephaven worker (a server console, an application script, or anywhere
+    Create it inside a Deephaven server (a server console, an application script, or anywhere
     an `ExecutionContext` is active); the library captures that context for its own threads and
     never starts a JVM. Configuration comes only from `MassiveConfig`, and the session does not
     expose it again, keeping the API key out of console globals.
@@ -212,7 +212,7 @@ class MassiveSession:
     on a query return Deephaven tables (README.md#how-it-works). A live table keeps running,
     and keeps its session running, while it or a table derived from it is in use; release it
     with `m.release(table)`, and `m.close()` stops everything and fails every live table
-    (README.md#live-tables). As a context manager the session closes on exit.
+    (docs/guide/concepts.md#live-tables). As a context manager the session closes on exit.
 
     Sessions of one process with the same API key share their WebSocket connections when their
     connection settings are equal; otherwise a WARNING says they compete for the slot. The
@@ -261,7 +261,7 @@ class MassiveSession:
                 is in the environment.
             ValueError: On a Deephaven update-graph thread.
             MassiveError: If no Deephaven `ExecutionContext` is active on this thread (the
-                session must be created inside a Deephaven worker), or if the context's query
+                session must be created inside a Deephaven server), or if the context's query
                 scope is not the Python script session's own, as with
                 `make_user_exec_ctx(freeze_vars=[...])`.
         """
@@ -272,7 +272,7 @@ class MassiveSession:
         exec_ctx = get_exec_ctx()
         if not has_execution_context(exec_ctx):
             raise MassiveError(
-                "MassiveSession must be created inside a Deephaven worker: no Deephaven "
+                "MassiveSession must be created inside a Deephaven server: no Deephaven "
                 "ExecutionContext is active on this thread. Create it from the Deephaven "
                 "console or an application script, or enter a context first "
                 "(with deephaven.execution_context.get_exec_ctx(): ...)."
@@ -393,13 +393,15 @@ class MassiveSession:
         Args:
             symbols: Massive's exact tickers of any class (`AAPL`, `O:SPY251219C00600000`,
                 `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a table; a ticker without a prefix is a stock.
-                `dm.ALL` is refused: use a class's `snapshots(dm.ALL)`. See README.md#symbols.
+                `dm.ALL` is refused: use a class's `snapshots(dm.ALL)`.
+                See docs/guide/arguments.md#symbols.
             sort: The field to sort by (`"ticker"`); past 250 tickers it orders each request's rows,
-                not all of them. See README.md#sort-order-limit.
-            order: The sort direction, per request the same way. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
+                not all of them. See docs/guide/arguments.md#sort-order-limit.
+            order: The sort direction, per request the same way.
+                See docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters; `type` is refused, since Massive rejects it beside
-                tickers. See README.md#filters.
+                tickers. See docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/snapshots.md.
@@ -443,7 +445,7 @@ class MassiveSession:
         One row per WebSocket connection, plus one `Transport=REST` row per resolved (asset
         class, channel family) host decision. A connection shared with another session of the
         same API key shows in both. Each call returns a new live view; after `close()` it keeps
-        its final rows. How to read it: README.md#diagnostics.
+        its final rows. How to read it: docs/guide/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Transport`, `AssetClass`, and `Family`, with `Host`, `Path`,
@@ -485,7 +487,7 @@ class MassiveSession:
         not take a parameter the poll sends). `Gaps` keeps each span over which a live table's
         rows may be missing (a recovered outage, a run of failed cycles) once the note is gone.
         Each call returns a new live view; after `close()` it keeps its final rows. How to read
-        it: README.md#diagnostics.
+        it: docs/guide/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that built
@@ -516,7 +518,7 @@ class MassiveSession:
         subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions of
         this process with the same API key share one governor, so their tables show the same
         rows. Each call returns a new live view; after `close()` it keeps its final rows. How
-        to read it: README.md#diagnostics.
+        to read it: docs/guide/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Bucket` (`stocks`, `options`, `indices`, `currencies`,
@@ -545,7 +547,7 @@ class MassiveSession:
         other failure makes it `FAILED` at once. Deleting and re-adding its row reads it again. The
         rows stay for the session's life, also after their result is released. Each call returns a
         new live view; after `close()` it keeps its final rows. How to read it:
-        README.md#diagnostics.
+        docs/guide/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId` (the result's row in `m.streams()`) and `Symbol`
@@ -578,7 +580,7 @@ class MassiveSession:
         else holds it (a derived table, an open UI panel); once nothing does, its stream
         unsubscribes, its poller stops, or its background read stops. Releasing twice does
         nothing, and `release()` keeps working after `close()`. Static results are not tracked.
-        See README.md#live-tables.
+        See docs/guide/concepts.md#live-tables.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -612,7 +614,7 @@ class MassiveSession:
         Connections no other session of the key
         uses are closed. After `close()`, verbs and the diagnostics methods raise
         `MassiveError("MassiveSession #1 is closed")`; building queries and `release()` keep
-        working. See README.md#live-tables.
+        working. See docs/guide/concepts.md#live-tables.
 
         Raises:
             ValueError: On a Deephaven update-graph thread, for example inside a table

@@ -276,7 +276,7 @@ class _Forex(Namespace):
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`
                 (`dm.canonical_symbol_forex` converts `EUR/USD`), or `dm.ALL`. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/forex.quotes.md.
@@ -306,7 +306,7 @@ class _Forex(Namespace):
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`. `dm.ALL` is refused:
-                use `m.forex.snapshots(dm.ALL)`. See README.md#symbols.
+                use `m.forex.snapshots(dm.ALL)`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/forex.last_quote.md.
@@ -359,12 +359,14 @@ class _Forex(Namespace):
         stream from the WebSocket; every other length is history only. Days are UTC days, though the
         interbank day rolls at 17:00 New York time, and weeks run Sunday to Saturday. Pairs have no
         corporate actions, so there is no `adjusted`. Bar windows, stamps, and which bars
-        `history()` returns follow README.md#bars; each pair's previous day is `previous_day_bar()`.
+        `history()` returns follow docs/guide/history.md#bars; each pair's previous day is
+        `previous_day_bar()`.
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL`
-                (`history()` takes it for one-minute and one-day bars). See README.md#symbols.
-            timespan: The bar unit; required. See README.md#timespan-and-multiplier.
+                (`history()` takes it for one-minute and one-day bars).
+                See docs/guide/arguments.md#symbols.
+            timespan: The bar unit; required. See docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
 
         Returns:
@@ -397,14 +399,14 @@ class _Forex(Namespace):
 
         One row per pair, from one REST request per pair: the 1-day bar of the previous completed
         UTC day. Massive stamps it at 23:59:59.999 UTC, which is moved to the day's start; another
-        stamp is kept, with a day-later end, no `Date`, and a WARNING (README.md#bars). An explicit
-        `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404) is left
-        out, with a WARNING.
+        stamp is kept, with a day-later end, no `Date`, and a WARNING (docs/guide/history.md#bars).
+        An explicit `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP
+        404) is left out, with a WARNING.
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`. `dm.ALL` is refused:
                 use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/forex.previous_day_bar.md.
@@ -440,7 +442,7 @@ class _Forex(Namespace):
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL`. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/forex.fmv.md.
@@ -466,7 +468,7 @@ class _Forex(Namespace):
 
         Args:
             symbols: Currency pairs as Massive's tickers, such as `C:EURUSD`, or `dm.ALL` for every
-                pair Massive tracks. See README.md#symbols.
+                pair Massive tracks. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns: docs/datasets/forex.snapshots.md.

@@ -405,7 +405,7 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts as Massive's tickers, `O:` and the OCC symbol
-                (`"O:AAPL250117C00150000"`), or `dm.ALL`. See README.md#symbols.
+                (`"O:AAPL250117C00150000"`), or `dm.ALL`. See docs/guide/arguments.md#symbols.
 
         Returns:
             A query with `history()` and the stream verbs. Columns: docs/datasets/options.trades.md.
@@ -431,14 +431,14 @@ class _Options(Namespace):
 
         One row per contract, one request per contract. The endpoint needs Options Developer or
         above (a lower plan raises `EntitlementError`); `snapshots(symbols)` also carries each
-        contract's last trade, from Options Starter up (README.md#plans-and-errors). A contract with
-        no trade (HTTP 404) is left out, with a WARNING. `dm.ALL` is refused: use
+        contract's last trade, from Options Starter up (docs/guide/plans.md#plans-and-errors). A
+        contract with no trade (HTTP 404) is left out, with a WARNING. `dm.ALL` is refused: use
         `chain(underlying)`. An explicit `poll(mode=dm.PollMode.APPEND)` appends each cycle's trade
         when it is new, so a trade between two cycles is missed; `trades()` streams every one.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.last_trade.md.
@@ -473,7 +473,7 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query with `history()` and the stream verbs. Columns: docs/datasets/options.quotes.md.
@@ -522,17 +522,17 @@ class _Options(Namespace):
 
         Each row is one contract's bar of `multiplier` times `timespan`. One-second and one-minute
         bars also stream from the WebSocket; every other length is history only. Bar windows,
-        stamps, and which bars `history()` returns follow README.md#bars. REST `history()` takes
-        explicit contracts; `dm.ALL` reads a day's flat file. One `/options` connection carries at
-        most 1,000 contract topics.
+        stamps, and which bars `history()` returns follow docs/guide/history.md#bars. REST
+        `history()` takes explicit contracts; `dm.ALL` reads a day's flat file. One `/options`
+        connection carries at most 1,000 contract topics.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                README.md#symbols.
-            timespan: The bar unit; required. See README.md#timespan-and-multiplier.
+                docs/guide/arguments.md#symbols.
+            timespan: The bar unit; required. See docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
             adjusted: Adjust for splits of the underlying, served by REST only. See
-                README.md#adjusted.
+                docs/guide/arguments.md#adjusted.
 
         Returns:
             A query of the class the timespan picks. Columns: docs/datasets/options.bars.md.
@@ -567,12 +567,12 @@ class _Options(Namespace):
         One row per contract: its 1-day bar of the previous completed session, one request per
         contract. A contract with no bar (HTTP 404) is left out, with a WARNING. `dm.ALL` is
         refused: `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)` reads every
-        contract's bar of a day from the flat files. Stamps follow README.md#bars.
+        contract's bar of a day from the flat files. Stamps follow docs/guide/history.md#bars.
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                README.md#symbols.
-            adjusted: Adjust for splits of the underlying. See README.md#adjusted.
+                docs/guide/arguments.md#symbols.
+            adjusted: Adjust for splits of the underlying. See docs/guide/arguments.md#adjusted.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.previous_day_bar.md.
@@ -611,7 +611,7 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
 
         Returns:
             A query with the stream verbs. Columns: docs/datasets/options.fmv.md.
@@ -657,11 +657,11 @@ class _Options(Namespace):
                 `Symbol` column, each read as if passed alone.
             contract_type: `dm.ContractType.CALL` or `PUT`; None, the default, for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`. See
-                README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.chain.md.
@@ -723,12 +723,12 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                README.md#symbols.
-            sort: `"ticker"`. See README.md#sort-order-limit.
-            order: See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#symbols.
+            sort: `"ticker"`. See docs/guide/arguments.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
-                `ticker_lte`. See README.md#filters.
+                `ticker_lte`. See docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.snapshots.md.
@@ -791,21 +791,22 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts to describe, as Massive's tickers; None, the default, lists
-                contracts. `dm.ALL` is refused. See README.md#symbols.
+                contracts. `dm.ALL` is refused. See docs/guide/arguments.md#symbols.
             underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
                 the rows' `Underlying` is the same canonical ticker. Or a table of them in a
                 `Symbol` column, each listed as if passed alone; a refreshing one is followed
                 by `fetch()` and re-read by each `poll()` cycle. See
                 README.md#option-chain.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
-            as_of: The day whose contracts to list; None for today. See README.md#as-of.
+            as_of: The day whose contracts to list; None for today.
+                See docs/guide/arguments.md#as-of.
             expired: True lists expired contracts only; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
-            order: See README.md#sort-order-limit.
+            order: See docs/guide/arguments.md#sort-order-limit.
             limit: The most rows in total without `symbols`; per contract with them, so no
-                effect there. See README.md#sort-order-limit.
+                effect there. See docs/guide/arguments.md#sort-order-limit.
             filters: `strike_price`, `expiration_date`, and their range forms. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.contracts.md.
@@ -879,10 +880,10 @@ class _Options(Namespace):
 
         Args:
             symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             date: The trading day, a calendar date (a `datetime` raises). See
-                README.md#start-and-end.
-            adjusted: Adjust for splits of the underlying. See README.md#adjusted.
+                docs/guide/arguments.md#start-and-end.
+            adjusted: Adjust for splits of the underlying. See docs/guide/arguments.md#adjusted.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.daily_open_close.md.

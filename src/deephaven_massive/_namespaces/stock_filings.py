@@ -13,8 +13,8 @@ touches the network until a verb is called on the query. This module owns the na
 `_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
 the request (the 13-F holdings and the taxonomies take none), `dm.ALL` is refused in favour of
 `symbols=None`, `start` and `end` bound the filing date where the dataset has one, and
-`sort`, `order`, `limit`, and `filters` work as README.md#sort-order-limit and
-README.md#filters describe. `m.stocks` (`stocks.py`) creates the namespace.
+`sort`, `order`, `limit`, and `filters` work as docs/guide/arguments.md#sort-order-limit and
+docs/guide/arguments.md#filters describe. `m.stocks` (`stocks.py`) creates the namespace.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -482,15 +482,17 @@ class _StockFilings(Namespace):
         a `limit`. A filing whose company has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
+            symbols: Stock tickers; None, the default, for every filer.
+                See docs/guide/arguments.md#symbols.
             form_type: The SEC form type, such as `"10-K"`; None, the default, for every form.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.index.md.
@@ -540,14 +542,16 @@ class _StockFilings(Namespace):
         has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every filer.
+                See docs/guide/arguments.md#symbols.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"section": "risk_factors"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.sections_10k.md.
@@ -597,14 +601,16 @@ class _StockFilings(Namespace):
         keeps a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every filer.
+                See docs/guide/arguments.md#symbols.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.text_8k.md.
@@ -651,19 +657,20 @@ class _StockFilings(Namespace):
         (see `disclosure_taxonomy()`), the supporting text, and the filing's accession number and
         date. A filing can name several share classes, so its `Tickers` column holds the filing's
         tickers, `symbols` selects the filings that list any of them, and a row is listed under each
-        named ticker it lists, in `Symbol` (README.md#symbols). `poll()` appends new rows, told
-        apart by the dataset's key columns, and needs a `start` or a `limit`.
+        named ticker it lists, in `Symbol` (docs/guide/arguments.md#symbols). `poll()` appends new
+        rows, told apart by the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#symbols.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.disclosures_8k.md.
@@ -712,14 +719,16 @@ class _StockFilings(Namespace):
         `limit`. A filing whose company has no ticker keeps a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer. See README.md#symbols.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; None, the default, for every filer.
+                See docs/guide/arguments.md#symbols.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.risk_factors.md.
@@ -771,12 +780,13 @@ class _StockFilings(Namespace):
         Args:
             filer_cik: The filing manager's SEC CIK, as text with its leading zeros, such as
                 `"0001067983"`, or a sequence of them; None, the default, for every filer.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.institutional_holdings.md.
@@ -825,22 +835,23 @@ class _StockFilings(Namespace):
         issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
         filing can name several share classes, so its `Tickers` column holds the filing's tickers,
         `symbols` selects the filings that list any of them, and a row is listed under each named
-        ticker it lists, in `Symbol` (README.md#symbols). `poll()` appends new rows, told apart by
-        the dataset's key columns, and needs a `start` or a `limit`.
+        ticker it lists, in `Symbol` (docs/guide/arguments.md#symbols). `poll()` appends new rows,
+        told apart by the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
                 default, for every owner.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.initial_insider_ownership.md.
@@ -891,23 +902,24 @@ class _StockFilings(Namespace):
         the shares owned afterwards, with the issuer and owner. A filing can name several share
         classes, so its `Tickers` column holds the filing's tickers, `symbols` selects the filings
         that list any of them, and a row is listed under each named ticker it lists, in `Symbol`
-        (README.md#symbols). `poll()` appends new rows, told apart by the dataset's key columns, and
-        needs a `start` or a `limit`.
+        (docs/guide/arguments.md#symbols). `poll()` appends new rows, told apart by the dataset's
+        key columns, and needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
                 default, for every owner.
-            start: The first filing date. See README.md#start-and-end.
-            end: The last filing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"filing_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            start: The first filing date. See docs/guide/arguments.md#start-and-end.
+            end: The last filing date. See docs/guide/arguments.md#start-and-end.
+            sort: The field to sort by, such as `"filing_date"`.
+                See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"transaction_code": "P"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.insider_transactions.md.
@@ -958,22 +970,22 @@ class _StockFilings(Namespace):
         part traded under a prearranged Rule 10b5-1 plan. `insider_transactions()` returns the Form
         4 lines themselves. A company can have several share classes, so its `Tickers` column holds
         the issuer's tickers, `symbols` selects the issuers that list any of them, and a row is
-        listed under each named ticker it lists, in `Symbol` (README.md#symbols). The totals cover
-        the issuer, not each ticker. `poll()` replaces the table each cycle, keyed by `IssuerCik`,
-        `TransactionDate`, and `Symbol`, so a late filing revises its day in place. Massive updates
-        the data daily.
+        listed under each named ticker it lists, in `Symbol` (docs/guide/arguments.md#symbols). The
+        totals cover the issuer, not each ticker. `poll()` replaces the table each cycle, keyed by
+        `IssuerCik`, `TransactionDate`, and `Symbol`, so a late filing revises its day in place.
+        Massive updates the data daily.
 
         Args:
             symbols: Tickers whose issuers to return; None, the default, for every issuer. See
-                README.md#symbols.
+                docs/guide/arguments.md#symbols.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
-            start: The first transaction date. See README.md#start-and-end.
-            end: The last transaction date. See README.md#start-and-end.
+            start: The first transaction date. See docs/guide/arguments.md#start-and-end.
+            end: The last transaction date. See docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"net_value"`; the default is the newest transaction
-                date first. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                date first. See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
@@ -1028,24 +1040,25 @@ class _StockFilings(Namespace):
         in percent (0.0198 means 0.0198%). `OldestPositionDate` far behind `LastFilingDate` warns
         that a position may be stale. A company can have several share classes, so its `Tickers`
         column holds the issuer's tickers, `symbols` selects the issuers that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols). `poll()`
-        replaces the table each cycle, keyed by `IssuerCik` and `OwnerCik`, so a new filing updates
-        its insider's row in place. Massive updates the data daily.
+        a row is listed under each named ticker it lists, in `Symbol`
+        (docs/guide/arguments.md#symbols). `poll()` replaces the table each cycle, keyed by
+        `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row in place. Massive
+        updates the data daily.
 
         Args:
             symbols: Tickers whose issuers' insiders to return; None, the default, for every issuer.
-                See README.md#symbols.
+                See docs/guide/arguments.md#symbols.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The insider's SEC CIK, or a sequence of them, to list every company one
                 person is an insider of; None, the default, for every insider.
             start: The earliest latest-filing date (`LastFilingDate`); an insider who has not filed
-                since is left out. See README.md#start-and-end.
-            end: The last latest-filing date. See README.md#start-and-end.
+                since is left out. See docs/guide/arguments.md#start-and-end.
+            end: The last latest-filing date. See docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"shares_owned"`; the default is the most recent
-                latest-filing date first. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                latest-filing date first. See docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
@@ -1096,11 +1109,11 @@ class _StockFilings(Namespace):
 
         Args:
             sort: The field to sort by, such as `"primary_category"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.risk_factor_taxonomy.md.
@@ -1143,11 +1156,11 @@ class _StockFilings(Namespace):
 
         Args:
             sort: The field to sort by, such as `"primary_category"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+                docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`. See docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows to return, in total. See docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`. See
-                README.md#filters.
+                docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/stocks.filings.disclosure_taxonomy.md.

@@ -17,7 +17,7 @@ logger's level:
   handler made then would keep writing to the old stream, which Deephaven never sees. A session
   needs the running server, so by then `sys.stderr` is final.
 - **`enable_debug_logging(output=LogOutput.STDERR)`**, for a console that is already running,
-  where a new environment variable takes effect only after a worker restart.
+  where a new environment variable takes effect only after a server restart.
 
 `disable_debug_logging()` undoes either: it removes and closes the handler and sets the logger's
 level back to `NOTSET`, as it was at import.
@@ -32,8 +32,8 @@ new session then logs its own configuration, so the log of a failing run says ex
 The handler writes one line per record, with the time in UTC:
 `2026-10-28 14:03:07,112Z DEBUG [massive #1 call-7 rest_0] deephaven_massive._massive.rest.client:
 GET ...`. The thread name says which session and which call or stream a line belongs to. On
-stderr, Deephaven copies the lines into its own log, the container's log, and the web IDE's log
-panel. Turning the log on again replaces the handler and closes the old one. The logger keeps
+stderr, Deephaven copies the lines into its own log, the container's log, and the Deephaven IDE's
+log panel. Turning the log on again replaces the handler and closes the old one. The logger keeps
 `propagate` on, so pytest's `caplog` and any handler a user put on the root logger still see
 every record; Deephaven installs no root handler, so nothing is printed twice there.
 
@@ -156,7 +156,7 @@ class LogOutput(Enum):
 
     STDERR = "stderr"
     """`sys.stderr` as it is when the log is turned on, which Deephaven copies into its log,
-    the container's log, and the web IDE's log panel."""
+    the container's log, and the Deephaven IDE's log panel."""
 
 
 class _Switch:
