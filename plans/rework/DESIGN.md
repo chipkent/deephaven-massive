@@ -5140,9 +5140,12 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
     into a cached model in place, and has boto3 append its data directory to the search paths
     on every session, so no two clients are built at once, and each build removes the
     duplicate search path it added;
-  - the `net.http` TLS-context cache, one per process, which builds each consumer's context
-    for a certificate setting once (reading the bundle from local disk) and looks it up
-    afterwards; the certificate file and directory are examined before the lock is taken;
+  - the `net.http` TLS-context cache, one per process, which builds the shared context of the
+    WebSocket clients for a certificate setting once (reading the bundle from local disk) and
+    looks it up afterwards; the certificate file and directory are examined before the lock is
+    taken;
+  - each `RestClient`'s idle-pool lock, which guards its list of idle connection pools: a
+    request pops one after taking a connection slot and appends it before giving the slot back;
   - the `_massive.spec` loaders, which load each generated file once;
   - each `RequestGovernor`'s lock (section 19.1), which guards its buckets; a request waits
     for its slot outside it, on a wake event of its own, and the governor's listeners are
