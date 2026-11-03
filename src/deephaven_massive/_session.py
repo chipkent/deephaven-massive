@@ -67,12 +67,14 @@ from deephaven_massive._namespaces.partners import _Partners
 from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
+from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
     has_script_query_scope,
     refuse_update_graph_thread,
 )
 from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -459,7 +461,7 @@ class MassiveSession:
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
-        return self._core.diagnostics_view(self._core.diagnostics.connections)
+        return self._core.diagnostics_view(self._core.diagnostics.connections, CONNECTIONS)
 
     @raises_through(SessionCore.diagnostics_view)
     def streams(self) -> Table:
@@ -503,7 +505,7 @@ class MassiveSession:
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
-        return self._core.diagnostics_view(self._core.diagnostics.streams)
+        return self._core.diagnostics_view(self._core.diagnostics.streams, STREAMS)
 
     @raises_through(SessionCore.diagnostics_view)
     def rate_limits(self) -> Table:
@@ -528,7 +530,7 @@ class MassiveSession:
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
-        return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
+        return self._core.diagnostics_view(self._core.diagnostics.rate_limits, RATE_LIMITS)
 
     @raises_through(SessionCore.diagnostics_view)
     def symbol_reads(self) -> Table:
@@ -567,7 +569,7 @@ class MassiveSession:
 
                 failed = m.symbol_reads().where("State = `FAILED`")
         """
-        return self._core.diagnostics_view(self._core.diagnostics.symbol_reads)
+        return self._core.diagnostics_view(self._core.diagnostics.symbol_reads, SYMBOL_READS)
 
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.

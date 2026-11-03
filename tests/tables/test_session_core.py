@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
@@ -35,7 +35,7 @@ from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
@@ -66,9 +66,11 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.request import StreamKey
     from deephaven_massive._tables.liveness import ResultRecord
+    from deephaven_massive._tables.publisher import BlinkPublisher
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.stream import FakeStreamTransport
 
@@ -879,6 +881,8 @@ def test_an_interrupt_while_a_reactive_key_is_stored_leaves_no_record(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # A reactive key holds a SymbolTable box, whose dataclass __hash__ is Python code, so the
     # key store in _claim is an interruptible checkpoint wherever the key's tuple hash is not
@@ -897,7 +901,7 @@ def test_an_interrupt_while_a_reactive_key_is_stored_leaves_no_record(
             super().__setitem__(key, value)
 
     monkeypatch.setattr(core, "_stream_ids", InterruptedStore())
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     with pytest.raises(KeyboardInterrupt):
         stream_query(massive_session, watchlist).blink()
@@ -1037,31 +1041,32 @@ def test_closers_run_and_failures_are_logged(
     assert "a transport failed to close" in caplog.text
 
 
-def test_a_reaper_that_cannot_start_stops_the_diagnostics_writer(
+def test_diagnostics_that_cannot_be_built_stop_the_reaper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    created: list[Diagnostics] = []
-    real = Diagnostics
+    created: list[Reaper] = []
+    real = Reaper
 
     def spying(
         exec_ctx: ExecutionContext,
         name: str,
+        *,
         on_death: Callable[[BaseException], None] | None = None,
-    ) -> Diagnostics:
-        diagnostics = real(exec_ctx, name, on_death=on_death)
-        created.append(diagnostics)
-        return diagnostics
+    ) -> Reaper:
+        reaper = real(exec_ctx, name, on_death=on_death)
+        created.append(reaper)
+        return reaper
 
-    def no_thread(exec_ctx: ExecutionContext, name: str, **_: object) -> Reaper:
-        raise RuntimeError("can't start new thread")
+    def no_tables(*_: object, **__: object) -> Diagnostics:
+        raise RuntimeError("no second table")
 
-    monkeypatch.setattr(_core, "Diagnostics", spying)
-    monkeypatch.setattr(_core, "Reaper", no_thread)
-    with pytest.raises(RuntimeError, match="can't start new thread"):
+    monkeypatch.setattr(_core, "Reaper", spying)
+    monkeypatch.setattr(_core, "Diagnostics", no_tables)
+    with pytest.raises(RuntimeError, match="no second table"):
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
-    (diagnostics,) = created
-    diagnostics.thread.join(TIMEOUT)
-    assert not diagnostics.thread.is_alive()  # stopped, with its tables released
+    (reaper,) = created
+    reaper.thread.join(TIMEOUT)
+    assert not reaper.thread.is_alive()  # stopped: no thread outlives the failed session
 
 
 def test_background_threads_stop_when_the_session_is_collected() -> None:
@@ -2001,7 +2006,7 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     text = fake_streams.failed[1]
     assert text.startswith(f"{label(massive_session)}: its reaper thread died (_Fatal")
     assert text.endswith("this table no longer updates")
-    assert core.diagnostics.barrier().wait(TIMEOUT)
+    assert core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = dh_to_pylist(core.diagnostics.streams)  # no view: nothing could release it
     assert (row["State"], row["Error"]) == ("FAILED", text)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
@@ -2012,6 +2017,34 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     queued = core._reaper._worker._queue
     while not queued.empty():
         queued.get_nowait()
+
+
+class _FatalPublisher:
+    # A diagnostics publisher whose add raises what the writer cannot carry on after.
+    def add(self, rows: Table) -> None:
+        raise _Fatal
+
+
+def test_a_dying_diagnostics_writer_fails_the_sessions_live_tables(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)  # the death still escapes
+    core = massive_session._core
+    writer = core.diagnostics.thread
+    core.diagnostics._streams.publisher = cast("BlinkPublisher", _FatalPublisher())
+    result = stream_query(massive_session).append_only()  # its row kills the writer
+    writer.join(TIMEOUT)
+    assert not writer.is_alive()
+    assert [args.exc_type for args in escaped] == [_Fatal]
+    text = fake_streams.failed[1]
+    assert text.startswith(f"{label(massive_session)}: its diagnostics writer thread died (_Fatal")
+    assert text.endswith("this table no longer updates")
+    massive_session.release(result)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
 def test_a_thread_of_a_freed_session_dies_quietly() -> None:
@@ -2052,3 +2085,40 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
             f"m.stocks.trades('AAPL').fetch() raised MassiveError: {core.label} is closed",
         ),
     ]
+
+
+def test_rows_written_while_close_runs_leave_one_row_per_key(
+    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # Library threads keep writing connection rows while close() releases the diagnostics (on
+    # a free-threaded build too): nothing deadlocks, and the held view shows one row per key.
+    view = massive_session.connections()
+    core = massive_session._core
+    families = (ChannelFamily.TICK, ChannelFamily.FMV)
+    start = threading.Barrier(len(families) + 1)
+
+    def write(family: ChannelFamily) -> None:
+        start.wait(TIMEOUT)
+        for reconnects in range(200):
+            core.diagnostics.write(
+                ConnectionRow(
+                    transport=Transport.WS,
+                    asset_class=AssetClass.STOCKS,
+                    family=family,
+                    reconnects=reconnects,
+                )
+            )
+
+    threads = [threading.Thread(target=write, args=(family,)) for family in families]
+    for thread in threads:
+        thread.start()
+    start.wait(TIMEOUT)
+    massive_session.close()
+    for thread in threads:
+        thread.join(TIMEOUT)
+        assert not thread.is_alive()
+    rows = dh_to_pylist(view)
+    keys = [(r["Transport"], r["AssetClass"], r["Family"]) for r in rows]
+    assert len(keys) == len(set(keys))
+    assert all(0 <= r["Reconnects"] < 200 for r in rows)
+    del view

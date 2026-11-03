@@ -315,9 +315,9 @@ class RestTransport(Protocol):
         request reads it alone, and a dataset that names several symbols in one request
         (`ticker.any_of`) reads them up to `DatasetSpec.symbols_per_request` at a time and
         splits the rows by their `Symbol`, so every symbol of such a request shares its
-        failure. A dataset whose rows carry no
-        `Symbol` column, or whose rows several symbols' requests may return
-        (`DatasetSpec.symbols_overlap`), reads each symbol in a request of its own. Each
+        failure; a row a dataset lists under several named tickers (`DatasetSpec.ticker_list`)
+        goes to each of them. A dataset whose rows carry no `Symbol` column reads each symbol
+        in a request of its own. Each
         request is capped at `Request.limit`; the rows of all symbols together are not.
         Requests run on up to `max_concurrency` threads, and one read's requests take one
         turn in the rate governor.

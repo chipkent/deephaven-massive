@@ -25,9 +25,9 @@ Instruments. The Benzinga datasets that take tickers and the ETF Global datasets
 stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS` and a symbol with another
 class's prefix (`X:BTCUSD`) is rejected when the query is built. Their rows each describe one
 instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; a
-Benzinga row's `ticker`; for a TMX event or a Benzinga row without a ticker, null).
-Benzinga news names several tickers per article, so it has no `Symbol`, keeps its `Tickers` column
-(a `String[]`), and uses `symbols` only to filter the request. Benzinga analysts and firms, and both
+Benzinga row's `ticker`; for a TMX event or a Benzinga row without a ticker, null). Benzinga news
+names several tickers per article, so it keeps its `Tickers` column (a `String[]`), and an article
+is listed under each ticker it was read for, in `Symbol`. Benzinga analysts and firms, and both
 Fable datasets, take no symbols at all. The TMX corporate events come from Wall Street Horizon's
 global calendar, whose tickers are not US-market ones (each event names its venue's MIC and an
 ISIN), so that dataset takes and keeps its tickers exactly as Massive writes them
@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final
 
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
@@ -86,6 +86,8 @@ def _list_spec(
     poll_mode: PollMode = PollMode.REPLACE,
     per_symbol: bool = False,
     symbols_as_written: bool = False,
+    ticker_list: str | None = None,
+    nullable_poll_keys: Mapping[str, str] | None = None,
 ) -> DatasetSpec:
     """Declare one partner dataset served by a single REST list path.
 
@@ -109,6 +111,10 @@ def _list_spec(
         per_symbol: True when the path takes one ticker per request.
         symbols_as_written: True when the symbols are a third party's global tickers, kept
             as Massive writes them (`DatasetSpec.symbols_as_written`).
+        ticker_list: The column listing each row's tickers, from which the library fills
+            `Symbol` (`DatasetSpec.ticker_list`); None, the default, for any other dataset.
+        nullable_poll_keys: The poll keys whose null is a value, each with its reason; None,
+            the default, for none.
 
     Returns:
         The spec; `DatasetSpec` raises its `ValueError` for an inconsistent
@@ -131,6 +137,8 @@ def _list_spec(
         per_symbol=per_symbol,
         page_size=page_size,
         symbols_as_written=symbols_as_written,
+        ticker_list=ticker_list,
+        nullable_poll_keys={} if nullable_poll_keys is None else nullable_poll_keys,
     )
 
 
@@ -249,8 +257,10 @@ BENZINGA_NEWS: Final = _list_spec(
     time="Published",
     time_axis=("published.gte", "published.lt"),
     symbol_param="tickers.any_of",
+    ticker_list="Tickers",
     poll_mode=PollMode.APPEND,
-    poll_keys=("BenzingaId",),
+    poll_keys=("BenzingaId", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
     # Below the documented 50,000: each article carries its whole HTML body, often several
     # kilobytes and sometimes tens, so a full page could reach hundreds of megabytes. A page of
     # 1,000 stays at some tens of megabytes at most.
@@ -784,12 +794,12 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
-        One row per article, at its publication `Timestamp`. An article names any number of
-        tickers, so the table has no `Symbol` but a `Tickers` array, and `symbols` selects the
-        articles that name any of them: `t.where("Tickers != null && inObj(`AAPL`, Tickers)")`
-        keeps one ticker's. `poll()` appends the articles it has not seen, keyed by
-        `BenzingaId`, and needs `start` or `limit`, since each cycle reads the whole range; a
-        fixed `start` widens the window of a poll that runs for days.
+        One row per article, at its publication `Timestamp`. An article names any number of tickers,
+        in its `Tickers` array; `symbols` selects the articles that name any of them, and an article
+        is listed under each named ticker it names, in `Symbol` (README.md#symbols). `poll()`
+        appends the articles it has not seen, keyed by `BenzingaId` and `Symbol`, and needs `start`
+        or `limit`, since each cycle reads the whole range; a fixed `start` widens the window of a
+        poll that runs for days.
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is

@@ -14,9 +14,10 @@ from urllib.parse import urlencode
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -155,8 +156,11 @@ def test_news_keeps_its_tickers_and_appends() -> None:
     assert not CATALOG.takes_symbols(spec)
     assert spec.time_axis == ("published_utc.gte", "published_utc.lt")
     assert spec.poll_mode is dm.PollMode.APPEND
+    # An article is listed once under each named ticker it lists: Symbol is that ticker.
+    assert spec.ticker_list == "Tickers"
+    assert spec.poll_keys == ("Id", "Symbol")
     types = _types(spec)
-    assert "Symbol" not in types
+    assert types["Symbol"] is ColumnType.STRING
     assert types["Tickers"] is ColumnType.STRING_ARRAY
     assert types["PublishedUtc"] is ColumnType.INSTANT
 
@@ -312,7 +316,7 @@ def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
     # watchlist is one request per ticker.
     news = cast("RestPath", source(R, "/v2/reference/news"))
     assert "ticker.any_of" not in {p.name for p in news.params}
-    assert reference.NEWS.symbols_overlap
+    assert reference.NEWS.ticker_list == "Tickers"
     ref: Any = massive_session.reference
     assert ref.news(symbols=["MSFT", "AAPL"])._request == Request(symbols=("AAPL", "MSFT"))
     table = new_table([string_col("Symbol", ["AAPL"])])
@@ -660,7 +664,7 @@ def test_news_fetch(
     # `published_utc` is an instant: a date bound is its New York midnight, end exclusive.
     assert params["published_utc.gte"] == ["2024-06-24T04:00:00Z"]
     assert params["published_utc.lt"] == ["2024-06-25T04:00:00Z"]
-    assert "Symbol" not in out[0]
+    assert out[0]["Symbol"] == "UBS"  # the ticker the request named
     assert out[0]["Tickers"] == ["UBS"]
     assert out[0]["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
 
@@ -690,7 +694,7 @@ def _news_target(ticker: str, **params: object) -> str:
     return f"{_NEWS}?{urlencode(sorted(query.items()))}"
 
 
-def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
+def test_news_of_a_watchlist_lists_an_article_under_each_ticker(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -699,7 +703,7 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
-    # An article without an id cannot be told from another, so neither copy is dropped.
+    # An article without an id is listed like any other.
     unnamed = {
         k: v for k, v in _article("", "2024-06-24T15:00:00Z", "AAPL", "MSFT").items() if k != "id"
     }
@@ -716,12 +720,19 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
         _news_target("AAPL", limit=3),
         _news_target("MSFT", limit=3),
     ]
-    # Ticker by ticker, in ticker order; the shared article once, where AAPL's request had it,
-    # and `limit` caps each ticker's articles, not the table.
-    assert [row["Id"] for row in out] == ["both", "a1", None, "m1", None]
+    # Ticker by ticker, in ticker order; the shared article is each ticker's data, so it is
+    # listed under each, and `limit` caps each ticker's articles, not the table.
+    assert [(row["Symbol"], row["Id"]) for row in out] == [
+        ("AAPL", "both"),
+        ("AAPL", "a1"),
+        ("AAPL", None),
+        ("MSFT", "both"),
+        ("MSFT", "m1"),
+        ("MSFT", None),
+    ]
     assert (
-        "reference.news: kept 5 of 6 rows from 2 requests, each row once by Id; limit=3 per "
-        "request" in caplog.messages
+        "reference.news: kept 6 rows from 2 one-symbol requests; limit=3 per symbol"
+        in caplog.messages
     )
 
 
@@ -731,6 +742,7 @@ def test_news_polls_follow_a_live_watchlist(
     fake_rest: FakeRestServer,
     dh_to_pylist: ToRows,
     monkeypatch: pytest.MonkeyPatch,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     clock = FakeClock(manual=True)
     monkeypatch.setattr(poll, "CLOCK", clock)
@@ -741,15 +753,21 @@ def test_news_polls_follow_a_live_watchlist(
         _news_target("MSFT", published_utc_gte=since),
         Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT")])),
     )
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     table = rest_session.reference.news(symbols=watch, start="2024-06-24").poll(60)
-    _until(lambda: [r["Id"] for r in dh_to_pylist(table)] == ["both"])
+    _until(lambda: [(r["Symbol"], r["Id"]) for r in dh_to_pylist(table)] == [("AAPL", "both")])
     clock.wait_for_sleepers(1)
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))
     clock.advance(60)
-    # The next cycle reads the added ticker too; the article both tickers return stays one row.
-    _until(lambda: sorted(r["Id"] for r in dh_to_pylist(table)) == ["both", "m1"])
+    # The next cycle reads the added ticker too; the article both tickers return is listed
+    # under each, keyed by its Id and Symbol.
+    _until(
+        lambda: (
+            sorted((r["Symbol"], r["Id"]) for r in dh_to_pylist(table))
+            == [("AAPL", "both"), ("MSFT", "both"), ("MSFT", "m1")]
+        )
+    )
     rest_session.release(table)
 
 

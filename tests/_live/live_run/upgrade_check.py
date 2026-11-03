@@ -28,6 +28,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,9 @@ CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
 """One call of each subscription that sends exactly one request."""
 
 ROUND_CALLS: Final = 10
+LEARN_SHOWN: Final = 3.0
+"""The most seconds `learn_limit` waits after a call for `m.rate_limits()` to read `LEARNED`:
+the row reaches the table on an update cycle after the call, a second apart by default."""
 ANSWER_LIMIT: Final = 30.0
 """A round's calls, and the seconds each may take to count as unpaced."""
 
@@ -128,6 +132,9 @@ def _row(m: MassiveSession, subscription: str) -> dict[str, Any]:
 def learn_limit(m: MassiveSession, subscription: str, *, limit: int = 30) -> int:
     """Make one-request calls until the session has learned the subscription is on Basic.
 
+    After each call it reads the subscription's row for up to `LEARN_SHOWN` seconds, since the
+    call's effect reaches `m.rate_limits()` only on a later update cycle.
+
     Args:
         m: Session A, which declares nothing.
         subscription: The subscription.
@@ -140,10 +147,16 @@ def learn_limit(m: MassiveSession, subscription: str, *, limit: int = 30) -> int
         RuntimeError: When the limit was not learned within `limit` calls: the subscription is
             not on Basic.
     """
+    pause = threading.Event()  # never set; only paces the reads
     for count in range(1, limit + 1):
         CALLS[subscription](m)
-        if _row(m, subscription).get("LimitSource") == "LEARNED":
-            return count
+        shown_by = time.monotonic() + LEARN_SHOWN
+        while True:
+            if _row(m, subscription).get("LimitSource") == "LEARNED":
+                return count
+            if time.monotonic() >= shown_by:
+                break
+            pause.wait(0.05)
     msg = f"{subscription}: no limit was learned after {limit} calls; is it on Basic?"
     raise RuntimeError(msg)
 

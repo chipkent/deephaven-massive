@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 import numpy as np
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 from deephaven.table_listener import listen
 from deephaven.time import to_j_instant, to_j_local_date, to_j_time_zone
 from deephaven.update_graph import shared_lock
@@ -39,7 +40,8 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import LIBRARY_BUG, UnlistedPairError
 from deephaven_massive._ingest import history_reads
-from deephaven_massive._massive import Transport
+from deephaven_massive._ingest import rest as rest_module
+from deephaven_massive._massive import Patience, Transport
 from deephaven_massive._namespaces import futures
 from deephaven_massive._namespaces.options import CHAIN
 from deephaven_massive._namespaces.query_building import build_query
@@ -70,7 +72,7 @@ from deephaven_massive._tables.transports import (
 )
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
-from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.stream import FakeStreamTransport
 
 if TYPE_CHECKING:
@@ -1163,9 +1165,11 @@ def test_stream_verbs_build_results(
 
 
 def test_last_by_follows_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     current = trades(massive_session, watchlist).last_by()
     assert current.is_refreshing
     massive_session.release(current)
@@ -1188,7 +1192,7 @@ def test_a_static_symbol_table_is_a_fixed_symbol_list(
     ]
     assert all(r.is_refreshing for r in results)
     assert len(fake_streams.opened) == 1
-    assert massive_session._core.diagnostics.barrier().wait(10.0)
+    assert massive_session._core.diagnostics.wait_until_shown(10.0)
     [row] = dh_to_pylist(massive_session.streams())
     assert (row["SymbolCount"], row["Symbols"]) == (2, "AAPL, MSFT")
     for result in results:
@@ -1349,9 +1353,11 @@ def assert_described(session: dm.MassiveSession, spec: DatasetSpec, table: Table
 
 
 def test_every_stream_shape_is_described(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     q, reactive = trades(massive_session), trades(massive_session, watchlist)
     results = [
@@ -1497,9 +1503,13 @@ FOREX_SPEC = DatasetSpec(
 
 
 def test_last_by_matches_the_rows_of_a_reactive_table(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    rows_when: RowsWhen,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["C:EURUSD", "C:GBPUSD"])]))
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
@@ -1533,9 +1543,13 @@ def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_rais
 
 
 def test_last_by_over_groups_of_symbols_filters_before_aggregating(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    rows_when: RowsWhen,
+    *,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
     current = trades(massive_session, watchlist).last_by(by="Exchange")
     watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
@@ -1913,7 +1927,7 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     assert (rest.calls, rest.checks) == ([], [])
     assert [call[0] for call in flat.calls] == ["history"]  # only the range with rows
     assert isinstance(flat.calls[0][3]["stop"], threading.Event)
-    assert s3_session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert s3_session._core.diagnostics.wait_until_shown(TIMEOUT)
     rows = sorted(dh_to_pylist(s3_session.streams()), key=lambda r: r["StreamId"])
     assert [(r["State"], r["Transport"]) for r in rows] == [
         ("DONE", "flat files"),
@@ -2110,21 +2124,23 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 # --- history() of a refreshing symbol table ---------------------------------------------------
 
 
-def live(*symbols: str) -> Table:
-    # A refreshing, keyed watchlist holding the symbols, created under the update graph's lock
-    # so no update cycle can refresh it in the step it was stamped with.
-    with shared_lock(get_exec_ctx().update_graph):
-        table = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    if symbols:
-        table.add(new_table([string_col("Symbol", list(symbols))]))
-    return table
+@pytest.fixture
+def live(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+    # Makes a refreshing, keyed watchlist holding the symbols.
+    def make(*symbols: str) -> Table:
+        table = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        if symbols:
+            table.add(new_table([string_col("Symbol", list(symbols))]))
+        return table
+
+    return make
 
 
 def follows(m: dm.MassiveSession) -> None:
     # Waits until no followed read of the session is left: its coordinator has ended.
     pause = threading.Event()
     for _ in range(int(TIMEOUT / 0.01)):
-        if m._core.follows.thread is None:
+        if m._core.follows.following == 0:
             return
         pause.wait(0.01)
     raise AssertionError("a followed read kept running")
@@ -2140,7 +2156,7 @@ def _until(condition: Callable[[], bool]) -> None:
 
 
 def test_history_follows_a_refreshing_table_from_rest_under_auto(
-    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
@@ -2168,7 +2184,7 @@ def test_history_follows_a_refreshing_table_from_rest_under_auto(
 
 
 def test_history_follows_from_flat_files_when_rest_cannot_serve(
-    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     flat = Recorder(s3_session._core.catalog)
     monkeypatch.setattr(
@@ -2187,7 +2203,7 @@ def test_history_follows_from_flat_files_when_rest_cannot_serve(
 
 
 def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
-    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     flat = Recorder(s3_session._core.catalog)
     monkeypatch.setattr(
@@ -2206,7 +2222,7 @@ def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
 
 
 def test_history_forced_to_rest_follows_from_rest(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live("AAPL")).history(
         "2025-03-03", "2025-03-03", source=HistorySource.REST
@@ -2221,7 +2237,7 @@ def test_history_forced_to_rest_follows_from_rest(
 
 
 def test_an_added_symbol_is_read_over_the_call_s_window(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     watchlist = live("AAPL")
     result = trades(massive_session, watchlist).history("2025-03-03")  # through the call instant
@@ -2239,7 +2255,7 @@ def test_an_added_symbol_is_read_over_the_call_s_window(
 
 
 def test_an_instant_range_prints_its_instants(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     start = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
     end = datetime(2025, 3, 3, 15, tzinfo=UTC)
@@ -2253,7 +2269,7 @@ def test_an_instant_range_prints_its_instants(
 
 
 def test_wait_false_returns_at_once_and_reads_in_the_background(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03", wait=False)
     assert result.is_refreshing
@@ -2264,19 +2280,19 @@ def test_wait_false_returns_at_once_and_reads_in_the_background(
 
 
 def test_an_empty_refreshing_table_returns_an_empty_following_result(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live()).history("2025-03-03", "2025-03-03")
     assert result.is_refreshing
     assert result.size == 0
     assert rest.by_symbol == []
-    assert rest.checks == []  # with no symbol, the first read checks the parameters
+    assert [verb for verb, _, _ in rest.checks] == ["history"]  # checked with no symbol too
     massive_session.release(result)
     follows(massive_session)
 
 
 def test_wait_true_raises_when_every_call_time_symbol_fails(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {
@@ -2294,6 +2310,7 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
 
 
 def test_wait_true_warns_once_when_some_call_time_symbols_fail(
+    live: Callable[..., Table],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -2347,6 +2364,7 @@ def test_a_static_call_logs_its_start_as_before(
 
 
 def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
+    live: Callable[..., Table],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -2362,6 +2380,7 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
 
 
 def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
+    live: Callable[..., Table],
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -2442,6 +2461,7 @@ def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
 
 def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     *,
+    live: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     drain: Callable[[], None],
@@ -2464,6 +2484,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(dh_to_pylist(result)) == 3)
     assert "follow-read" in rest.fetched[1][2]
+    _until(lambda: symbol_reads(massive_session, drain, dh_to_pylist)["MSFT"]["State"] == "DONE")
     reads = symbol_reads(massive_session, drain, dh_to_pylist)
     # Each symbol's rows are Massive's answer as of its own read.
     assert reads["MSFT"]["ReadAt"] > reads["AAPL"]["ReadAt"]
@@ -2478,6 +2499,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
 
 def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
     *,
+    live: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -2506,7 +2528,7 @@ def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
 
 
 def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, Query)
@@ -2520,7 +2542,11 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
 
 
 def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
-    *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {"AAPL": SymbolFailure(refusal, FailureKind.PERMANENT)}
@@ -2547,6 +2573,7 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
 @pytest.mark.parametrize("setting", [OnError.LOG, OnError.IGNORE, OnError.RAISE])
 def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
     *,
+    live: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
@@ -2575,12 +2602,11 @@ def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> No
     batched = dataclasses.replace(LAST_TRADE_SPEC, symbols_per_request=250)
     assert _symbols_per_read(batched) == 250
     assert _symbols_per_read(LAST_TRADE_SPEC) == 1
-    # Rows that list their tickers: each symbol is read in a request of its own.
-    assert _symbols_per_read(dataclasses.replace(batched, symbols_overlap=True)) == 1
 
 
 def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_rows(
     *,
+    live: Callable[..., Table],
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -2599,7 +2625,7 @@ def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_row
 
 
 def test_a_followed_fetch_sends_its_limit_on_its_request(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, live: Callable[..., Table], rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # `limit` is Massive's own cap on a request's rows, sent as the caller gave it.
     fake_rest.reply("/v3/snapshot", Reply(envelope([{"ticker": "AAPL", "type": "stocks"}])))
@@ -2612,6 +2638,7 @@ def test_a_followed_fetch_sends_its_limit_on_its_request(
 
 def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     *,
+    live: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -2632,6 +2659,7 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
 
 def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     *,
+    live: Callable[..., Table],
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -2659,17 +2687,61 @@ def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     follows(rest_session)
 
 
+def test_a_followed_read_s_patience_starts_when_its_read_does(
+    live: Callable[..., Table], *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One read thread: MSFT waits in the queue while AAPL is read. Its patience for rate
+    # limits begins only when its own read begins, so the time it queued never counts.
+    events: list[str] = []
+    lock = threading.Lock()
+    patience = rest_module.RestReader.patience
+
+    def recorded(reader: rest_module.RestReader) -> Patience:
+        with lock:
+            events.append("patience")
+        return patience(reader)
+
+    def heard(received: Received) -> None:
+        with lock:
+            events.append(received.target.split("?")[0].rsplit("/", 1)[-1])
+
+    monkeypatch.setattr(rest_module.RestReader, "patience", recorded)
+    fake_rest.on_request(heard)
+    fake_rest.reply_default(Reply(envelope([])))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=1)
+    with dm.MassiveSession(config) as m:
+        result = m.stocks.trades(live("AAPL", "MSFT")).history(
+            "2025-03-03", "2025-03-03", wait=False
+        )
+        _until(lambda: events.count("patience") == 2 and len(events) == 4)
+        m.release(result)
+    assert events == ["patience", "AAPL", "patience", "MSFT"]
+
+
+def test_a_followed_range_no_row_can_lie_in_checks_nothing(
+    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    result = trades(massive_session, live("AAPL")).history(moment, moment)  # an empty range
+    assert rest.checks == []  # nothing can be asked: no request, no parameter to check
+    massive_session.release(result)
+    follows(massive_session)
+
+
 # --- fetch() and poll() of a table passed where a dataset takes one value ---------------------
 
 
-def live_codes(*codes: str) -> Table:
-    # A refreshing, keyed table of futures product codes, as `m.futures.products()` rows carry
-    # them, created under the update graph's lock as `live` creates a watchlist.
-    with shared_lock(get_exec_ctx().update_graph):
-        table = input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
-    if codes:
-        table.add(new_table([string_col("ProductCode", list(codes))]))
-    return table
+@pytest.fixture
+def live_codes(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+    # Makes a refreshing, keyed table of futures product codes, as `m.futures.products()` rows
+    # carry them.
+    def make(*codes: str) -> Table:
+        table = dh_input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
+        if codes:
+            table.add(new_table([string_col("ProductCode", list(codes))]))
+        return table
+
+    return make
 
 
 def test_a_static_table_of_underlyings_reads_each_chain_once(
@@ -2731,6 +2803,7 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
 
 def test_fetch_follows_a_refreshing_table_of_product_codes(
     *,
+    live_codes: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     drain: Callable[[], None],
@@ -2758,7 +2831,7 @@ def test_fetch_follows_a_refreshing_table_of_product_codes(
 
 
 def test_fetch_follows_a_refreshing_table_of_underlyings_with_wait_false(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = massive_session.options.chain(live()).fetch(wait=False)
     assert result.is_refreshing
@@ -2775,7 +2848,11 @@ def test_fetch_follows_a_refreshing_table_of_underlyings_with_wait_false(
 
 
 def test_fetch_follows_one_refreshing_table_at_a_time(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    *,
+    live: Callable[..., Table],
+    live_codes: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
 ) -> None:
     q = massive_session.futures.snapshots(live("ESZ6"), product_code=live_codes("ES"))
     with pytest.raises(
@@ -2795,7 +2872,7 @@ def test_fetch_follows_one_refreshing_table_at_a_time(
 
 
 def test_poll_reads_a_table_of_values_at_its_call(
-    *, massive_session: dm.MassiveSession, rest: Recorder
+    *, live_codes: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     codes = live_codes("ES")
     massive_session.futures.market_status(product_code=codes).poll(5)

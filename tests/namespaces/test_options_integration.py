@@ -18,10 +18,8 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
-from deephaven.execution_context import get_exec_ctx
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._massive import (
@@ -37,6 +35,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._query import Query
 
@@ -768,7 +767,11 @@ def _underlyings_until(
 @pytest.mark.needs("options:starter")
 @pytest.mark.timeout(300)
 def test_the_chain_follows_a_live_table_of_underlyings(
-    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     """Whether `fetch()` of the option chain follows a live table of underlyings.
 
@@ -779,9 +782,7 @@ def test_the_chain_follows_a_live_table_of_underlyings(
     most 90 s.
     """
     m = live_session
-    # A stand-in for the user's table, created under the lock so no cycle refreshes it early.
-    with shared_lock(get_exec_ctx().update_graph):
-        underlyings = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    underlyings = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     underlyings.add(new_table([string_col("Symbol", ["SPY"])]))
     query = m.options.chain(underlyings, contract_type=dm.ContractType.CALL, limit=20)
     result = query.fetch()

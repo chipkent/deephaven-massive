@@ -198,6 +198,12 @@ These prevent deadlocks and leaks.
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.
+- **A test that creates an input table to stand in for a user's watchlist creates it through
+  `dh_input_table`**, which holds the UG shared lock only for the creation; release it before
+  any blocking add or delete, which raise under the shared lock. Created while an update cycle
+  runs, a table can be refreshed in the step it was stamped with: the creation stamp counts as
+  the table's notification for that step, so a first change delivered in the same step is
+  fatal.
 - **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
   flush routing are released there, not when a result record is released. The callback only
   updates the registry, queues a failure's pin release on the reaper, and calls
@@ -207,6 +213,13 @@ These prevent deadlocks and leaks.
   a published failure until the next update cycle; if another thread destroys the table
   meanwhile, Deephaven can deliver the failure twice and exit the process. `publish_failure`
   pins the table until the failure has been delivered.
+- **The library never uses input tables.** They are for people editing data by hand, such as a
+  watchlist typed in the web UI, not for code and not for volume. Every table the library
+  writes is a `blink_publisher` blink table or a shape of one; a keyed one is `last_by` on its
+  keys. Tests may use an input table to stand in for a user's watchlist. `blink_publisher`
+  creates its table under the UG shared lock: a table's creation stamp counts as its
+  notification for the cycle it was created in, so if it is registered while that cycle runs,
+  its first change in the same cycle is fatal.
 - **Connection state is loop-confined.** Only a connection's client thread touches its
   subscription sets; other threads use `loop.call_soon_threadsafe` with plain data.
 - **Never rely on the atomicity of `dict`, `set`, or `list` operations.** Every shared container

@@ -31,9 +31,9 @@ the dataset's table shape:
   from here. `Catalog` caches the result per dataset; this module holds no state.
 
 The merge runs from the committed generated files only, never from data. The Deephaven types of
-these columns, and the column definitions `table_publisher` and `input_table` take, come from
-`_tables/columns.py`: this module makes no Deephaven call. Epoch timestamps keep their wire
-unit here (`source_columns.SourceColumn.unit`); the transports convert them with
+these columns, and the column definitions a blink table's publisher takes (`blink_publisher`),
+come from `_tables/columns.py`: this module makes no Deephaven call. Epoch timestamps keep
+their wire unit here (`source_columns.SourceColumn.unit`); the transports convert them with
 `timestamps.py`.
 """
 
@@ -57,6 +57,7 @@ from deephaven_massive._datasets.column_descriptions import (
     OPTION_ROOT,
     OTHER_ROWS,
     RAW_SYMBOL,
+    SYMBOL,
     TRANSPORT_ORDER,
     Contribution,
     column_description,
@@ -342,13 +343,14 @@ keys or the library fills them; every other column, `Underlying` included, takes
 first appearance, and `TimestampInsert` comes last."""
 
 _LIBRARY_TYPES: Final[Mapping[str, WireType]] = {
+    SYMBOL: WireType.STRING,
     DATE: WireType.DATE,
     START: WireType.EPOCH,
     END: WireType.EPOCH,
     INSERT: WireType.EPOCH,
 }
-"""The wire type each library time column joins the merge with: `Date` is a date (ISO text), the
-others instants."""
+"""The wire type each library column joins the merge with: the `Symbol` of a dataset with a
+`ticker_list` is text, `Date` is a date (ISO text), the others instants."""
 
 
 _Read: TypeAlias = "tuple[DatasetSpec, Transport, str, Source]"
@@ -391,21 +393,23 @@ def _by_position(
 
 
 def _library_names(spec: DatasetSpec) -> tuple[str, ...]:
-    """Return the time columns the library fills for every row of a dataset.
+    """Return the columns the library fills for every row of a dataset.
 
     Args:
         spec: The dataset.
 
     Returns:
-        `Date` for ticks; `Date`, `TimestampStart`, and `TimestampEnd` for bars and daily
-        summaries; and `TimestampInsert` for every dataset, last.
+        `Symbol` first for a dataset whose rows list their tickers (`DatasetSpec.ticker_list`),
+        then the time columns: `Date` for ticks; `Date`, `TimestampStart`, and `TimestampEnd`
+        for bars and daily summaries; and `TimestampInsert` for every dataset, last.
     """
+    listed = (SYMBOL,) if spec.ticker_list is not None else ()
     times = spec.times
     if times is RowTimes.TICK:
-        return (DATE, INSERT)
+        return (*listed, DATE, INSERT)
     if times is RowTimes.NONE:
-        return (INSERT,)
-    return (DATE, START, END, INSERT)
+        return (*listed, INSERT)
+    return (*listed, DATE, START, END, INSERT)
 
 
 def filled_columns(

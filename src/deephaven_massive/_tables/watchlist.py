@@ -456,13 +456,13 @@ class SymbolWatch:
     Example:
         ::
 
-            from deephaven import input_table
-            from deephaven import dtypes as dht
+            from deephaven import time_table
 
             from deephaven_massive._enums import AssetClass, OnError
             from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch
 
-            watchlist = input_table({"Symbol": dht.string})
+            # A live watchlist that adds a row every second, alternating two pairs.
+            watchlist = time_table("PT1s").view("Symbol = ii % 2 == 0 ? `X:BTCUSD` : `X:ETHUSD`")
             rule = SymbolRowRule(
                 "crypto.trades", AssetClass.CRYPTO, as_written=False, noncanonical=OnError.LOG
             )

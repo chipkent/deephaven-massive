@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pytest
-from deephaven import dtypes, input_table
+from deephaven import dtypes
 from deephaven.arrow import to_arrow, to_table
 from deephaven.stream import blink_to_append_only
 
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._tables.session_core import SessionCore
@@ -608,7 +609,9 @@ def test_a_sink_whose_failure_is_refused_publishes_nothing_more(
 
 
 def test_open_stream_tables_releases_its_scope_on_failure(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # The watch fails after the publisher exists: releasing the scope shuts the blink table down.
     shut_down = threading.Event()
@@ -618,7 +621,7 @@ def test_open_stream_tables_releases_its_scope_on_failure(
 
     monkeypatch.setattr(stream, "SymbolWatch", broken)
     core = massive_session._core
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     with pytest.raises(RuntimeError, match="no watch"):
         open_stream_tables(
             ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE),
@@ -664,18 +667,22 @@ def test_open_stream_tables_releases_its_scope_when_interrupted_at_the_end(
     assert shut_down.wait(TIMEOUT)
 
 
-def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSession) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+def test_a_reactive_stream_starts_with_no_symbols(
+    massive_session: dm.MassiveSession, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     sink, _ = make_sink(massive_session._core, SymbolTable(watchlist))
     assert not sink.holds("AAPL")
     assert not sink.receives_all
 
 
-def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSession) -> None:
+def test_a_reactive_streams_handle_holds_its_watch(
+    massive_session: dm.MassiveSession, dh_input_table: Callable[..., InputTable]
+) -> None:
     # Deephaven holds a table's listeners only weakly: the session's record of the stream holds
     # the watch through the handle, whatever else keeps it reachable, and stops it through it.
     core = massive_session._core
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     opened = open_stream_tables(
         ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE),
         core.catalog.dataset_schema(TRADES, raw_symbol=False),
@@ -1977,3 +1984,12 @@ def test_benchmark_flush_conversion(
             f"\nflush of {len(rows)} rows from frames of {rows_per_frame}: "
             f"{seconds * 1000:.2f} ms, {seconds * 1e6 / len(rows):.2f} us a row\n"
         )
+
+
+def test_a_streams_blink_table_is_created_under_the_update_graphs_shared_lock(
+    massive_session: dm.MassiveSession, blink_creations: list[bool]
+) -> None:
+    before = len(blink_creations)
+    sink, _blink = make_sink(massive_session._core, ("AAPL",))
+    assert blink_creations[before:] == [True]
+    sink.fail(MassiveError("done"))

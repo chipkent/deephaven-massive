@@ -936,13 +936,14 @@ You edit an input table in its panel:
 ### 21. A watchlist that drives a poll (`21_watchlist_poll.py`)
 
 ```python
-# Makes a watchlist you can edit, and a table that reads the previous day's bar of each of
-# its stocks every minute: three Stocks requests a minute, within the free plan's five. Then a
-# second watchlist, of futures products, and a table of each product's contracts that follows
-# it: one Futures request for each product you add. You should see four new tables:
-# stock_watchlist, with three rows; watched_bars, with one row per stock within about a
-# minute; product_watchlist, with one row; and watched_contracts, with up to 10 ES rows. Then
-# follow the steps after this block.
+# Makes a watchlist you can edit, a table that reads the previous day's bar of each of its
+# stocks every minute (three Stocks requests a minute, within the free plan's five), and a
+# fetch() of their dividends that follows the watchlist. Then a second watchlist, of futures
+# products, and a fetch() of each product's contracts that follows it: one Futures request for
+# each product you add. You should see five new tables: stock_watchlist, with three rows;
+# watched_bars, with one row per stock within about a minute; watched_dividends, with each
+# stock's dividends; product_watchlist, with one row; and watched_contracts, with up to 10 ES
+# rows. Then follow the steps after this block.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
@@ -950,6 +951,7 @@ from deephaven.column import string_col
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
+watched_dividends = m.stocks.dividends(stock_watchlist).fetch()
 
 product_watchlist = input_table({"ProductCode": dht.string}, key_cols="ProductCode")
 product_watchlist.add(new_table([string_col("ProductCode", ["ES"])]))
@@ -959,16 +961,20 @@ watched_contracts = m.futures.contracts(product_code=product_watchlist, limit=10
 Then, in the `stock_watchlist` panel:
 
 1. Add `AAPL`. **You should see** an `AAPL` row in `watched_bars` within about a minute, at
-   its next read.
-2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read.
+   its next read, and AAPL's dividends join `watched_dividends` once they are read.
+2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read, and
+   TSLA's dividends leave `watched_dividends` at once.
 3. In the `streams` panel, the `stocks.previous_day_bar` row's `SymbolCount` reads 3: the
-   symbols its latest read covered.
+   symbols its latest read covered. The `stocks.dividends` row has `Kind` `read`.
+4. Run `reads = m.symbol_reads()`. **You should see** one row per symbol of
+   `watched_dividends`: `DONE` for JPM, XOM, and AAPL, and `REMOVED` for TSLA.
 
 Then, in the `product_watchlist` panel:
 
-4. Add `NQ`. **You should see** up to 10 rows whose `ProductCode` is `NQ` land in
-   `watched_contracts` together, within about a minute.
-5. Delete `NQ`. **You should see** every `NQ` row leave `watched_contracts` at once, while the
+5. Add `NQ`. **You should see** up to 10 rows whose `ProductCode` is `NQ` land in
+   `watched_contracts` together, within about a minute, and an `NQ` row in `reads` with
+   `State` `DONE`.
+6. Delete `NQ`. **You should see** every `NQ` row leave `watched_contracts` at once, while the
    `ES` rows stay.
 
 ### 22. A crypto watchlist, paid plans (`22_crypto_watchlist.py`)
@@ -1022,6 +1028,42 @@ gainer_trades = m.stocks.trades(gainers).last_by()
 stock joins or leaves the gainers at a minute's read, it joins or leaves `Symbols` and
 `gainer_trades` too. On Stocks Developer the trades run 15 minutes behind, and the session
 needs example 1's line for that plan, as example 18 says.
+
+### History that follows a watchlist
+
+`history()` given a watchlist you can edit follows it: each symbol you add is read over the same
+range and its rows arrive all at once, and each symbol you delete leaves in the same update.
+`m.symbol_reads()` shows each symbol's read. This works on the free plan: each added symbol is
+one request.
+
+```python
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+
+names = input_table({"Symbol": dht.string}, key_cols="Symbol")
+names.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
+month_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=30)
+followed = m.stocks.bars(names, dm.Timespan.DAY).history(month_ago)
+reads = m.symbol_reads()
+
+names.add(new_table([string_col("Symbol", ["NVDA"])]))
+```
+
+**You should see** `followed` with AAPL's and MSFT's bars at once, and NVDA's bars a few seconds
+later, all of them in one update. In `reads`, NVDA goes `QUEUED`, `LOADING`, then `DONE`, with
+`Rows` equal to its bars in `followed`. Then delete NVDA: its bars leave `followed` in the same
+update, and its row in `reads` becomes `REMOVED`.
+
+```python
+names.delete(new_table([string_col("Symbol", ["NVDA"])]))
+```
+
+Add NVDA back and it is downloaded again: its `ReadAt` in `reads` is newer. To get the earlier
+download back with no request, pass `reread=dm.Reread.NEVER` to `history()`.
 
 ## 2.4 Save the diagnostics, and finish
 

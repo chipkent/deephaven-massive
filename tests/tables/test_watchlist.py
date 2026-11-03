@@ -10,11 +10,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from deephaven import dtypes, empty_table, input_table, new_table, time_table, update_graph
+from deephaven import dtypes, empty_table, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
-from deephaven.execution_context import get_exec_ctx
 from deephaven.stream import blink_to_append_only
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.request import ValueTable
@@ -104,8 +102,10 @@ def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
 
 
 @pytest.mark.parametrize("mode", list(OnError))
-def test_read_symbols_refuses_a_failed_table(dh_exec_ctx: object, mode: OnError) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_read_symbols_refuses_a_failed_table(
+    dh_exec_ctx: object, mode: OnError, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
         watch = dm.canonicalize_symbols(source, AssetClass.FOREX)
@@ -226,8 +226,10 @@ def watching(
     return watch, seen, refused, skipped
 
 
-def test_a_watch_reports_changes_of_the_symbol_set(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_reports_changes_of_the_symbol_set(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watchlist.add(
         new_table([int_col("Key", [1, 2, 3]), string_col("Symbol", ["C:EURUSD", "C:EURUSD", None])])
     )
@@ -245,8 +247,10 @@ def test_a_watch_reports_changes_of_the_symbol_set(dh_exec_ctx: object) -> None:
     assert skipped == []
 
 
-def test_a_watch_refuses_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_refuses_a_late_row_that_is_not_canonical(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watch, seen, refused, skipped = watching(watchlist)
     watch.start()
     watchlist.add(
@@ -263,8 +267,10 @@ def test_a_watch_refuses_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -
     assert skipped == []
 
 
-def test_a_watch_skips_a_late_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
+def test_a_watch_skips_a_late_row_that_is_not_canonical(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
     watchlist.add(new_table([int_col("Key", [1]), string_col("Symbol", ["eur/usd"])]))
     watch, seen, refused, skipped = watching(watchlist, OnError.LOG)
     watch.start()  # the replay reports the skipped row
@@ -338,10 +344,10 @@ def test_a_table_of_product_codes_is_read_from_its_product_code_column(
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
 
 
-def test_a_watch_of_product_codes_reports_changes_of_its_codes(dh_exec_ctx: object) -> None:
-    # A stand-in for the user's table, created under the lock so no cycle refreshes it early.
-    with shared_lock(get_exec_ctx().update_graph):
-        codes = input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
+def test_a_watch_of_product_codes_reports_changes_of_its_codes(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    codes = dh_input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
     codes.add(new_table([string_col("ProductCode", ["ES"])]))
     watch, seen, refused, _ = watching(codes, row_rule=product_codes())
     watch.start()
@@ -352,8 +358,10 @@ def test_a_watch_of_product_codes_reports_changes_of_its_codes(dh_exec_ctx: obje
     assert refused == []
 
 
-def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
-    watch, seen, _, skipped = watching(input_table({"Symbol": dtypes.string}))
+def test_an_empty_table_reports_nothing(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watch, seen, _, skipped = watching(dh_input_table({"Symbol": dtypes.string}))
     watch.start()
     assert seen == []
     assert skipped == []
@@ -384,8 +392,10 @@ def test_a_failing_watch_is_refused_and_logged_only_at_debug(
     assert refused == [expected]
 
 
-def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: object) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     scope = new_scope()
     with scope.open():
@@ -399,8 +409,10 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: obje
     scope.release()
 
 
-def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+def test_a_watch_lives_as_long_as_its_keeper(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     keeper_scope = new_scope()
     with keeper_scope.open():
         keeper = time_table("PT1s")
@@ -496,12 +508,15 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
 
 def test_watched_rows_keeps_the_watched_symbols_and_follows_the_watchlist(
     dh_exec_ctx: ExecutionContext,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     scope = new_scope()
     with scope.open():
-        prices = input_table({"Symbol": dtypes.string, "Price": dtypes.int32}, key_cols=["Symbol"])
+        prices = dh_input_table(
+            {"Symbol": dtypes.string, "Price": dtypes.int32}, key_cols=["Symbol"]
+        )
         prices.add(new_table([string_col("Symbol", ["A", "B", "C"]), int_col("Price", [1, 2, 3])]))
-        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
         kept = watched_rows(prices, watchlist)
     wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "B"])
@@ -544,11 +559,9 @@ def stamped(symbol: str, price: int, *, at: int | None = None, exchange: int = 1
     )
 
 
-def keyed_watchlist(dh_exec_ctx: ExecutionContext, symbols: list[str]) -> InputTable:
-    # An editable watchlist keyed by symbol. Created under the update graph's lock, so its
-    # first cycle cannot run while Deephaven is still wiring it up.
-    with update_graph.shared_lock(dh_exec_ctx.update_graph):
-        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+def keyed_watchlist(symbols: list[str], *, dh_input_table: Callable[..., InputTable]) -> InputTable:
+    # An editable watchlist keyed by symbol.
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", symbols)]))
     return watchlist
 
@@ -593,12 +606,14 @@ def cycle_ended(dh_exec_ctx: ExecutionContext) -> None:
 
 
 def test_latest_rows_since_added_shows_a_row_received_before_the_build(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # A row the library received while the result was being built reaches the table after
     # it: it shows, whatever its receive time says.
     received = time.time_ns()
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    watchlist = keyed_watchlist(["A"], dh_input_table=dh_input_table)
     latest = latest_of(watchlist)
     latest.publisher.add(stamped("A", 1, at=received))
     wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1)])
@@ -628,9 +643,11 @@ def test_latest_rows_since_added_shows_a_row_that_arrives_in_the_cycle_its_symbo
 
 
 def test_latest_rows_since_added_reads_no_wall_clock(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    watchlist = keyed_watchlist(["A"], dh_input_table=dh_input_table)
     latest = latest_of(watchlist)
     latest.publisher.add(stamped("A", 1, at=946_684_800_000_000_000))  # 2000-01-01
     wait_for(lambda: latest.shown(dh_to_pylist) == [("A", 1)])
@@ -638,9 +655,11 @@ def test_latest_rows_since_added_reads_no_wall_clock(
 
 
 def test_latest_rows_since_added_hides_a_re_added_symbols_old_row(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A", "B"])
+    watchlist = keyed_watchlist(["A", "B"], dh_input_table=dh_input_table)
     latest = latest_of(watchlist)
     latest.publisher.add(stamped("A", 1))
     latest.publisher.add(stamped("B", 2))
@@ -661,12 +680,16 @@ def test_latest_rows_since_added_hides_a_re_added_symbols_old_row(
 
 
 def test_latest_rows_since_added_keeps_symbols_swapped_between_watchlist_rows(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # One write moves A and B between two rows: neither leaves the watchlist, so neither
     # rejoins, and both keep their rows.
     with update_graph.shared_lock(dh_exec_ctx.update_graph):
-        watchlist = input_table({"Slot": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Slot"])
+        watchlist = dh_input_table(
+            {"Slot": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Slot"]
+        )
     watchlist.add(new_table([int_col("Slot", [1, 2]), string_col("Symbol", ["A", "B"])]))
     latest = latest_of(watchlist)
     latest.publisher.add(stamped("A", 1))
@@ -679,9 +702,11 @@ def test_latest_rows_since_added_keeps_symbols_swapped_between_watchlist_rows(
 
 
 def test_latest_rows_since_added_by_symbol_and_exchange_shows_only_rows_since_the_rejoin(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    watchlist = keyed_watchlist(["A"], dh_input_table=dh_input_table)
     latest = latest_of(watchlist, ("Symbol", "Exchange"))
 
     def shown() -> list[tuple[object, object]]:
@@ -699,9 +724,11 @@ def test_latest_rows_since_added_by_symbol_and_exchange_shows_only_rows_since_th
 
 
 def test_latest_rows_since_added_builds_under_the_consoles_lock(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    watchlist = keyed_watchlist(["A"], dh_input_table=dh_input_table)
     with update_graph.exclusive_lock(dh_exec_ctx.update_graph):  # as a console command holds it
         latest = latest_of(watchlist)
     latest.publisher.add(stamped("A", 1))
@@ -741,9 +768,11 @@ def parallel_updates() -> Iterator[None]:
 
 @pytest.mark.usefixtures("parallel_updates")
 def test_latest_rows_since_added_stamps_the_cycle_on_parallel_update_threads(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watchlist = keyed_watchlist(dh_exec_ctx, ["A"])
+    watchlist = keyed_watchlist(["A"], dh_input_table=dh_input_table)
     pins: list[LivenessScope] = []
     scope = new_scope()
     with scope.open():

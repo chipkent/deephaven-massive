@@ -20,10 +20,8 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
-from deephaven.execution_context import get_exec_ctx
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._massive import (
@@ -42,6 +40,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from tests._live.futures_bar_buckets import Bar
     from tests._live.ticker_lists import SpreadRead
@@ -1004,6 +1003,7 @@ def test_contracts_follow_a_live_table_of_product_codes(
     recent_monday: date,
     table_rows: TableRows,
     evidence: Evidence,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     """Whether `fetch()` of futures contracts follows a live table of product codes.
 
@@ -1014,9 +1014,7 @@ def test_contracts_follow_a_live_table_of_product_codes(
     most 90 s.
     """
     m = live_session
-    # A stand-in for the user's table, created under the lock so no cycle refreshes it early.
-    with shared_lock(get_exec_ctx().update_graph):
-        codes = input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
+    codes = dh_input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
     codes.add(new_table([string_col("ProductCode", ["ES"])]))
     result = m.futures.contracts(product_code=codes, as_of=recent_monday, limit=10).fetch()
     try:

@@ -947,6 +947,11 @@ once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/
 `dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive.
 The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
 
+**Rows that list several tickers.** News, filings, and financial statements list the tickers
+each row concerns, in `Tickers`, and their `Symbol` is each ticker you named that the row lists.
+An article about AAPL and MSFT, read with `symbols=["AAPL", "MSFT"]`, is two rows: one with
+`Symbol` AAPL and one with `Symbol` MSFT. Read without `symbols`, `Symbol` is null.
+
 **A live table is followed.** Add a row and a stream subscribes to it; delete one and it
 unsubscribes. `poll()` reads the table at every cycle. `fetch()` and `history()` return a live
 table: an added symbol's rows appear whole once they are read, and a deleted symbol's rows leave
@@ -1007,7 +1012,9 @@ rejected API key, a closed session, a failed watchlist, or a library bug fails t
 With `wait=True`, the default, the call returns once the watchlist's current symbols are read,
 and raises only if every one of them failed. A symbol that comes back after you deleted it is
 downloaded again, unless you choose otherwise (`reread`, in
-[verb arguments](#verb-arguments)). `limit` then caps each symbol's rows.
+[verb arguments](#verb-arguments)). `limit` is sent on each request, as Massive's cap on its
+rows. As in every read, a news article, filing, or financial statement is listed under each
+named ticker it lists.
 
 The arguments that take one value take a table too: `underlying=` of `m.options.chain` and
 `m.options.contracts` a table with a `Symbol` column, and every futures `product_code=` one with a
@@ -1158,8 +1165,10 @@ sample; for complete data on each symbol, read without it (the data is small). S
 cap each request instead, because each request names one symbol: the indicators, `reference.tickers` and `stocks.ipos` when tickers are named, and
 `reference.news`, whose `sort` and `order` apply to each ticker's request too. On
 `options.contracts` with explicit symbols, each contract is one row, so `limit` has no effect.
+On news, filings, and financial statements, `limit` caps the rows Massive returns; each is then
+listed under every named ticker it lists, so the table can hold more rows than `limit`.
 Each dataset's `help()` says when its `limit` is per symbol. A `fetch()` that follows a live
-symbol table caps each symbol's rows on every dataset. `limit` keeps the first rows in
+symbol table sends `limit` the same way, once on each request. `limit` keeps the first rows in
 Massive's order, so ask for newest first when you want the latest:
 `m.reference.news("AAPL", sort="published_utc", order=dm.Order.DESC, limit=50).poll(60)`. A news
 or filings poll needs a `start` or a `limit`: without either, every cycle would re-read the whole
@@ -1314,16 +1323,15 @@ an issue's text at 65,536 characters; zip a larger file), and add the output of 
 
 ## Status
 
-Every dataset in the [reference](docs/datasets/README.md) is implemented: live streams, polled
-REST tables, and history from REST or the flat files. Each is tested against simulated Massive
-servers that answer as Massive's documentation says Massive does, and the live tests have run
-against Massive on a mix of paid and free plans. Some questions remain open because those plans
-cannot settle them, such as how index daily bars and futures sessions are stamped and parts of
-the flat files; on those, the library follows its best reading of Massive's documentation and
-warns when what Massive sends differs. Following a live symbol table in `history()` and
-`fetch()`, with `reread` and `m.symbol_reads()`, is specified but not built yet: until it is,
-both read a live table once, when called. The library is not on PyPI yet. Outside testers start
-with the [tester guide](docs/tester-guide.md).
+Every dataset in the [reference](docs/datasets/README.md) is implemented: live streams, polled REST
+tables, and history from REST or the flat files. Each is tested against simulated Massive servers
+that answer as Massive's documentation says Massive does, and the live tests have run against
+Massive on a mix of paid and free plans. Some questions remain open because those plans cannot
+settle them, such as how index daily bars and futures sessions are stamped and parts of the flat
+files; on those, the library follows its best reading of Massive's documentation and warns when what
+Massive sends differs. `history()` and `fetch()` follow a live symbol table, with
+`m.symbol_reads()`. Following a table passed as `underlying=` or `product_code=` is planned. The
+library is not on PyPI yet. Outside testers start with the [tester guide](docs/tester-guide.md).
 
 <a id="contributing"></a>
 

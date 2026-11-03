@@ -1043,7 +1043,8 @@ return result
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
   meets the failed table always finds the failure to name.
 - **A failure pins its table.** Every blink table the library feeds (a stream's, a `poll()`
-  table's) is created by `blink_publisher` (`_tables/publisher.py`), whose
+  table's, a background read's, a diagnostics table's) is created by `blink_publisher`
+  (`_tables/publisher.py`), whose
   `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table, then
   publishes the failure. While the failure is queued nothing can destroy the table, so only
   the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
@@ -1121,13 +1122,17 @@ return result
      write holds, the session gets the last row written for each family it shows, marked
      `CLOSED` with no topics and no buffered rows (a `FAILED` row keeps its state and counts),
      and leaves the connection's users, so no later row replaces it.
-  5. It writes the final rows, then releases the diagnostics scope, and returns once the
-     update cycle that applied the rows has ended (it takes the shared update-graph lock once),
-     so a held `m.streams()` view, which updates later in that cycle, shows them. On a thread
-     that holds the UG lock it waits for neither: the writer's `InputTable.add` waits for an
-     update cycle, which cannot run until the caller releases the lock, so `close()` asks the
-     writer to apply the rows, release the scope, and end, and returns at once; the rows, and
-     a held view, follow once the console command is over.
+  5. It has the writer add the final rows, release the diagnostics scope under the shared
+     update-graph lock, and end, and waits for it. The rows reach the tables on the next update
+     cycle, so while a diagnostics view is held `close()` then waits for a cycle that started
+     after the writer ended (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then
+     a WARNING), and a held `m.streams()` view shows them when it returns. A held view keeps
+     its table, the blink table under it, and the publisher alive, so the release does not
+     drop the pending rows; with no view held nothing could show them, and `close()` does not
+     wait. On a thread that holds the UG lock it waits for neither: the writer's release
+     cannot take the lock until the caller lets it go, so `close()` asks the writer to add the
+     rows, release the scope, and end, and returns at once; the rows, and a held view, follow
+     once the console command is over.
   6. It logs "MassiveSession #1 closed; N live tables failed, streams N [...]", at WARNING
      when N > 0 and at INFO when N is 0. N counts the tables that are failed once the close is
      done, including one a racing failure failed first; the line names their stream ids (the
@@ -2006,11 +2011,12 @@ it.`).
 - **Per-symbol paths** (one symbol in the path): one read per symbol.
 - **`ticker.any_of` and `tickers` batches:** the waiting symbols are batched as today, and each
   row is assigned to its symbol by its `Symbol` column, which the filter matches exactly.
-- **List-column datasets** (rows with a `Tickers` list and no `Symbol`: the financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, `partners.benzinga.news`):
-  one request per symbol, each row belonging to the request that returned it. A row Massive
-  returns for two symbols' requests is listed under each symbol: it is the data listed by
-  symbol, and nothing removes a copy across requests (decision 90).
+- **List-column datasets** (rows with a `Tickers` list: the financial statements, Forms 3 and
+  4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+  `partners.benzinga.news`): requested as a static `fetch()` requests them, and each row is
+  listed under each named ticker it lists, with that ticker in `Symbol`, as a static
+  `fetch()` lists it ([section 10](#10-symbols-and-all), decision 90). Nothing removes a
+  copy across requests.
 
 **`limit`** is sent on each request of a followed read as Massive's own cap on that request's
 rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
@@ -2147,9 +2153,10 @@ Notation:
   `limit` samples and a read without one is complete (decision 87). The exception is where
   each request names one symbol: a per-symbol path
   (the indicators) or a symbol parameter that takes one ticker
-  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
+  (`reference.tickers`, `stocks.ipos`, `reference.news`). There it caps each symbol's
+  request, so one ticker's rows never crowd out another's (owner decision 74). On a dataset
+  whose rows list their tickers, the cap is on the rows Massive returns, before each is listed
+  under its named tickers, so the table can hold more rows than `limit` (decision 90). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is the path's documented maximum (or
   `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
@@ -2185,8 +2192,9 @@ Notation:
   an article, not one instrument: the three financial statements,
   `filings.initial_insider_ownership` and `filings.insider_transactions` (Forms 3 and 4),
   `filings.insider_activity` and `filings.insider_holdings`, `filings.disclosures_8k`,
-  `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
-  column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
+  `reference.news`, and `partners.benzinga.news` keep their `Tickers` column, and their
+  `Symbol` is the library's: each ticker the request named that a row lists, one row per
+  such ticker ([section 10](#10-symbols-and-all)).
 
 ### 8.1 `m.stocks`
 
@@ -2338,7 +2346,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is listed under each, with that ticker in `Symbol` (decision 90); a `poll()` table is keyed by `Id` and `Symbol`, and fails on an article without an `Id`. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -2893,11 +2901,17 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
-  (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
-  each list several tickers, because no single instrument is the row's: the three financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
-  `partners.benzinga.news` keep their `Tickers` column (`String[]`), and `symbols` there only
-  filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column. A dataset whose rows each list
+  several tickers (the three financial statements, Forms 3 and 4, insider activity and
+  holdings, the 8-K disclosures, `reference.news`, and `partners.benzinga.news`) keeps its
+  `Tickers` column (`String[]`) and gets a `Symbol` the library fills
+  (`DatasetSpec.ticker_list`, decision 90): each ticker the request named that the row
+  lists, the row repeated once per such ticker. An article about AAPL and MSFT read for both
+  is two rows, `Symbol` AAPL and `Symbol` MSFT. A request that named one ticker gives it to
+  every row; a row that lists none of a request's several named tickers keeps a null
+  `Symbol`, never dropped, with one WARNING per dataset a session; `symbols=None` leaves it
+  null. Requests stay batched (`tickers.any_of`). The datasets' `poll()` keys add `Symbol`,
+  which may be null. `Symbol` is never a list.
 
 ## 11. Enums and types
 
@@ -4332,6 +4346,19 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Library threads never create refreshing tables outside an explicit scope.** Refreshing
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
+- **The library never uses input tables.** They are for people editing data by hand, such as a
+  watchlist typed in the web UI. Every table the library writes is a `blink_publisher` blink
+  table or a shape of one; a keyed one is `last_by` on its keys (decision 92).
+- **Every blink table is created under the UG shared lock.** `blink_publisher` holds the shared
+  lock (the Java lock, as `release_scope` takes it) around `table_publisher`, so no update cycle
+  runs while the table is created. Deephaven stamps a new table with the current cycle's step,
+  and the creation stamp counts as the table's notification for that step: a table registered
+  while a cycle runs can be refreshed in that cycle, and a first change delivered in the same
+  step is fatal (Deephaven exits the process). Keyed input tables were seen to fail this way;
+  a publisher's blink table is registered the same way, so the lock is a precaution for every
+  blink table. It suffices because a cycle holds the exclusive lock from its start until it
+  has listed its sources. A thread that already holds either lock (a console command) takes it
+  again at once.
 - Each stream owns one
   `blink_publisher(name=f"massive.{dataset}#{stream_id}", columns=<dataset schema>, on_shutdown=..., defer=<the session's reaper>)`
   (a `table_publisher` whose failure pins its table, section 6.1), created inside the stream scope under the session's captured `ExecutionContext` by
@@ -4666,15 +4693,31 @@ whatever that request returned.
 
 ## 17. Diagnostics
 
-The diagnostics tables are keyed `input_table`s. They live in one session-owned
+Each diagnostics table is a blink table that the diagnostics writer adds rows to through its
+`blink_publisher` publisher, and `last_by` of it on the table's keys, which keeps the latest
+row of each key: a later row of a key replaces the earlier one as a modify, also when two adds
+of one key land in one cycle, and a new key is appended in first-seen order. The tables are not
+input tables, so nobody can edit them in the web UI. **Memory:** rows are never deleted, so
+each table keeps one row per key ever written, copied out of the blink rows, plus `last_by`'s
+hash state: a few dozen `connections()` rows, six `rate_limits()` rows, one `streams()` row per
+stream, poll, and background read the session ever opened, and one `symbol_reads()` row per
+symbol of each followed read. That is the same as the keyed input tables the library used
+before, which never deleted rows either; a session that ever needs pruning would add a
+tombstone filter, as `poll(mode=REPLACE)` does. They live in one session-owned
 `LivenessScope` that `m.close()` releases. `m.connections()`, `m.streams()`, and
 `m.symbol_reads()` each return a new view of one of them, built in its own result scope and tracked like any live result: while the view is held it
 keeps the session alive and current, and after `close()` it keeps showing the final rows. They
 are written by one diagnostics writer thread per session, which
-applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
+adds immutable row snapshots from a queue in order; other threads only enqueue, never wait on
 the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
-writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
-table, so the queue stays bounded however fast rows arrive.
+writer takes everything queued, keeps the latest row per key, and adds it with one Arrow
+conversion and one `publisher.add` per table; it starts its next batch no sooner than
+`WRITE_INTERVAL` (0.1 s) after the last, so a burst of rows costs each table one add per
+interval and the queue stays bounded however fast rows arrive. An add returns at once; the
+rows reach the tables on the next update cycle. Only the writer touches the publishers, so they
+need no lock of their own. `Diagnostics.wait_until_shown(timeout)` waits for the writer to add
+every row queued before the call and then for an update cycle that started after that; tests
+use it to read rows.
 
 **`m.connections()`**: one row per connection plus one `Transport=REST` row per resolved
 (class, family).
@@ -5025,10 +5068,10 @@ without the GIL.
 | background read, one per `fetch(wait=False)` or `history(..., wait=False)`, ended when the read lands, fails, or is cancelled | library | the transport call `wait=True` makes (REST requests, with their fan-out pool, or the flat-file reader pool), listening to the read's stop token; the static conversion; `publisher.add` of one row that holds the static table, or `publish_failure`, under the read's publish lock; `SessionCore.finish_read` | hold the UG lock; take `registry_lock` across a Deephaven call |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause, then for one of the client's `max_concurrency` connections; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`, each waiting for one of its `max_concurrency` connections, which an open file keeps until it is closed; decompressing the file and cutting it into chunks, which a pool of three parse threads per file parses with Arrow (no Deephaven call there); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| follow coordinator, one per session while it has a followed read (`fetch()` or `history()` of a refreshing symbol table) | library | owns all per-symbol state of the session's followed reads: takes the symbol tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`; starts reads on the follow read pool (flat-file scans of one result one at a time); times the retries; publishes each symbol's cell (`publisher.add`) and a failure of the whole table (`publish_failure`, after `SessionCore.fail_stream`) under the result's publish lock, checking its failed flag; queues `m.streams()` and `m.symbol_reads()` row snapshots | any I/O; wait for an update cycle or on a read; take `registry_lock` across a Deephaven call; let another thread touch per-symbol state |
-| follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session while it has a followed read | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
+| follow coordinator, one per session from its first followed read (`fetch()` or `history()` of a refreshing symbol table) until the session closes or is collected | library | owns all per-symbol state of the session's followed reads: takes the symbol tables' changes, the reads' outcomes, and the stops from one `SimpleQueue`; starts reads on the follow read pool (flat-file scans of one result one at a time); times the retries; publishes each symbol's cell (`publisher.add`) and a failure of the whole table (`publish_failure`, after `SessionCore.fail_stream`) under the result's publish lock, checking its failed flag; queues `m.streams()` and `m.symbol_reads()` row snapshots | any I/O; wait for an update cycle or on a read; take `registry_lock` across a Deephaven call; let another thread touch per-symbol state |
+| follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session, made and ended with the follow coordinator | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
+| diagnostics writer, one per session | library | adds row snapshots from its queue to the blink tables under `connections()`, `streams()`, and `symbol_reads()` through their publishers: each batch coalesced to the latest row per key, one `publisher.add` per table, batches at least `WRITE_INTERVAL` (0.1 s) apart, never waiting for an update cycle; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); a lookup error whose cause is `LIBRARY_DEFECT` is neither retried nor skipped; any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`), a `LIBRARY_DEFECT` `MassiveError` as it is and any other wrapped in one; `m.close()` ends a wait for schedules or for a retry at once, and the change is dropped (DEBUG); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
@@ -5142,15 +5185,18 @@ The order is **UG lock, then `registry_lock`**. Listeners run on the UG thread w
 lock is held and may take `registry_lock`. Therefore no library thread acquires the UG lock,
 directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, or
 `deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
-registry deadlock. Verbs called on the UG thread raise `ValueError`.
+registry deadlock. Verbs called on the UG thread raise `ValueError`. `blink_publisher` takes
+the UG shared lock on the caller thread while it creates a blink table, never under
+`registry_lock` or a publish lock. `wait_for_update_cycle`, which waits for a cycle that
+started after the call to end, refuses to run on a UG thread or under either UG lock.
 
 **A caller holding the UG lock never waits on a thread that may need the UG lock or an update
 cycle** (the diagnostics writer, a poller, another caller's stream open, the reaper). The
 caller may hold the UG lock without being a UG thread: the console holds the exclusive lock
 for every command, and a user thread may hold the shared lock. No update cycle runs meanwhile,
 and any other thread that needs the lock blocks, so a wait on such a thread could never end.
-Which library threads can need the lock: the diagnostics writer (`InputTable.add` waits for the cycle that applies it, and its exit
-releases the tables' scope under the shared lock), a poller (`Table.snapshot()` of a
+Which library threads can need the lock: the diagnostics writer (its exit releases the
+tables' scope under the shared lock; its adds never wait for a cycle), a poller (`Table.snapshot()` of a
 watchlist), another caller's stream open (starting a watchlist's listener, reading a crypto
 watchlist), and the reaper (every scope release takes the shared lock; nothing joins the reaper
 or waits for its jobs). The flush threads, the WebSocket client threads, the REST and flat-file
@@ -6346,8 +6392,8 @@ per source in a
   dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
   filled from the request, or a `symbol_param` that filters a single-ticker field. A
   `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
-  article is `string-array`) does not make one: those rows have no `Symbol`
-  ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
+  article is `string-array`) does not make one: those rows' `Symbol` is the library's,
+  filled from the request ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
   name, singular or plural, read from the generated path, never from a hand list. Its asset
   class alone does not make a dataset one either: `futures.exchanges` and
   `futures.schedules` keep `FUTURES` for the session-day rule and take no symbols;
@@ -7784,8 +7830,8 @@ document already reflects them.
     and only authentication, a closed session, a failed symbol table, `RAISE`, or a library
     bug fails the table. `wait=True` raises only when every call-time symbol fails. The
     single-value inputs `underlying=` and `product_code=` follow tables too. Within it:
-    - **`limit` caps each symbol's rows** in a followed read, on every dataset, extending
-      decision 74 there.
+    - **`limit`** in a followed read is sent as on any read, once on each request; decision
+      90 replaces the per-symbol cap this first said.
     - **`reread=dm.Reread.ALWAYS`** on `history()` (owner decision D-1, 2026-11-02: `ALWAYS`
       the default, `NEVER` opt-in): `ALWAYS` downloads a returning symbol again, and `NEVER`
       reuses its earlier download for the life of the table. There is no automatic member,
@@ -7829,15 +7875,24 @@ document already reflects them.
     (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
     of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
     read whole ([section 8](#8-namespace-tree)).
-90. **A followed `fetch()` lists a shared row under each symbol, and an unlisted crypto pair
-    follows `unlisted_symbols` in every REST verb** (2026-11-02, owner). A followed `fetch()`
-    of a dataset whose rows list their tickers (news, financial statements, filings) reads
-    each symbol in requests of its own, and a row Massive returns for two symbols' requests is
-    listed under each symbol: it is the data listed by symbol, so no copy is removed across
-    requests. `limit` is sent as Massive's own cap on each request: once on a per-symbol
-    request, and once on a `ticker.any_of` batch. Rule 24 covers an unlisted crypto pair of a
-    symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and `IGNORE` leave it
-    out, and `RAISE` fails; before, both verbs always failed ([section 5](#5-massiveconfig)).
+90. **A row that lists several tickers is listed under each named one, and an unlisted crypto
+    pair follows `unlisted_symbols` in every REST verb** (owner decision 2026-11-02, option
+    (a)). A row returned for two symbols "is the data listed by symbol", not a duplicate. The
+    ten datasets whose rows list their tickers (the three financial statements, Forms 3 and
+    4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+    `partners.benzinga.news`) gain a `Symbol` column: each ticker the request named that the
+    row lists, one row per such ticker, so an article about AAPL and MSFT read for both is
+    listed under AAPL and under MSFT. A request that named one ticker gives it to every row;
+    a row listing none of the named tickers keeps a null `Symbol`, with one WARNING per
+    dataset, and is never dropped; `symbols=None` gives a null `Symbol`. Requests stay
+    batched, with no extra request. `limit` caps the rows Massive returns before the split,
+    so the split can give more table rows than `limit`. A static `fetch()` and a followed one
+    list rows the same way, and nothing merges copies by `Id`. Each dataset's `poll()` keys
+    add `Symbol` (news: `Id` and `Symbol`). In a followed read, `limit` is sent as on any
+    read, once on a per-symbol request and once on a batch. Rule 24 covers an unlisted
+    crypto pair of a symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and
+    `IGNORE` leave it out, and `RAISE` fails; before, both verbs always failed
+    ([section 5](#5-massiveconfig)).
 91. **`last_by()` on a live symbol table shows a row by update cycle, not by receive time**
     (owner decision, 2026-11-02). A symbol's row shows when it reached the table in or after
     the update cycle in which the symbol last joined the symbol table; it was "received after
@@ -7845,6 +7900,15 @@ document already reflects them.
     `now()` and hid a symbol's first row until its next tick, for hours on a quiet option
     contract. A symbol removed and added again still shows no row until its next tick
     ([section 7](#7-query-classes-and-verbs)).
+92. **The library never uses input tables** (owner decision, 2026-11-02). An input table is
+    for a person editing data by hand, such as a watchlist typed in the web UI, not for code
+    and not for volume. The diagnostics tables, the library's last keyed input tables, are
+    now a `blink_publisher` blink table each with `last_by` on its keys: the same columns,
+    keys, and rows, and the same memory, one row per key; nobody can edit them in the web UI.
+    Every blink table is created under the UG shared lock, because a table registered while a
+    cycle runs can be refreshed in the step its creation stamp claims, and a first change in
+    that step is fatal ([section 14](#14-publishers-fan-out-and-failure-semantics)). Tests may
+    still use an input table to stand in for a user's watchlist.
 
 ## 23. Open verification items
 

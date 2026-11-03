@@ -308,10 +308,13 @@ def test_single_ticker_rows_lead_with_symbol(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", LIST_VALUED)
-def test_rows_that_list_several_tickers_keep_tickers_and_have_no_symbol(name: str) -> None:
+def test_rows_that_list_several_tickers_keep_tickers_and_list_each_named_one(name: str) -> None:
+    # Symbol is the library's: each named ticker a row lists, never a field of the row.
     found = columns(name)
-    assert "Symbol" not in found
+    assert next(iter(found)) == "Symbol"
     assert found["Tickers"] is ColumnType.STRING_ARRAY
+    assert spec_of(name).ticker_list == "Tickers"
+    assert "Symbol" in spec_of(name).poll_keys
     assert not CATALOG.takes_symbols(spec_of(name))
 
 
@@ -385,14 +388,15 @@ REPLACE_KEYS = {
     "short_interest": ("Symbol", "SettlementDate"),
     "short_volume": ("Symbol", "Date"),
     "share_float": ("Symbol",),
-    "financials.balance_sheets": ("Cik", "PeriodEnd", "Timeframe"),
-    "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe"),
-    "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe"),
+    # A statement, a day's insider totals, and a position are listed under each named ticker.
+    "financials.balance_sheets": ("Cik", "PeriodEnd", "Timeframe", "Symbol"),
+    "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe", "Symbol"),
+    "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe", "Symbol"),
     "financials.ratios": ("Symbol", "Date"),
     # A later filing for the same day revises that day's totals.
-    "filings.insider_activity": ("IssuerCik", "TransactionDate"),
+    "filings.insider_activity": ("IssuerCik", "TransactionDate", "Symbol"),
     # A new filing by an insider updates that insider's current position.
-    "filings.insider_holdings": ("IssuerCik", "OwnerCik"),
+    "filings.insider_holdings": ("IssuerCik", "OwnerCik", "Symbol"),
     "filings.risk_factor_taxonomy": ("Taxonomy", *CATEGORIES),
     "filings.disclosure_taxonomy": ("Taxonomy", *CATEGORIES),
 }
@@ -1275,7 +1279,8 @@ def test_list_datasets_send_their_exact_request(
     out = table_rows(cast("Query", factory(rest_session, name)(**kwargs)).fetch())
     assert fake_rest.get_queries(one_value=True) == [(path, query)]
     assert out[0][column] == value
-    assert ("Symbol" in out[0]) == CATALOG.takes_symbols(spec_of(name))
+    listed = spec_of(name).ticker_list is not None
+    assert ("Symbol" in out[0]) == (CATALOG.takes_symbols(spec_of(name)) or listed)
 
 
 def test_limit_caps_the_rows_and_never_raises_the_page_size(
@@ -1804,22 +1809,22 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
     result_key = cast("str", rest_path.result_key)
     first = body[result_key][0]
     symbol = spec.keys_for(R, template).symbol
+    # A Symbol the library fills from the named tickers is no field to vary: these calls name
+    # none, and another test shows it tells a row's copies apart.
+    keys = tuple(k for k in spec.poll_keys if not (k == "Symbol" and spec.ticker_list))
     rows = [first]
-    for column in spec.poll_keys:
+    for column in keys:
         field = rest_path.field(symbol.column if column == "Symbol" and symbol else column)
         rows.append({**first, field.wire_key: _other(first.get(field.wire_key), field.wire_type)})
     body[result_key] = rows
     fake_rest.reply(path, Reply(body=body))
     out = table_rows(cast("Query", make(rest_session)).fetch())
     # A list key (`OtherManagers`) is compared as a tuple, so a set can hold it.
-    keyed = [
-        tuple(tuple(v) if isinstance(v := row[k], list) else v for k in spec.poll_keys)
-        for row in out
-    ]
+    keyed = [tuple(tuple(v) if isinstance(v := row[k], list) else v for k in keys) for row in out]
     assert len(set(keyed)) == len(rows)
-    for index in range(len(spec.poll_keys)):
+    for index in range(len(keys)):
         fewer = {key[:index] + key[index + 1 :] for key in keyed}
-        assert len(fewer) < len(rows), spec.poll_keys[index]
+        assert len(fewer) < len(rows), keys[index]
 
 
 NULLABLE_KEYS = {
@@ -1850,8 +1855,11 @@ NULLABLE_KEYS = {
 
 @pytest.mark.parametrize("name", ALL_NAMES)
 def test_only_the_ownership_filings_have_nullable_poll_keys(name: str) -> None:
+    # Beside them, a dataset whose rows list their tickers has a null Symbol when the call
+    # names no ticker.
     nullable = spec_of(name).nullable_poll_keys
-    assert set(nullable) == NULLABLE_KEYS.get(name, set())
+    listed = {"Symbol"} if name in LIST_VALUED else set()
+    assert set(nullable) == NULLABLE_KEYS.get(name, set()) | listed
     assert all(nullable.values())  # each with its reason
 
 

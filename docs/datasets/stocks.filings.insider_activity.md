@@ -15,7 +15,7 @@ m.stocks.filings.insider_activity(symbols=None, *, issuer_cik=None, start=None, 
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `transaction_date.gte` and `transaction_date.lte` |
-| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `IssuerCik` and `TransactionDate` |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `IssuerCik`, `TransactionDate` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | none |
 
@@ -35,6 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST |
 | `IssuerName` | String | Name of the issuer company as reported in the filings. | REST |
 | `LastFilingDate` | String | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. | REST |
@@ -60,6 +61,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `IssuerCik` | `issuer_cik` |
 | `IssuerName` | `issuer_name` |
 | `LastFilingDate` | `last_filing_date` |

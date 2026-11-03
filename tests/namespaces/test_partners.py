@@ -168,7 +168,9 @@ def test_symbol_is_the_one_instrument_of_a_row(name: str) -> None:
     names = schema.column_names
     fields = {f.wire_key: f.column for f in sources(Transport.REST)[path].fields}
     assert "Underlying" not in names
-    if symbol is None:
+    if spec_of(name).ticker_list is not None:
+        assert names[0] == "Symbol"  # the library's, from the request and the row's tickers
+    elif symbol is None:
         assert "Symbol" not in names
         assert not CATALOG.takes_symbols(spec_of(name))
     else:
@@ -186,10 +188,13 @@ def test_news_keeps_its_tickers_and_is_timed_by_publication() -> None:
     spec = spec_of("partners.benzinga.news")
     schema = CATALOG.dataset_schema(spec)
     types = {column.name: column.type for column in schema.columns}
-    assert schema.column_names[0] == "Timestamp"
+    assert schema.column_names[:2] == ("Symbol", "Timestamp")
     assert types["Timestamp"] is ColumnType.INSTANT
     assert "Published" not in types
-    assert types["Tickers"] is ColumnType.STRING_ARRAY  # the list, never a Symbol
+    # The list stays; Symbol is each named ticker it holds, filled by the library.
+    assert types["Tickers"] is ColumnType.STRING_ARRAY
+    assert types["Symbol"] is ColumnType.STRING
+    assert spec.ticker_list == "Tickers"
     assert spec.asset_class is ClassFromPrefix.ANY
     assert spec.time_axis == ("published.gte", "published.lt")
     assert spec.symbol_param == "tickers.any_of"
@@ -229,7 +234,13 @@ ETF_KEYS = ("Symbol", "EffectiveDate", "ProcessedDate")
     ("name", "keys"),
     [
         # Benzinga gives every record its own id; a consensus is one row per stock.
-        *((n, ("BenzingaId",)) for n in LIST_DATASETS if n.startswith("partners.benzinga.")),
+        *(
+            (n, ("BenzingaId",))
+            for n in LIST_DATASETS
+            if n.startswith("partners.benzinga.") and n != "partners.benzinga.news"
+        ),
+        # A news article is listed once under each named ticker it lists.
+        ("partners.benzinga.news", ("BenzingaId", "Symbol")),
         ("partners.benzinga.consensus_ratings", ("Symbol",)),
         # A fund's data is per effective date, and an issuer can restate a date later.
         ("partners.etf_global.analytics", ETF_KEYS),
@@ -291,7 +302,9 @@ def test_every_poll_key_tells_fixture_rows_apart(
     wire_keys = {f.column: f.wire_key for f in sources(Transport.REST)[path].fields}
     if symbol is not None:
         wire_keys["Symbol"] = symbol
-    keys = [wire_keys[column] for column in spec_of(name).poll_keys]
+    # The Symbol the library fills from a row's ticker list is no field of the fixture.
+    filled = {"Symbol"} if spec_of(name).ticker_list is not None else set()
+    keys = [wire_keys[column] for column in spec_of(name).poll_keys if column not in filled]
     assert len({tuple(row[key] for key in keys) for row in rows}) == len(rows)
     first, second = rows[0], rows[-1]
     assert [first[key] == second[key] for key in keys] == [True] * (len(keys) - 1) + [False]

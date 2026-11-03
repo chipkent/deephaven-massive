@@ -1,20 +1,30 @@
 """Tests for entering the session's execution context and checking where a call runs."""
 
+from __future__ import annotations
+
+import logging
 import threading
 import types
-from collections.abc import Callable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from deephaven import time_table
 from deephaven.execution_context import ExecutionContext, get_exec_ctx
-from deephaven.update_graph import exclusive_lock, shared_lock
+from deephaven.table_listener import TableUpdate, listen
+from deephaven.update_graph import UpdateGraph, exclusive_lock, shared_lock
 
+from deephaven_massive._tables import execution_context
 from deephaven_massive._tables.execution_context import (
     entered,
     holds_update_graph_lock,
     refuse_update_graph_thread,
     update_cycle,
+    wait_for_update_cycle,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
 TIMEOUT = 30.0
 
@@ -83,3 +93,118 @@ def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionCont
 def _update_graph_class() -> str:
     j_update_graph = get_exec_ctx().update_graph.j_update_graph
     return str(j_update_graph.getClass().getSimpleName())
+
+
+def test_waiting_for_an_update_cycle_returns_once_a_later_one_has_ended(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    first = update_cycle(dh_exec_ctx)
+    assert wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
+    with shared_lock(dh_exec_ctx.update_graph):  # no cycle runs: the number is a finished one
+        assert update_cycle(dh_exec_ctx) > first
+
+
+def _scripted(
+    steps: list[int], waits: list[int], refreshes: list[int], *, locks: list[bool] | None = None
+) -> ExecutionContext:
+    # An update graph whose cycle numbers, signal waits, and lock attempts follow a script, so
+    # each turn of the wait's loop can be told apart (with no `locks`, the lock is always
+    # free); each refresh request is counted in `refreshes`. Its methods carry the Java names.
+    graph = types.SimpleNamespace(
+        currentThreadProcessesUpdates=lambda: False,
+        currentStep=lambda: steps.pop(0),
+        requestRefresh=lambda: refreshes.append(1),
+        requestSignal=lambda _signal: None,
+        tryLock=lambda _nanoseconds, _unit: locks.pop(0) if locks is not None else True,
+        unlock=lambda: None,
+        awaitNanos=lambda _nanoseconds: waits.pop(0),
+    )
+    graph.clock = lambda: graph
+    graph.exclusiveLock = lambda: graph
+    graph.newCondition = lambda: graph
+    return cast(
+        "ExecutionContext",
+        types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph)),
+    )
+
+
+def test_a_signal_from_a_cycle_already_running_makes_the_wait_ask_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first signal came from the cycle that was running at the call (the number has not
+    # grown); the wait asks for another cycle, and the next one's end is seen.
+    monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
+    refreshes: list[int] = []
+    assert wait_for_update_cycle(_scripted([5, 5, 6], [1_000], refreshes), TIMEOUT)
+    assert len(refreshes) == 2
+
+
+def test_a_wait_whose_signal_never_comes_gives_up(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
+    with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
+        assert not wait_for_update_cycle(_scripted([5, 5], [0], []), 0.5)
+    assert "no update cycle ended within 0.5 s" in caplog.text
+
+
+def test_a_wait_gives_up_when_another_thread_takes_the_lock_before_the_cycle(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The first number was read; then another thread held the lock until the deadline.
+    monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
+    with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
+        assert not wait_for_update_cycle(_scripted([5], [], [], locks=[True, False]), 0.5)
+    assert "the last finished cycle seen: 5" in caplog.text
+
+
+def test_a_wait_gives_up_while_another_thread_holds_the_lock(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    held, done = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with exclusive_lock(dh_exec_ctx.update_graph):  # as another thread's console command
+            held.set()
+            done.wait(TIMEOUT)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert held.wait(TIMEOUT)
+        with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
+            assert not wait_for_update_cycle(dh_exec_ctx, 0.2)
+    finally:
+        done.set()
+        thread.join(TIMEOUT)
+    assert "no update cycle ended within 0.2 s" in caplog.text
+    assert "the last finished cycle seen: None" in caplog.text
+
+
+@pytest.mark.parametrize("lock", [shared_lock, exclusive_lock], ids=["shared", "exclusive"])
+def test_a_wait_for_an_update_cycle_is_refused_under_the_lock(
+    dh_exec_ctx: ExecutionContext, lock: Callable[[UpdateGraph], AbstractContextManager[None]]
+) -> None:
+    with lock(dh_exec_ctx.update_graph), pytest.raises(RuntimeError, match="would never end"):
+        wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
+
+
+def test_a_wait_for_an_update_cycle_is_refused_on_an_update_graph_thread(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    refused: list[BaseException] = []
+    heard = threading.Event()
+
+    def on_update(update: TableUpdate, is_replay: bool) -> None:
+        try:
+            wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
+        except ValueError as error:
+            refused.append(error)
+        heard.set()
+
+    handle = listen(time_table("PT0.01S"), on_update)
+    try:
+        assert heard.wait(TIMEOUT)
+    finally:
+        handle.stop()
+    assert "update-graph thread" in str(refused[0])

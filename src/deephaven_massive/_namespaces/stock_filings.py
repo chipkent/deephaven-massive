@@ -1,11 +1,11 @@
 """The `m.stocks.filings` namespace: SEC filings, insider ownership, and their taxonomies.
 
 Datasets: the EDGAR filings index, 10-K sections, 8-K text and disclosures, risk factors,
-institutional holdings (13-F), initial insider ownership (Form 3) and insider transactions
-(Form 4), insider activity and holdings, and the risk-factor and disclosure taxonomies. The
-rows of Forms 3 and 4, the insider activity and holdings, and the 8-K disclosures each list
-several tickers, so those datasets have no `Symbol` column and keep `Tickers`; a filing
-without a ticker keeps a null `Symbol`.
+institutional holdings (13-F), initial insider ownership (Form 3) and insider transactions (Form 4),
+insider activity and holdings, and the risk-factor and disclosure taxonomies. The rows of Forms 3
+and 4, the insider activity and holdings, and the 8-K disclosures each list several tickers, so
+those datasets keep `Tickers`, and a row is listed under each named ticker it lists, in `Symbol`;
+the other filings take `Symbol` from their rows, null for a filing without a ticker.
 
 Each dataset is one factory method that validates its arguments and returns a query; nothing
 touches the network until a verb is called on the query. This module owns the namespace's
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Final
 
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, Order, PollMode
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
@@ -108,6 +108,7 @@ def _filing(
     nullable_poll_keys: Mapping[str, str] | None = None,
     keys: SourceKeys | None = None,
     page_size: int | None = None,
+    ticker_list: str | None = None,
 ) -> DatasetSpec:
     """Return the spec of one filings dataset: axis `filing_date`, appended when polled.
 
@@ -123,6 +124,8 @@ def _filing(
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
         page_size: A page size below the largest `limit` the path documents, for rows that
             carry long text; None, the default, requests that largest `limit`.
+        ticker_list: The column listing each row's tickers, from which the library fills
+            `Symbol` (`DatasetSpec.ticker_list`); None, the default, for a filing without one.
 
     Returns:
         The spec.
@@ -139,6 +142,7 @@ def _filing(
         poll_keys=poll_keys,
         nullable_poll_keys={} if nullable_poll_keys is None else nullable_poll_keys,
         page_size=page_size,
+        ticker_list=ticker_list,
     )
 
 
@@ -183,7 +187,9 @@ DISCLOSURES_8K: Final = _filing(
     "disclosures_8k",
     _DISCLOSURES_8K,
     symbol_param="tickers.any_of",
-    poll_keys=("AccessionNumber", *_CATEGORIES, "SupportingText"),
+    ticker_list="Tickers",
+    poll_keys=("AccessionNumber", *_CATEGORIES, "SupportingText", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
     keys=_NO_KEYS,
     summary="Disclosures in 8-K current reports, classified by category, one row per disclosure.",
 )
@@ -237,8 +243,14 @@ INITIAL_INSIDER_OWNERSHIP: Final = _filing(
     "initial_insider_ownership",
     _FORM_3,
     symbol_param="tickers.any_of",
-    poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate"),
-    nullable_poll_keys={**_INDIRECT, **_DERIVATIVE, "ExerciseDate": _DERIVATIVE_ONLY},
+    ticker_list="Tickers",
+    poll_keys=(*_INSIDER_HOLDING, "ExercisePrice", "ExerciseDate", "Symbol"),
+    nullable_poll_keys={
+        **_INDIRECT,
+        **_DERIVATIVE,
+        "ExerciseDate": _DERIVATIVE_ONLY,
+        "Symbol": NO_NAMED_TICKER,
+    },
     keys=_NO_KEYS,
     summary="Initial insider ownership statements (SEC Form 3), one row per reported holding.",
 )
@@ -247,6 +259,7 @@ INSIDER_TRANSACTIONS: Final = _filing(
     "insider_transactions",
     _FORM_4,
     symbol_param="tickers.any_of",
+    ticker_list="Tickers",
     poll_keys=(
         *_INSIDER_HOLDING,
         "RecordType",
@@ -259,8 +272,10 @@ INSIDER_TRANSACTIONS: Final = _filing(
         "ExercisePrice",
         "ExerciseDate",
         "ExpirationDate",
+        "Symbol",
     ),
     nullable_poll_keys={
+        "Symbol": NO_NAMED_TICKER,
         **_INDIRECT,
         **_DERIVATIVE,
         "ExerciseDate": _DERIVATIVE_ONLY,
@@ -291,10 +306,12 @@ INSIDER_ACTIVITY: Final = DatasetSpec(
     keys={(_R, _INSIDER_ACTIVITY): _NO_KEYS},
     time_axis=("transaction_date.gte", "transaction_date.lte"),
     symbol_param="tickers.any_of",
+    ticker_list="Tickers",
     # One row sums every insider of one issuer on one transaction day. A filing that arrives
     # later for the same day revises that row's totals and `LastFilingDate`, so the row is
-    # replaced, not appended.
-    poll_keys=("IssuerCik", "TransactionDate"),
+    # replaced, not appended; it is listed under each named ticker of the issuer.
+    poll_keys=("IssuerCik", "TransactionDate", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
 )
 
 INSIDER_HOLDINGS: Final = DatasetSpec(
@@ -305,9 +322,11 @@ INSIDER_HOLDINGS: Final = DatasetSpec(
     keys={(_R, _INSIDER_HOLDINGS): _NO_KEYS},
     time_axis=("last_filing_date.gte", "last_filing_date.lte"),
     symbol_param="tickers.any_of",
+    ticker_list="Tickers",
     # One row is one reporting owner's current position in one issuer; each new filing by
-    # that owner updates the row in place.
-    poll_keys=("IssuerCik", "OwnerCik"),
+    # that owner updates the row in place. It is listed under each named ticker of the issuer.
+    poll_keys=("IssuerCik", "OwnerCik", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
 )
 
 RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
@@ -630,10 +649,10 @@ class _StockFilings(Namespace):
 
         Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories
         (see `disclosure_taxonomy()`), the supporting text, and the filing's accession number and
-        date. A filing can name several share classes, so a row has no `Symbol`: its `Tickers`
-        column holds the filing's tickers, and `symbols` selects the filings that list any of them.
-        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
-        `limit`.
+        date. A filing can name several share classes, so its `Tickers` column holds the filing's
+        tickers, `symbols` selects the filings that list any of them, and a row is listed under each
+        named ticker it lists, in `Symbol` (README.md#symbols). `poll()` appends new rows, told
+        apart by the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
@@ -804,9 +823,10 @@ class _StockFilings(Namespace):
 
         Each row is a security an officer, director, or 10% owner held on becoming an insider: the
         issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
-        filing can name several share classes, so a row has no `Symbol`: its `Tickers` column holds
-        the filing's tickers, and `symbols` selects the filings that list any of them. `poll()`
-        appends new rows, told apart by the dataset's key columns, and needs a `start` or a `limit`.
+        filing can name several share classes, so its `Tickers` column holds the filing's tickers,
+        `symbols` selects the filings that list any of them, and a row is listed under each named
+        ticker it lists, in `Symbol` (README.md#symbols). `poll()` appends new rows, told apart by
+        the dataset's key columns, and needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
@@ -869,9 +889,10 @@ class _StockFilings(Namespace):
         Each row is a purchase, sale, grant, or exercise an officer, director, or 10% owner
         reported, or a holding reported beside them: the transaction code, date, shares, price, and
         the shares owned afterwards, with the issuer and owner. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the filing's tickers, and
-        `symbols` selects the filings that list any of them. `poll()` appends new rows, told apart
-        by the dataset's key columns, and needs a `start` or a `limit`.
+        classes, so its `Tickers` column holds the filing's tickers, `symbols` selects the filings
+        that list any of them, and a row is listed under each named ticker it lists, in `Symbol`
+        (README.md#symbols). `poll()` appends new rows, told apart by the dataset's key columns, and
+        needs a `start` or a `limit`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
@@ -935,11 +956,12 @@ class _StockFilings(Namespace):
         5. Massive sums one issuer's insider buys and sells of one day into one row: counts, shares
         and dollar values, their net (`NetShares`, `NetValue`, negative for net selling), and the
         part traded under a prearranged Rule 10b5-1 plan. `insider_transactions()` returns the Form
-        4 lines themselves. A company can have several share classes, so a row has no `Symbol`: its
-        `Tickers` column holds the issuer's tickers, and `symbols` selects the issuers that list any
-        of them. The totals cover the issuer, not each ticker. `poll()` replaces the table each
-        cycle, keyed by `IssuerCik` and `TransactionDate`, so a late filing revises its day in
-        place. Massive updates the data daily.
+        4 lines themselves. A company can have several share classes, so its `Tickers` column holds
+        the issuer's tickers, `symbols` selects the issuers that list any of them, and a row is
+        listed under each named ticker it lists, in `Symbol` (README.md#symbols). The totals cover
+        the issuer, not each ticker. `poll()` replaces the table each cycle, keyed by `IssuerCik`,
+        `TransactionDate`, and `Symbol`, so a late filing revises its day in place. Massive updates
+        the data daily.
 
         Args:
             symbols: Tickers whose issuers to return; None, the default, for every issuer. See
@@ -1004,11 +1026,11 @@ class _StockFilings(Namespace):
         the owner, roles, and title; the first and latest filing dates; the shares owned directly,
         indirectly, and in total, as filed (not split-adjusted, no derivatives); and `OwnershipPct`,
         in percent (0.0198 means 0.0198%). `OldestPositionDate` far behind `LastFilingDate` warns
-        that a position may be stale. A company can have several share classes, so a row has no
-        `Symbol`: its `Tickers` column holds the issuer's tickers, and `symbols` selects the issuers
-        that list any of them. `poll()` replaces the table each cycle, keyed by `IssuerCik` and
-        `OwnerCik`, so a new filing updates its insider's row in place. Massive updates the data
-        daily.
+        that a position may be stale. A company can have several share classes, so its `Tickers`
+        column holds the issuer's tickers, `symbols` selects the issuers that list any of them, and
+        a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols). `poll()`
+        replaces the table each cycle, keyed by `IssuerCik` and `OwnerCik`, so a new filing updates
+        its insider's row in place. Massive updates the data daily.
 
         Args:
             symbols: Tickers whose issuers' insiders to return; None, the default, for every issuer.
