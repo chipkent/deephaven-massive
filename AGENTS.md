@@ -1,33 +1,31 @@
 # AGENTS.md
 
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
-Deephaven tables: a Python library managed with `uv`. Until the rework ends, the design in
-`plans/rework/design/`, indexed by `plans/rework/DESIGN.md`, is the specification and wins over
-this file. The library has no users yet, so nothing is kept, aliased, or shimmed for
-compatibility: a rename is an ordinary edit.
+Deephaven tables: a Python library managed with `uv`. This file wins over every other document.
+`README.md` and the public docstrings are the user contract, enforced by tests;
+`docs/dev/decisions.md` records why the contract is what it is. The library has no users yet, so
+nothing is kept, aliased, or shimmed for compatibility: a rename is an ordinary edit.
 
 ## Commands
 
 Run everything from the repository root, through `uv run`. The tests need JDK 17 or later.
+`CONTRIBUTING.md` has the setup commands and the whole-suite and build commands.
 
 ```bash
-uv sync --upgrade                        # create or update .venv with the newest versions
-uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
 ./scripts/check.sh                       # full gate: ruff, format, mypy; the whole suite with 100% coverage only if the change can affect the tests
-./scripts/check.sh full --all            # whole suite; plain full (and pre-push) tests only what CI would
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy only
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
 uv run python -m deephaven_massive._massive.refresh   # regenerate _massive/spec/*.json; no network
 uv run python scripts/render_reference.py             # regenerate docs/datasets/
-uv build                                 # sdist and wheel
 ```
 
 - The free-threaded run keeps its own `.venv-314t`: a plain `--python 3.14t` replaces `.venv`.
 - `uv.lock` is not committed and `check.sh` upgrades on every run, so a new ruff or mypy release
   can flag code you did not touch. Fix it in your PR, or propose an ignore for owner approval.
-- Live tests (`tests/**/test_*_integration.py`) use the owner's Massive keys, and only the owner
-  runs them. Never run one with a key. `docs/live-tests.md` is their runbook.
+- Live tests (`tests/**/test_*_integration.py`) call Massive with a real key. Agents never run
+  one with a key; the owner runs them, and outside testers run them with their own keys through
+  `docs/tester-guide.md`. `docs/live-tests.md` is their runbook.
 
 ## Hard rules
 
@@ -57,16 +55,16 @@ uv build                                 # sdist and wheel
    final state on every push, and end it with `Closes #<issue>` on its own line. Issue bodies
    and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
-9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
-   `DESIGN.md` first: an owner decision when it changes what users see or the documented
-   contract. A change that keeps the documented intent and changes only how it is achieved
-   records, in its PR, the existing owner decision it follows, and proceeds.
-10. **Tests mirror the package**, one leading underscore dropped per path component:
-    `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
-    packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the
-    logic behind the live tests' fixtures. Each `tests/_live/` module has a unit test at the
-    same mirrored path (`tests/_live/plans.py` is tested by `tests/live/test_plans.py`); the
-    fakes have none. A new helper package, or tests for another one, needs owner approval.
+9. **Contract changes first.** A change to a public signature, default, column, or failure
+   behavior is an owner decision: add an entry to `docs/dev/decisions.md` and update
+   `README.md`, the docstrings, and the tests in the same PR. A change that keeps the documented
+   behavior and changes only how it is achieved cites, in its PR, the existing decision it
+   follows, and proceeds.
+10. **Tests mirror the package**, one leading underscore dropped per path component
+    (`_massive/rest/client.py` → `tests/massive/rest/test_client.py`). Two helper packages sit
+    outside the rule: `tests/_fakes/`, the fake servers, which have no tests, and `tests/_live/`,
+    the live tests' fixture logic, each module tested at its mirrored path (`tests/live/`). A
+    new helper package, or tests for another one, needs owner approval.
 11. **Coverage is 100%** of statements and branches. Delete a dead defensive branch instead of
     covering it. `# pragma: no cover` needs a reason on its line and owner approval in the PR.
 12. **Every suppression has a reason**: each ruff ignore entry, `# noqa`, and
@@ -92,18 +90,25 @@ uv build                                 # sdist and wheel
     `docs/datasets/` only through `render_reference.py`, committed in the same PR as its cause.
     The procedure, including wrong vendor descriptions, is in `docs/dev/spec-refresh.md`.
 18. **Placement and names.** A module holds one subject, named in the first line of its
-    docstring; `DESIGN.md` § 4.1 says where new code goes and lists the pattern words no module
-    name uses. Every name (function, argument, column, environment variable, pytest marker) says
-    what the thing is or does, in words a newcomer knows: no abbreviation you coined.
+    docstring; new code goes where that line names its subject, or in a new module, never in a
+    neighbor whose summary grows "…, and X". Module names are subject nouns, never pattern
+    words (`base`, `core`, `common`, `helpers`, `util`). A rule has one body, in the module that
+    owns its concept; an exception lives where it is raised, or in `_errors.py`
+    (`_massive/net/errors.py`) when several modules or a lower layer need it. A module over
+    about 1,000 lines is split or says why it is one subject. `queries.py` is the one public
+    module; another needs owner approval. Every name says what the thing is or does, in words
+    a newcomer knows: no abbreviation you coined.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
     `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read: one type joins with every
     other date. Instants stay `Instant`s. Every dataset table is built by `_tables/columns.py`
     `dataset_table`, which shares one string per date, and the library owns the names `Date` and
     `Timestamp*`.
-21. **No planning references outside `plans/`.** Code, comments, docstrings, test names, error
-    messages, CI step names, and config never cite the planning documents, their sections,
-    planned-PR names, or decision numbers. State the behavior or the reason directly.
+21. **No decision or planning references in code.** Code, comments, docstrings, test names,
+    error messages, CI step names, and config never cite decision numbers, planning documents,
+    or planned-PR names: state the behavior or the reason directly. Only the live tests'
+    `verifies` and `settles` markers name verification items, by their number in
+    `docs/dev/verification-items.md`.
 22. **Every change logs its decisions and failures, with their values, and never a secret**:
     the rules and their checks are in the `src/deephaven_massive/_debug_log.py` docstring.
 23. **Supply Massive's data; never repair it.** The library returns what Massive sends,
@@ -125,147 +130,66 @@ uv build                                 # sdist and wheel
     row is bad is refused at the call. A `str` or list passed as `symbols` is the caller's code,
     not data: a value in it that is not Massive's exact ticker raises `ValueError` at the call,
     whatever the setting.
+25. **No probe connections, no exposed secrets.** No connection is ever opened to test anything.
+    Sessions and queries expose no introspection attributes (no `name`, `config`, or `dataset`),
+    so the API key stays out of objects users leave in console globals.
 
 ## Working in parallel
 
-Several agents work at once, and every collision costs a full check and a paid CI run.
+Several agents work at once, and every collision costs a full check and a paid CI run. Follow
+the `working-in-parallel` skill when you start a branch, stack on another PR, merge, or take a
+decision or verification-item number. In short: stack on any open PR that changes your files;
+never rewrite a pushed branch (no force-push, no rebase once pushed); merge `main` or your base
+branch only to resolve a conflict, never to stay current; and never run the check yourself just
+before a push, since the pre-push hook is the check.
 
-- **Before starting**, list the files, `DESIGN.md` sections, and `README.md` sections you will
-  change. If an open PR changes the same files (`gh pr list`, `gh pr diff <n> --name-only`),
-  stack yours on it with GitHub's native stacked PRs: branch from its branch, push, open your
-  PR against that branch (`gh pr create --base <its branch>`), then run
-  `gh stack link <its PR> <your PR>`, listing every PR of a longer stack bottom to top. Install
-  the extension once: `gh extension install github/gh-stack`.
-- **Never rewrite a pushed branch**: never force-push, and never rebase a branch you have
-  pushed. Never run `gh stack submit`, `push`, or `sync`, which push with `--force-with-lease`,
-  or `gh stack rebase`. GitHub's own stack rebases are allowed: the automatic one after a PR
-  below yours merges, and the owner's **Rebase stack** click.
-- **After the PR below yours merges**, GitHub re-targets yours and rebases its branch: pull the
-  rebased branch (`git pull --rebase`) instead of merging `main` by hand.
-- **Merge only when needed.** When GitHub cannot rebase the stack because of a conflict, merge
-  your PR's base branch (`main` for the bottom PR); when your branch conflicts with `main`,
-  merge `main`. Resolve the conflict in the merge, push, and say in the PR body how you resolved
-  it. Never merge only to stay current.
-- **The pre-push hook is the check.** It runs `./scripts/check.sh` and picks the scope from the
-  files the branch changes: never run the check yourself just before a push.
-- **Take a free `DESIGN.md` number.** A new decision (§ 22) or verification item (§ 23) takes
-  the number the coordinator reserved for you, or else the next after the highest on `main` and
-  in every open PR's diff. Decisions live in `plans/rework/design/22-decisions.md`, verification
-  items in `plans/rework/design/23-open-verification-items.md`. Name the number in the PR body.
-- **Keep context small.** Every turn re-reads all the context so far: `grep -n` and read only
-  the section you need, keep command output short (`-q`, `| tail`, `--stat`), and never re-read
-  a file you just edited. The `plan-parallel-prs` skill has the full list.
-- Read only the `plans/rework/design/` file for your topic, never all of them.
+## Documentation
 
-## Documentation standard
-
-Docstrings serve two readers: a person in an IDE or the Deephaven console, and an agent that
-knows nothing but the code. Write clear, edited prose; a one-line docstring on anything with
-behavior worth knowing is a defect.
-
-- **Modules**: what the module is for, what it owns, how it fits with its neighbors. The package
-  `__init__.py` is the front door: what the library does, the public API with a short example,
-  where to read next, and any status a reader must know.
-- **Classes**: the concept, its lifecycle, who creates it, its thread-safety; public ones include
-  a short example.
-- **Functions and methods**: what they do and why one would call them; every argument (meaning,
-  units, accepted values, default); the return value (for a table, its columns); every exception
-  and when; side effects (network calls, threads, subscriptions, tables created); blocking and
-  threading constraints.
-- **Dataset methods and verbs** link instead of repeating. `README.md` defines each shared
-  argument (`symbols`, `start` and `end`, `as_of`, `sort`, `order`, `limit`, `filters`,
-  `adjusted`, `timespan`, `multiplier`, `venues`, the verb arguments) and each concept (bars,
-  history sources, split adjustment, live-table lifetime) once. A docstring gives a shared
-  argument one line with only this dataset's difference and `See README.md#<anchor>.`, and its
-  Returns line names its columns page, `docs/datasets/<dataset>.md`. A dataset docstring runs
-  about 15 to 25 lines: the summary, what a row is and what is unusual, one Args line per
-  argument, Returns, exact Raises, and one or two example lines. `tests/test_docs.py` fails on a
-  cited anchor or page that does not exist.
-- **User documentation is one file.** Everything hand-written for users goes in `README.md`;
-  `docs/datasets/` is generated; contributor material goes in `CONTRIBUTING.md` or `docs/dev/`.
-  Every Python block in the README runs in `tests/test_docs.py`, so an example is real code.
-- **Examples** are real code that runs against the documented API. **Never** restate the
-  signature, use filler ("This function…"), or leave a term undefined.
-- **Configuration text is documentation too**: config comments, pytest marker descriptions
-  (`name(args): meaning`, in plain sentences), and CLI help text meet this same standard.
+Docstrings serve a person in an IDE or the Deephaven console and an agent that knows only the
+code: a one-line docstring on anything with behavior worth knowing is a defect. User docs go in
+`README.md` alone. Follow the `writing-docstrings` skill whenever you write or change a
+docstring, the README, or other user-facing text.
 
 ## Deephaven invariants
 
-These prevent deadlocks and leaks.
+These prevent deadlocks, leaks, and JVM crashes.
 
+- **Lock order**: the update-graph (UG) lock, then a connection's flush lock, then a stream's
+  publish lock, then `registry_lock`, then the live set's lock. A connection group's lock comes
+  only after the UG lock and is never held with `registry_lock`.
+- **`registry_lock` is a leaf**: under it, make no Deephaven call, network call, or blocking
+  wait, and no table operation that may take the UG lock (`where_in`, `last_by`,
+  `Table.snapshot()`, `deephaven.arrow.to_table`).
 - **Enter the execution context on every library thread**, before any Deephaven call, through a
-  fresh wrapper (`with entered(exec_ctx):`). A shared wrapper entered on two threads loses one
+  fresh wrapper (`with entered(exec_ctx):`): a shared wrapper entered on two threads loses one
   thread's context, and Deephaven raises `No execution context`.
-- **Update-graph (UG) lock first, then `registry_lock`.** `registry_lock` is a leaf: while holding
-  it, make no Deephaven call, network call, or blocking wait. Table operations such as
-  `where_in`, `last_by`, `Table.snapshot()`, and `deephaven.arrow.to_table` may take the UG lock,
-  so never run one under `registry_lock`.
-- **Release refreshing tables under the UG lock**: every liveness scope through `release_scope`,
+- **Release refreshing tables under the UG lock**, every liveness scope through `release_scope`,
   never a bare `scope.release()`, and never under a library lock. Where the lock is off-limits (a
   listener, a shutdown callback, a publish lock), hand the scope to `SessionCore.release_later`.
 - **Never block in a table listener.** It runs on a UG thread holding the UG lock: compute the
   diff, hand it to a worker, return. No table operations, I/O, or waits on library threads.
-- **The console holds the UG lock.** Deephaven runs every console command under the exclusive
-  UG lock, so every call must work there: only UG threads are refused, and a call holding the
-  lock never waits for an update cycle or on a thread that may need the lock (the diagnostics
-  writer, a poller, another caller's stream open, the reaper).
+- **The console holds the UG lock** for every command, so every call must work there: only UG
+  threads are refused, and a call holding the lock never waits for an update cycle or on a
+  thread that may need the lock (the diagnostics writer, a poller, a stream open, the reaper).
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
-  on the caller thread; a refreshing table made outside an explicit scope lives as long as the
-  console session.
-- **A test that creates an input table to stand in for a user's watchlist creates it through
-  `dh_input_table`**, which holds the UG shared lock only for the creation; release it before
-  any blocking add or delete, which raise under the shared lock. Created while an update cycle
-  runs, a table can be refreshed in the step it was stamped with: the creation stamp counts as
-  the table's notification for that step, so a first change delivered in the same step is
-  fatal.
-- **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
-  flush routing are released there, not when a result record is released. The callback only
-  updates the registry, queues a failure's pin release on the reaper, and calls
-  `call_soon_threadsafe`; it never sends and never calls Java.
-- **Fail a blink table only through `BlinkPublisher`.** Library code creates every publisher
-  with `blink_publisher` (`_tables/publisher.py`), never with `table_publisher`. Deephaven queues
-  a published failure until the next update cycle; if another thread destroys the table
-  meanwhile, Deephaven can deliver the failure twice and exit the process. `publish_failure`
-  pins the table until the failure has been delivered.
-- **The library never uses input tables.** They are for people editing data by hand, such as a
-  watchlist typed in the web UI, not for code and not for volume. Every table the library
-  writes is a `blink_publisher` blink table or a shape of one; a keyed one is `last_by` on its
-  keys. Tests may use an input table to stand in for a user's watchlist. `blink_publisher`
-  creates its table under the UG shared lock: a table's creation stamp counts as its
-  notification for the cycle it was created in, so if it is registered while that cycle runs,
-  its first change in the same cycle is fatal.
-- **Connection state is loop-confined.** Only a connection's client thread touches its
-  subscription sets; other threads use `loop.call_soon_threadsafe` with plain data.
-- **Never rely on the atomicity of `dict`, `set`, or `list` operations.** Every shared container
-  is behind a lock or has a single owning thread.
-
-## Tests and the embedded JVM
-
-- `tests/conftest.py` starts one embedded Deephaven server per pytest process before collection,
-  so test modules may import `deephaven` at module level. Under `-n`, each xdist worker starts
-  one and the controller starts none; `-n` with the live tests is refused. Never start or stop
-  another `Server` in that process (a subprocess may). Read the comments on its `trylast` hook
-  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash, and
-  a `jvm_fatal_pid*.log` file holds the message of a JVM fatal error that exited the process:
-  investigate either.
-- The JVM raises SIGSEGV on purpose: never call `faulthandler.enable()` once it runs. Any process
-  that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py` does.
-- Take the execution context, table helpers, and fakes from fixtures (`dh_exec_ctx`,
-  `dh_to_pylist`, `load_fixture`, `make_csv_gz`). Drive state through the fakes and explicit
-  flush or poll calls, never `time.sleep()`.
-- To delete rows from a keyed `input_table`, pass a static key table, never a live view of the
-  same table: that can hang against the update-graph refresh thread.
-
-## Where to look
-
-| Task | Read first |
-|---|---|
-| Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
-| Where new code goes; the layout cleanup and its feature pause | `plans/rework/design/04-package-layout.md` (§ 4.1), `plans/rework/LAYOUT.md` |
-| Design, by topic | One file per section in `plans/rework/design/`; `plans/rework/DESIGN.md` is the index. Exports `03-exports.md`; layout and layers `04-package-layout.md`; session and liveness `06-massivesession-and-lifecycle.md`; API and enums `07-query-classes-and-verbs.md`, `11-enums-and-types.md`; datasets `08-namespace-tree.md`; connections `13-host-resolution-and-connection-protocol.md`; fan-out `14-publishers-fan-out-and-failure-semantics.md`; threads and locks `18-concurrency-model.md`; wire and schemas `19-wire-clients-and-the-spec-snapshot.md`; tooling `20-quality-gates.md` |
-| Splitting work across agents | The `plan-parallel-prs` skill, `.claude/skills/plan-parallel-prs/SKILL.md` |
-| PR descriptions | `docs/dev/pull-requests.md` |
-| Vendor changes and drift | `docs/dev/spec-refresh.md` |
-| Live tests | `docs/live-tests.md` |
-| Cutting a release | `docs/dev/releasing.md` |
-| User docs and the dataset reference | `README.md`, `docs/datasets/README.md`, `CONTRIBUTING.md` |
+  on the caller thread; a refreshing table made outside one lives as long as the console session.
+- **Streams tear down from the blink table's `on_shutdown_callback`**, which releases topic
+  reference counts and flush routing. It only updates the registry, queues a failure's pin
+  release on the reaper, and calls `call_soon_threadsafe`; it never sends and never calls Java.
+- **Fail a blink table only through `BlinkPublisher`**, created with `blink_publisher`
+  (`_tables/publisher.py`), never `table_publisher`. Deephaven delivers a published failure at
+  the next cycle and, if another thread destroys the table first, can deliver it twice and exit
+  the process; `publish_failure` pins the table until delivery.
+- **The library never uses input tables.** They are for people editing data by hand, not for
+  code or volume: every table the library writes is a `blink_publisher` blink table or a shape
+  of one, and a keyed one is `last_by` on its keys. Tests may stand in for a user's watchlist
+  with an input table made by `dh_input_table`.
+- **Create a table under the UG shared lock**, as `blink_publisher` and `dh_input_table` do, for
+  the creation only: a table registered while a cycle runs and changed in that same cycle is
+  fatal. Release the lock before a blocking input-table add or delete, which raise under it.
+- **Shared state has one owner or one lock.** Only a connection's client thread touches its
+  subscription sets (other threads use `loop.call_soon_threadsafe` with plain data), and no code
+  relies on the atomicity of `dict`, `set`, or `list` operations.
+- **One embedded JVM per test process.** `tests/conftest.py` starts it; never start or stop
+  another `Server` there, and never call `faulthandler.enable()` once it runs (the JVM raises
+  SIGSEGV on purpose). Follow the `writing-tests` skill whenever you write or debug a test.

@@ -15,6 +15,7 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ./scripts/check.sh                         # full gate: lint, format, types; tests + coverage only if the change can affect them
 ./scripts/check.sh full --all              # the whole suite, even for a docs-only change
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
+uv build                                   # sdist and wheel
 ```
 
 Always go through `uv run`: bare `python`, `pytest`, `ruff`, and `mypy` use the wrong
@@ -41,6 +42,12 @@ that every cited anchor and page exists.
 
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.
+
+The owner's decisions behind the public contract, and why, are in
+[`docs/dev/decisions.md`](docs/dev/decisions.md). A change to a public signature, default,
+column, or failure behavior adds an entry there. The facts about Massive that the documentation
+does not settle, and the live tests that settle them, are in
+[`docs/dev/verification-items.md`](docs/dev/verification-items.md).
 
 ## Live integration tests
 

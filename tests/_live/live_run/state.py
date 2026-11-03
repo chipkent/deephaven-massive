@@ -70,7 +70,7 @@ class Check:
         entitlement: The entitlement id of its last run.
         passed_under: The entitlement id of its last pass, `""` if it never passed.
         last_run: The New York date of its last run, ISO.
-        items: The design's open questions it answers (`settles` and `verifies`).
+        items: The open verification items it answers (`settles` and `verifies`).
         passed_rules: The `ROW_RULES` version in force at its last pass; 0 for a pass recorded
             before the version existed, or none.
     """

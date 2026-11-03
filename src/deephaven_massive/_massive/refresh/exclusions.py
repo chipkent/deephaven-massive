@@ -5,7 +5,14 @@ paths of the OpenAPI specification, WebSocket channels of the WebSocket specific
 flat-file prefixes of the flat-file overview pages. Each entry names an item present in the
 pinned snapshot; one that names an item the snapshot lacks fails the refresh as stale, so the
 list can never silently outlive the vendor's own sources. Endpoints that are absent from every
-vendor source are not listed here; the design documents them so nobody re-adds them.
+vendor source are not listed here; they are recorded below so nobody re-adds them:
+
+- `/benzinga/v1/transcripts`: never existed.
+- `/v1/summaries`: removed from the OpenAPI specification on 2026-10-28; never in the
+  documentation index.
+- `/benzinga/v1/news`: sunset, replaced by `/benzinga/v2/news`.
+- `/vX/reference/financials`: sunset, replaced by `/stocks/financials/v1/*`.
+- WebSocket `/futures/{venue}`: not documented; the futures WebSocket pages list `/futures` only.
 
 Every generated source must be read by a dataset; the coverage test in
 `tests/datasets/test_catalog.py` fails on one that is not. So when a refresh brings a new

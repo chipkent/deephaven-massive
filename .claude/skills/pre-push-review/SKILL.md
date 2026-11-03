@@ -27,8 +27,9 @@ git diff origin/main...HEAD --stat
 git diff origin/main...HEAD
 ```
 
-Read it hunting for defects, with the spec open: the PR's `PLAN.md` section, every `DESIGN.md`
-section it implements, and `AGENTS.md`. In the `--stat`, look first at deleted lines under
+Read it hunting for defects, with the spec open: the PR's issue, the `README.md` sections and
+public docstrings it touches, the decisions it follows in `docs/dev/decisions.md`, and
+`AGENTS.md`. In the `--stat`, look first at deleted lines under
 `tests/`: a deleted or weakened test is a finding unless the diff adds one that pins the same
 property. For each changed file ask:
 
@@ -36,10 +37,16 @@ property. For each changed file ask:
   `None`, boundaries (midnight, day zones, nanosecond limits), errors from the network and from
   Deephaven. Is any failure swallowed, logged without failing the table that needs it, or retried
   forever?
-- **Contract.** Does every public signature, default, column and error match `DESIGN.md`
-  exactly? A change to one updates `DESIGN.md` first. Does the new behavior match how the API
-  already treats the same concept elsewhere (ranges, dates, missing data, errors)? An
-  inconsistency with a sibling call is a finding even when `DESIGN.md` is silent.
+- **Contract.** A user-visible change (a public signature, default, column, or failure
+  behavior) needs a new `docs/dev/decisions.md` entry and matching `README.md`, docstring, and
+  test changes in the same PR; a change that keeps documented behavior cites the decision it
+  follows in the PR body. Does the new behavior match how the API already treats the same
+  concept elsewhere (ranges, dates, missing data, errors)? An inconsistency with a sibling call
+  is a finding even when no decision covers it.
+- **Verification items.** Every `verifies` or `settles` marker the diff adds names an item of
+  `docs/dev/verification-items.md` (`tests/live/test_summary.py` checks the number exists);
+  a new open question gets a new item, and an item the evidence settles gets its one-line
+  settlement in that file.
 - **Concurrency** (any code that runs off the caller's thread, and any change to a `with ...lock:`
   block). Write down what now runs under each lock the diff touches: a constructor that reads
   files or settings counts as blocking work. The Deephaven invariants in
@@ -60,7 +67,7 @@ property. For each changed file ask:
   noting it.
 - **Names.** Every new or renamed function, argument, column, environment variable, and pytest
   marker says what it is or does (`AGENTS.md` rule 18). After any rename, `git grep` the old
-  name across code, docs, and `DESIGN.md`, and check the PR description and its linked issues'
+  name across code, docs, and `README.md`, and check the PR description and its linked issues'
   bodies; fix every hit.
 - **Duplicates and private imports.** For every new helper, `git grep -n` for the concept (the
   format it parses, the rule it applies), not only for its name. An import of another module's
@@ -101,26 +108,26 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
 
 ## 3. Check the words
 
-- Docstrings meet the documentation standard in `AGENTS.md`: every argument, return, exception
+- Docstrings meet the `writing-docstrings` skill: every argument, return, exception
   and side effect, and examples that run. They describe the code as it is now: reread the
   docstring and comments of every function whose body changed.
-- `DESIGN.md`, `PLAN.md`, `AGENTS.md`, and `docs/dev/` say exactly what the code does.
+- `README.md`, `AGENTS.md`, the skills, and `docs/dev/` say exactly what the code does.
 - Every comment in a config file, pytest marker description, and CLI help text the diff adds or
   changes reads as edited prose for a reader new to the project: what it means, when to use
   it, and what each argument means, with no internal shorthand.
-- No planning references in code, comments, tests or messages:
-  `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*(DESIGN|PLAN|§)'`.
+- No decision or planning references in code, comments, tests or messages:
+  `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*([Dd]ecision [0-9]|DESIGN|PLAN|§)'`.
 - The PR title and every commit subject on the branch (`git log origin/main..HEAD --format=%s`)
   meet the Title section of `docs/dev/pull-requests.md`: a type, then one specific idea in the
   imperative, at most 60 characters, the effect rather than the technique, and no internal
   names or jargon. Count with `printf %s "<title>" | wc -c`. Fix the PR title with
   `gh pr edit <n> --title`, and the last unpushed commit subject with `git commit --amend`.
 - **An open question in the description is a finding** ("should this return X?", "happy to
-  switch"). Answer it from `AGENTS.md`, `DESIGN.md` and the code, and record the choice and its
-  reason under Decisions; if only the owner can decide, or you are unsure whether you may
-  decide (section 1 of the `writing-to-the-owner` skill), stop and ask before the push, using
-  that skill. Never answer one by overturning an `AGENTS.md` rule, such as dates being ISO
-  strings.
+  switch"). Answer it from `AGENTS.md`, `docs/dev/decisions.md`, and the code, and record the
+  choice and its reason under Decisions; if only the owner can decide, or you are unsure
+  whether you may decide (section 1 of the `writing-to-the-owner` skill), stop and ask before
+  the push, using that skill. Never answer one by overturning an `AGENTS.md` rule, such as
+  dates being ISO strings.
 
 ## 4. Edit the PR description
 
@@ -138,7 +145,7 @@ the reader needs is ever cut.
 3. Grep for narration and hedges, as the checklist's banned-pattern item shows:
    `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
    Fix every hit that is narration, a hedge, or filler.
-4. Check that the body names the `DESIGN.md` decision or verification-item number it takes, if
+4. Check that the body names the decision or verification-item number it takes, if
    any.
 5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
    `gh pr view <n> --json closingIssuesReferences`.

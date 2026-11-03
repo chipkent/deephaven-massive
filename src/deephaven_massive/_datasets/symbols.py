@@ -708,7 +708,7 @@ _CONVERTERS: Final[dict[AssetClass, Callable[[str], str]]] = {
     AssetClass.CRYPTO: _convert_crypto,
 }
 
-_UNVERIFIED: Final = (
+_UNDOCUMENTED_SPELLINGS: Final = (
     "Massive documents no spelling for warrants, units, rights, when-issued, "
     "when-distributed, called, or test issues, so the library converts none of them; pass "
     "Massive's own ticker, as m.reference.tickers lists it"
@@ -768,7 +768,7 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
             return match.expand(template)
     raise ValueError(
         f"{text!r} is not a plain, class, or preferred ticker of the {convention.name} "
-        f"convention. {_UNVERIFIED}"
+        f"convention. {_UNDOCUMENTED_SPELLINGS}"
     )
 
 

@@ -10,7 +10,7 @@ module turns that state into what the tester and the owner read:
   add, so they read `skipped: needs Stocks Starter`.
 - `write_checks_csv`, one line per check, and `write_report`, `REPORT.md`: the environment, the
   probes over time, one table per group, each stream night's findings (`night_lines`), the
-  design's open verification items (from the tests'
+  open verification items of `docs/dev/verification-items.md` (from the tests'
   `settles` and `verifies` markers) with each one's status, and every check still unverified,
   grouped by what it needs.
 - `pack`, which writes both, scans every file of the results folder for the secrets

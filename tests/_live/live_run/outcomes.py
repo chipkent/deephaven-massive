@@ -10,7 +10,7 @@ own reports would be lost with the process. Each line holds:
   `skipped`);
 - `reason`, a skip's reason without pytest's `Skipped: ` prefix, else `""`;
 - `error_type`, the class name of a failure's exception (such as `EntitlementError`), else `""`;
-- `items`, the design's open questions the test answers (its `settles` and `verifies`
+- `items`, the open verification items the test answers (its `settles` and `verifies`
   markers), collected once per run, since a report carries no markers.
 
 At collection, with `MASSIVE_LIVE_COLLECTION` set, the plugin also writes that file: a JSON

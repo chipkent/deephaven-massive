@@ -40,7 +40,7 @@ asking about a minor point you are confident in (decide that one and list it und
 These decisions are always the owner's:
 
 - **What a user sees:** a public name, signature, default, column, error message, document, or
-  table behavior. `DESIGN.md` changes first.
+  table behavior. It needs a `docs/dev/decisions.md` entry.
 - **Scope:** adding or dropping a feature, dataset, or planned piece of work, including new
   items in the project plan.
 - **Money, accounts, access:** billing, paid plans, subscriptions, keys, and settings you cannot
@@ -76,11 +76,11 @@ nothing in the library depends on it.
 
 ### Before asking
 
-Check that the question is still open. Search `DESIGN.md`, `AGENTS.md`, your memory notes, and
-the owner's earlier answers. Asking again what the owner has clearly answered ("You already said
-… WTF are you talking about here?") wastes their time. If an earlier answer exists but you are
-not sure it covers the case in front of you, ask, and quote the earlier answer in the
-background.
+Check that the question is still open. Search `docs/dev/decisions.md`, `AGENTS.md`, your memory
+notes, and the owner's earlier answers. Asking again what the owner has clearly answered
+("You already said … WTF are you talking about here?") wastes their time. If an earlier answer
+exists but you are not sure it covers the case in front of you, ask, and quote the earlier
+answer in the background.
 
 **A question from the owner is a question, not an instruction.** Answer it. Do not change a
 design because of it unless they say so. The owner, after a question was treated as a design
@@ -211,7 +211,7 @@ Rewritten:
 >
 > - **A. Rename them to `ticker_type=` and `condition_id=`.** Users write
 >   `m.reference.tickers(ticker_type=dm.TickerType.CS)`, and the library still sends Massive
->   `type=CS`. Cost: one edit in the open reference-data PR and in DESIGN.
+>   `type=CS`. Cost: one edit in the open reference-data PR and a decision entry.
 > - **B. Keep `type=` and `id=`, matching Massive's docs.** Needs a permanent `# noqa: A002`
 >   on both, approved by you.
 >
@@ -223,14 +223,14 @@ Rewritten:
 The message as sent (the owner replied: "L6: I have zero clue what you are suggesting here"):
 
 > **L6. Approve the design changes that go with PR 1?** Low-level "gave up retrying" messages
-> drop to INFO … DESIGN.md gains the three new functions and the log-writer thread.
+> drop to INFO … the design gains the three new functions and the log-writer thread.
 > *Recommended:* approve.
 
 The owner's complaint was that the message could not be understood, not that it was a question.
 What made these choices the agent's to make is that each passes both tests in section 1:
 
 - **Confident.** The agent had checked that the three functions and the thread are private:
-  no user calls them, so recording them in `DESIGN.md` is bookkeeping. The log levels change
+  no user calls them, so recording them in the design was bookkeeping. The log levels change
   only how often a failure is logged, not what a user's call returns or raises.
 - **Easy to undo.** Each is a one-line change if the owner objects.
 
@@ -240,5 +240,5 @@ instead ask about them in full, in the shape of Example 1. Rewritten, with every
 > **Decided:**
 > - A failure that has used up its retries is logged once, as an ERROR where it reaches your
 >   code. The lower-level "gave up retrying" message that used to repeat it drops to INFO.
-> - `DESIGN.md` now records the three private helper functions and the background thread that
+> - The design now records the three private helper functions and the background thread that
 >   writes log records, which this PR adds.

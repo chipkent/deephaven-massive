@@ -89,11 +89,11 @@ jobs:
           # export without .git comes from .git_archival.txt; and the wheel check compares the
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
-          # Files no job reads: the plans, the contributor, developer, and live-test guides, the
+          # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
           # settings, which only the release workflow reads.
-          unread='^(plans/|docs/dev/|docs/live-tests\.md$|CONTRIBUTING\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)'
+          unread='^(docs/dev/|docs/live-tests\.md$|CONTRIBUTING\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)'
           # A change to a workflow or a composite action runs everything.
           workflows='^\.github/(workflows|actions)/'
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An

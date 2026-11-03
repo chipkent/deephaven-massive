@@ -2,7 +2,7 @@ r"""Decide how much of the local full check a branch's changes need, by CI's own
 
 `scripts/check.sh full`, which the pre-push hook runs, asks this script which scope to run. CI
 already skips its test jobs when a pull request changes only files the tests cannot read, such
-as the developer guides or the plans; the local check makes the same choice, so a push of such
+as the developer guides; the local check makes the same choice, so a push of such
 a change no longer waits minutes for the whole suite. The local check never runs fewer tests
 than CI's test jobs run for the same change, so a push the hook passes cannot fail one of those
 jobs on a test the hook skipped. CI also builds the package and tests other Python versions and
@@ -38,7 +38,7 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 ...     lint=r"^(src|tests|scripts)/|^pyproject\.toml$",
 ...     test=r"^(src|tests|scripts|vendor)/|^docs/datasets/|^pyproject\.toml$",
 ...     build=r"^(src|tests)/|^docs/datasets/|^README\.md$",
-...     unread=r"^(plans/|docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
+...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
 ...     workflows=r"^\.github/(workflows|actions)/",
 ... )
 >>> decide(["docs/dev/pull-requests.md", "AGENTS.md"], rules)
@@ -47,11 +47,11 @@ Decision(scope='lint', reason='2 changed files, none of which the tests read')
 Decision(scope='readme', reason='2 changed files, none of which the tests read except README.md')
 >>> decide(["AGENTS.md", "src/deephaven_massive/__init__.py", "tests/conftest.py"], rules)
 Decision(scope='full', reason='3 changed files; src/deephaven_massive/__init__.py is a test input')
->>> decide(["plans/x.md", "docs/datasets/stocks.trades.md"], rules)
+>>> decide(["docs/dev/x.md", "docs/datasets/stocks.trades.md"], rules)
 Decision(scope='full', reason='2 changed files; docs/datasets/stocks.trades.md is a test input')
->>> decide(["plans/x.md", ".github/workflows/ci.yml"], rules)
+>>> decide(["docs/dev/x.md", ".github/workflows/ci.yml"], rules)
 Decision(scope='full', reason='2 changed files; .github/workflows/ci.yml is a workflow')
->>> decide(["plans/x.md", "docs/tester-guide.md"], rules)
+>>> decide(["docs/dev/x.md", "docs/tester-guide.md"], rules)
 Decision(scope='full', reason='2 changed files; no rule covers docs/tester-guide.md')
 >>> decide(['"docs/dev/caf\\303\\251.md"'], rules)
 Decision(scope='full', reason='1 changed file; no rule covers "docs/dev/caf\\303\\251.md"')
