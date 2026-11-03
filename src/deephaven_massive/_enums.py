@@ -7,7 +7,8 @@ one spelling per value, tab completion in every IDE and in the Deephaven web con
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
 An enum of a library setting that never reaches the wire (`PollMode`, `HistorySource`,
-`SymbolConvention`, `OnError`, `Subscription`) takes its member names in lower case as values.
+`Reread`, `SymbolConvention`, `OnError`, `Subscription`) takes its member names in lower case
+as values.
 
 Four further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
@@ -18,7 +19,7 @@ class of a dataset whose symbols span classes, each read from its prefix; and `N
 plain `Enum` too (so it never equals a `Timespan` value), whose one member `ANY` keys the one
 WebSocket channel and flat-file prefix of a dataset that is not bars.
 
-The eighteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+The nineteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private. `subscription_of` maps an asset class to the subscription that covers it.
 """
 
@@ -44,6 +45,7 @@ __all__ = [
     "Order",
     "PollMode",
     "Recency",
+    "Reread",
     "SeriesType",
     "Sip",
     "Subscription",
@@ -193,6 +195,36 @@ class HistorySource(StrEnum):
     AUTO = "auto"
     REST = "rest"
     FLAT_FILES = "flat_files"
+
+
+class Reread(StrEnum):
+    """Whether `history()` of a live symbol table downloads a symbol again when it returns.
+
+    A `history()` whose `symbols` is a refreshing table follows it: each symbol added later is
+    downloaded over the call's range, and a removed symbol's rows leave the result. This
+    setting decides what happens when a removed symbol comes back. No date or time rule can
+    tell that Massive's past data is final (late cancellations, rewritten flat files,
+    backfills, splits applied overnight), so there is no automatic member. It has no effect
+    when `symbols` is not a refreshing table.
+
+    - `ALWAYS` (the default): the returning symbol is downloaded again and shows Massive's
+      current answer. It has no rows until the new download lands.
+    - `NEVER`: the returning symbol gets its earlier download back at once, with no request.
+      The result keeps every download it has made for as long as it lives, in memory, and a
+      returning symbol's rows are as old as that download (`ReadAt` in `m.symbol_reads()`).
+
+    A symbol whose download failed is downloaded again on every return, under both members.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            assert dm.Reread("never") is dm.Reread.NEVER
+    """
+
+    ALWAYS = "always"
+    NEVER = "never"
 
 
 class FuturesVenue(StrEnum):

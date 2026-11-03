@@ -172,9 +172,10 @@ _CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES
 class SymbolTable:
     """A table passed as `symbols`, compared and hashed by the identity of its Python wrapper.
 
-    A refreshing table makes a reactive stream, which follows the table's rows as they change;
-    the stream verbs read a static table once, as a fixed symbol list, and `fetch()` and
-    `history()` read either kind once.
+    A refreshing table makes a reactive stream, which follows the table's rows as they change,
+    and `history()` follows it too, reading each symbol added; the stream verbs read a static
+    table once, as a fixed symbol list, `history()` reads a static table once, and `fetch()`
+    reads either kind once.
 
     Deephaven `Table` wrappers compare equal when they wrap the same Java table, but a reactive
     stream is keyed by `id(table)`: two wrappers of one Java table are two streams.

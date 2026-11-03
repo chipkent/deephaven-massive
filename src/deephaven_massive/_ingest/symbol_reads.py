@@ -529,7 +529,8 @@ def symbol_outcomes(
             `"flat files and REST"` when REST served the days the files lack.
 
     Returns:
-        Each symbol with its `SymbolRows`, or its `SymbolFailure` classed by `failure_kind`;
+        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`
+        classed by `failure_kind`;
         a table without exactly the dataset's columns fails its symbol as a library defect.
 
     Raises:
@@ -552,7 +553,7 @@ def symbol_outcomes(
             table = tables[symbol]
             problem = _column_problem(table, expected)
             if problem is None:
-                outcomes[symbol] = SymbolRows(table)
+                outcomes[symbol] = SymbolRows(table, source=source)
                 logger.debug(
                     "call %d %s %s: rows read from %s: %d",
                     call,
