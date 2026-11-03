@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import enum
 import inspect
-import logging
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASET_LIST_DESCRIPTIONS", "dataset_calls", "datasets"]
 
-logger = logging.getLogger(__name__)
 
 DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {

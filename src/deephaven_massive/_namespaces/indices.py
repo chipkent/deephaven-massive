@@ -28,7 +28,6 @@ it gets the prefix from the endpoint's class, never from the name.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASETS", "_Indices"]
 
-logger = logging.getLogger(__name__)
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
 
