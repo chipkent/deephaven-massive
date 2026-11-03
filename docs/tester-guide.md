@@ -17,7 +17,6 @@ what you should see, and what to do if you see something else.
 | 3. Live run | Start one program that runs every check your Massive plan allows | 30 minutes to start, then 10 minutes a day | days to weeks, unattended |
 | 4. Send back | Pack the results and send them, with your notes | 15 minutes | a few minutes |
 
-<!-- Owner decision pending: the minimum length of the test. Change the numbers below. -->
 **How long.** Plan on at least five trading days, including one full stream day (market open
 to close).
 
@@ -49,6 +48,8 @@ than this guide says; an error message you cannot understand or act on; a step w
 instructions were unclear. "The instructions were unclear" is a finding, not a failure on
 your part.
 
+First time? Start at [Part 1](#part-1-set-up).
+
 ## Quick start
 
 For when you have done it once and want the commands. Every command runs in a terminal on
@@ -64,6 +65,8 @@ uv venv --seed --python 3.12 ~/massive-test/dh-venv
 ~/massive-test/dh-venv/bin/pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@<TESTER_VERSION>"
 printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY
 uv run python scripts/tester.py check
+# or, with the Docker console (appendix A):
+uv run python scripts/tester.py check --docker-image deephaven-massive-test
 
 # Phase 2: the console (section 1.7, then part 2)
 ~/massive-test/dh-venv/bin/deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=massive-test" 2>&1 | tee ~/massive-test/server.log
@@ -160,6 +163,13 @@ disk and 8 GB of memory. `uv` brings its own Python, so you need not install one
    ```bash
    brew install git gh uv
    brew install --cask temurin@21
+   ```
+
+   If `brew install uv` fails, install `uv` with its own installer instead, then open a new
+   terminal:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 **Linux (Ubuntu or Debian).**
@@ -326,7 +336,12 @@ ready: yes
 ```
 
 A `FAIL` line says how to fix it; fix it and run the check again. A `WARN` line is worth noting
-but does not stop you. With Docker, add `--docker-image deephaven-massive-test`.
+but does not stop you. If you run Deephaven in Docker ([appendix A](#appendix-a-the-docker-console-setup)),
+run this instead:
+
+```bash
+uv run python scripts/tester.py check --docker-image deephaven-massive-test
+```
 
 ## 1.7 Start Deephaven and open the web IDE
 
@@ -360,6 +375,10 @@ at"; if another program uses port 10000, use `--port 10010` and open
 
 ## 2.0 How the console works
 
+In this part, "the console" is the **Console** panel of the Deephaven web IDE in your browser
+(section 1.7), not a terminal. Every Python block goes there; only the `bash` blocks go in a
+terminal.
+
 - Paste a whole code block into the input box at the bottom of the **Console** panel and press
   **Enter**. **Shift+Enter** adds a line without running.
 - Printed text appears above the input box. Each table you assign to a variable opens in a
@@ -377,11 +396,25 @@ at"; if another program uses port 10000, use `--port 10010` and open
 
 Each example is also a file in the checkout, under
 `~/massive-test/deephaven-massive/docs/tester-examples/`, named in its heading. Instead of
-pasting, you can run a file in the console:
+pasting, you can run a file by its number. First paste this helper into the console once:
 
 ```python
-import os; exec(open(os.path.expanduser("~/massive-test/deephaven-massive/docs/tester-examples/03_daily_bars.py")).read())
+import glob, os
+def run(n):
+    path, = glob.glob(os.path.expanduser(f"~/massive-test/deephaven-massive/docs/tester-examples/{n:02d}_*.py"))
+    exec(compile(open(path).read(), path, "exec"), globals())
 ```
+
+Then run an example by its number, such as the first:
+
+```python
+run(1)
+```
+
+Run them in order, as when pasting: each uses variables from the ones before. If you restart
+the console, paste the helper again. The helper does not work in the Docker setup
+([appendix A](#appendix-a-the-docker-console-setup)), since the container cannot see the
+checkout: paste the examples there instead.
 
 **All at once.** After you have done the exercises by hand, run them all with one command, from
 the checkout, in a terminal with your key set. Close the web console's session first (example
@@ -607,7 +640,9 @@ year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(
 
 ### 10. A first analysis (`10_year_analysis.py`)
 
-Run this once `year`'s row reads `DONE`.
+Run this once `year`'s row reads `DONE`. The table fills all at once when its download is
+`DONE`, and `snapshot()` takes a fixed copy of it, so a snapshot taken while it is still
+loading is empty, and so is every table made from it.
 
 ```python
 # Compares the year of the two stocks: daily returns, growth, volatility, correlation, a
@@ -848,7 +883,7 @@ dividends = (
 )
 dividend_yield = dividends.aj(
     aapl_daily, on=["Symbol", "ExDividendDate > Date"], joins=["PriceDate = Date", "Close"]
-).update("YieldPercent = 100 * CashAmount / Close")
+).update("PaymentYieldPercent = 100 * CashAmount / Close")
 ```
 
 ### 17. The yield curve (`17_yield_curve.py`)
@@ -891,9 +926,11 @@ latest_bars = m.stocks.bars(
 ```python
 # Needs a paid Stocks plan (Starter or higher). Joins today's minute bars from history with
 # the live ones that follow, into one table that keeps growing. You should see a new table,
-# aapl_today, with a row per minute since the open and a new row each minute, while the
-# market is open; before 09:30 New York time or on a weekend, it is empty. On Stocks Starter
-# or Developer, the live bars run 15 minutes behind; history is not affected.
+# aapl_today, with a row for each traded minute since 04:00 New York time, when pre-market
+# trading starts, and a new row each minute until 20:00; before 04:00 or on a weekend, it is
+# empty. On Stocks Starter or Developer, the live bars run 15 minutes behind; history is not
+# affected. The stream opens before history is read, so the two overlap, and last_by keeps
+# one row per minute: the stream's, where both have it.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -901,7 +938,9 @@ from deephaven import merge
 
 aapl_minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
 session_day = datetime.now(ZoneInfo("America/New_York")).date()
-aapl_today = merge([aapl_minutes.history(session_day), aapl_minutes.append_only()])
+aapl_live = aapl_minutes.append_only()
+aapl_past = aapl_minutes.history(session_day)
+aapl_today = merge([aapl_past, aapl_live]).last_by(["Symbol", "TimestampStart"])
 ```
 
 ### 20. Live crypto, paid plans (`20_live_crypto.py`)

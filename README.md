@@ -23,15 +23,19 @@ Starter, the live line raises an error that names the setting to add. See
 [real-time or delayed](#real-time-or-delayed).
 
 This README is the whole user guide. The [dataset reference](docs/datasets/README.md) lists
-every dataset with its arguments, its columns, and what each Massive plan includes.
+every dataset with its arguments, its columns, and what each Massive plan includes, and each
+dataset's page links Massive's own pages for that dataset.
 
 <a id="install"></a>
 
 ## Install
 
-The repository is private for now and the library is not on PyPI: outside testers get access
-and a version from the owner, and follow the [tester guide](docs/tester-guide.md), which walks
-through every step. With access to the repository, you need Python 3.11 or later, Java 17 or
+The library runs on macOS and Linux, and on Windows through WSL2, on a computer with at least
+8 GB of memory. It is not on PyPI, and while its repository is private you need access to it
+(see the [tester guide's access step](docs/tester-guide.md#12-get-access-to-the-code)). Outside
+testers get access and a version from the owner, and follow the
+[tester guide](docs/tester-guide.md), which walks through every step. With access to the
+repository, you need Python 3.11 or later, Java 17 or
 later (check with `java -version`; any current JDK works, such as one from
 [Adoptium](https://adoptium.net)), and a Massive account:
 
@@ -118,6 +122,34 @@ header in the web UI to read what the column means.
 Crypto trades around the clock, so it is the easiest market to watch at night or at weekends:
 `m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).last_by()` (a paid Currencies plan).
 
+<a id="terms"></a>
+
+## Terms
+
+Words the rest of this guide uses without defining them again:
+
+- **Console**: the **Console** panel of the Deephaven web IDE in your browser, where you type
+  Python that runs inside the server. It is not a terminal.
+- **Update cycle**: Deephaven applies changes to its live tables together, in cycles about once a
+  second. A live table changes between cycles, never during one.
+- **Blink, append-only, ring, and `last_by` tables**: the live tables the stream verbs make.
+  [Verbs](#verbs) and [table shapes](#table-shapes) define them.
+- **As-of join (`aj`)**: a Deephaven join that matches each row of one table with the row of
+  another that has the latest time at or before its own, such as each trade with the quote in
+  force when it happened.
+- **Table operations**: `where`, `update`, `sort`, `agg_by`, the joins, and the rest are
+  Deephaven's own; the library returns ordinary Deephaven tables. Deephaven's
+  [table operations overview](https://deephaven.io/core/docs/conceptual/table-operations-overview/)
+  lists them.
+- **Subscription and plan**: Massive sells one *subscription* per asset class (Stocks, Options,
+  Indices, Currencies, and Futures), each at a *plan* level: Basic (free), Starter, Developer,
+  Advanced, or Business. Basic through Advanced are individual plans, for one person's own use;
+  Business plans are for companies. Massive's [pricing page](https://massive.com/pricing) lists
+  them, and [plans and errors](#plans-and-errors) says what each changes in the library.
+- **Delayed data**: live data from Massive's delayed feed, which runs 15 minutes behind the
+  market (10 for futures). Starter and Developer plans stream it; see
+  [real-time or delayed](#real-time-or-delayed).
+
 <a id="how-it-works"></a>
 
 ## How it works
@@ -182,6 +214,9 @@ naming the verbs the query has and, where one exists, the dataset that has the v
 
 `m.snapshots(...)` is a method of the session itself, not a namespace: the current state of any
 mix of tickers across asset classes, such as `m.snapshots(["AAPL", "O:SPY271217C00700000"])`.
+`O:SPY271217C00700000` is an OCC option symbol: underlying `SPY`, expiring `271217` (2027-12-17),
+`C` for a call (`P` for a put), and a strike of 700, written as the strike times 1000 in eight
+digits (`00700000`).
 
 `dm.datasets()` lists every dataset in one static table, with no session or key needed; filter
 it to find what you want:
@@ -229,8 +264,8 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 ### Backfill, then live
 
 A table that starts with history and continues with the stream: today's minute bars so far,
-then each new one as it closes. The function opens the stream first, so no bar falls between
-the two, and keeps one row per minute:
+then each new one as it closes. The function opens the stream before it reads history, so the
+two overlap, and keeps one row per minute:
 
 ```python
 from deephaven import merge
@@ -331,7 +366,14 @@ the price moves, contracts that come near are subscribed and those that drift aw
 (see [`symbols`](#symbols)):
 
 ```python
-spy_chain = m.options.chain("SPY", sort="expiration_date", limit=200).poll(300)
+from deephaven.time import dh_today, to_j_time_zone
+
+spy_chain = m.options.chain(
+    "SPY",
+    filters={"expiration_date_gte": dh_today(to_j_time_zone("America/New_York"))},
+    sort="expiration_date",
+    limit=200,
+).poll(300)
 near = spy_chain.where(
     "abs(DetailsStrikePrice - UnderlyingAssetPrice) <= 0.02 * UnderlyingAssetPrice"
 )
@@ -480,8 +522,10 @@ and the trade count. These rules hold for every `bars()` dataset.
   after it. An intraday bar (second, minute, hour) spans its own length. A bar of a day or
   longer runs from 00:00 of its first day to 00:00 after its last, in the market's time zone;
   an index bar ends an hour later, at 01:00 New York time.
-- **Weeks and longer.** Massive starts a week on Sunday and names it by that Sunday. A stock or
-  option week covers Monday to Friday, and its month, quarter, or year leaves out the weekend
+- **Weeks and longer.** Massive starts a week on Sunday and names it by that Sunday. The
+  library's `TimestampStart` is when the week's trading can begin: Monday for a stock or option
+  week, and Sunday for an index, forex, or crypto week. A stock or option week covers Monday to
+  Friday, and its month, quarter, or year leaves out the weekend
   days at either end. Indices, forex, and crypto, which can trade at weekends, cover whole
   calendar weeks (Sunday to Saturday), months, quarters, and years. A bar of several days spans
   that many calendar days, weekends included, as Massive counts them: a 2-day stock bar stamped
@@ -498,7 +542,8 @@ and the trade count. These rules hold for every `bars()` dataset.
   range at that midnight instead, such as `datetime(2026, 9, 13, tzinfo=UTC)` for the session
   that opens on Sunday, September 13, or pass dates. With dates, `history()` returns a bar only
   when all its sessions lie in the range, so a month bar needs the range to reach the session
-  that opens on the month's last day:
+  that opens on the month's last day. `ESZ6` is the E-mini S&P 500 future (product `ES`) for
+  December (month code `Z`) 2026 (year `6`):
 
   | Call | Returns |
   |---|---|
@@ -666,8 +711,8 @@ kept = trades.snapshot()
 ```
 
 A script that only reads static tables can let a `with` block close the session:
-`with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own,
-with an INFO line in the log.
+`with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own;
+with the debug log on, an INFO line in the log says so.
 
 **A long feed outage fails live tables.** When the connection to Massive drops, the library
 reconnects on its own. Meanwhile each live table keeps its last rows, and `m.streams()` notes
@@ -1171,10 +1216,12 @@ and futures contracts, or futures products, takes `as_of`, a date. Left out, it 
 
 ### `sort`, `order`, and `limit`
 
-List datasets take `sort`, the field to order by, as Massive names it (such as
-`"ex_dividend_date"`), and `order`, `dm.Order.ASC` or `dm.Order.DESC`. Each dataset accepts only
-the fields its endpoint documents, listed on its reference page; a dataset whose endpoint cannot
-sort has neither argument.
+List datasets take `sort`, the field or fields to order by, as Massive names them (such as
+`"ex_dividend_date"`), and `order`, `dm.Order.ASC` or `dm.Order.DESC`. Where an endpoint
+documents it, `sort` takes several fields separated by commas, each with an optional `.asc` or
+`.desc` (such as `"ticker,ex_dividend_date.desc"`). Each dataset accepts only the fields and
+forms its endpoint documents, listed on its reference page; a dataset whose endpoint cannot sort
+has neither argument.
 
 `limit` caps the total rows Massive returns for the request, across all the symbols you name and
 every page, so a symbol that comes first can use up the whole cap. Use `limit` to look at a
@@ -1297,7 +1344,7 @@ this section) and look at what the library did.
 | `over capacity: <n>/1000; <k> deferred` in `m.streams()` | The options connection is full; the extra contracts subscribe when others leave. Watch fewer contracts. See [`symbols`](#symbols). |
 | `rows for ... are being dropped` in `m.streams()`, or `... the last 100 rows of channel ... were dropped` | Massive sent rows the library cannot read: a `dm.ALL` stream warns and keeps running; any other stream fails after 100 such rows in a row. Massive has most likely changed its format: report it with the log. |
 | `rate limited: ...; this read ran inside a Deephaven console command` | A Basic subscription's pace held a console read for more than 90 seconds. Pass `wait=False`, which waits up to ten minutes, and list your Basic subscriptions in `rest_basic_subscriptions` so the library paces from the start. |
-| `S3 rejected the flat-file credentials` | The S3 keys are wrong. Set `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` from Massive's dashboard and restart the server. |
+| `S3 rejected the flat-file credentials` | The S3 keys are wrong. Under `source=dm.HistorySource.AUTO`, the default, the read falls back to REST and this text arrives in a WARNING; it fails only with `source=dm.HistorySource.FLAT_FILES`, or when REST cannot serve the read. Set `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` from Massive's dashboard and restart the server. |
 | `no data since <time> during ... trading hours` in `m.streams()` | The connection is up but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
 | a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; the table reads Massive's delayed feed (`Recency` `DELAYED` in `m.streams()`), which starts 15 minutes behind; or the stream failed (`m.streams()`). |
 | a download is slow | Basic plans allow five requests a minute (`m.rate_limits()` shows the pace). Use flat files for many symbols, and `wait=False` for long reads. |
@@ -1307,7 +1354,9 @@ this section) and look at what the library did.
 | a symbol returns no rows | No data in that range, or the ticker changed: `m.reference.ticker_events("META").fetch()` lists past names. |
 
 **The log.** The library writes to Deephaven's log, which the web UI shows in its **Log** panel.
-INFO reports a decision or progress; nothing to do. WARNING means a live table may be stale or
+By default only WARNING and ERROR lines appear there; INFO lines appear only once the debug log
+is on (`dm.enable_debug_logging()`, below). INFO reports a decision or progress; nothing to do.
+WARNING means a live table may be stale or
 wrong, or something needs you; the message says which, once when it starts, and an INFO line
 says when it recovers. ERROR means a defect: in your code or input (the message names the fix),
 or in the library (the message ends "This is a bug in deephaven-massive"). To see everything the

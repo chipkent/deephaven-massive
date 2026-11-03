@@ -14,4 +14,4 @@ dividends = (
 )
 dividend_yield = dividends.aj(
     aapl_daily, on=["Symbol", "ExDividendDate > Date"], joins=["PriceDate = Date", "Close"]
-).update("YieldPercent = 100 * CashAmount / Close")
+).update("PaymentYieldPercent = 100 * CashAmount / Close")
