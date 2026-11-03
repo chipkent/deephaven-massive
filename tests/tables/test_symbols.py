@@ -61,7 +61,7 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
     with pytest.raises(
         ValueError, match=r"^7 value\(s\) of Symbol are not stocks symbols: "
     ) as raised:
-        dm.canonicalize_symbols(table, AssetClass.STOCKS)
+        dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
     message = str(raised.value)
     assert "'BRK-B' is not a Massive stock ticker" in message
     assert "'b4'" in message  # the first five in sorted order
@@ -93,7 +93,7 @@ def test_canonicalize_a_refreshing_table(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO)
+        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     assert result.is_refreshing
     source.add(new_table([string_col("Symbol", ["BTC-USD", None])]))
     wait_for(lambda: result.size == 2)
@@ -110,7 +110,7 @@ def test_a_bad_initial_row_of_a_refreshing_table_raises(
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
     with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
-        dm.canonicalize_symbols(source, AssetClass.CRYPTO)
+        dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     scope.release()
 
 

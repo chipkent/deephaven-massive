@@ -24,8 +24,8 @@ from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
     CURRENT_STEP,
+    CurrentSymbols,
     SymbolRowRule,
-    SymbolRows,
     SymbolWatch,
     _SymbolCounter,
     invalid_row_message,
@@ -87,10 +87,10 @@ def spanning(mode: OnError = OnError.RAISE) -> SymbolRowRule:
 
 def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:GBPUSD", None, "C:EURUSD", "C:GBPUSD"])])
-    assert read_symbols(rule(), table, stream_id=7) == SymbolRows(("C:EURUSD", "C:GBPUSD"))
+    assert read_symbols(rule(), table, stream_id=7) == CurrentSymbols(("C:EURUSD", "C:GBPUSD"))
     assert read_symbols(
         rule(), new_table([string_col("Symbol", [None])]), stream_id=None
-    ) == SymbolRows(())
+    ) == CurrentSymbols(())
 
 
 def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
@@ -108,7 +108,7 @@ def test_read_symbols_refuses_a_failed_table(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        watch = dm.canonicalize_symbols(source, AssetClass.FOREX)
+        watch = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     wait_for(lambda: bool(watch.j_table.isFailed()))
     with pytest.raises(
@@ -126,7 +126,7 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         ValueError,
         match=r"^forex\.quotes: a symbol table holds 'EUR/USD' \('EUR/USD' is not Massive's "
         r"ticker; use 'C:EURUSD' .*\)\. Fix the row, or pass the table through "
-        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX, on_error=dm\.OnError\.LOG\), "
+        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX\), "
         r"which converts what it can and nulls the rest$",
     ):
         read_symbols(rule(), table, stream_id=7)
@@ -151,7 +151,7 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
     bad = f"EUR/USD {mode.value}"
     table = new_table([string_col("Symbol", ["C:EURUSD", bad, bad, None])])
     with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
-        assert read_symbols(rule(mode=mode), table, stream_id=7) == SymbolRows(
+        assert read_symbols(rule(mode=mode), table, stream_id=7) == CurrentSymbols(
             ("C:EURUSD",), (bad,)
         )
         read_symbols(rule(mode=mode), table, stream_id=7)  # a second read logs nothing more
@@ -330,7 +330,7 @@ def test_a_skipped_underlying_is_logged_with_its_reason(
     table = new_table([string_col("Symbol", [bad, "AAPL"])])
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)
-    assert rows == SymbolRows(("AAPL",), (bad,))
+    assert rows == CurrentSymbols(("AAPL",), (bad,))
     [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
     assert record.startswith(f"options.chain a call's read: a table of underlyings holds {bad!r}")
 
@@ -384,7 +384,8 @@ def test_a_failing_watch_is_refused_and_logged_only_at_debug(
     expected = (
         "the symbol table passed to snapshots failed upstream, so the result can no longer "
         "follow it: table broke. Fix that table and call snapshots again; a table made by "
-        "dm.canonicalize_symbols fails on a row it cannot convert unless on_error=dm.OnError.LOG"
+        "dm.canonicalize_symbols fails on a row it cannot convert only under "
+        "on_error=dm.OnError.RAISE"
     )
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
         ("DEBUG", f"snapshots stream 7: {expected}")
@@ -399,7 +400,7 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
     source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     scope = new_scope()
     with scope.open():
-        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX)
+        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
         watch, seen, refused, _ = watching(watch_table, OnError.IGNORE)
     watch.start()
     assert seen == [(frozenset({"C:EURUSD"}), frozenset())]

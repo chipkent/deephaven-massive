@@ -469,11 +469,11 @@ class MassiveSession:
 
         One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), background read
         (`read`, from `fetch(wait=False)` or `history(..., wait=False)`), and followed read
-        (`read`, a `history()` of a refreshing symbol table). A stream or poll is `RUNNING`; a
-        background read is `LOADING`, then `DONE`, or `FAILED` with the error; a followed read
-        is `LOADING` while a symbol is queued, loading, or waiting to retry, and `RUNNING` once
-        every symbol has landed or failed, and its `Error` groups its failed and retrying
-        symbols by cause (`m.symbol_reads()` has one row per symbol). `Error` also
+        (`read`, a `history()` or `fetch()` of a refreshing symbol table). A stream or poll is
+        `RUNNING`; a background read is `LOADING`, then `DONE`, or `FAILED` with the error; a
+        followed read is `LOADING` while a symbol is queued, loading, or waiting to retry, and
+        `RUNNING` once every symbol has landed or failed, and its `Error` groups its failed and
+        retrying symbols by cause (`m.symbol_reads()` has one row per symbol). `Error` also
         shows warnings that do not stop a stream: deferred options contracts; skipped symbol-table
         rows that are not Massive's exact tickers; topics Massive has not acknowledged (`no
         acknowledgement from Massive for ...`, re-sent until it does); a connection that is down
@@ -593,9 +593,9 @@ class MassiveSession:
             raise ValueError(
                 "table is not a live result of this session: release() takes a table that this "
                 "session returned from blink(), append_only(), ring(), last_by(), poll(), "
-                "fetch(wait=False), history(..., wait=False), history() of a refreshing "
-                "symbol table, connections(), streams(), rate_limits(), or symbol_reads(). "
-                "For a table derived from one, release the live table it came "
+                "fetch(wait=False), history(..., wait=False), history() or fetch() of a "
+                "refreshing symbol table, connections(), streams(), rate_limits(), or "
+                "symbol_reads(). For a table derived from one, release the live table it came "
                 "from; a static fetch() or history() table has nothing to release"
             )
 

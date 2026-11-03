@@ -182,8 +182,8 @@ class StreamKind(StrEnum):
         POLL: A `poll()` table, which re-reads a REST dataset on an interval.
         READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
             table fills once, when its download completes; or a followed read, a `history()`
-            of a refreshing symbol table, whose table gains and drops each symbol's rows as the
-            symbol table changes.
+            or `fetch()` of a refreshing symbol table, whose table gains and drops each symbol's
+            rows as the symbol table changes.
     """
 
     STREAM = "stream"

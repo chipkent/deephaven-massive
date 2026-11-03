@@ -18,7 +18,6 @@ around the clock, so a date-only bound is a whole UTC day.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -46,8 +45,6 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_Crypto"]
-
-logger = logging.getLogger(__name__)
 
 
 _R, _W, _F = Transport.REST, Transport.WS, Transport.FLAT_FILES

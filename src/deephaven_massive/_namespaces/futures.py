@@ -36,7 +36,6 @@ instrument: they take no symbols and have no `Symbol` column.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven.table import Table
@@ -66,7 +65,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASETS", "_Futures"]
 
-logger = logging.getLogger(__name__)
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
 

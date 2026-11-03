@@ -257,13 +257,19 @@ class PermanentError(MassiveError):
     errors whose cause is settled for the session or the request: a row that breaks its
     dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), a crypto pair missing from the session's ticker list
-    (`UnlistedPairError`), and, in a read by symbol, a parameter a symbol's path does not take
-    (`UnsupportedParameterError`, `_ingest/symbol_reads.py`). A `poll()` table fails with one
-    rather than retrying it every cycle.
-    `RowDataError` and `UnlistedPairError` are defined here, since the REST transport raises
-    them and the tables layer names them; `SymbolRowError` is the poll module's
-    (`_tables/poll.py`). The fatal set of `poll()` names only this base, so a subclass defined
-    in a module the poll module cannot import (the ingest layer) still fails the table.
+    (`UnlistedPairError`), a symbol Massive has no data for under
+    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`, `_ingest/rest.py`), and, in
+    a read by symbol, a parameter a symbol's path does not take (`UnsupportedParameterError`,
+    `_ingest/symbol_reads.py`).
+
+    A `poll()` table fails with any of them except `UnsupportedParameterError` rather than
+    retrying it every cycle. `UnsupportedParameterError` never reaches a `poll()` cycle: the
+    read by symbol records it as that symbol's failure, so it fails only its own symbol and the
+    read goes on with the others. `RowDataError` and `UnlistedPairError` are defined here,
+    since the REST transport raises them and the tables layer names them; `SymbolRowError` is
+    the poll module's (`_tables/poll.py`). The fatal set of `poll()` names only this base, so a
+    subclass defined in a module the poll module cannot import (the ingest layer, such as
+    `UnavailableSymbolError`) still fails the table.
 
     Example:
         ::

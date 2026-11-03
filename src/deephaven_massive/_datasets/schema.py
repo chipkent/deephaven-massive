@@ -40,7 +40,6 @@ their wire unit here (`source_columns.SourceColumn.unit`); the transports conver
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -85,7 +84,6 @@ __all__ = [
     "filled_columns",
 ]
 
-logger = logging.getLogger(__name__)
 
 _ISO_FRACTION: Final = re.compile(r"\.(\d+)")
 

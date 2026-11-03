@@ -19,7 +19,6 @@ declares the symbol as filled from the request, so the row's `Symbol` is the who
 
 from __future__ import annotations
 
-import logging
 import math
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
@@ -53,7 +52,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASETS", "_Forex"]
 
-logger = logging.getLogger(__name__)
 
 _REST: Final = Transport.REST
 _WS: Final = Transport.WS

@@ -14,7 +14,6 @@ their `Date` column (ISO `yyyy-MM-dd` text, as every date the library returns), 
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -29,8 +28,6 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike, FilterValue
 
 __all__ = ["DATASETS", "_Economy"]
-
-logger = logging.getLogger(__name__)
 
 
 def _series(name: str, path: str, summary: str) -> DatasetSpec:

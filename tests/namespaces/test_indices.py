@@ -449,7 +449,12 @@ def test_daily_open_close_query(m: dm.MassiveSession, day: str | date) -> None:
 
 
 def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"use m\.indices\.snapshots\(dm\.ALL\)"):
+    # Massive has no grouped daily endpoint for indices: the day's bars serve every index.
+    with pytest.raises(
+        ValueError,
+        match=r"; use m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
+        r"every index's bar of that day$",
+    ):
         m.indices.daily_open_close(dm.ALL, "2025-06-02")
 
 

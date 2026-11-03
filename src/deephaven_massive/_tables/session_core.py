@@ -19,8 +19,8 @@ one `SessionCore`, which queries and namespaces share. The core owns:
 - the worker-table registry: the `m.streams()` row of every *worker table*, a table one library
   thread of its own fills (a `poll()` table's poller, a background read's thread for
   `fetch(wait=False)` and `history(..., wait=False)`, or the follow coordinator for a
-  `history()` of a refreshing symbol table), from its creation until its result is released
-  and its blink table has shut down;
+  `history()` or `fetch()` of a refreshing symbol table), from its creation until its result
+  is released and its blink table has shut down;
 - the latest `m.symbol_reads()` row of every symbol of every followed read, kept for the
   session's life so `close()` can mark the unfinished ones `CLOSED`, and the session's follow
   coordinator (`follow_coordinator.py`), which owns the followed reads' per-symbol state;

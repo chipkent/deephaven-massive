@@ -25,7 +25,6 @@ private. `subscription_of` maps an asset class to the subscription that covers i
 
 from __future__ import annotations
 
-import logging
 from enum import Enum, StrEnum
 from typing import TypeVar, overload
 
@@ -56,7 +55,6 @@ __all__ = [
     "subscription_of",
 ]
 
-logger = logging.getLogger(__name__)
 
 _E = TypeVar("_E", bound=StrEnum)
 

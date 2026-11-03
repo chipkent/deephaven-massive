@@ -40,7 +40,6 @@ partner sub-namespaces, and every dataset is a REST list endpoint built the same
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
@@ -59,7 +58,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
 
-logger = logging.getLogger(__name__)
 
 _REST = Transport.REST
 

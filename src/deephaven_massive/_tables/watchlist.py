@@ -20,7 +20,7 @@ session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
 Two pieces apply that rule:
 
 - `read_symbols` reads a table's current rows once, on the caller thread or a poller's, and
-  returns its good and its skipped values (`SymbolRows`), or raises `ValueError` under `RAISE`.
+  returns its good and its skipped values (`CurrentSymbols`), or raises `ValueError` under `RAISE`.
   The static verbs read their symbols with it; the live verbs check the table with it first.
 - `SymbolWatch` listens to the table and reports each change of the *set* of symbols it holds,
   so a WebSocket stream subscribes and unsubscribes exactly the topics the watchlist names. A
@@ -77,8 +77,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CURRENT_STEP",
+    "CurrentSymbols",
     "SymbolRowRule",
-    "SymbolRows",
     "SymbolWatch",
     "invalid_row_message",
     "latest_rows_since_added",
@@ -132,8 +132,8 @@ def invalid_row_message(
         remedy: fix the row, or convert the table; and, unless the class's converter turns the
         row into a ticker, where to report it, since the value can also be a ticker Massive
         writes in a form the library does not know yet. For a
-        dataset of one class the remedy is `dm.canonicalize_symbols` with
-        `on_error=dm.OnError.LOG`; for a dataset that spans classes, whose rows may mix them, it
+        dataset of one class the remedy is `dm.canonicalize_symbols`, which by default nulls
+        the rows it cannot convert; for a dataset that spans classes, whose rows may mix them, it
         is `dm.canonical_symbol` per row with each row's class.
     """
     reason = ""
@@ -149,8 +149,7 @@ def invalid_row_message(
     else:
         remedy = (
             f"pass the table through dm.canonicalize_symbols(table, "
-            f"dm.AssetClass.{asset_class.name}, on_error=dm.OnError.LOG), which converts what "
-            "it can and nulls the rest"
+            f"dm.AssetClass.{asset_class.name}), which converts what it can and nulls the rest"
         )
     message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
     if as_written or _converts(asset_class, symbol):
@@ -186,7 +185,7 @@ def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
 _FAILED_TABLE: Final = (
     "the symbol table passed to {dataset} failed upstream, so the result can no longer follow "
     "it: {cause}. Fix that table and call {dataset} again; a table made by "
-    "dm.canonicalize_symbols fails on a row it cannot convert unless on_error=dm.OnError.LOG"
+    "dm.canonicalize_symbols fails on a row it cannot convert only under on_error=dm.OnError.RAISE"
 )
 """The message of a result whose symbol table failed upstream, formatted with the dataset and
 the cause."""
@@ -365,8 +364,8 @@ class SymbolRowRule:
 
 
 @dataclass(frozen=True, slots=True)
-class SymbolRows:
-    """A symbol table's current rows as one read found them.
+class CurrentSymbols:
+    """A symbol table's current canonical symbols and skipped values, as one read found them.
 
     Attributes:
         symbols: The canonical symbols, sorted and de-duplicated.
@@ -378,7 +377,7 @@ class SymbolRows:
     skipped: tuple[str, ...] = ()
 
 
-def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> SymbolRows:
+def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> CurrentSymbols:
     """Read a symbol table's current rows once, sorting them into good and skipped values.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
@@ -415,7 +414,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
         else:
             rule.skip(symbol, stream_id=stream_id)
             skipped.append(symbol)
-    return SymbolRows(tuple(good), tuple(skipped))
+    return CurrentSymbols(tuple(good), tuple(skipped))
 
 
 class SymbolWatch:
