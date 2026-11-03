@@ -158,12 +158,12 @@ class SymbolRows:
             when Massive has no data for the symbol (HTTP 404 on its first request, or no row
             in the range).
         source: Where the rows came from, as users read it: `"REST"`, `"flat files"`, or
-            `"flat files and REST"` when REST served the days the files lack; empty when the
+            `"flat files and REST"` when REST served the days the files lack; None when the
             maker did not say.
     """
 
     table: Table
-    source: str = ""
+    source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -35,7 +35,7 @@ from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import FLAT_FILES_AND_REST
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
-from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
+from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
@@ -623,6 +623,32 @@ def test_a_failed_table_stops_its_symbols(
     gate.set()
 
 
+def test_a_symbol_added_after_its_result_failed_is_stopped_not_queued(
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The table's failure is held back, so the result has failed but not yet stopped when the
+    # symbol arrives: it is never read, and must not wait as QUEUED.
+    failures: list[MassiveError] = []
+
+    def held_back(_read: object, error: MassiveError) -> bool:
+        failures.append(error)
+        return True
+
+    monkeypatch.setattr(FollowedRead, "fail_table", held_back)
+    script = Script(massive_session)
+    script.answers["AAPL"] = [dm.AuthenticationError("HTTP 401: wrong key")]
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script)
+    until(lambda: len(failures) == 1)
+    add(wl, "NVDA")
+    wait_state(massive_session, "NVDA", SymbolReadState.STOPPED)
+    assert script.reads_of("NVDA") == 0
+    monkeypatch.undo()
+    massive_session.release(result)
+
+
 def test_close_marks_every_unfinished_symbol_closed(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
@@ -916,6 +942,45 @@ def test_a_session_freed_while_following_needs_no_close(
     assert not thread.is_alive()
 
 
+def test_a_session_never_closed_outlives_its_last_stop(
+    watchlist: Callable[..., Table],
+    *,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Nothing else holds the session while the coordinator handles its last result's stop:
+    # the result holds the core, so the stop's rows are written to a live session, with no
+    # error, and only then is the session freed.
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+    result = follow(m, watchlist("AAPL"), Script(m))
+    landed = functools.partial(_holds_rows, dh_to_pylist, result, 2)
+    until(landed)
+    del landed
+    core = weakref.ref(m._core)
+    thread = cast("threading.Thread", m._core.follows.thread)
+    stopping, proceed = threading.Event(), threading.Event()
+    stopped = follow_coordinator.FollowCoordinator._stopped
+
+    def held(coordinator: follow_coordinator.FollowCoordinator, *step: object) -> None:
+        stopping.set()
+        assert proceed.wait(TIMEOUT)
+        stopped(coordinator, cast("Any", step[0]))
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_stopped", held)
+    with caplog.at_level(logging.ERROR):
+        m.release(result)
+        del result, m
+        assert stopping.wait(TIMEOUT)
+        gc.collect()
+        assert core() is not None  # the result, which the coordinator holds, holds it
+        proceed.set()
+        until(lambda: gc.collect() >= 0 and core() is None)
+        thread.join(TIMEOUT)
+    assert not thread.is_alive()
+    assert [r.getMessage() for r in caplog.records] == []
+
+
 def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
@@ -1119,6 +1184,92 @@ def _calls(m: dm.MassiveSession) -> set[int]:
         return set(m._core._workers)
 
 
+@pytest.mark.parametrize(
+    ("method", "step"),
+    [
+        ("_start", "starting"),
+        ("_queue_due_retries", "queuing its due retries"),
+        ("_schedule", "starting its reads"),
+        ("_show", "writing its rows"),
+        ("_forget", "forgetting it"),
+    ],
+)
+def test_a_defect_in_any_step_fails_only_its_result(
+    method: str,
+    step: str,
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: ToList,
+) -> None:
+    # Every step the coordinator runs for one result is guarded: its error fails that result,
+    # named in the log and the table's error, and the rest of the batch still runs.
+    healthy_list, broken_list = watchlist("AAPL"), watchlist("NVDA")
+    healthy = follow(massive_session, healthy_list, Script(massive_session))
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    healthy_id = max(_calls(massive_session))
+    original = getattr(follow_coordinator.FollowCoordinator, method)
+
+    def breaks(coordinator: follow_coordinator.FollowCoordinator, *step_args: object) -> None:
+        result = cast("Any", step_args[0])
+        if result.read.call != healthy_id:
+            raise RuntimeError(f"a defect in {method}")
+        original(coordinator, *step_args)
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, method, breaks)
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        broken = follow(massive_session, broken_list, Script(massive_session))
+        until(lambda: bool(broken.j_table.isFailed()))
+    broken_id = max(_calls(massive_session))
+    assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
+    with massive_session._core.registry_lock:
+        error = massive_session._core._workers[broken_id].row.error or ""
+    assert f"the followed read failed {step}: RuntimeError: a defect in {method}" in error
+    add(healthy_list, "MSFT")
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
+    if method != "_show":  # its symbol is stopped, never left queued or loading
+        until(lambda: state(massive_session, "NVDA") in (None, SymbolReadState.STOPPED))
+    massive_session.release(healthy)
+    massive_session.release(broken)
+
+
+def test_a_defect_while_failing_a_broken_result_is_logged_too(
+    watchlist: Callable[..., Table],
+    *,
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: ToList,
+) -> None:
+    healthy_list = watchlist("AAPL")
+    healthy = follow(massive_session, healthy_list, Script(massive_session))
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    healthy_id = max(_calls(massive_session))
+    show = follow_coordinator.FollowCoordinator._show
+
+    def breaks(coordinator: follow_coordinator.FollowCoordinator, *step_args: object) -> None:
+        result = cast("Any", step_args[0])
+        if result.read.call != healthy_id:
+            raise RuntimeError("a defect in _show")
+        show(coordinator, result)
+
+    def cannot_fail(_read: object, _error: MassiveError) -> bool:
+        raise RuntimeError("a defect in fail_table")
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_show", breaks)
+    monkeypatch.setattr(FollowedRead, "fail_table", cannot_fail)
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        broken = follow(massive_session, watchlist("NVDA"), Script(massive_session))
+        until(lambda: "failing its table after writing its rows failed raised too" in caplog.text)
+    monkeypatch.undo()
+    add(healthy_list, "MSFT")  # the coordinator goes on
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
+    massive_session.release(healthy)
+    massive_session.release(broken)
+
+
 def test_a_result_handed_over_as_the_session_closes_never_starts(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
@@ -1128,17 +1279,16 @@ def test_a_result_handed_over_as_the_session_closes_never_starts(
     start = follow_coordinator.FollowCoordinator._start
     started: list[bool] = []
 
-    def closing(self: follow_coordinator.FollowCoordinator, *event: object) -> object:
-        (message,) = event
+    def closing(self: follow_coordinator.FollowCoordinator, *event: object) -> None:
+        result, message = cast("tuple[Any, Any]", event)
         with core.registry_lock:
             core._closed = True  # as a close does, between the hand-over and the start
         try:
-            result = start(self, cast("Any", message))
+            start(self, result, message)
         finally:
             with core.registry_lock:
                 core._closed = False
         started.append(result.ended)
-        return result
 
     monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_start", closing)
     script = Script(massive_session)

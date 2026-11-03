@@ -1249,7 +1249,8 @@ A symbol lands, is replaced, or leaves as one partition, so no rows are copied i
 cycle. A removed symbol's rows leave in the cycle that removes its row from the user's table,
 because `watched_rows` drops its partition there. With `wait=True` the seed is a static table of
 the call-time symbols' partition rows, so their rows are visible at once, also inside a console
-command. A partition row with a null `Constituent` (an empty partition row) frees a symbol's
+command; a static table never drops a row, so the seed keeps those rows until the result is
+released, under either `reread`. A partition row with a null `Constituent` (an empty partition row) frees a symbol's
 rows: under `reread=ALWAYS` a removal publishes one, and `DecidedAtStep`, the latest symbol-table
 cycle the coordinator had applied when it decided to publish a row, hides a download decided
 before the symbol's last join; `NEVER` keeps the row, so a re-add shows it at once. There is no

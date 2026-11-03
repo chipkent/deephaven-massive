@@ -1439,9 +1439,10 @@ class SessionCore:
         `update_streams` it sets the fields `update` names; unlike it, it also sets `State`:
         `LOADING` while a symbol is queued, loading, or waiting to retry, `RUNNING` once every
         symbol has landed or failed. Only a `LOADING` or `RUNNING` row changes state: a
-        released, failed, or closed one keeps its state. One short critical section under
-        `registry_lock`; an id that has left the registry is ignored. No Deephaven call, no
-        wait.
+        released, failed, or closed one keeps its state. Once the session has closed nothing is
+        written, as in `write_symbol_reads`: the row keeps what the close wrote. One short
+        critical section under `registry_lock`; an id that has left the registry is ignored.
+        No Deephaven call, no wait.
 
         Args:
             stream_id: The followed read's `StreamId`.
@@ -1455,6 +1456,8 @@ class SessionCore:
             return replace(row, state=state) if row.state in _ACTIVE else row
 
         with self.registry_lock:
+            if self._closed:
+                return
             self._update_worker(stream_id, change)
 
     def write_symbol_reads(self, rows: Sequence[SymbolReadRow]) -> None:
