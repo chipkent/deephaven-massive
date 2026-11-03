@@ -286,6 +286,32 @@ def test_a_row_listing_two_named_tickers_goes_to_each(
     assert [r["BenzingaId"] for r in _rows(out["MSFT"])] == [1, 2]
 
 
+def test_a_row_listing_none_of_the_named_tickers_keeps_a_null_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A static read keeps such a row with a null Symbol; a read by symbol keeps it too, with
+    # the request's first symbol, and the listing step logs its WARNING.
+    fake_rest.reply(
+        BENZINGA_NEWS_PATH,
+        Reply(
+            envelope(
+                [
+                    {"benzinga_id": 1, "tickers": ["MSFT"]},
+                    {"benzinga_id": 2, "tickers": ["IBM"]},
+                ]
+            )
+        ),
+    )
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, LISTED, ["MSFT", "AAPL"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["AAPL"])] == [(2, None)]
+    assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["MSFT"])] == [(1, "MSFT")]
+    listing = [r for r in caplog.records if "list none of the request's tickers" in r.getMessage()]
+    assert [r.levelno for r in listing] == [logging.WARNING]
+    assert "name none of those symbols" not in caplog.text
+    assert "null Symbol; they are kept with AAPL" in caplog.text
+
+
 def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:

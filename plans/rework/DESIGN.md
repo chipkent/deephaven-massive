@@ -2023,7 +2023,9 @@ it.`).
   `partners.benzinga.news`): requested as a static `fetch()` requests them, and each row is
   listed under each named ticker it lists, with that ticker in `Symbol`, as a static
   `fetch()` lists it ([section 10](#10-symbols-and-all), decision 90). Nothing removes a
-  copy across requests.
+  copy across requests. A row that lists none of a batch's named tickers keeps its null
+  `Symbol`, as in a static `fetch()`, and goes with the batch's first symbol: it leaves the
+  result when that symbol does.
 
 **`limit`** is sent on each request of a followed read as Massive's own cap on that request's
 rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
