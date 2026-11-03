@@ -108,7 +108,7 @@ def test_read_symbols_refuses_a_failed_table(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        watch = dm.canonicalize_symbols(source, AssetClass.FOREX)
+        watch = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     wait_for(lambda: bool(watch.j_table.isFailed()))
     with pytest.raises(
@@ -126,7 +126,7 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         ValueError,
         match=r"^forex\.quotes: a symbol table holds 'EUR/USD' \('EUR/USD' is not Massive's "
         r"ticker; use 'C:EURUSD' .*\)\. Fix the row, or pass the table through "
-        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX, on_error=dm\.OnError\.LOG\), "
+        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX\), "
         r"which converts what it can and nulls the rest$",
     ):
         read_symbols(rule(), table, stream_id=7)
@@ -384,7 +384,8 @@ def test_a_failing_watch_is_refused_and_logged_only_at_debug(
     expected = (
         "the symbol table passed to snapshots failed upstream, so the result can no longer "
         "follow it: table broke. Fix that table and call snapshots again; a table made by "
-        "dm.canonicalize_symbols fails on a row it cannot convert unless on_error=dm.OnError.LOG"
+        "dm.canonicalize_symbols fails on a row it cannot convert only under "
+        "on_error=dm.OnError.RAISE"
     )
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
         ("DEBUG", f"snapshots stream 7: {expected}")
@@ -399,7 +400,7 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
     source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     scope = new_scope()
     with scope.open():
-        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX)
+        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
         watch, seen, refused, _ = watching(watch_table, OnError.IGNORE)
     watch.start()
     assert seen == [(frozenset({"C:EURUSD"}), frozenset())]

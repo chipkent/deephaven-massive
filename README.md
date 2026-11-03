@@ -951,8 +951,9 @@ Every ticker must be Massive's exact spelling: `AAPL`, `BRK.B`, `O:SPY271217C007
 `I:SPX`, `C:EURUSD`, `X:BTCUSD`, `ESZ6`. A wrong one in a string or list raises `ValueError` at
 once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/USD")` returns
 `"C:EURUSD"`, `dm.canonical_symbol_stock_yahoo("BRK-B")` returns `"BRK.B"`, and
-`dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive.
-The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
+`dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive; by
+default (`on_error=dm.OnError.LOG`) a row it cannot convert gets an empty symbol and is logged,
+and the table keeps updating. The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
 
 **Rows that list several tickers.** News, filings, and financial statements list the tickers
 each row concerns, in `Tickers`, and their `Symbol` is each ticker you named that the row lists.

@@ -745,18 +745,16 @@ except ValueError as error:
 
 watchlist = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
-    watchlist,
-    dm.AssetClass.STOCKS,
-    convention=dm.SymbolConvention.YAHOO,
-    on_error=dm.OnError.LOG,
+    watchlist, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )
 ```
 
 **You should see** `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, then a line starting
 `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another convention's separators`
 that names the conventions to choose from. `converted` holds `BRK.B`, `AAPL`, and an empty
-row: with `dm.OnError.LOG` a symbol that cannot be converted becomes empty and is logged,
-instead of stopping everything (`dm.OnError.RAISE`) or passing silently (`dm.OnError.IGNORE`).
+row: by default (`dm.OnError.LOG`) a symbol that cannot be converted becomes empty and is
+logged, instead of stopping everything (`on_error=dm.OnError.RAISE`) or passing silently
+(`dm.OnError.IGNORE`).
 
 ### 13. Check the debug log (`13_check_the_log.py`)
 

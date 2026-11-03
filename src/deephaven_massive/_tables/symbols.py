@@ -5,8 +5,9 @@ and one function per class and convention), which make no Deephaven call. A user
 watchlist is written in another spelling (`EUR/USD`, Yahoo's `BRK-B`) needs the same conversion
 over a whole table, static or refreshing, before passing it as `symbols=`; that is table code,
 which reads rows and adds a formula column, so it lives here, on the Deephaven side.
-Under `OnError.LOG` or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows it cannot
-convert instead of failing. It takes its own `on_error` argument rather than a session's
+Under `OnError.LOG`, the default, or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows
+it cannot convert instead of failing, so one bad row never fails the table; `OnError.RAISE`
+fails instead. It takes its own `on_error` argument rather than a session's
 `MassiveConfig.noncanonical_symbols`, since it needs no session. The tables it returns are what
 the symbol-table check in `_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
 
@@ -64,7 +65,7 @@ def canonicalize_symbols(
     *,
     column: str = "Symbol",
     convention: SymbolConvention = SymbolConvention.MASSIVE,
-    on_error: OnError = OnError.RAISE,
+    on_error: OnError = OnError.LOG,
 ) -> Table:
     """Return a table whose symbol column holds Massive's exact tickers, converted row by row.
 
@@ -73,17 +74,17 @@ def canonicalize_symbols(
     converted column keeps its name. Each row converts as `canonical_symbol(value, asset_class,
     convention=convention)` would; a null stays null.
 
-    The table's current rows are checked in Python first, one call per distinct value, so a
-    bad value raises a clean `ValueError` here, whether the table is static or refreshing;
-    every table is then converted by a formula (`Table.update`), on every row of a static
-    table and every row that ticks in a refreshing one. Under `OnError.RAISE` a later bad row
-    of a refreshing table fails the table, and a dataset reading it as a watchlist fails too;
-    under `OnError.LOG` a bad row gets a null symbol, which every dataset ignores, and each
-    bad value is logged once at WARNING, at most 20 per table; under `OnError.IGNORE` it gets
-    a null symbol the same way, logged at DEBUG only. This function's `on_error` is its own: a
-    session's `MassiveConfig.noncanonical_symbols` does not apply to it. Call it on a thread with a
-    Deephaven execution context, as any table operation; the result belongs to the caller's
-    liveness scope. The conversion is pure, so
+    The table's current rows are checked in Python first, one call per distinct value; every
+    table is then converted by a formula (`Table.update`), on every row of a static table and
+    every row that ticks in a refreshing one. Under `OnError.LOG`, the default, a bad row gets
+    a null symbol, which every dataset ignores, and each bad value is logged once at WARNING,
+    at most 20 per table, so the table and every table that follows it keep updating; under
+    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. Under
+    `OnError.RAISE` a current bad value raises a clean `ValueError` here, and a later bad row
+    of a refreshing table fails the table, and a dataset reading it as a watchlist fails too.
+    This function's `on_error` is its own: a session's `MassiveConfig.noncanonical_symbols` does
+    not apply to it. Call it on a thread with a Deephaven execution context, as any table
+    operation; the result belongs to the caller's liveness scope. The conversion is pure, so
     Deephaven may run it on several threads at once.
 
     Example:
@@ -108,9 +109,9 @@ def canonicalize_symbols(
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
             for stocks only, `YAHOO`, `NASDAQ`, or `CMS`.
-        on_error: `OnError.RAISE` (the default) fails on a value that does not convert;
-            `OnError.LOG` writes a null symbol for it and logs the value once at WARNING;
-            `OnError.IGNORE` writes a null symbol and logs it at DEBUG only.
+        on_error: What a value that does not convert does. `OnError.LOG`, the default,
+            writes a null symbol for it and logs the value once at WARNING; `OnError.IGNORE`
+            writes a null symbol and logs it at DEBUG only; `OnError.RAISE` fails.
 
     Returns:
         A table with the same rows and columns, whose `column` holds canonical tickers (or
