@@ -62,8 +62,8 @@ _E = TypeVar("_E", bound=StrEnum)
 class AssetClass(StrEnum):
     """An asset class, named by its WebSocket cluster path.
 
-    Used to pin a WebSocket host (`MassiveConfig.ws_hosts`), in the diagnostics tables, and by
-    the reference endpoints that filter by asset class (`m.reference.ticker_types`,
+    Used to pin a WebSocket host (`MassiveConfig.websocket_hosts`), in the diagnostics tables, and
+    by the reference endpoints that filter by asset class (`m.reference.ticker_types`,
     `m.reference.exchanges`, `m.reference.conditions`). The values are the cluster paths
     (`wss://<host>/stocks`, ...). On the REST reference endpoints `FOREX` is sent as `fx`.
 
@@ -72,7 +72,7 @@ class AssetClass(StrEnum):
 
             import deephaven_massive as dm
 
-            cfg = dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
+            cfg = dm.MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
     """
 
     STOCKS = "stocks"
@@ -494,8 +494,8 @@ class OnError(StrEnum):
       is `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
-    - `MassiveConfig.unavailable_symbols`, for a symbol a `poll()` table cannot read from
-      Massive. The default is `LOG`.
+    - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
+      `history()`, or `poll()`, or one a `poll()` table cannot read. The default is `LOG`.
 
     The members:
 

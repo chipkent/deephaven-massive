@@ -273,13 +273,37 @@ def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | s
 
 
 class UnavailableSymbolError(PermanentError):
-    """A symbol a `poll()` cycle cannot read, under `MassiveConfig.unavailable_symbols=RAISE`.
+    """A symbol Massive cannot serve, under `MassiveConfig.unavailable_symbols=RAISE`.
 
-    Massive answered HTTP 404 for it (`ErrorCause.EXPECTED`), or its path does not take a
-    parameter the poll sends (`ErrorCause.USER_DEFECT`). Under `LOG` and `IGNORE` the cycle
-    leaves the symbol out instead and the table's `Error` lists it. A `poll()` table fails
-    with it.
+    Massive answered HTTP 404 for it (`ErrorCause.EXPECTED`), or, in a `poll()` cycle, its path
+    does not take a parameter the poll sends (`ErrorCause.USER_DEFECT`). Under `LOG` and
+    `IGNORE` the read leaves the symbol out instead, and a `poll()` table's `Error` lists it.
+    A `fetch()` or `history()` raises it, a followed `fetch()` marks the symbol `FAILED` with
+    it, and a `poll()` table fails with it.
     """
+
+
+def _missing_error(
+    spec: DatasetSpec, template: str, missing: Sequence[str]
+) -> UnavailableSymbolError:
+    """Return the failure of symbols with no data, under `unavailable_symbols=RAISE`.
+
+    Args:
+        spec: The dataset.
+        template: The path that answered HTTP 404.
+        missing: The symbols, in call order.
+
+    Returns:
+        The error, naming the symbols, the path, and the setting that would leave them out.
+    """
+    names = bounded_list(missing)
+    logger.debug("%s: no data for %s (HTTP 404 from %s); raising", spec.name, names, template)
+    return UnavailableSymbolError(
+        f"{spec.name}: no data for {names}: Massive answered HTTP 404 from {template}. "
+        "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to "
+        "leave it out and read the others",
+        cause=ErrorCause.EXPECTED,
+    )
 
 
 def _bare_index(request: Request, call: Call) -> str | None:
@@ -509,8 +533,8 @@ class RestReader:
         max_concurrency: The most requests of one fan-out at a time.
         unreadable_symbols: The session's setting for a symbol spelling the library cannot
             read (`MassiveConfig.unreadable_symbols`).
-        unavailable_symbols: The session's setting for a symbol a `poll()` cycle cannot read
-            from Massive (`MassiveConfig.unavailable_symbols`).
+        unavailable_symbols: The session's setting for a symbol the library cannot read from
+            Massive (`MassiveConfig.unavailable_symbols`), which every read follows.
         unlisted_symbols: The session's setting for a crypto pair of a symbol table that
             Massive's crypto ticker list does not hold (`MassiveConfig.unlisted_symbols`), which
             a `poll()` cycle follows (`_plan_cycle`).
@@ -801,17 +825,18 @@ class RestReader:
             on_missing: Given the path's template and the symbols of the read that Massive
                 answered with HTTP 404 (no data), in call order, when there are any; the
                 caller then logs them (a `poll()` cycle, under
-                `MassiveConfig.unavailable_symbols`). None to log them here: one WARNING per
-                read naming each symbol once per session.
+                `MassiveConfig.unavailable_symbols`). None to apply that setting here
+                (`_report_missing`).
 
         Returns:
             The rows, in call order and then page order, and the number of requests made.
 
         Errors: the public error of each `WireError` (`public_error`), `RowDataError` for a page
         whose every row was dropped, and the `MassiveError` of `_call` for a page on another
-        adjustment basis, its `CutShortError` for a symbol whose data was cut short, and the
-        `EntitlementError` of `_check_recency` for delayed data. A closed session raises
-        `MassiveError("... is closed")`.
+        adjustment basis, its `CutShortError` for a symbol whose data was cut short, the
+        `EntitlementError` of `_check_recency` for delayed data, and, with no `on_missing`, the
+        `UnavailableSymbolError` of `_report_missing` for a symbol Massive answered HTTP 404. A
+        closed session raises `MassiveError("... is closed")`.
         """
         converter = RowConverter.build(
             self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
@@ -838,7 +863,7 @@ class RestReader:
         if missing and on_missing is not None:
             on_missing(rest_path.template, missing)
         elif missing:
-            self._warn_missing(spec, rest_path.template, missing, level=logging.WARNING)
+            self._report_missing(spec, rest_path.template, missing)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -862,9 +887,11 @@ class RestReader:
         requests may span several paths. They run on this thread when there is one, else on a
         pool of `min(max_concurrency, requests)` threads made for this read, and listen to a
         `Cancel` token of the read's own (following `cancel`), which is also the read's lane in
-        the rate governor. Each is made as `read` makes it (`_call`), capped at `limit`, and
-        one WARNING per path names the symbols Massive answered HTTP 404
-        for on their first request, which have no rows.
+        the rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A
+        symbol Massive answered HTTP 404 on its first request has no data and follows
+        `MassiveConfig.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
+        line per path names it (`_report_missing`); under `RAISE` its result is an
+        `UnavailableSymbolError`.
 
         Args:
             spec: The dataset.
@@ -914,18 +941,21 @@ class RestReader:
             for (rest_path, _), outcome in zip(units, done, strict=True)
             if isinstance(outcome, _Outcome)
         ]
+        refused = self.unavailable_symbols is OnError.RAISE
         for template in converters:
             missing = [o.missing for t, o in answered if t == template and o.missing is not None]
-            if missing:
-                self._warn_missing(spec, template, missing, level=logging.WARNING)
-        results: list[pa.Table | MassiveError] = [
-            pa.Table.from_batches(
-                outcome.batches, schema=converters[rest_path.template].arrow_schema
-            )
-            if isinstance(outcome, _Outcome)
-            else outcome
-            for (rest_path, _), outcome in zip(units, done, strict=True)
-        ]
+            if missing and not refused:
+                self._report_missing(spec, template, missing)
+        results: list[pa.Table | MassiveError] = []
+        for (rest_path, _), outcome in zip(units, done, strict=True):
+            if not isinstance(outcome, _Outcome):
+                results.append(outcome)
+            elif refused and outcome.missing is not None:
+                # Under RAISE a symbol with no data fails alone; the others keep their rows.
+                results.append(_missing_error(spec, rest_path.template, [outcome.missing]))
+            else:
+                schema = converters[rest_path.template].arrow_schema
+                results.append(pa.Table.from_batches(outcome.batches, schema=schema))
         return results, sum(outcome.requests for _, outcome in answered)
 
     def _call_alone(
@@ -987,6 +1017,29 @@ class RestReader:
             )
             return error
 
+    def _report_missing(self, spec: DatasetSpec, template: str, missing: Sequence[str]) -> None:
+        """Apply `MassiveConfig.unavailable_symbols` to the symbols a read found no data for.
+
+        A `fetch()` or `history()` symbol Massive answered HTTP 404 has no data. Under `LOG` one
+        WARNING per read names each such symbol once per session, under `IGNORE` only DEBUG,
+        and the read leaves them out; under `RAISE` the read fails. A `poll()` cycle applies
+        the setting itself (`_unavailable`).
+
+        Args:
+            spec: The dataset.
+            template: The path's template.
+            missing: The symbols (a futures session's with its session), in call order.
+
+        Raises:
+            UnavailableSymbolError: Under `RAISE` (`_missing_error`).
+        """
+        setting = self.unavailable_symbols
+        if setting is OnError.RAISE:
+            error = _missing_error(spec, template, missing)
+            raise error
+        level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
+        self._warn_missing(spec, template, missing, level=level)
+
     def _warn_missing(
         self, spec: DatasetSpec, template: str, missing: Sequence[str], *, level: int
     ) -> None:
@@ -994,8 +1047,7 @@ class RestReader:
 
         One line per read names each symbol once per session at `level`, however many there
         are; the others, and every symbol under a `level` of DEBUG, log at DEBUG. A DEBUG line
-        marks no symbol as named, so a poll under `unavailable_symbols=IGNORE` never takes
-        the WARNING a later `fetch()` of the same symbol owes.
+        marks no symbol as named.
 
         Args:
             spec: The dataset.
@@ -2382,7 +2434,7 @@ class RestEndpoints:
             decision = host_decision.decide(
                 asset_class,
                 family,
-                ws_hosts=self._core.config.ws_hosts,
+                websocket_hosts=self._core.config.websocket_hosts,
                 delayed_subscriptions=self._core.config.delayed_subscriptions,
                 fetch=functools.partial(reader.probe, asset_class=asset_class, patience=patience),
             )

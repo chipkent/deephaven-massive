@@ -64,7 +64,9 @@ def run(
     **pinned: str,
 ) -> HostDecision:
     pins = {AssetClass[name.upper()]: host for name, host in pinned.items()}
-    return decide(asset_class, TICK, ws_hosts=pins, delayed_subscriptions=delayed, fetch=fetch)
+    return decide(
+        asset_class, TICK, websocket_hosts=pins, delayed_subscriptions=delayed, fetch=fetch
+    )
 
 
 def test_every_probe_is_a_generated_path_with_its_parameters() -> None:
@@ -86,7 +88,11 @@ def test_fmv_is_always_the_business_host() -> None:
     fetch = Snapshot()
     pinned = {AssetClass.STOCKS: "fullmarket.massive.com"}
     decision = decide(
-        AssetClass.STOCKS, FMV, ws_hosts=pinned, delayed_subscriptions=frozenset(), fetch=fetch
+        AssetClass.STOCKS,
+        FMV,
+        websocket_hosts=pinned,
+        delayed_subscriptions=frozenset(),
+        fetch=fetch,
     )
     assert (decision.host, decision.recency) == (BUSINESS_HOST, Recency.REALTIME)
     assert decision.evidence == "FMV is Business-only; fixed host (docs)"
@@ -99,7 +105,7 @@ def test_fmv_of_a_delayed_subscription_is_refused() -> None:
         decide(
             AssetClass.STOCKS,
             FMV,
-            ws_hosts={},
+            websocket_hosts={},
             delayed_subscriptions=frozenset({Subscription.STOCKS}),
             fetch=fetch,
         )
@@ -110,7 +116,7 @@ def test_fmv_of_a_delayed_subscription_is_refused() -> None:
 def test_a_pinned_tick_host_needs_no_request() -> None:
     fetch = Snapshot()
     decision = run(AssetClass.OPTIONS, fetch, options="opts.example.com")
-    assert decision == HostDecision("opts.example.com", Recency.UNKNOWN, "ws_hosts")
+    assert decision == HostDecision("opts.example.com", Recency.UNKNOWN, "websocket_hosts")
     assert fetch.probes == []
 
 
@@ -119,7 +125,7 @@ def test_a_pinned_delayed_host_is_delayed() -> None:
     decision = run(
         AssetClass.STOCKS, fetch, delayed=frozenset({Subscription.STOCKS}), stocks=DELAYED_HOST
     )
-    assert decision == HostDecision(DELAYED_HOST, Recency.DELAYED, "ws_hosts")
+    assert decision == HostDecision(DELAYED_HOST, Recency.DELAYED, "websocket_hosts")
     assert fetch.probes == []
 
 
@@ -198,7 +204,7 @@ def test_an_undocumented_timeframe_streams_real_time_data(
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
     assert "'END-OF-DAY'" in record.getMessage()
-    assert "ws_hosts={dm.AssetClass.STOCKS" in record.getMessage()
+    assert "websocket_hosts={dm.AssetClass.STOCKS" in record.getMessage()
 
 
 def test_delayed_beside_an_undocumented_timeframe_is_refused() -> None:
@@ -373,4 +379,4 @@ def test_only_a_snapshot_without_a_label_is_unlabelled_evidence(
     assert decision.evidence == "no timeframe in the stocks snapshot"
     assert unlabelled(decision.evidence)
     assert not unlabelled("last_trade.timeframe=REAL-TIME")
-    assert not unlabelled("ws_hosts")
+    assert not unlabelled("websocket_hosts")

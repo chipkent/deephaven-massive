@@ -957,7 +957,8 @@ class Query(QueryBase):
         (README.md#symbols). A table passed as `underlying=` or `product_code=` is read value by
         value, each as if passed alone: a static one once (a failed value fails the call), a
         refreshing one followed in the same way, keyed by the value. A symbol with no data (HTTP
-        404 on its first request) returns no rows, with a WARNING; HTTP 404 on a later page raises
+        404 on its first request) follows `MassiveConfig.unavailable_symbols`: by default it
+        returns no rows, with a WARNING; HTTP 404 on a later page raises
         `MassiveError`, since its data was cut short. Current data of a subscription not in
         `MassiveConfig.delayed_subscriptions` must be real-time: a response Massive labels
         `DELAYED` raises; a listed subscription's data is returned as the plan serves it, and the

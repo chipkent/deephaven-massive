@@ -117,7 +117,7 @@ def test_minute_bars_of_a_business_key_on_the_real_time_host(
     `AM.AAPL` and records the session's host, state, and acknowledgement. Passes when the
     stocks connection is on `socket.massive.com` and Massive acknowledged the topic there,
     which it does whether or not the market is open; a refusal there means the base Business
-    TICK host is another one, which the user pins with `MassiveConfig.ws_hosts`.
+    TICK host is another one, which the user pins with `MassiveConfig.websocket_hosts`.
     """
     table = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)

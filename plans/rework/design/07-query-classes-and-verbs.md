@@ -583,7 +583,8 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   snapshot of every contract is slow), and `m.<class>.bars(dm.ALL, dm.Timespan.DAY)
   .history(day, day)` for the previous day's bar (with `adjusted=False` for options and
   without `adjusted` for indices, whose `dm.ALL` daily bars only the flat files serve). A
-  symbol with no data (HTTP 404) is left out with a WARNING, as for every per-symbol path.
+  symbol with no data (HTTP 404) follows `MassiveConfig.unavailable_symbols`, as on every
+  per-symbol path: left out with a WARNING by default, or a failure under `RAISE`.
 - **The kind's columns.** Each one-row dataset is a member of its kind
   ([section 19.4](19-wire-clients-and-the-spec-snapshot.md#194-generated-schemas)), and its rows have the columns of its kind that its
   endpoint fills, under the kind's names and types, so a column it shares with
@@ -786,7 +787,7 @@ query re-reads it each cycle, as for `symbols`.
 
 | Cause | The symbol |
 |---|---|
-| HTTP 404 on the first request (Massive has no data) | `DONE` with 0 rows, and the existing WARNING |
+| HTTP 404 on the first request (Massive has no data) | `DONE` with 0 rows, and the existing WARNING (at DEBUG under `unavailable_symbols=IGNORE`); `FAILED`, permanent, under `unavailable_symbols=RAISE` |
 | Transient: a rate limit beyond the read's patience, a network failure, or a 5xx after the REST client's own retries | `RETRYING`, then read again 1, 5, and 15 minutes later; `FAILED` after the last |
 | Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold (logged as `MassiveConfig.unlisted_symbols` says; under `RAISE` it fails the table) | `FAILED` at once |
 

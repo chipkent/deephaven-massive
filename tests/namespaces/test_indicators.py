@@ -159,6 +159,24 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         i.sma("Q:NOPE", 20)
 
 
+def test_a_timespan_passed_as_the_window_names_the_keyword(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # bars() takes its timespan second; an indicator takes its window there.
+    i = massive_session.indicators
+    keyword = "timespan is keyword-only, so pass it by name"
+    with pytest.raises(
+        TypeError, match=rf"^window must be an int, not Timespan\.MINUTE: {keyword}"
+    ):
+        i.sma("AAPL", cast("int", dm.Timespan.MINUTE))
+    with pytest.raises(TypeError, match=rf"^window must be an int, not 'hour': {keyword}"):
+        i.rsi("AAPL", cast("int", "hour"))
+    with pytest.raises(TypeError, match=r"^short_window must be an int, not Timespan\.DAY: "):
+        i.macd("AAPL", short_window=cast("int", dm.Timespan.DAY))
+    with pytest.raises(TypeError, match=r"^window must be an int, not float$"):
+        i.ema("AAPL", cast("int", 2.5))
+
+
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
     factories: list[Callable[..., Query]] = [

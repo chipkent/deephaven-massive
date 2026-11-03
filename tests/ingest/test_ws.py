@@ -295,7 +295,7 @@ def test_a_refused_topic_fails_only_its_streams(
         "socket.test/stocks refused the subscription to Q.AAPL; Massive said: not authorized "
         "to access Q.AAPL"
     ) in rows[1]["Error"]
-    assert "MassiveConfig.ws_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
+    assert "MassiveConfig.websocket_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
     ws_session.send(trade("AAPL"))
     ws_session.flush()
     rows_when(trades, lambda rows: len(rows) == 1)  # the connection kept running

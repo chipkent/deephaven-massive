@@ -12,6 +12,7 @@ is checked against the real tree and against synthetic namespaces that break it.
 import collections.abc
 import dataclasses
 import datetime as dt
+import importlib
 import inspect
 import logging
 import re
@@ -23,7 +24,8 @@ from typing import Any, ClassVar, Literal, cast, overload
 import numpy as np
 import pytest
 from deephaven import new_table
-from deephaven.column import string_col
+from deephaven.column import int_col, string_col
+from deephaven.time import to_j_instant, to_j_local_date
 
 import deephaven_massive as dm
 from deephaven_massive import _enums, _query, _types
@@ -40,6 +42,7 @@ from deephaven_massive._namespaces.query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     _is_default,
+    _time_value,
     accepted_values,
     adjustment_notes,
     build_query,
@@ -47,6 +50,7 @@ from deephaven_massive._namespaces.query_building import (
     one_or_any_of,
     optional_text,
     require_bool,
+    value_table,
 )
 from deephaven_massive._query import (
     HistoryQuery,
@@ -98,6 +102,8 @@ DIVIDENDS = DatasetSpec(
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
 )
+pd: Any = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+
 INDICATOR = DatasetSpec(
     name="indicators.sma",
     summary="A dataset for the tests.",
@@ -312,6 +318,45 @@ def test_naive_datetime_filters_and_params_are_rejected(
     assert build(massive_session, INDICATOR, filters={"timestamp_gte": aware})._request.filters
 
 
+def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The indicator timestamps take whole milliseconds, as their ISO-8601 text does.
+    instant = to_j_instant("2025-01-02T14:30:00.001Z")
+    filters = build(
+        massive_session,
+        INDICATOR,
+        filters={
+            "timestamp_gte": instant,
+            "timestamp_lt": pd.Timestamp("2025-01-02T14:30:00.002Z"),
+        },
+    )._request.filters
+    assert filters == (
+        ("timestamp_gte", datetime(2025, 1, 2, 14, 30, 0, 1000, tzinfo=UTC)),
+        ("timestamp_lt", datetime(2025, 1, 2, 14, 30, 0, 2000, tzinfo=UTC)),
+    )
+    assert all(type(value) is datetime for _, value in filters)
+    for day in (to_j_local_date("2025-01-02"), np.datetime64("2025-01-02")):
+        assert build(
+            massive_session, INDICATOR, filters={"timestamp_gte": day}
+        )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
+    # A Java day in a list is a day; the next element is the first the list refuses.
+    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
+        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})
+    # An instant between two microseconds rounds outward: an upper bound up, any other down,
+    # whether the name is a filter key or a wire name.
+    between = to_j_instant("2025-01-02T14:30:00.000001001Z")
+    down = datetime(2025, 1, 2, 14, 30, 0, 1, tzinfo=UTC)
+    up = datetime(2025, 1, 2, 14, 30, 0, 2, tzinfo=UTC)
+    assert _time_value("timestamp_gte", between) == down
+    assert _time_value("timestamp_gt", between) == down
+    assert _time_value("timestamp_lt", between) == up
+    assert _time_value("timestamp.lte", between) == up
+    naive = pd.Timestamp("2025-01-02 09:30")
+    with pytest.raises(ValueError, match=r"^timestamp_gte=.* needs a timezone"):
+        build(massive_session, INDICATOR, filters={"timestamp_gte": naive})
+
+
 def test_accepted_values_read_the_generated_enum(massive_session: dm.MassiveSession) -> None:
     sma = CATALOG.by_name["indicators.sma"]
     spans = accepted_values(massive_session._core, sma, "timespan")
@@ -481,7 +526,29 @@ def test_a_symbol_table_needs_a_symbol_column(
         build(massive_session, TRADES_SPEC, symbols=table)
 
 
-# The query class of a dataset.
+def test_a_column_of_tickers_or_codes_must_hold_text(
+    massive_session: dm.MassiveSession, dh_exec_ctx: object
+) -> None:
+    # A column of numbers would otherwise fail inside the verb, naming no column.
+    numbers = new_table([int_col("Symbol", [1]), int_col("ProductCode", [2])])
+    with pytest.raises(
+        ValueError,
+        match=r"^the Symbol column of a symbol table must be a String column; this one holds int",
+    ):
+        build(massive_session, TRADES_SPEC, symbols=numbers)
+    with pytest.raises(
+        ValueError, match=r"^the ProductCode column of a table passed as product_code must be a"
+    ):
+        value_table(numbers, argument="product_code", parameter="product_code", underlying=False)
+    # A pandas Series of tickers is a sequence of str, so it reads as a list does.
+    texts = new_table([string_col("Symbol", ["AAPL"])])
+    assert build(massive_session, TRADES_SPEC, symbols=pd.Series(["AAPL"])) == build(
+        massive_session, TRADES_SPEC, symbols=["AAPL"]
+    )
+    assert value_table(texts, argument="underlying", parameter="u", underlying=True).table is texts
+
+
+# The query class of a dataset.)
 
 _FETCH = {"fetch_path": "/v2/last/trade/{stocksTicker}"}
 _HISTORY = {"history_path": "/v3/trades/{stockTicker}"}

@@ -160,8 +160,8 @@ drop less this window, not from the last frame, which may be hours old."""
 
 CONNECTION_SETTINGS: Final = (
     "api_key",
-    "ws_hosts",
-    "ack_timeout",
+    "websocket_hosts",
+    "subscription_confirmation_timeout",
     "reconnect_backoff",
     "max_reconnect_backoff",
     "max_outage",
@@ -447,7 +447,7 @@ class Connection:
         self.subscriptions: Final = Subscriptions(
             self._client,
             call_later=self._client.loop.call_later,
-            ack_timeout=group.ack_timeout,
+            subscription_confirmation_timeout=group.subscription_confirmation_timeout,
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
             on_change=self._changed,
@@ -1070,24 +1070,25 @@ class Connection:
             refused: The refused topics.
 
         Returns:
-            On a pinned host, that `MassiveConfig.ws_hosts` chooses it; on the delayed feed, that
-            the subscription is listed in `delayed_subscriptions` and that removing it uses the
-            real-time feed; on the real-time feed of a key whose snapshot showed real-time data,
-            that its plan or an add-on may not include the data (such a key has nothing to gain from
-            the delayed feed); on the real-time feed of a key whose snapshot carried no label (a
-            base Business key's), that `ws_hosts` pins the host the plan serves it on, or the
-            delayed feed if its data is delayed; on the real-time feed of a key whose snapshot
+            On a pinned host, that `MassiveConfig.websocket_hosts` chooses it; on the delayed
+            feed, that the subscription is listed in `delayed_subscriptions` and that removing it
+            uses the real-time feed; on the real-time feed of a key whose snapshot showed
+            real-time data, that its plan or an add-on may not include the data (such a key has
+            nothing to gain from the delayed feed); on the real-time feed of a key whose snapshot
+            carried no label (a
+            base Business key's), that `websocket_hosts` pins the host the plan serves it on, or
+            the delayed feed if its data is delayed; on the real-time feed of a key whose snapshot
             Massive refused (a Basic key's), that the plan has no live data on either feed and
             that REST reads it instead; on the real-time feed otherwise, how to use
             Massive's delayed feed instead; for fair-market-value topics, that they need a Business
-            plan; on another host, that `ws_hosts` chooses it; and for index values, that they may
-            need `business.massive.com`.
+            plan; on another host, that `websocket_hosts` chooses it; and for index values, that
+            they may need `business.massive.com`.
         """
         subscription = subscription_of(self.asset_class)
-        if self.decision.evidence == "ws_hosts":
+        if self.decision.evidence == "websocket_hosts":
             hint = (
-                f"MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] pins this host; "
-                "the plan may not include this data here"
+                f"MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] pins this "
+                "host; the plan may not include this data here"
             )
         elif self.decision.host.startswith(DELAYED_PREFIX):
             hint = (
@@ -1106,8 +1107,8 @@ class Connection:
             hint = (
                 f"the {subscription} snapshot carried no recency label, as a Business plan's "
                 "without the trades and quotes expansion does, so the plan may serve this data "
-                "on another host: pin it with "
-                f'MassiveConfig(ws_hosts={{dm.AssetClass.{self.asset_class.name}: "<host>"}}); '
+                "on another host: pin it with MassiveConfig(websocket_hosts="
+                f'{{dm.AssetClass.{self.asset_class.name}: "<host>"}}); '
                 f"if the plan's data is delayed instead, use Massive's delayed {subscription} "
                 f"feed: {delayed_fix(subscription)}"
             )
@@ -1126,13 +1127,13 @@ class Connection:
         elif any(channel_of(t) == _FMV_CHANNEL for t in refused):
             hint = (
                 "fair-market-value (FMV) data needs a Business plan of the "
-                f"{subscription} subscription; MassiveConfig.ws_hosts never applies to it"
+                f"{subscription} subscription; MassiveConfig.websocket_hosts never applies to it"
             )
         else:
             hint = (
                 f"the {subscription} subscription's plan may not include this data on this "
-                f"host; MassiveConfig.ws_hosts[AssetClass.{self.asset_class.name}] chooses the "
-                "host"
+                f"host; MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] chooses "
+                "the host"
             )
         if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
             hint += " (index values may need business.massive.com)"
@@ -1228,20 +1229,20 @@ class Connection:
 
         The client asks before each reconnect wait. A stream held down by the outage fails
         when its timer fires, so the next attempt must authenticate, and its subscriptions be
-        acknowledged within `ack_timeout`, before the earliest timer: the client shortens its
-        wait to fit (never below the reconnect backoff). The waits alone (30, 60, then 100 to
-        120 seconds) would otherwise put the last attempt before a 300-second `max_outage`
-        too late to save it.
+        acknowledged within `subscription_confirmation_timeout`, before the earliest timer: the
+        client shortens its wait to fit (never below the reconnect backoff). The waits alone (30,
+        60, then 100 to 120 seconds) would otherwise put the last attempt before a 300-second
+        `max_outage` too late to save it.
 
         Returns:
-            The earliest held-down stream's time left, less `ack_timeout`, in seconds; None
-            when no stream is held down.
+            The earliest held-down stream's time left, less `subscription_confirmation_timeout`, in
+            seconds; None when no stream is held down.
         """
         timers = self._episodes.down.values()
         if not timers:
             return None
         earliest = min(timer.when() for timer in timers)
-        return earliest - self._client.loop.time() - self._group.ack_timeout
+        return earliest - self._client.loop.time() - self._group.subscription_confirmation_timeout
 
     def _hold_down(self, stream_id: int, left: float, *, since: float) -> None:
         """Hold a stream down in the outage: it fails in `left` seconds unless it recovers.
@@ -1709,7 +1710,7 @@ def _sharing_value(name: str, value: object) -> Hashable:
 
     The key is process-wide and public (`ConnectionGroup.key`), so the API key appears as its
     SHA-256 digest, never itself: no repr or traceback of the key can show the secret. A mapping
-    (`ws_hosts`) becomes a frozenset of its items.
+    (`websocket_hosts`) becomes a frozenset of its items.
 
     Args:
         name: One of `CONNECTION_SETTINGS`.
@@ -1762,7 +1763,7 @@ class ConnectionGroup:
         *,
         label: str,
         factory: ClientFactory,
-        ack_timeout: float,
+        subscription_confirmation_timeout: float,
         flush_interval: float,
         max_outage: float,
     ) -> None:
@@ -1774,7 +1775,8 @@ class ConnectionGroup:
                 connections run (their clients and flush threads), since
                 they serve several sessions.
             factory: Creates each connection's client.
-            ack_timeout: `MassiveConfig.ack_timeout` of its sessions.
+            subscription_confirmation_timeout: `MassiveConfig.subscription_confirmation_timeout`
+                of its sessions.
             flush_interval: `MassiveConfig.flush_interval` of its sessions.
             max_outage: `MassiveConfig.max_outage` of its sessions, in seconds.
         """
@@ -1782,7 +1784,7 @@ class ConnectionGroup:
         self.label: Final = label
         self.lock: Final = threading.RLock()
         self.factory: Final = factory
-        self.ack_timeout: Final = ack_timeout
+        self.subscription_confirmation_timeout: Final = subscription_confirmation_timeout
         self.flush_interval: Final = flush_interval
         self.max_outage: Final = max_outage
         # Guarded by lock.
@@ -1835,7 +1837,7 @@ class ConnectionGroup:
                     key,
                     label=label,
                     factory=factory,
-                    ack_timeout=config.ack_timeout,
+                    subscription_confirmation_timeout=config.subscription_confirmation_timeout,
                     flush_interval=config.flush_interval,
                     max_outage=config.max_outage,
                 )

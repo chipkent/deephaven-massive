@@ -117,8 +117,8 @@ def test_partial_s3_credentials_are_rejected() -> None:
 def test_defaults(base: MassiveConfig) -> None:
     assert base.s3_access_key_id is None
     assert base.s3_secret_access_key is None
-    assert dict(base.ws_hosts) == {}
-    assert base.ack_timeout == 5.0
+    assert dict(base.websocket_hosts) == {}
+    assert base.subscription_confirmation_timeout == 5.0
     assert base.reconnect_backoff == 30.0
     assert base.max_reconnect_backoff == 120.0
     assert base.max_outage == 300.0
@@ -199,10 +199,10 @@ def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("ack_timeout", 0.0),
+        ("subscription_confirmation_timeout", 0.0),
         ("flush_interval", -1.0),
-        ("ack_timeout", float("inf")),
-        ("ack_timeout", float("nan")),
+        ("subscription_confirmation_timeout", float("inf")),
+        ("subscription_confirmation_timeout", float("nan")),
         ("max_concurrency", 0),
         ("flat_file_symbol_threshold", -5),
     ],
@@ -213,17 +213,24 @@ def test_positive_numbers(base: MassiveConfig, name: str, value: float) -> None:
 
 
 @pytest.mark.parametrize("value", [60.0, 90.0])
-def test_ack_timeout_is_below_the_no_ack_resend_interval(base: MassiveConfig, value: float) -> None:
-    with pytest.raises(ValueError, match=r"ack_timeout must be below 60 s, not \d+: "):
-        _replace(base, ack_timeout=value)
-    assert _replace(base, ack_timeout=59.0).ack_timeout == 59.0
+def test_subscription_confirmation_timeout_is_below_the_no_ack_resend_interval(
+    base: MassiveConfig, value: float
+) -> None:
+    with pytest.raises(
+        ValueError, match=r"subscription_confirmation_timeout must be below 60 s, not \d+: "
+    ):
+        _replace(base, subscription_confirmation_timeout=value)
+    assert (
+        _replace(base, subscription_confirmation_timeout=59.0).subscription_confirmation_timeout
+        == 59.0
+    )
 
 
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("ack_timeout", "5"),
-        ("ack_timeout", True),
+        ("subscription_confirmation_timeout", "5"),
+        ("subscription_confirmation_timeout", True),
         ("max_concurrency", 2.5),
         ("max_concurrency", False),
     ],
@@ -233,14 +240,14 @@ def test_numeric_types(base: MassiveConfig, name: str, value: object) -> None:
         _replace(base, **{name: value})
 
 
-def test_ws_hosts_are_validated_and_frozen() -> None:
+def test_websocket_hosts_are_validated_and_frozen() -> None:
     hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
-    cfg = MassiveConfig(api_key="k", ws_hosts=hosts)
-    assert dict(cfg.ws_hosts) == {AssetClass.STOCKS: "fullmarket-business.massive.com"}
+    cfg = MassiveConfig(api_key="k", websocket_hosts=hosts)
+    assert dict(cfg.websocket_hosts) == {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     hosts[AssetClass.OPTIONS] = "x.massive.com"
-    assert AssetClass.OPTIONS not in cfg.ws_hosts
+    assert AssetClass.OPTIONS not in cfg.websocket_hosts
     with pytest.raises(TypeError):
-        cast("dict[AssetClass, str]", cfg.ws_hosts)[AssetClass.OPTIONS] = "y"
+        cast("dict[AssetClass, str]", cfg.websocket_hosts)[AssetClass.OPTIONS] = "y"
 
 
 @pytest.mark.parametrize(
@@ -253,29 +260,30 @@ def test_ws_hosts_are_validated_and_frozen() -> None:
         "-a.com",
     ],
 )
-def test_ws_hosts_must_be_bare_hostnames(host: str) -> None:
+def test_websocket_hosts_must_be_bare_hostnames(host: str) -> None:
     with pytest.raises(ValueError, match="bare hostname"):
-        MassiveConfig(api_key="k", ws_hosts={AssetClass.STOCKS: host})
+        MassiveConfig(api_key="k", websocket_hosts={AssetClass.STOCKS: host})
 
 
 @pytest.mark.parametrize(
     "host", [" delayed.massive.com", "delayed.massive.com ", "Delayed.Massive.com"]
 )
-def test_ws_hosts_are_taken_exactly_as_written(host: str) -> None:
+def test_websocket_hosts_are_taken_exactly_as_written(host: str) -> None:
     # Never trimmed or lower-cased; the message names the hostname to write.
     with pytest.raises(ValueError, match=r"; write 'delayed\.massive\.com'$"):
-        MassiveConfig(api_key="k", ws_hosts={AssetClass.STOCKS: host})
+        MassiveConfig(api_key="k", websocket_hosts={AssetClass.STOCKS: host})
 
 
-def test_ws_hosts_types(base: MassiveConfig) -> None:
+def test_websocket_hosts_types(base: MassiveConfig) -> None:
     with pytest.raises(
-        TypeError, match=r"^ws_hosts key must be dm\.AssetClass, e\.g\. dm\.AssetClass\.STOCKS$"
+        TypeError,
+        match=r"^websocket_hosts key must be dm\.AssetClass, e\.g\. dm\.AssetClass\.STOCKS$",
     ):
-        _replace(base, ws_hosts={"stocks": "delayed.massive.com"})
+        _replace(base, websocket_hosts={"stocks": "delayed.massive.com"})
     with pytest.raises(TypeError, match="must be a hostname str"):
-        _replace(base, ws_hosts={AssetClass.STOCKS: 5})
-    with pytest.raises(TypeError, match="ws_hosts must be a mapping"):
-        _replace(base, ws_hosts=["delayed.massive.com"])
+        _replace(base, websocket_hosts={AssetClass.STOCKS: 5})
+    with pytest.raises(TypeError, match="websocket_hosts must be a mapping"):
+        _replace(base, websocket_hosts=["delayed.massive.com"])
 
 
 def test_rest_basic_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
@@ -353,14 +361,16 @@ def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
     with pytest.raises(
         ValueError,
-        match=r"^ws_hosts pins options to the delayed feed delayed\.massive\.com, but "
+        match=r"^websocket_hosts pins options to the delayed feed delayed\.massive\.com, but "
         r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
         r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\)$",
     ):
-        _replace(base, ws_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
+        _replace(base, websocket_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
     # Any host named as a delayed feed asks for delayed data.
-    with pytest.raises(ValueError, match=r"^ws_hosts pins stocks to the delayed feed delayed\.x"):
-        _replace(base, ws_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
+    with pytest.raises(
+        ValueError, match=r"^websocket_hosts pins stocks to the delayed feed delayed\.x"
+    ):
+        _replace(base, websocket_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.FOREX, AssetClass.CRYPTO])
@@ -370,20 +380,20 @@ def test_forex_and_crypto_cannot_pin_a_delayed_feed(
     with pytest.raises(
         ValueError, match=r"Massive has no delayed forex or crypto feed; remove the pin$"
     ):
-        _replace(base, ws_hosts={asset_class: "delayed.massive.com"})
+        _replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
 
 
 def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:
     with pytest.raises(
         ValueError,
         match=r"^delayed_subscriptions lists dm\.Subscription\.STOCKS, whose streams use "
-        r"Massive's delayed feed delayed\.massive\.com, but ws_hosts pins stocks to "
+        r"Massive's delayed feed delayed\.massive\.com, but websocket_hosts pins stocks to "
         r"socket\.massive\.com; remove one of the two$",
     ):
         _replace(
             base,
             delayed_subscriptions={Subscription.STOCKS},
-            ws_hosts={AssetClass.STOCKS: "socket.massive.com"},
+            websocket_hosts={AssetClass.STOCKS: "socket.massive.com"},
         )
 
 
@@ -391,9 +401,12 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     cfg = _replace(
         base,
         delayed_subscriptions={Subscription.STOCKS},
-        ws_hosts={AssetClass.STOCKS: "delayed.massive.com", AssetClass.OPTIONS: "o.example.com"},
+        websocket_hosts={
+            AssetClass.STOCKS: "delayed.massive.com",
+            AssetClass.OPTIONS: "o.example.com",
+        },
     )
-    assert cfg.ws_hosts[AssetClass.STOCKS] == "delayed.massive.com"
+    assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
 _SYMBOL_SETTINGS = [
@@ -429,14 +442,14 @@ def test_api_key_must_be_a_string() -> None:
 
 def test_configs_are_hashable_and_compare_by_value() -> None:
     hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
-    a = MassiveConfig(api_key="k", ws_hosts=hosts)
-    b = MassiveConfig(api_key="k", ws_hosts=dict(hosts))
+    a = MassiveConfig(api_key="k", websocket_hosts=hosts)
+    b = MassiveConfig(api_key="k", websocket_hosts=dict(hosts))
     assert a == b
     assert hash(a) == hash(b)
     assert len({a, b, MassiveConfig(api_key="k")}) == 2
-    assert repr(a.ws_hosts) == repr(hosts)
-    assert len(a.ws_hosts) == 1
-    assert list(a.ws_hosts) == [AssetClass.STOCKS]
+    assert repr(a.websocket_hosts) == repr(hosts)
+    assert len(a.websocket_hosts) == 1
+    assert list(a.websocket_hosts) == [AssetClass.STOCKS]
 
 
 def test_equal_backoffs_are_accepted() -> None:
@@ -510,7 +523,7 @@ def test_the_text_settings_must_be_strings(base: MassiveConfig, name: str) -> No
 def test_a_refused_ws_host_never_shows_a_password() -> None:
     with pytest.raises(ValueError, match=r"got '\*\*\*@delayed\.massive\.com'$") as info:
         dm.MassiveConfig(
-            api_key="k", ws_hosts={dm.AssetClass.STOCKS: "u:hunter2@delayed.massive.com"}
+            api_key="k", websocket_hosts={dm.AssetClass.STOCKS: "u:hunter2@delayed.massive.com"}
         )
     assert "hunter2" not in str(info.value)
 
@@ -558,10 +571,10 @@ def test_a_file_sets_every_field_once(tmp_path: Path) -> None:
         tmp_path,
         """\
 # Every setting a file may hold.
-ws_hosts:
+websocket_hosts:
   options: delayed.massive.com
   stocks: fullmarket-business.massive.com
-ack_timeout: 4.5
+subscription_confirmation_timeout: 4.5
 reconnect_backoff: 20
 max_reconnect_backoff: 1e2
 max_outage: 0
@@ -582,11 +595,11 @@ unavailable_symbols: raise
     )
     expected = MassiveConfig(
         api_key="k",
-        ws_hosts={
+        websocket_hosts={
             AssetClass.OPTIONS: "delayed.massive.com",
             AssetClass.STOCKS: "fullmarket-business.massive.com",
         },
-        ack_timeout=4.5,
+        subscription_confirmation_timeout=4.5,
         reconnect_backoff=20.0,
         max_reconnect_backoff=100.0,
         max_outage=0.0,
@@ -763,7 +776,7 @@ def test_a_second_document_is_refused(tmp_path: Path) -> None:
         ("s3_bucket: !!str ON\n", ", line 1, column 12: a tag (tag:yaml.org,2002:str) is not"),
         ("s3_bucket: !custom ON\n", ", line 1, column 12: a tag (!custom) is not allowed"),
         ("delayed_subscriptions: !!seq [options]\n", ", line 1, column 24: a tag"),
-        ("ws_hosts: !!map {stocks: a.example.com}\n", ", line 1, column 11: a tag"),
+        ("websocket_hosts: !!map {stocks: a.example.com}\n", ", line 1, column 18: a tag"),
         ("!!python/name:os.system max_outage: 1\n", ", line 1, column 1: a tag"),
     ],
 )
@@ -772,12 +785,14 @@ def test_a_tag_is_refused(tmp_path: Path, text: str, expected: str) -> None:
 
 
 def test_an_anchor_and_an_alias_are_refused(tmp_path: Path) -> None:
-    message = _refused(tmp_path, "max_outage: &seconds 300\nack_timeout: *seconds\n")
+    message = _refused(
+        tmp_path, "max_outage: &seconds 300\nsubscription_confirmation_timeout: *seconds\n"
+    )
     assert message == (
         ", line 1, column 13: an anchor (&seconds) is not allowed; write each value out"
     )
-    message = _refused(tmp_path, "max_outage: 300\nack_timeout: *seconds\n")
-    assert message == ", line 2, column 14: an alias (*name) is not allowed; write the value out"
+    message = _refused(tmp_path, "max_outage: 300\nsubscription_confirmation_timeout: *seconds\n")
+    assert message == ", line 2, column 36: an alias (*name) is not allowed; write the value out"
 
 
 def test_deep_nesting_is_refused_at_its_line_instead_of_overflowing_the_stack(
@@ -911,7 +926,10 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         ("max_outage: .inf\n", ", line 1, column 13: max_outage '.inf' is not a finite"),
         ("max_outage: nan\n", ", line 1, column 13: max_outage 'nan' is not a finite"),
         ("max_outage: 1e999\n", ", line 1, column 13: max_outage '1e999' is not a finite"),
-        ("ack_timeout: 0700\n", ", line 1, column 14: ack_timeout '0700' is not a finite"),
+        (
+            "subscription_confirmation_timeout: 0700\n",
+            ", line 1, column 36: subscription_confirmation_timeout '0700' is not a finite",
+        ),
         ("flush_interval: 1_0\n", ", line 1, column 17: flush_interval '1_0' is not a finite"),
         ("flush_interval: \n", ", line 1, column 16: flush_interval '' is not a finite"),
         (
@@ -930,26 +948,26 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         ),
         # The host mapping.
         (
-            "ws_hosts: delayed.massive.com\n",
+            "websocket_hosts: delayed.massive.com\n",
             (
-                ", line 1, column 11: ws_hosts must be a mapping of "
+                ", line 1, column 18: websocket_hosts must be a mapping of "
                 "asset class to hostname, such as {stocks: delayed.massive.com}"
             ),
         ),
         (
-            "ws_hosts: {Stocks: a.example.com}\n",
+            "websocket_hosts: {Stocks: a.example.com}\n",
             (
-                ", line 1, column 12: ws_hosts 'Stocks' is not "
+                ", line 1, column 19: websocket_hosts 'Stocks' is not "
                 "an asset class; write one of stocks, options, futures, indices, forex, crypto"
             ),
         ),
         (
-            "ws_hosts:\n  stocks: a.example.com\n  stocks: b.example.com\n",
-            ", line 3, column 3: ws_hosts pins 'stocks' twice",
+            "websocket_hosts:\n  stocks: a.example.com\n  stocks: b.example.com\n",
+            ", line 3, column 3: websocket_hosts pins 'stocks' twice",
         ),
         (
-            "ws_hosts: {stocks: [a.example.com]}\n",
-            ", line 1, column 20: ws_hosts must be a hostname, not a list or mapping",
+            "websocket_hosts: {stocks: [a.example.com]}\n",
+            ", line 1, column 27: websocket_hosts must be a hostname, not a list or mapping",
         ),
         # The counts: more digits than Python converts, without echoing them.
         (
@@ -993,11 +1011,11 @@ def test_tickers_like_on_and_no_stay_text(tmp_path: Path) -> None:
     # YAML 1.1 reads ON, NO, Y, and off as booleans, and 0700 as octal; the file keeps text.
     file = _settings(
         tmp_path,
-        "s3_bucket: NO\nws_hosts: {stocks: y}\n",
+        "s3_bucket: NO\nwebsocket_hosts: {stocks: y}\n",
     )
     config = MassiveConfig.from_file(file)
     assert config.s3_bucket == "NO"
-    assert config.ws_hosts[AssetClass.STOCKS] == "y"
+    assert config.websocket_hosts[AssetClass.STOCKS] == "y"
 
 
 @pytest.mark.usefixtures("key")
@@ -1011,8 +1029,10 @@ def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path
     assert message.startswith(
         ", line 1, column 1: delayed_subscriptions cannot hold dm.Subscription.CURRENCIES"
     )
-    message = _refused(tmp_path, "ws_hosts: {stocks: Socket.massive.com}\n")
-    assert message.startswith(", line 1, column 1: ws_hosts[stocks]='Socket.massive.com' must")
+    message = _refused(tmp_path, "websocket_hosts: {stocks: Socket.massive.com}\n")
+    assert message.startswith(
+        ", line 1, column 1: websocket_hosts[stocks]='Socket.massive.com' must"
+    )
     message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
     assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
     message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")

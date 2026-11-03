@@ -832,12 +832,12 @@ noncanonical_symbols: raise
 # stream, fetch(), or poll(): raise, log (leave it out), or ignore (the same, quietly).
 unlisted_symbols: log
 
-# A symbol a poll cannot read from Massive (no data, or an argument its endpoint does not
-# take): log (leave it out and keep polling), ignore (the same, quietly), or raise (stop).
+# A symbol Massive has no data for, in fetch(), history(), or poll(), or one a poll's endpoint
+# cannot take an argument for: log (leave it out), ignore (the same, quietly), or raise (fail).
 unavailable_symbols: log
 
 # Pin the WebSocket host of an asset class; the library chooses when you leave this out.
-ws_hosts:
+websocket_hosts:
   options: delayed.massive.com
 ```
 
@@ -1016,7 +1016,8 @@ aapl = board.where("Symbol == `AAPL`")
 ```
 
 A `history()` or `fetch()` that follows a watchlist reads each symbol on its own, so one bad
-symbol never stops the table: Massive's "no data" gives that symbol no rows, a passing failure
+symbol never stops the table: Massive's "no data" gives that symbol no rows (or, under
+`MassiveConfig(unavailable_symbols=dm.OnError.RAISE)`, marks it failed), a passing failure
 (a rate limit, a dropped connection) is retried after 1, 5, and 15 minutes, and a refusal marks
 that symbol failed in `m.symbol_reads()`; delete and re-add its row to read it again. Only a
 rejected API key, a closed session, a failed watchlist, or a library bug fails the whole table.
@@ -1197,6 +1198,9 @@ parameter's name, with its dots written as underscores, to a value:
 `m.options.contracts(underlying="SPY", filters={"strike_price_gte": 600})`. Each dataset's
 reference page lists the keys it accepts. A key the endpoint does not take, or one that has its
 own argument (`start`, `symbols`, `adjusted`), is refused with `ValueError` naming the valid keys.
+A date or time filter takes ISO-8601 text or any date or time object that [`start` and
+`end`](#start-and-end) take: a `date`, an aware `datetime` or `pandas.Timestamp`, a Deephaven
+`LocalDate`, `Instant`, or `ZonedDateTime`, or a `numpy.datetime64`.
 
 <a id="adjusted"></a>
 

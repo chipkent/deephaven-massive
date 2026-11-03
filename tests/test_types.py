@@ -40,7 +40,8 @@ def test_date_and_filter_aliases() -> None:
         bool,
         date,
         datetime,
-        Sequence[str | int | float | date],
+        np.datetime64,
+        Sequence[str | int | float | date | np.datetime64],
     }
 
 

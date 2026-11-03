@@ -60,7 +60,7 @@ from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.session_core import SessionCore
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive._tables.transports import HostDecision, SymbolFailure, SymbolRows
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
@@ -4478,6 +4478,46 @@ def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
     assert len(debug) == 4  # each symbol of each read
     assert all(r.startswith("stocks.trades: ") and "HTTP 404 from" in r for r in debug)
     assert any("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker}" in r for r in debug)
+
+
+def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data(
+    *, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    day = date(2025, 3, 3)
+    no_data = (
+        r"^stocks\.trades: no data for 1 \[ZZZZ\]: Massive answered HTTP 404 from "
+        r"/v3/trades/\{stockTicker\}\. Remove the symbol, or set "
+        r"MassiveConfig\(unavailable_symbols=dm\.OnError\.LOG\)"
+    )
+
+    def session_with(setting: dm.OnError) -> dm.MassiveSession:
+        return dm.MassiveSession(
+            dm.MassiveConfig(
+                api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
+            )
+        )
+
+    # IGNORE leaves the symbol out, as LOG does, and names it only at DEBUG.
+    with session_with(dm.OnError.IGNORE) as m, caplog.at_level(logging.DEBUG, LOGGER):
+        history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("no data for 1 [ZZZZ]" in r.getMessage() for r in caplog.records)
+    with session_with(dm.OnError.RAISE) as m:
+        # A static read fails, naming the symbol and the setting that would leave it out.
+        with pytest.raises(rest.UnavailableSymbolError, match=no_data):
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
+        # A read by symbol fails that symbol alone; the others keep their rows.
+        asked = Request(start=day, end=day)
+        window = history_window(TRADES, asked, start=day, end=day, classes=())
+        transport = m._core.rest_transport()
+        out = transport.history_by_symbol(TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1)
+    assert isinstance(out["MSFT"], SymbolRows)
+    failed = out["ZZZZ"]
+    assert isinstance(failed, SymbolFailure)
+    assert isinstance(failed.error, rest.UnavailableSymbolError)
+    assert re.match(no_data, str(failed.error))
 
 
 def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(

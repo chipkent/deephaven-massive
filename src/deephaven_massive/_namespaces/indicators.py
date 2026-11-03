@@ -143,6 +143,36 @@ def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> T
     return span
 
 
+@raises_through(require_positive_int)
+def _check_window(name: str, value: object) -> int:
+    """Validate one window length, naming `timespan=` when a timespan was passed in its place.
+
+    `bars()` takes its timespan as the second positional argument, and an indicator takes its
+    window there, with `timespan` keyword-only, so `sma("AAPL", dm.Timespan.MINUTE)` puts the
+    timespan in the window.
+
+    Args:
+        name: The window's wire name, such as `"window"` or `"short_window"`.
+        value: The argument as passed.
+
+    Returns:
+        The window, a positive `int`.
+
+    Raises:
+        TypeError: If `value` is text, a `dm.Timespan` among it; the message says that
+            `timespan` is keyword-only. If it is any other value that is not an `int`
+            (`require_positive_int`).
+        ValueError: If the window is not positive (`require_positive_int`).
+    """
+    if isinstance(value, str):
+        shown = f"Timespan.{value.name}" if isinstance(value, Timespan) else repr(value)
+        raise TypeError(
+            f"{name} must be an int, not {shown}: timespan is keyword-only, so pass it by "
+            "name, as in sma('AAPL', timespan=dm.Timespan.MINUTE)"
+        )
+    return require_positive_int(name, value)
+
+
 class _Indicators(Namespace):
     """`m.indicators`: the technical indicator datasets of a session.
 
@@ -164,7 +194,14 @@ class _Indicators(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "indicators"
 
-    @raises_through(_check_timespan, require_positive_int, _require_enum, list_params, build_query)
+    @raises_through(
+        _check_timespan,
+        _check_window,
+        require_positive_int,
+        _require_enum,
+        list_params,
+        build_query,
+    )
     def _query(
         self,
         spec: DatasetSpec,
@@ -201,15 +238,16 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `series_type` that is not
-                a `dm.SeriesType` (`_check_timespan`, `require_positive_int`, `_require_enum`,
-                `list_params`, `build_query`).
+                a `dm.SeriesType`, or a timespan passed as a window (`_check_timespan`,
+                `_check_window`, `require_positive_int`, `_require_enum`, `list_params`,
+                `build_query`).
             ValueError: If the endpoint does not accept the timespan, a window is not
                 positive, or another argument has a value the dataset refuses
                 (`_check_timespan`, `require_positive_int`, `build_query`).
         """
         span = _check_timespan(self._core, spec, timespan)
         params: dict[str, ParamValue | None] = {
-            name: require_positive_int(name, value) for name, value in windows.items()
+            name: _check_window(name, value) for name, value in windows.items()
         }
         params["series_type"] = _require_enum(series_type, SeriesType, "series_type")
         params.update(list_params(sort=None, order=order))

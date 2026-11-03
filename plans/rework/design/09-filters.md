@@ -13,7 +13,10 @@ Typed keyword-only parameters exist for:
 Every other query parameter the spec documents for the dataset's paths (the `.gt`, `.gte`, `.lt`,
 `.lte`, and `.any_of` variants, of which the spec lists over a thousand, and plain filters such
 as `pay_date`) goes through `filters: Mapping[str, FilterValue]`, where
-`FilterValue = str | int | float | bool | date | datetime | Sequence[str | int | float | date]`.
+`FilterValue = str | int | float | bool | date | datetime | np.datetime64 | Sequence[str | int | float | date | np.datetime64]`;
+a date or time also takes the Java `LocalDate`, `Instant`, and `ZonedDateTime` and the `pandas.Timestamp`
+that a time bound takes, read by `dates.parse_date_like` when the query is built (a sub-microsecond
+instant rounds up on a `_lt` or `_lte` key and down on any other, as ISO-8601 text does).
 A key is the wire
 name with its dot written as an underscore, so every key is a Python identifier:
 
