@@ -285,6 +285,9 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     wait_for(lambda: connections_of(custom_session, dh_to_pylist)[0]["NoAckTopics"] == 1)
     healthy = custom_session.query(TRADES, ["MSFT"]).blink()
     custom_session.subscribed("T.MSFT")
+    # The server records the subscription before it answers: wait for its acknowledgement to
+    # reach the client, or the row may not count it yet.
+    custom_session.wait(lambda s: len(s.statuses) == 1)
     # The topic was sent, re-sent once, and is counted; the connection, and the other stream
     # on it, stays up.
     params = [json.loads(f)["params"] for f in fake_ws_server.frames(0)]

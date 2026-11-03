@@ -24,8 +24,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import deephaven
 import pytest
-from deephaven.table import Table
+from deephaven import update_graph
+from deephaven.execution_context import ExecutionContext
+from deephaven.table import Table, TableDefinitionLike
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
@@ -166,13 +170,26 @@ def readme_server(
     vars(dm).pop("MassiveSession", None)
 
 
-def _run_blocks(blocks: Sequence[str], tmp_path: Path, name: str) -> dict[str, Any]:
+def _run_blocks(
+    blocks: Sequence[str],
+    tmp_path: Path,
+    name: str,
+    *,
+    console_command: Callable[[Callable[[], None]], None],
+) -> dict[str, Any]:
     """Run code blocks as scripts, in order, each seeing what the blocks before it defined.
+
+    Each block runs as one console command (the `console_command` fixture): under the update
+    graph's exclusive lock, as a reader pasting it into the Deephaven console runs it. A block
+    that creates an input table and adds a row at once, as the watchlist examples do, is then
+    never interrupted by an update cycle; without the lock, a cycle running while the table is
+    created can refresh it in the step it was stamped with, and Deephaven exits the process.
 
     Args:
         blocks: The code of each block.
         tmp_path: Where to write the scripts.
         name: The scripts' file name prefix.
+        console_command: Runs one block the way the console runs a command.
 
     Returns:
         The names the blocks defined.
@@ -181,7 +198,12 @@ def _run_blocks(blocks: Sequence[str], tmp_path: Path, name: str) -> dict[str, A
     for number, block in enumerate(blocks):
         script = tmp_path / f"{name}_{number}.py"
         script.write_text(block, encoding="utf-8")
-        names = runpy.run_path(str(script), init_globals=names)
+
+        def run(script: Path = script) -> None:
+            nonlocal names
+            names = runpy.run_path(str(script), init_globals=names)
+
+        console_command(run)
     return names
 
 
@@ -226,8 +248,27 @@ def _settings_file(home: Path) -> Path:
 
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
 def test_every_readme_example_runs_in_order(
-    *, readme_server: FakeRestServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    *,
+    readme_server: FakeRestServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+    dh_exec_ctx: ExecutionContext,
 ) -> None:
+    # Each watchlist example's input table is created under the update graph's lock, so no
+    # update cycle can refresh it in the step it was stamped with.
+    locked: list[bool] = []
+    real_input_table = deephaven.input_table
+
+    def recording(
+        col_defs: TableDefinitionLike | None = None,
+        init_table: Table | None = None,
+        key_cols: str | Sequence[str] | None = None,
+    ) -> InputTable:
+        locked.append(update_graph.has_exclusive_lock(dh_exec_ctx.update_graph))
+        return real_input_table(col_defs, init_table, key_cols)
+
+    monkeypatch.setattr(deephaven, "input_table", recording)
     # The settings-file examples read the README's example file from the home folder, by path
     # and through the environment variable.
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -239,7 +280,7 @@ def test_every_readme_example_runs_in_order(
     readme_server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     blocks = _blocks(README.read_text(encoding="utf-8"))
     assert len(blocks) >= 15
-    names = _run_blocks(blocks, tmp_path, "readme")
+    names = _run_blocks(blocks, tmp_path, "readme", console_command=console_command)
     # A few of the tables the README promises.
     assert isinstance(names["week"], Table)
     assert isinstance(names["kept"], Table)
@@ -247,6 +288,7 @@ def test_every_readme_example_runs_in_order(
     assert isinstance(names["es"], Table)
     assert isinstance(names["near_quotes"], Table)
     assert names["config"].max_outage == 600  # read from the example file
+    assert locked == [True, True]  # the two watchlist examples
     _forget(names)
 
 
@@ -330,6 +372,7 @@ def test_the_split_adjustment_examples_run(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # The whole New York days of 2024-06-03 to 2024-06-14, as the range path's `{from}/{to}`.
     path = (
@@ -379,6 +422,7 @@ def test_the_split_adjustment_examples_run(
         ["import deephaven_massive as dm\n\nm = dm.MassiveSession()\n", *blocks, recipe],
         tmp_path,
         "split_adjustment",
+        console_command=console_command,
     )
 
     adjusted = {r["Date"]: r for r in dh_to_pylist(names["adjusted"])}
@@ -459,6 +503,7 @@ def test_the_first_tables_example_runs(
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # The whole New York days of 2025-06-02 to 2025-06-06, as the range path's `{from}/{to}`.
     path = (
@@ -470,7 +515,7 @@ def test_the_first_tables_example_runs(
     # Every other path, today's headlines among them, answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
     [block] = _section_blocks("first-tables")
-    names = _run_blocks([block], tmp_path, "first_tables")
+    names = _run_blocks([block], tmp_path, "first_tables", console_command=console_command)
 
     assert [r["Date"] for r in dh_to_pylist(names["week"])] == [
         "2025-06-02",
