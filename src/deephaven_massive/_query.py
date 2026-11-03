@@ -111,8 +111,8 @@ from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.transports import FlatFileTransport, RestTransport, StreamTransport
 from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
+    latest_rows_since_added,
     read_symbols,
-    rows_since_added,
     skipped_rows_text,
     watched_rows,
 )
@@ -1225,8 +1225,9 @@ class StreamQuery(QueryBase):
 
         The underlying state keeps every key ever seen. With a reactive symbol table and
         `Symbol` among the keys, a symbol's row shows only while the table holds the symbol and
-        only once a row has arrived since the symbol last joined it: a symbol removed and added
-        again shows no row until it ticks again. With keys that span symbols
+        only if the row reached the stream in or after the update cycle in which the symbol last
+        joined the table: each symbol's first row shows as it arrives, and a symbol removed and
+        added again shows no row until it ticks again. With keys that span symbols
         (`by="Exchange"`), each group's row is the latest from a symbol watched when it arrived,
         and removing that symbol does not remove the group's row. A table row that is not
         Massive's exact ticker is skipped and listed in `m.streams()` (convert with
@@ -1272,12 +1273,24 @@ class StreamQuery(QueryBase):
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows,
             # and hides the row a re-added symbol showed before it left.
+            logger.debug(
+                "%s.last_by(%s): latest rows of the watched symbols, each shown from the update "
+                "cycle in which its symbol last joined the symbol table",
+                self._spec.name,
+                list(keys),
+            )
             return self._stream(
-                lambda blink: rows_since_added(blink.last_by(list(keys)), watch),
+                lambda blink: latest_rows_since_added(blink, watch, keys),
                 request,
                 verb="last_by",
             )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
+        logger.debug(
+            "%s.last_by(%s): latest rows by keys that span symbols, from the rows whose symbol "
+            "the symbol table holds when they arrive",
+            self._spec.name,
+            list(keys),
+        )
         return self._stream(
             lambda blink: watched_rows(blink, watch).last_by(list(keys)),
             request,

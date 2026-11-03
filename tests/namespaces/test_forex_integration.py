@@ -300,7 +300,7 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
 
 
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("37")
+@pytest.mark.verifies("37")
 @pytest.mark.timeout(100)
 def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     live_session: dm.MassiveSession,
@@ -320,7 +320,9 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     so the read keeps every spelling the library's own file filter keeps. Reading it: the file and
     REST bars of the same day being one bar, whatever their stamps, means the library's 00:00 UTC
     label is right if each stamp lies in that UTC day; a file row matching another day's REST bar
-    means the sources cut or label days differently.
+    means the sources cut or label days differently. Fails when the file has no row of the pair,
+    or when a row's `window_start` is not 00:00:00.000 or 23:59:59.999 UTC of its own day, the
+    two stamps the library moves to 00:00 UTC without a warning.
     """
     read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.FOREX, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
@@ -360,6 +362,13 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
     assert rows
+    stamps = [None if r["window_start"] is None else int(str(r["window_start"])) for r in rows]
+    odd = [
+        stamp
+        for stamp in stamps
+        if stamp is None or stamp % _MS or not _at_day_edge(stamp // _MS, recent_monday)
+    ]
+    assert not odd, f"window_start (ns) not at the start or end of {recent_monday} UTC: {odd}"
 
 
 def _canonical(raw: Iterable[str]) -> set[str]:

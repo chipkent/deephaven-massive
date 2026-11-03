@@ -1032,8 +1032,12 @@ return result
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
   during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
   if the failure had arrived just after it: every shape, `blink()` included, raises
-  `MassiveError` naming the stream's failure, with the hold released. `SessionCore.stream_result`
-  checks the stream's recorded failure before it builds the shape, and wraps in the same
+  `MassiveError` naming the stream's failure, with the hold released. A new stream subscribes
+  before its first result exists, so its sink holds the rows routed to it until the verb that
+  opened it has built that result, and `SessionCore.stream_result` then adds them
+  (`StreamHandle.publish_held`, also after a failed build), so an aggregation such as
+  `last_by` sees every row the stream received; a reused stream holds nothing.
+  `SessionCore.stream_result` checks the stream's recorded failure before it builds the shape, and wraps in the same
   `MassiveError` the `DHError` ("Can not listen to failed table") Deephaven raises when the
   failure lands while the shape derives from the blink table. A stream's failure is recorded
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
@@ -1491,17 +1495,24 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`rows_since_added(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted
+`latest_rows_since_added(blink, symbol_table, keys)`, so rows of removed symbols are evicted
 from the result. The underlying `last_by` state keeps every symbol ever seen, so the filter also
-hides a row received before its symbol last joined the table: a symbol that is removed and
-re-added shows no row until its next tick. `rows_since_added` (`_tables/watchlist.py`) joins
-each row with the time its symbol joined, computed by the engine in the cycle the symbol appears
-(`symbol_table.select_distinct("Symbol").update("AddedAt = now()")`, under a hidden name), and
-keeps rows with `TimestampInsert >= AddedAt`. The time comes from the engine, not from a library
-publisher, which would lag the table by a cycle and let the stale row through; the stream
-subscribes the symbol in reaction to the same change, so every row received for it comes later.
-A row a shared stream received just before the symbol joined is hidden until the next one. With
-keys that span symbols (for
+hides a row that reached the table before the update cycle in which its symbol last joined the
+symbol table: a symbol that is removed and re-added shows no row until its next tick, while a
+symbol's first row shows as soon as it reaches the table, in or after the cycle in which the
+symbol joined (decision 91, owner decision, 2026-11-02). `latest_rows_since_added`
+(`_tables/watchlist.py`) compares update-cycle numbers, the logical clock's step
+(`ExecutionContext.getContext().getUpdateGraph().clock().currentStep()` in a formula), never
+wall-clock times. Under one hold of the update graph's shared lock it creates the symbol
+table's distinct symbols stamped with the step (`select_distinct("Symbol").update(...)`, first)
+and the blink table stamped with the step before the aggregation
+(`blink.update(...).last_by(keys)`), then joins the two and keeps rows whose row step is at
+least their symbol's added step, dropping both hidden columns. The watchlist side comes first,
+so a symbol's added step is never later than the step of a row the aggregation starts from,
+even if a cycle ran between the two creations; the lock makes the two equal. The stamp precedes
+the aggregation because a formula that reads no column is not recomputed when a row is
+modified, and both sides use `update`, never `update_view`, so the step is the cycle in which
+the row changed, not the one in which it is read. With keys that span symbols (for
 example `by="Exchange"`) the filter comes first, `watched_rows(blink,
 symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
@@ -2116,7 +2127,9 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` is a total-row cap, except where each request names one symbol: a per-symbol path
+- `limit` is Massive's total-row cap: named symbols that share a request share the cap, so a
+  `limit` samples and a read without one is complete (decision 87). The exception is where
+  each request names one symbol: a per-symbol path
   (the indicators) or a symbol parameter that takes one ticker
   (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
@@ -3087,8 +3100,9 @@ range's start and its `TimestampEnd` is no later than the earlier of now and the
 The window carries these as `HistoryWindow.bars`, a `row_times.BarBounds` whose `start_rule` is
 explicit: `StartRule.RANGE` checks the start, and `StartRule.LABEL`, for futures intraday and
 1-session bars named by dates, keeps bars by their session label instead, since a folded session
-opens before its date. For futures bars of a session or longer, `BarBounds.futures_completion` adds the
-judgment that the bar has certainly ended (below). Ticks have no bar window (`bars` is None). A range of dates ends where its last day's bar would
+opens before its date. For futures bars of a session or longer, `BarBounds.futures_completion`
+adds the judgment that the bar has certainly ended (below). Ticks have no bar window (`bars` is
+None). A range of dates ends where its last day's bar would
 (`dates.day_end`: the next midnight in the class day zone; 01:00 New York time for indices;
 17:00 Chicago on the last session's date for futures); a range of datetimes at its end. The
 transports drop a later bar once its time columns are filled (`row_times.within`), so selection
@@ -3146,9 +3160,11 @@ windows:
   label lies in the range; every longer bar (several sessions, a week, a month, a quarter, a
   year) when the first weekday on or after its bucket's first day is on or after the first
   date, its label is on or before the last date, its `TimestampStart` is no earlier than the
-  `{from}` sent (which drops a bucket Massive cut short at `{from}`), and it has certainly
-  ended. One rule covers every longer unit and is predictable from the visible columns.
-  So `history("2026-09-01", "2026-09-30")` of month bars returns no bar, and
+  `{from}` sent (so its whole window lies in the request), and it has certainly ended. One
+  rule covers every longer unit and is predictable from the visible columns. It selects whole
+  windows by their stamps: a bucket Massive cut short and stamped at `{from}` would look whole
+  and be kept; whether Massive cuts one short is open ([section 23](#23-open-verification-items)
+  item 40). So `history("2026-09-01", "2026-09-30")` of month bars returns no bar, and
   `history("2026-09-01", "2026-10-01")` returns September's.
 
 A bar whose window has not ended yet is never returned, so the current day, week, month,
@@ -4996,7 +5012,7 @@ without the GIL.
 | follow read pool, a `ThreadPoolExecutor(max_concurrency)` per session while it has a followed read | library | one followed read each: the transport call `wait=True` makes, in the session's execution context, listening to its result's stop token; the static conversion; enqueues the outcome for the coordinator | publish; touch per-symbol state; take `registry_lock` across a Deephaven call |
 | reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()`, `streams()`, and `symbol_reads()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
-| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| symbol changes, one per session, started by the first futures or crypto watchlist change | library | for futures, waits up to 15 s for the schedules of the contracts a symbol table adds (`SCHEDULE_WAIT`); for crypto, reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions), retrying a failed read for the change's whole batch after 2 s and 8 s, one read per try, and skipping a ticker it cannot split (its `Error` part in `m.streams()`); a lookup error whose cause is `LIBRARY_DEFECT` is neither retried nor skipped; any unexpected exception of a change is logged with its trace and fails the stream (`Flusher.fail`), a `LIBRARY_DEFECT` `MassiveError` as it is and any other wrapped in one; `m.close()` ends a wait for schedules or for a retry at once, and the change is dropped (DEBUG); then posts the change to the connection's loop; changes run one at a time, in order, so a removal never overtakes an addition still waiting | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.worker_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
@@ -7790,6 +7806,19 @@ document already reflects them.
     `TimestampInsert` before `TimestampEnd` and gives the filter, and when it is approximate;
     each indicator docstring gives the filter in one line. A `poll(mode=APPEND)` table keeps
     the first unfinished value it sees for a period ([section 8.8](#88-mindicators)).
+87. **`limit` is Massive's total cap per request** (2026-11-02, owner). Reversed by the owner
+    on 2026-11-02: `limit` is Massive's total cap per request; one request for the named
+    symbols. Use `limit` to sample; read without it for complete data. The earlier decision
+    (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
+    of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
+    read whole ([section 8](#8-namespace-tree)).
+91. **`last_by()` on a live symbol table shows a row by update cycle, not by receive time**
+    (owner decision, 2026-11-02). A symbol's row shows when it reached the table in or after
+    the update cycle in which the symbol last joined the symbol table; it was "received after
+    the symbol was added", which compared the library's `TimestampInsert` with the engine's
+    `now()` and hid a symbol's first row until its next tick, for hours on a quiet option
+    contract. A symbol removed and added again still shows no row until its next tick
+    ([section 7](#7-query-classes-and-verbs)).
 
 ## 23. Open verification items
 
@@ -7883,4 +7912,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 78 | Which futures snapshot rows carry a `timeframe`: the host check read one row, sorted by ticker | Settled by the live check of 2026-11-02: only traded contracts. Of the first three ES rows, `ESH0` and `ESH1`, far-dated, carried only `details` and `session`, and `ESH7` carried `last_minute`, `last_trade`, and `last_quote`, each `timeframe` `REAL-TIME` (evidence `c1525b4b-live-evidence-20261102T152504Z.log` and `c54bbc29-live.log`); with one row the decision recorded "no timeframe in the futures snapshot". The probe reads up to 100 ES contracts in one request and takes the labels of every row | `tests/ingest/test_host_decision.py`: rows shaped as the live response decide from the third row's label | `tests/ingest/test_host_decision_integration.py`: the futures snapshot's envelope status and the timeframes of its rows |
 | 79 | The unit of the futures snapshot's `last_minute.last_updated`: undescribed, with a 13-digit (millisecond) documentation sample | Settled against the sample by the live run of 2026-11-02 at 17:24 UTC: 19 digits, nanoseconds (`1793640180000000000`, 2026-11-02 17:23 UTC), like the snapshot's other times; read as milliseconds, the value was out of range and `LastMinuteLastUpdated` was null with a drift warning. The field is read by magnitude (`ms\|ns`), so either unit reads | `tests/namespaces/test_futures.py`: a snapshot shaped as the live one fills `LastMinuteLastUpdated` from nanoseconds without drift, and the documented sample still reads from milliseconds | `tests/datasets/test_catalog_integration.py`: `futures.snapshots`; record `LastMinuteLastUpdated` and any drift |
 | 80 | Which day each index day source (the range, `/prev`, the daily open and close, `us_indices/day_aggs_v1`) covers across many indices, and whether the index day and minute files match REST: so far only `I:SPX` and `I:AAVE100` were compared, on two days, and `I:AAVE100`'s day file and `/prev` matched no REST window. One odd index must not drive a library change | Unchanged: the handling of items 52 and 60 stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_index_day_sources.py` | `tests/namespaces/test_indices_integration.py` (Indices Starter and `s3`): `I:SPX`, `I:NDX`, `I:DJI`, `I:RUT`, `I:VIX`, `I:AAVE100`, and up to two AAVE, BTC, and ETH indices from the index ticker list, over the three trading days before the run, the most recent Monday, and the day after the most recent holiday; record each source's window against minute rebuilds over the New York and the Chicago day, the minute file against REST's minutes, and a verdict line per question: do REST day bars cover the Chicago day, do the files match REST beyond the regular-hours indices, is `I:AAVE100`'s mismatch isolated |
-| 81 | How Massive buckets futures bars of a session or longer: whether each whole session falls in the bucket of the UTC day of its first minute, buckets are whole UTC days on a fixed grid starting at `window_start` (N days for N sessions, 7N for N weeks, calendar months), the label is the bucket's last session, and a bar read from inside its bucket is clipped at `{from}`; for products whose sessions open at 17:00 (ES), 19:00 (corn), and 08:30 Chicago time (live cattle) | Unchanged: item 40's rule stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_futures_bar_buckets.py` | `tests/namespaces/test_futures_integration.py` (Futures Starter): the ES, ZC, and LE contracts front at the end of the most recent whole month; record each 1-session bar's `window_start` against its first minute bar, 2-session bars from an even and an odd epoch day, the start day of 1-week bars, each 2-session, week, month, and 2-month bar against the 1-session and minute bars of its bucket, and one 2-month bucket read from before it and from a month into it; a verdict line per question and contract |
+| 81 | How Massive buckets futures bars of a session or longer: whether each whole session falls in the bucket of the UTC day of its first minute, buckets are whole UTC days on a fixed grid starting at `window_start` (N days for N sessions, 7N for N weeks, calendar months), the label is the bucket's last session, and a bar read from inside its bucket is clipped at `{from}`; for products whose sessions open at 17:00 (ES), 19:00 (corn), and 08:30 Chicago time (live cattle), and for Micro Bitcoin (MBT), whose underlying never stops trading: whether any session opens on a Friday evening or a Saturday, which the certain-end judgment assumes no session does | Unchanged: item 40's rule stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_futures_bar_buckets.py` | `tests/namespaces/test_futures_integration.py` (Futures Starter): the ES, ZC, LE, and MBT contracts front at the end of the most recent whole month; record each 1-session bar's `window_start` against its first minute bar, the UTC days 1-session bars start on and their labels' weekdays, 2-session bars from an even and an odd epoch day, the start day of 1-week bars, each 2-session, week, month, and 2-month bar against the 1-session and minute bars of its bucket, and one 2-month bucket read from before it and from a month into it; a verdict line per question and contract |

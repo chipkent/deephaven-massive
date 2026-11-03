@@ -1629,6 +1629,16 @@ def test_a_list_symbol_parameter_without_a_limit_takes_every_symbol_at_once(
     assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["I:DJI,I:NDX,I:SPX"]]
 
 
+def test_a_list_symbol_parameter_under_a_limit_still_takes_every_symbol_at_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # `limit` is Massive's cap on the request's total rows, so the named symbols share one
+    # request and one cap instead of a request each.
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
+    fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:NDX", "I:DJI"], limit=2)
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["I:DJI,I:NDX,I:SPX"]]
+
+
 def test_limit_caps_rows_across_requests(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

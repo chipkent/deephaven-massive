@@ -1862,6 +1862,18 @@ class ConnectionGroup:
         if calendar is not None:
             calendar.close(wait=wait)
 
+    def wake_schedule_waiters(self) -> None:
+        """Wake every thread waiting for futures schedules, so each checks its stop event.
+
+        A session's close calls it after it set its stop event (`FuturesCalendar.wake`). The
+        calendar is read under the lock and woken outside it; a group without a calendar has
+        no waiter. Never blocks.
+        """
+        with self.lock:
+            calendar = self._calendar
+        if calendar is not None:
+            calendar.wake()
+
     def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
         """Return the group's futures schedule calendar, creating it on first use.
 

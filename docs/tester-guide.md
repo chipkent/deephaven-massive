@@ -13,7 +13,7 @@ what you should see, and what to do if you see something else.
 | Phase | What you do | Your time | Computer time |
 |---|---|---|---|
 | 1. Set up | Install the tools, get the code twice (once for the console, once for the live run), check both | 45 to 90 minutes | the same |
-| 2. Console exercises | Paste 22 short examples into Deephaven's web console and judge what they show | 90 minutes | the same |
+| 2. Console exercises | Paste 25 short examples into Deephaven's web console and judge what they show | 90 minutes | the same |
 | 3. Live run | Start one program that runs every check your Massive plan allows | 30 minutes to start, then 10 minutes a day | days to weeks, unattended |
 | 4. Send back | Pack the results and send them, with your notes | 15 minutes | a few minutes |
 
@@ -102,8 +102,9 @@ to each item, note anything that surprised you.
 - [ ] 11: what Massive did with the free key's live minute bars (rejected the key, refused
       the subscription, or closed the connection)
 - [ ] 13 debug log        - [ ] 14 to 17 try your own (free plan)
-- [ ] 18 to 20 try your own (paid plans only)       - [ ] 21 save diagnostics
-- [ ] 22 finish           - [ ] tester.py examples ran all of them at once
+- [ ] 18 to 20 try your own (paid plans only)       - [ ] 21 watchlist poll (free plan)
+- [ ] 22 crypto watchlist (Currencies) - [ ] 23 gainers to trades (Stocks)
+- [ ] 24 save diagnostics - [ ] 25 finish         - [ ] tester.py examples ran all of them at once
 ## Live run
 - [ ] live_run.py check says ready: yes
 - [ ] first run started with --any-time
@@ -383,7 +384,7 @@ import os; exec(open(os.path.expanduser("~/massive-test/deephaven-massive/docs/t
 
 **All at once.** After you have done the exercises by hand, run them all with one command, from
 the checkout, in a terminal with your key set. Close the web console's session first (example
-22), since both use the same key's limits.
+25), since both use the same key's limits.
 
 ```bash
 uv run python scripts/tester.py examples
@@ -395,9 +396,9 @@ take 15 minutes or more, since it waits up to 15 minutes for example 9's downloa
 what each example printed, raised, and made in `~/massive-test/examples-output/`, with a
 one-line verdict per example in `summary.txt`:
 
-- `passed`. On a key without live stocks or crypto data, examples 18 to 20 pass too: their
-  live table opens before Massive refuses it, and the refusal shows in
-  `~/massive-test/diagnostics/streams.csv`, which example 21 writes.
+- `passed`. On a key without live stocks or crypto data, examples 18 to 20, 22, and 23
+  pass too: their live tables open before Massive refuses them, and the refusals show in
+  `~/massive-test/diagnostics/streams.csv`, which example 24 writes.
 - `refused by your plan`: expected for an example your plan does not include.
 - `failed`: report it.
 
@@ -918,9 +919,99 @@ trades_per_minute = crypto_trades.update("Minute = lowerBin(Timestamp, MINUTE)")
 )
 ```
 
-## 2.3 Save the diagnostics, and finish
+## 2.3 Follow a watchlist
 
-### 21. Save the diagnostics (`21_save_diagnostics.py`)
+A table can choose a dataset's symbols. When it is live, such as an input table you type into,
+the library follows it: a symbol you add is read or subscribed to, and one you delete is
+dropped. These three examples check that. Example 21 works on the free plan; 22 and 23 need a
+paid plan's data. On a free key their tables open, and a few seconds later Massive refuses
+them: the streams panel shows their rows `FAILED`, as in step 11.
+
+You edit an input table in its panel:
+
+- **Add a row**: click the empty row at the bottom of the panel, type the symbol, press
+  **Enter**, then click **Commit** below the table. Nothing is added until you commit.
+- **Delete a row**: click the row, right-click it, and choose **Delete Selected Rows**.
+
+### 21. A watchlist that drives a poll (`21_watchlist_poll.py`)
+
+```python
+# Makes a watchlist you can edit, and a table that reads the previous day's bar of each of
+# its stocks every minute: three Stocks requests a minute, within the free plan's five. You
+# should see two new tables: stock_watchlist, with three rows, and watched_bars, with one row
+# per stock within about a minute. Then follow the steps after this block.
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+
+stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
+stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
+watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
+```
+
+Then, in the `stock_watchlist` panel:
+
+1. Add `AAPL`. **You should see** an `AAPL` row in `watched_bars` within about a minute, at
+   its next read.
+2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read.
+3. In the `streams` panel, the `stocks.previous_day_bar` row's `SymbolCount` reads 3: the
+   symbols its latest read covered.
+
+### 22. A crypto watchlist, paid plans (`22_crypto_watchlist.py`)
+
+```python
+# Needs a paid Currencies plan (Starter or higher). Makes a watchlist of crypto pairs and
+# streams their trades, keeping each pair's latest. You should see three new tables:
+# crypto_watchlist, with two rows; crypto_board, with one row per pair after its first trade,
+# within seconds; and streams. Then follow the steps after this block. Crypto trades around
+# the clock, so this works at any hour.
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+
+crypto_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
+crypto_watchlist.add(new_table([string_col("Symbol", ["X:ETHUSD", "X:LINKUSD"])]))
+crypto_board = m.crypto.trades(crypto_watchlist).last_by()
+streams = m.streams()
+```
+
+Then, in the `crypto_watchlist` panel, and watching `crypto_board` and the `crypto.trades`
+row of `streams`:
+
+1. Add `X:SOLUSD`. **You should see** an `X:SOLUSD` row in `crypto_board` after its first
+   trade, usually within seconds, and `X:SOLUSD` in that stream's `Symbols`, with
+   `SymbolCount` 3.
+2. Delete `X:SOLUSD`. **You should see** its row leave `crypto_board` at once, and `Symbols`
+   drop it, with `SymbolCount` 2.
+3. Add `X:SOLUSD` again. **You should see** no `X:SOLUSD` row until its next trade; then a row
+   whose `Timestamp` is later than when you added it, never the old row back.
+4. Add `btcusd`, in lower case. **You should see** no row for it: the stream skips it, since
+   it is not Massive's spelling, and its `Error` names `btcusd`. The other pairs keep
+   streaming. Fix it: delete the `btcusd` row and add `X:BTCUSD`. **You should see** the
+   `Error` clear and an `X:BTCUSD` row in `crypto_board` after its first trade.
+5. Add `X:ZZZZUSD`, a pair Massive does not list. **You should see** no row for it, and the
+   stream's `Error` names `X:ZZZZUSD`; the other pairs keep streaming. Delete it, and the
+   `Error` clears.
+
+### 23. Gainers choose the trades, paid plans (`23_gainers_trades.py`)
+
+```python
+# Needs a paid Stocks plan with trades (Developer or higher). Lets one table choose another's
+# symbols: the day's top gainers, re-read every minute, choose whose trades to stream. You
+# should see two new tables: gainers, with up to 20 rows, and gainer_trades, with one row per
+# gainer after its first trade, while the market is open.
+gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
+gainer_trades = m.stocks.trades(gainers).last_by()
+```
+
+**You should see** the `stocks.trades` row of `streams` list the gainers in `Symbols`. When a
+stock joins or leaves the gainers at a minute's read, it joins or leaves `Symbols` and
+`gainer_trades` too. On Stocks Developer the trades run 15 minutes behind, and the session
+needs example 1's line for that plan, as example 18 says.
+
+## 2.4 Save the diagnostics, and finish
+
+### 24. Save the diagnostics (`24_save_diagnostics.py`)
 
 Run this whenever something goes wrong, before anything else, and before you close the session:
 the bug report (part 4) collects these files.
@@ -941,7 +1032,7 @@ for name, table in tables.items():
 print("saved to", diagnostics)
 ```
 
-### 22. Close the session (`22_finish.py`)
+### 25. Close the session (`25_finish.py`)
 
 ```python
 # Closes the session, shows that a closed session refuses new work, and downloads once more
@@ -1175,7 +1266,7 @@ In `tester.py examples`, a refusal shows as `refused by your plan` and anything 
 
 ## 4.2 Make the report
 
-1. **Right away**, in the console, run example 21 (`21_save_diagnostics.py`) to save the
+1. **Right away**, in the console, run example 24 (`24_save_diagnostics.py`) to save the
    diagnostics tables. Take a screenshot of anything on screen that looks wrong.
 2. Write `~/massive-test/bug-report.md` from the template below.
 3. From the checkout, with your key set, bundle everything:

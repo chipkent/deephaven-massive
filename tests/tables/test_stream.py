@@ -35,6 +35,8 @@ from deephaven_massive._massive import DriftReport, DriftSample, Transport, sour
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
+from deephaven_massive._tables.execution_context import update_cycle
+from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -333,7 +335,67 @@ def make_sink(
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
     )
+    opened.sink.publish_held()  # as the verb that opens a stream does once its result exists
     return opened.sink, opened.handle.blink
+
+
+def test_a_new_sink_holds_its_rows_until_its_first_result_is_built(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Rows routed before the first result exists are held, then added in order before any
+    # later row, so a result built after the stream subscribed still sees them.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    opened = open_stream_tables(
+        plan,
+        core.catalog.dataset_schema(TRADES, raw_symbol=False),
+        ("AAPL",),
+        core=core,
+        stream_id=1,
+        host="socket.test",
+        evidence="test host",
+        recency=Recency.REALTIME,
+        path="/stocks",
+        on_shutdown=lambda: None,
+        on_symbols=lambda *_: None,
+    )
+    sink = opened.sink
+    assert sink.publish(shared_batch(plan, [trade("AAPL", 1.0)])) == 1  # counted, and held
+    shown = blink_to_append_only(opened.handle.blink)  # the first result
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.stream"):
+        sink.publish_held()
+    assert "adding the 1 rows it received while it opened" in caplog.text
+    sink.publish(shared_batch(plan, [trade("AAPL", 2.0)]))
+    sink.publish_held()  # idempotent: nothing is held any more
+    wait_for(lambda: shown.size == 2)
+    assert [row[0] for row in shown.iter_tuple(cols="Price")] == [1.0, 2.0]
+    release_scope(core.exec_ctx, opened.handle.scope)
+
+
+def test_a_failed_sink_drops_the_rows_it_held(massive_session: dm.MassiveSession) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    opened = open_stream_tables(
+        plan,
+        core.catalog.dataset_schema(TRADES, raw_symbol=False),
+        ("AAPL",),
+        core=core,
+        stream_id=1,
+        host="socket.test",
+        evidence="test host",
+        recency=Recency.REALTIME,
+        path="/stocks",
+        on_shutdown=lambda: None,
+        on_symbols=lambda *_: None,
+    )
+    shown = blink_to_append_only(opened.handle.blink)
+    opened.sink.publish(shared_batch(plan, [trade("AAPL")]))
+    opened.sink.failed = True  # as `fail` leaves it
+    opened.sink.publish_held()
+    cycle = update_cycle(core.exec_ctx)
+    wait_for(lambda: update_cycle(core.exec_ctx) >= cycle + 2)  # a cycle ran after the add
+    assert shown.size == 0
+    release_scope(core.exec_ctx, opened.handle.scope)
 
 
 def shared_batch(
@@ -874,6 +936,7 @@ def test_a_session_miss_leaves_the_streams_error_alone_and_publishes_its_rows(
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
         )
+        opened.sink.publish_held()
         flusher.routes.add("T", opened.sink)
         sinks.append(opened.sink)
     both = [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
@@ -1291,7 +1354,7 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
 
     def sink(stream_id: int, symbol: str) -> StreamSink:
         # The two streams share the dataset's plan, as the streams of one connection do.
-        return open_stream_tables(
+        opened = open_stream_tables(
             plan,
             core.catalog.dataset_schema(TRADES, raw_symbol=False),
             (symbol,),
@@ -1303,7 +1366,9 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
             path="/stocks",
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
-        ).sink
+        )
+        opened.sink.publish_held()
+        return opened.sink
 
     aapl, msft = sink(1, "AAPL"), sink(2, "MSFT")
 
@@ -1449,6 +1514,7 @@ def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
     )
+    opened.sink.publish_held()
     flusher.routes.add("C", opened.sink)
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
@@ -1841,6 +1907,7 @@ def test_streamed_rows_of_one_day_share_one_stored_date(
         on_symbols=lambda *_: None,
     )
     shown = blink_to_append_only(opened.handle.blink)
+    opened.sink.publish_held()
     flusher.routes.add("T", opened.sink)
     flusher.rows("T", frame([trade("AAPL"), trade("MSFT"), trade("IBM")]))
     flusher.flush()
