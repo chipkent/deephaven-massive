@@ -183,7 +183,7 @@ the smoke tests.
   | Part | Requests declared, at most | Time at 5 a minute |
   |---|---|---|
   | Evidence tests (the [Every class on Basic](#every-class-on-basic) list) | About 74 to stocks (reference data included), 32 to currencies, 31 to futures, 8 to options, 7 to indices | Up to about 15 minutes |
-  | Smoke tier | 88 to stocks, 36 to currencies, 24 each to options and futures, 14 to indices; its stream cases skip before any request, since Basic does not stream | Up to about 18 minutes |
+  | Smoke tests | 88 to stocks, 36 to currencies, 24 each to options and futures, 14 to indices; its stream cases skip before any request, since Basic does not stream | Up to about 18 minutes |
   | Rate-limit tests | | About six minutes of pauses between them |
 
   A run takes less when a test sends fewer requests than it declares.

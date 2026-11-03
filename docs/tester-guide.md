@@ -427,8 +427,9 @@ block in this part goes there; only the `bash` blocks go in a terminal.
   opens in a panel named after it; if one does not, click its name in the console output.
 - **Order**: run the examples in order, in one console. Each uses variables from the ones
   before.
-- **Live tables** do not change while a console command runs: Deephaven applies new data
-  between commands.
+- **Live tables** change in Deephaven's update cycles, about once a second. No cycle runs
+  while a console command runs, so a live table shows new data only after the command
+  finishes.
 - **Errors** appear in red, starting `Error in Python interpreter`. The line that matters is
   the last line of the Python part, right before the first line that starts with `at `. It
   names the error's type and its message.
