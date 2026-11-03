@@ -264,8 +264,8 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 ### Backfill, then live
 
 A table that starts with history and continues with the stream: today's minute bars so far,
-then each new one as it closes. The function opens the stream first, so no bar falls between
-the two, and keeps one row per minute:
+then each new one as it closes. The function opens the stream before it reads history, so the
+two overlap, and keeps one row per minute:
 
 ```python
 from deephaven import merge
