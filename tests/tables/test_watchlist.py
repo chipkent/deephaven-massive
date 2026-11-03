@@ -24,8 +24,8 @@ from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
     _CURRENT_STEP,
+    CurrentSymbols,
     SymbolRowRule,
-    SymbolRows,
     SymbolWatch,
     _SymbolCounter,
     invalid_row_message,
@@ -87,10 +87,10 @@ def spanning(mode: OnError = OnError.RAISE) -> SymbolRowRule:
 
 def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:GBPUSD", None, "C:EURUSD", "C:GBPUSD"])])
-    assert read_symbols(rule(), table, stream_id=7) == SymbolRows(("C:EURUSD", "C:GBPUSD"))
+    assert read_symbols(rule(), table, stream_id=7) == CurrentSymbols(("C:EURUSD", "C:GBPUSD"))
     assert read_symbols(
         rule(), new_table([string_col("Symbol", [None])]), stream_id=None
-    ) == SymbolRows(())
+    ) == CurrentSymbols(())
 
 
 def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
@@ -151,7 +151,7 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
     bad = f"EUR/USD {mode.value}"
     table = new_table([string_col("Symbol", ["C:EURUSD", bad, bad, None])])
     with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
-        assert read_symbols(rule(mode=mode), table, stream_id=7) == SymbolRows(
+        assert read_symbols(rule(mode=mode), table, stream_id=7) == CurrentSymbols(
             ("C:EURUSD",), (bad,)
         )
         read_symbols(rule(mode=mode), table, stream_id=7)  # a second read logs nothing more
@@ -330,7 +330,7 @@ def test_a_skipped_underlying_is_logged_with_its_reason(
     table = new_table([string_col("Symbol", [bad, "AAPL"])])
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)
-    assert rows == SymbolRows(("AAPL",), (bad,))
+    assert rows == CurrentSymbols(("AAPL",), (bad,))
     [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
     assert record.startswith(f"options.chain a call's read: a table of underlyings holds {bad!r}")
 

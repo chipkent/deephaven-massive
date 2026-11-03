@@ -1,8 +1,9 @@
-"""The rows of `m.symbol_reads()`: one per symbol of each followed `history()`.
+"""The rows of `m.symbol_reads()`: one per symbol of each followed `history()` or `fetch()`.
 
-A `history()` given a refreshing symbol table follows it (`_tables/followed_read.py`), and the
-session's follow coordinator (`_tables/follow_coordinator.py`) decides each symbol's state.
-This module defines what shows those states to the user:
+A `history()` or `fetch()` given a refreshing symbol table follows it
+(`_tables/followed_read.py`), and the session's follow coordinator
+(`_tables/follow_coordinator.py`) decides each symbol's state. This module defines what shows
+those states to the user:
 
 - `SymbolReadState` and `SymbolReadRow`: a symbol's state and the immutable row that shows it.
 - `SYMBOL_READS` and `SYMBOL_READ_KEYS`: the table's columns and its key, `StreamId` and

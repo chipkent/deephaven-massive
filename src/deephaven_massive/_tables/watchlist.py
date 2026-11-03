@@ -20,7 +20,7 @@ session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
 Two pieces apply that rule:
 
 - `read_symbols` reads a table's current rows once, on the caller thread or a poller's, and
-  returns its good and its skipped values (`SymbolRows`), or raises `ValueError` under `RAISE`.
+  returns its good and its skipped values (`CurrentSymbols`), or raises `ValueError` under `RAISE`.
   The static verbs read their symbols with it; the live verbs check the table with it first.
 - `SymbolWatch` listens to the table and reports each change of the *set* of symbols it holds,
   so a WebSocket stream subscribes and unsubscribes exactly the topics the watchlist names. A
@@ -76,8 +76,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ValueTable
 
 __all__ = [
+    "CurrentSymbols",
     "SymbolRowRule",
-    "SymbolRows",
     "SymbolWatch",
     "invalid_row_message",
     "latest_rows_since_added",
@@ -364,8 +364,8 @@ class SymbolRowRule:
 
 
 @dataclass(frozen=True, slots=True)
-class SymbolRows:
-    """A symbol table's current rows as one read found them.
+class CurrentSymbols:
+    """A symbol table's current canonical symbols and skipped values, as one read found them.
 
     Attributes:
         symbols: The canonical symbols, sorted and de-duplicated.
@@ -377,7 +377,7 @@ class SymbolRows:
     skipped: tuple[str, ...] = ()
 
 
-def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> SymbolRows:
+def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> CurrentSymbols:
     """Read a symbol table's current rows once, sorting them into good and skipped values.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
@@ -414,7 +414,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
         else:
             rule.skip(symbol, stream_id=stream_id)
             skipped.append(symbol)
-    return SymbolRows(tuple(good), tuple(skipped))
+    return CurrentSymbols(tuple(good), tuple(skipped))
 
 
 class SymbolWatch:

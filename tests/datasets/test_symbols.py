@@ -25,7 +25,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
-from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolRows, read_symbols
+from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -164,7 +164,7 @@ def test_every_futures_ticker_massive_writes_round_trips(
     assert normalize(FUT, every) == tuple(sorted(set(every)))
     rule = SymbolRowRule("futures.trades", FUT, as_written=False, noncanonical=OnError.RAISE)
     rows = read_symbols(rule, new_table([string_col("Symbol", every)]), stream_id=None)
-    assert rows == SymbolRows(tuple(sorted(set(every))))
+    assert rows == CurrentSymbols(tuple(sorted(set(every))))
     for text in every:
         assert canonical_from_wire(FUT, text) == text
         assert dm.canonical_symbol(text, FUT) == text
