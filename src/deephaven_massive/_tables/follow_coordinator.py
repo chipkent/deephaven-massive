@@ -156,20 +156,23 @@ class _Follow:
 class _Baseline:
     """The symbol table's whole set of symbols when its watch started.
 
-    Every later change is relative to it.
+    Every later change is relative to it. `step` is the update cycle the watch replayed the
+    table at, or 0 when the table held no symbol then.
     """
 
     read: FollowedRead
     symbols: frozenset[str]
+    step: int
 
 
 @dataclass(frozen=True, slots=True)
 class _Changed:
-    """Symbols the table gained and lost in one update cycle."""
+    """Symbols the table gained and lost in one update cycle, the cycle `step`."""
 
     read: FollowedRead
     added: frozenset[str]
     removed: frozenset[str]
+    step: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,9 +284,13 @@ class _Result:
         transports: The sources its reads have used.
         skipped: The text of its skipped symbol-table values, or None.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
+        heard: The latest update cycle of the symbol table whose change the coordinator has
+            applied (the result's build cycle until the first), stamped on every cell it
+            publishes; see `FollowedRead.publish`.
     """
 
     read: FollowedRead
+    heard: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
     queue: list[str] = field(default_factory=list)
     scanning: bool = False
@@ -353,14 +360,14 @@ class FollowCoordinator:
     first followed read (`follow`), and keeps its thread and pool until `stop` (the session's
     close, or its collection), so one thread owns the per-symbol state for the session's life.
     It never refers to the core. `follow`, `post`, `wake`, and `stop` are safe from any thread
-    and never block: they take a leaf lock only around a queue put. Every handler runs on the
+    and never block: they take its lock only around a queue put. Every handler runs on the
     coordinator thread.
     """
 
     __slots__ = (
         "_closed",
-        "_count",
         "_exec_ctx",
+        "_following",
         "_lock",
         "_max_workers",
         "_pool",
@@ -381,11 +388,14 @@ class FollowCoordinator:
         self._exec_ctx = exec_ctx
         self._thread_prefix = thread_prefix
         self._max_workers = max_workers
-        # A leaf lock: guards the thread, the pool, the count of followed reads, and the stop.
+        # Guards the thread, the pool, the followed reads, and the stop. Held only
+        # around a queue put or a pool submit, which never waits on another thread's lock.
         self._lock = threading.Lock()
         self._worker: QueueWorker[_Message] | None = None
         self._pool: ThreadPoolExecutor | None = None
-        self._count = 0
+        # Every followed read handed over (`follow`) and not yet forgotten, by `id`: what a
+        # dying thread fails, including a read whose start never reached it.
+        self._following: dict[int, FollowedRead] = {}
         self._closed = False
         # Touched only by the coordinator thread.
         self._results: dict[int, _Result] = {}
@@ -400,7 +410,7 @@ class FollowCoordinator:
     def following(self) -> int:
         """How many followed reads the coordinator serves: counted until each one stops."""
         with self._lock:
-            return self._count
+            return len(self._following)
 
     def follow(self, read: FollowedRead, first: FirstRead | None) -> None:
         """Start coordinating a new followed read, starting the thread and pool if needed.
@@ -429,8 +439,8 @@ class FollowCoordinator:
                     on_exit=self._exited,
                     on_death=self._died,
                 )
-            started = self._count == 0
-            self._count += 1
+            started = not self._following
+            self._following[id(read)] = read
             self._worker.put(_Follow(read, first))
         if started:
             logger.debug("%s follow: a followed read starts", self._thread_prefix)
@@ -467,24 +477,28 @@ class FollowCoordinator:
 
     # --- Events from other threads, for a result -------------------------------------------
 
-    def baseline(self, read: FollowedRead, symbols: frozenset[str]) -> None:
+    def baseline(self, read: FollowedRead, symbols: frozenset[str], step: int) -> None:
         """Queue the symbol table's set of symbols when its watch started.
 
         Args:
             read: The result.
             symbols: The set.
+            step: The update cycle the watch replayed the table at, or 0 for an empty set.
         """
-        self.post(_Baseline(read, symbols))
+        self.post(_Baseline(read, symbols, step))
 
-    def changed(self, read: FollowedRead, added: frozenset[str], removed: frozenset[str]) -> None:
+    def changed(
+        self, read: FollowedRead, added: frozenset[str], removed: frozenset[str], *, step: int
+    ) -> None:
         """Queue one change of the symbol table's set (the watch's listener calls it).
 
         Args:
             read: The result.
             added: The symbols gained.
             removed: The symbols lost.
+            step: The update cycle that made the change.
         """
-        self.post(_Changed(read, added, removed))
+        self.post(_Changed(read, added, removed, step))
 
     def skipped(self, read: FollowedRead, text: str | None) -> None:
         """Queue the text of the table's skipped values, or None once none is skipped.
@@ -611,6 +625,7 @@ class FollowCoordinator:
             added, removed = message.symbols - held, frozenset(held - message.symbols)
         else:
             added, removed = message.added, message.removed
+        result.heard = max(result.heard, message.step)
         now = _now_ns()
         for name in sorted(removed):
             self._remove(result, name)
@@ -633,7 +648,7 @@ class FollowCoordinator:
             Its state.
         """
         read = message.read
-        result = _Result(read)
+        result = _Result(read, heard=read.built_step)
         self._results[id(read)] = result
         if read.core.closed:  # the close failed the table while it was handed over
             result.ended = True
@@ -721,7 +736,7 @@ class FollowCoordinator:
             result.queue.remove(name)
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
-            result.read.publish(name, result.seq, None)
+            result.read.publish(name, result.seq, None, heard=result.heard)
             symbol.kept = False
             symbol.read_at = None
             symbol.rows = 0
@@ -803,7 +818,7 @@ class FollowCoordinator:
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
-                read.publish(name, result.seq, outcome.table)
+                read.publish(name, result.seq, outcome.table, heard=result.heard)
             symbol.state = SymbolReadState.DONE
             symbol.kept = True
             symbol.rows = outcome.table.size
@@ -811,12 +826,14 @@ class FollowCoordinator:
             symbol.error = symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
-                "call %d %s: %d rows in %.1f s from %s",
+                "call %d %s: %d rows in %.1f s from %s (cell %d, heard cycle %d)",
                 read.call,
                 name,
                 symbol.rows,
                 seconds,
                 transport,
+                result.seq,
+                result.heard,
             )
             return
         self._failed(result, name, outcome)
@@ -958,15 +975,26 @@ class FollowCoordinator:
             self._submit(result.read, generations)
 
     def _submit(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
-        """Hand one read to the pool.
+        """Hand one read to the pool, or drop it once `stop` has ended the pool.
+
+        `stop` may end the pool while this thread still handles the events queued before it;
+        a read of those is dropped, since every result is failed or about to fail. The submit
+        runs under the lock, so `stop` never shuts the pool down between the check and the
+        submit; a submit only queues the task and at most starts a pool thread.
 
         Args:
             read: The result.
             generations: The symbols to read, at their generations.
         """
         with self._lock:
-            pool = cast("ThreadPoolExecutor", self._pool)  # it lives as long as this thread
-        pool.submit(self._read, read, dict(generations))
+            if self._pool is not None:
+                self._pool.submit(self._read, read, dict(generations))
+                return
+        logger.debug(
+            "call %d follow: the coordinator stopped; the read of %s is dropped",
+            read.call,
+            bounded_list(sorted(generations)),
+        )
 
     def _read(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
         """A pool task: read some symbols of one result and queue the outcome.
@@ -1164,12 +1192,8 @@ class FollowCoordinator:
         for key, result in touched.items():
             if result.ended and result.read.shut_down and key in self._results:
                 del self._results[key]
-                self._release_one()
-
-    def _release_one(self) -> None:
-        """Count one followed read less."""
-        with self._lock:
-            self._count -= 1
+                with self._lock:
+                    self._following.pop(key, None)
 
     def _exited(self) -> None:
         """The coordinator thread ends (`stop`): forget every result, so none outlives it.
@@ -1179,11 +1203,16 @@ class FollowCoordinator:
         """
         logger.debug("follow: the coordinator ends with %d results", len(self._results))
         self._results.clear()
+        with self._lock:
+            self._following.clear()
 
     def _died(self, death: BaseException) -> None:
-        """The coordinator thread died: fail every followed read it served.
+        """The coordinator thread died: fail every followed read it served or was handed.
 
         Runs on the dying thread. Its results would stop following without an error otherwise.
+        A `follow` that came before the thread was cleared queued its start to the dead thread,
+        so every read handed over is failed, not only those the thread had started; a `follow`
+        after it starts a new thread.
 
         Args:
             death: What ended the thread.
@@ -1192,17 +1221,19 @@ class FollowCoordinator:
             library_bug(f"the follow coordinator died ({death!r}); this table no longer updates"),
             cause=ErrorCause.LIBRARY_DEFECT,
         )
-        results = list(self._results.values())
+        for result in self._results.values():
+            result.ended = True
         self._results.clear()  # before the next thread can start: never two owners
         with self._lock:
-            self._count = 0
+            reads = list(self._following.values())
+            self._following.clear()
             pool = self._pool  # None when a stop came first
             self._worker = self._pool = None
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
-        for result in results:
-            result.ended = True
-            result.read.fail_table(error)
+        logger.debug("follow: the coordinator died; failing %d followed reads", len(reads))
+        for read in reads:
+            read.fail_table(error)
 
 
 def _ns_text(value: int) -> str:

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream.table_publisher import TablePublisher
@@ -1056,8 +1056,9 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["MSFT", "AAPL", None])]))
     script.drift = DriftReport(missing=frozenset({"ticker"}))  # every cycle: shown once
     script.rows()
@@ -1082,8 +1083,9 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    source = input_table({"Symbol": dtypes.string})
+    source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
     watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
     script.rows()
@@ -1110,11 +1112,12 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     core = massive_session._core
     strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(core, "config", strict)
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     script.rows()
     table = start(
@@ -1143,8 +1146,9 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
     script.rows()
     table = start(
@@ -1705,7 +1709,7 @@ def routed_session(
 
 def streams_of(m: dm.MassiveSession, to_pylist: ToPylist) -> list[dict[str, Any]]:
     # The session's m.streams() rows, once every row queued so far is applied.
-    assert m._core.diagnostics.barrier().wait(TIMEOUT)
+    assert m._core.diagnostics.wait_until_shown(TIMEOUT)
     return to_pylist(m.streams())
 
 
@@ -1721,13 +1725,14 @@ def test_an_emptied_symbol_table_evicts_every_key(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
     spec: DatasetSpec,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     fake_rest.reply(INDEX_PATH, Reply(envelope([{"ticker": "I:SPX", "value": 1.0}])))
     fake_rest.reply(
         "/v1/indicators/sma/I%3ASPX",
         Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
     )
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["I:SPX"])]))
     q = build_query(routed_session._core, spec, symbols=watch)
     assert isinstance(q, Query)
@@ -1758,11 +1763,12 @@ def test_a_symbol_routed_to_a_path_without_the_parameter_is_left_out_and_listed(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
     caplog: pytest.LogCaptureFixture,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # One symbol never fails the table: the crypto pair's path does not take `adjusted`, so
     # it is left out of each cycle and named in the Error, and the stock is polled.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
     q = build_query(routed_session._core, SMA, symbols=watch, adjusted=False)
     assert isinstance(q, Query)
@@ -2056,6 +2062,7 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     fake_rest: FakeRestServer,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     # The default path lacks `adjusted`; only the stock symbols' path takes it.
     crypto_first = DatasetSpec(
@@ -2070,7 +2077,7 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
         "/v1/indicators/sma/AAPL",
         Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
     )
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     q = build_query(routed_session._core, crypto_first, symbols=watch, adjusted=False)
     assert isinstance(q, Query)
@@ -2240,7 +2247,7 @@ def test_a_failed_append_remembers_nothing(
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0)])
     fail_one_poll_conversion(monkeypatch)
     next_cycle(clock)  # b's cycle fails to publish
-    assert feed_session._core.diagnostics.barrier().wait(30.0)
+    assert feed_session._core.diagnostics.wait_until_shown(30.0)
     assert dh_to_pylist(feed_session.streams())[0]["Error"] == f"conversion failed; {GOOD}"
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
@@ -2405,7 +2412,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
         until(lambda: len(fake_rest.requests) == 2)
         until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
-        assert m._core.diagnostics.barrier().wait(30.0)
+        assert m._core.diagnostics.wait_until_shown(30.0)
         assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
         failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
         assert not failed
@@ -2601,6 +2608,7 @@ def open_poll_case(
     failures_heard: Callable[[Table], Callable[[], int]],
     race: Callable[..., None],
     cycles_ended: Callable[[], None],
+    dh_input_table: Callable[..., InputTable],
 ) -> PollCase:
     # Polls AAPL's dividends, of a watchlist under `watched`, until the first cycle landed and
     # the poller waits for the next; then derives and listens.
@@ -2608,7 +2616,7 @@ def open_poll_case(
     watchlist: InputTable | None = None
     symbols: object = ["AAPL"]
     if watched:
-        symbols = watchlist = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+        symbols = watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
         watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     q = build_query(m._core, DIVIDENDS, symbols=cast("Any", symbols))
     assert isinstance(q, Query)
@@ -2687,6 +2695,7 @@ def test_every_poll_mode_fails_once_by_every_path(
     failures_heard: Callable[[Table], Callable[[], int]],
     race: Callable[..., None],
     cycles_ended: Callable[[], None],
+    dh_input_table: Callable[..., InputTable],
     mode: PollMode,
     path: str,
 ) -> None:
@@ -2700,6 +2709,7 @@ def test_every_poll_mode_fails_once_by_every_path(
         failures_heard=failures_heard,
         race=race,
         cycles_ended=cycles_ended,
+        dh_input_table=dh_input_table,
     )
     POLL_PATHS[path](case)
     poll_failed_once(case)
@@ -2716,6 +2726,7 @@ def test_a_poll_failing_while_its_watchlist_changes_fails_once(
     failures_heard: Callable[[Table], Callable[[], int]],
     race: Callable[..., None],
     cycles_ended: Callable[[], None],
+    dh_input_table: Callable[..., InputTable],
     path: str,
 ) -> None:
     # The edit lands while the cycle that reads it fails, or while the session closes.
@@ -2729,6 +2740,7 @@ def test_a_poll_failing_while_its_watchlist_changes_fails_once(
         failures_heard=failures_heard,
         race=race,
         cycles_ended=cycles_ended,
+        dh_input_table=dh_input_table,
     )
     assert case.watchlist is not None
     case.watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
@@ -2777,4 +2789,18 @@ def test_a_cycles_labels_set_the_rows_recency(
         massive_session.streams(), lambda rows: bool(rows and rows[0]["RowsPublished"])
     )
     assert row["Recency"] == shown
+    massive_session.release(table)
+
+
+def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    blink_creations: list[bool],
+) -> None:
+    before = len(blink_creations)
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    assert blink_creations[before:] == [True]
     massive_session.release(table)

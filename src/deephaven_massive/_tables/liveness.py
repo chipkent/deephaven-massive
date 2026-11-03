@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import weakref
 from dataclasses import dataclass, field
 from itertools import count
@@ -208,6 +209,11 @@ class QueueWorker(Generic[_T]):
     on its own thread; an exception from `on_timeout` is logged like one from `handle`. No other
     thread or timer is involved, so nothing outlives the worker.
 
+    An owner whose every batch costs the update graph work (the diagnostics writer, whose adds
+    each enter the next update cycle) passes `interval`, the fewest seconds from the end of one
+    batch to the start of the next: after a batch the thread sleeps that long before it takes
+    more items, so what is queued meanwhile becomes one batch.
+
     If something escapes that the thread cannot carry on after (a `KeyboardInterrupt` or
     `SystemExit` raised by `handle`, or an exception from `on_exit`), `on_death` runs with it
     before the thread ends, so the owner can fail what the thread served instead of leaving it
@@ -220,6 +226,8 @@ class QueueWorker(Generic[_T]):
     __slots__ = (
         "_exec_ctx",
         "_handle",
+        "_interval",
+        "_next_start",
         "_on_death",
         "_on_exit",
         "_on_timeout",
@@ -238,6 +246,7 @@ class QueueWorker(Generic[_T]):
         timeout: Callable[[], float | None] | None = None,
         on_timeout: Callable[[], None] | None = None,
         on_death: Callable[[BaseException], None] | None = None,
+        interval: float = 0.0,
     ) -> None:
         """Create and start the worker thread.
 
@@ -253,8 +262,14 @@ class QueueWorker(Generic[_T]):
                 with `timeout`.
             on_death: Runs on the dying thread, inside the execution context, with what ended
                 it, before it is re-raised; an exception it raises is logged and dropped.
+            interval: The fewest seconds from the end of one batch to the start of the
+                next (a timed wake-up counts as a batch); the default 0.0 takes each batch as
+                soon as an item comes.
         """
         self._exec_ctx = exec_ctx
+        self._interval = interval
+        # When the next batch may start (`time.monotonic()`); only the thread reads or sets it.
+        self._next_start = 0.0
         self._handle = handle
         self._on_exit = on_exit
         self._timeout = timeout
@@ -314,7 +329,22 @@ class QueueWorker(Generic[_T]):
     def _next_batch(self) -> bool:
         """Wait for an item, take everything queued behind it, and handle the batch.
 
-        A timed wait (`timeout`) that ends without an item runs `on_timeout` instead.
+        A timed wait (`timeout`) that ends without an item runs `on_timeout` instead. With an
+        `interval`, it first sleeps until that long has passed since the last batch ended.
+
+        Returns:
+            False once the stop request was reached, True otherwise.
+        """
+        pause = self._next_start - time.monotonic()
+        if pause > 0:
+            time.sleep(pause)
+        try:
+            return self._take_batch()
+        finally:
+            self._next_start = time.monotonic() + self._interval
+
+    def _take_batch(self) -> bool:
+        """Wait for an item, take everything queued behind it, and handle the batch.
 
         Returns:
             False once the stop request was reached, True otherwise.

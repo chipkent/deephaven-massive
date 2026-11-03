@@ -8,7 +8,7 @@ import threading
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import int_col, string_col
 
 import deephaven_massive as dm
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
@@ -86,8 +87,10 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     assert messages[-1] == "20 values were reported; further ones are not logged"
 
 
-def test_canonicalize_a_refreshing_table(dh_exec_ctx: object) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_canonicalize_a_refreshing_table(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.CRYPTO)
@@ -100,8 +103,10 @@ def test_canonicalize_a_refreshing_table(dh_exec_ctx: object) -> None:
     scope.release()
 
 
-def test_a_bad_initial_row_of_a_refreshing_table_raises(dh_exec_ctx: object) -> None:
-    source = input_table({"Symbol": dtypes.string})
+def test_a_bad_initial_row_of_a_refreshing_table_raises(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
     with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
@@ -110,9 +115,9 @@ def test_a_bad_initial_row_of_a_refreshing_table_raises(dh_exec_ctx: object) -> 
 
 
 def test_a_bad_row_of_a_refreshing_table_is_nulled(
-    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture, dh_input_table: Callable[..., InputTable]
 ) -> None:
-    source = input_table({"Symbol": dtypes.string})
+    source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.LOG)
@@ -204,10 +209,12 @@ def _listeners(table: Table) -> int:
     return 0 if references is None else 1
 
 
-def test_canonicalizing_a_refreshing_table_leaves_no_hidden_table(dh_exec_ctx: object) -> None:
+def test_canonicalizing_a_refreshing_table_leaves_no_hidden_table(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
     # The pre-check reads the rows without a derived table, so the source's only child is the
     # result's own formula, and none is left once the scope is released.
-    source = input_table({"Symbol": dtypes.string})
+    source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["EUR/USD", "EUR/USD"])]))
     assert _listeners(source) == 0
     scope = new_scope()

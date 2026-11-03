@@ -10,7 +10,8 @@ result and holds what one result owns; the session's follow coordinator
 **How the rows land without a copy.** Everything is created on the caller thread inside the
 result's own liveness scope (`open_followed_read`)::
 
-    blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long, "Constituent": TABLE})
+    blink, publisher = blink_publisher(name, {"Symbol": str, "Seq": long, "Constituent": TABLE,
+                                              "Heard": long})
     latest = blink.last_by("Symbol")                  # each symbol's latest cell
     held = latest                                     # wait=False; with wait=True, the seed:
     held = merge([seed.natural_join(latest, "Symbol", "Over=Seq").where("isNull(Over)"),
@@ -20,13 +21,17 @@ result's own liveness scope (`open_followed_read`)::
                 unique_keys=True, constituent_column="Constituent", ...)
     result = describe(parts.merge(), spec, schema, note=...)
 
-A *cell* is one row of the blink table: a symbol, a sequence number, and a static table of
-that symbol's complete rows, built off the update graph's lock by the read. Publishing a cell
-(`FollowedRead.publish`) replaces the symbol's constituent, so a symbol lands, is replaced, or
-leaves as one constituent, and no row is copied in the update cycle. A cell with no table (a
-*tombstone*) frees a symbol's rows. With `wait=True` the call-time symbols' cells form a static
-seed, so their rows are in the result when the call returns, even inside a console command,
-which holds the update graph's lock; a later cell of the same symbol masks its seed cell.
+A *cell* is one row of the blink table: a symbol, a sequence number, a static table of that
+symbol's complete rows, built off the update graph's lock by the read, and `Heard`, the latest
+update cycle of the symbol table the coordinator had applied when it published the cell; under
+`Reread.ALWAYS` a cell shows only when its symbol joined the table at that cycle or before
+(`_shown`), so a download of a symbol that has since left and returned never shows.
+Publishing a cell (`FollowedRead.publish`) replaces the symbol's constituent, so a symbol
+lands, is replaced, or leaves as one constituent, and no row is copied in the update cycle. A
+cell with no table (a *tombstone*) frees a symbol's rows. With `wait=True` the call-time
+symbols' cells form a static seed, so their rows are in the result when the call returns, even
+inside a console command, which holds the update graph's lock; a later cell of the same symbol
+masks its seed cell.
 `watched_rows` joins the user's table, so a symbol whose row leaves the table leaves the result
 in that same cycle. A blink symbol table is followed as its append-only form, so every symbol
 it has delivered stays. There is no `input_table` and no `add_async`: the publisher's `add`
@@ -88,6 +93,7 @@ if TYPE_CHECKING:
 
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.update_graph import UpdateGraph
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._massive import Transport
@@ -116,8 +122,9 @@ _OVER: Final = "__MassiveOver"
 """The hidden column that marks a seed cell a newer cell masks; dataset columns are PascalCase
 wire names, so none can take this name."""
 
-_LANDED: Final = "__MassiveLanded"
-"""The hidden column of the update cycle a cell landed in (-1 for a seed cell)."""
+HEARD: Final = "Heard"
+"""The cell column of the latest update cycle of the symbol table that the coordinator had
+applied when it published the cell (the result's build cycle for a seed cell)."""
 
 _JOINED: Final = "__MassiveJoined"
 """The hidden column of the update cycle a symbol's row last joined the symbol table."""
@@ -175,6 +182,7 @@ class FollowedRead:
         "_publish_lock",
         "_publisher",
         "_watch",
+        "built_step",
         "call",
         "dataset",
         "plan",
@@ -218,6 +226,7 @@ class FollowedRead:
         self._failed = False
         self._publisher: BlinkPublisher | None = None
         self._watch: SymbolWatch | None = None
+        self.built_step = 0
 
     @property
     def core(self) -> SessionCore:
@@ -229,17 +238,20 @@ class FollowedRead:
         """True once the result's blink table has shut down: nothing uses the result."""
         return self.shut_down_event.is_set()
 
-    def attach(self, publisher: BlinkPublisher, watch: SymbolWatch) -> None:
+    def attach(self, publisher: BlinkPublisher, watch: SymbolWatch, built_step: int) -> None:
         """Keep the result's publisher and watch, once both exist.
 
         Args:
             publisher: The blink table's publisher.
             watch: The watch of the user's symbol table.
+            built_step: The update cycle the result was built at: no cycle ran while it was
+                built, so every symbol in the table then joined at this cycle or before.
         """
         self._publisher = publisher
         self._watch = watch
+        self.built_step = built_step
 
-    def publish(self, symbol: str, seq: int, table: Table | None) -> None:
+    def publish(self, symbol: str, seq: int, table: Table | None, *, heard: int) -> None:
         """Publish a symbol's cell: its rows, or a tombstone; nothing once the result stopped.
 
         Runs on the coordinator thread, in the session's execution context. The rows are viewed
@@ -250,6 +262,9 @@ class FollowedRead:
             symbol: The symbol.
             seq: The cell's number, larger than every earlier cell of the result.
             table: The symbol's static rows, or None to free them.
+            heard: The latest update cycle of the symbol table whose change the coordinator
+                had applied when it decided to publish the cell; under `Reread.ALWAYS` the
+                cell shows only if its symbol last joined the table at that cycle or before.
         """
         rows = None if table is None else _viewed(table, self._columns).j_table
         cell = new_table(
@@ -257,6 +272,7 @@ class FollowedRead:
                 string_col(SYMBOL, [symbol]),
                 long_col(SEQ, [seq]),
                 InputColumn(name=CONSTITUENT, data_type=TABLE, input_data=[rows]),
+                long_col(HEARD, [heard]),
             ]
         )
         with self._publish_lock:
@@ -329,25 +345,42 @@ class _WatchRouter:
     `SymbolWatch.start`, and an update-graph thread may report a change before the caller has
     queued that replay. So, until `finish`, the caller's replay is gathered into one set, and
     every other report waits in a list; `finish` queues the set and then the waiting reports,
-    in order. Its lock is a leaf held only around list changes and queue puts; the listener
+    in order. A change carries the update cycle that made it, and the set the cycle it was
+    replayed at, read from the update graph's logical clock (`step`, a read of a counter that
+    never waits). Its lock is a leaf held only around list changes and queue puts; the listener
     calls it holding the update graph's lock, and it never waits.
     """
 
-    __slots__ = ("_coordinator", "_lock", "_read", "_replay", "_replaying", "_starter", "_waiting")
+    __slots__ = (
+        "_coordinator",
+        "_lock",
+        "_read",
+        "_replay",
+        "_replay_step",
+        "_replaying",
+        "_starter",
+        "_step",
+        "_waiting",
+    )
 
-    def __init__(self, coordinator: FollowCoordinator, read: FollowedRead) -> None:
+    def __init__(
+        self, coordinator: FollowCoordinator, read: FollowedRead, step: Callable[[], int]
+    ) -> None:
         """Gather reports until `finish`.
 
         Args:
             coordinator: The session's follow coordinator.
             read: The result, held weakly: Java holds the listener, which holds this router.
+            step: Returns the update cycle being run, or the last one run between cycles.
         """
         self._coordinator = coordinator
         self._read = weakref.ref(read)
+        self._step = step
         self._lock = threading.Lock()
         self._replaying = True
         self._starter = threading.get_ident()
         self._replay: set[str] = set()
+        self._replay_step = 0
         self._waiting: list[Callable[[FollowedRead], None]] = []
 
     def _route(self, report: Callable[[FollowedRead], None]) -> None:
@@ -371,11 +404,13 @@ class _WatchRouter:
             added: Symbols gained.
             removed: Symbols lost.
         """
+        step = self._step()
         with self._lock:
             if self._replaying and threading.get_ident() == self._starter:
                 self._replay |= added
+                self._replay_step = step
                 return
-        self._route(lambda read: self._coordinator.changed(read, added, removed))
+        self._route(lambda read: self._coordinator.changed(read, added, removed, step=step))
 
     def on_skipped(self, values: tuple[str, ...]) -> None:
         """The watch's `on_skipped`: queue the text of the values skipped now.
@@ -401,11 +436,26 @@ class _WatchRouter:
             read: The result.
         """
         with self._lock:
-            self._coordinator.baseline(read, frozenset(self._replay))
+            self._coordinator.baseline(read, frozenset(self._replay), self._replay_step)
             for report in self._waiting:
                 report(read)
             self._waiting.clear()
             self._replaying = False
+
+
+def _current_step(update_graph: UpdateGraph) -> int:
+    """Return the update cycle being run, or the last one run between cycles.
+
+    A read of the update graph's logical clock, which never waits, so the watch's listener
+    may call it.
+
+    Args:
+        update_graph: The session's update graph.
+
+    Returns:
+        The clock's step.
+    """
+    return int(update_graph.j_update_graph.clock().currentStep())
 
 
 def _shut_down(
@@ -465,17 +515,20 @@ def _shown(blink: Table, seed: Table | None, followed: Table, *, reread: Reread)
 
     Under `Reread.ALWAYS` a returning symbol must show no rows until its new download lands,
     though its earlier cell stays the latest until the empty cell that frees it lands. So each
-    symbol is stamped with the update cycle its row last joined the table (`_JOINED`, made
-    first), each cell with the cycle it landed in (`_LANDED`, by `update` before any
-    aggregation), and a cell shows only when it landed in the cycle its symbol joined or later.
-    The coordinator hears of a join in the cycle that makes it and only then starts the read,
-    so that read's cell lands in a later cycle and always shows; the earlier download's cell
-    landed before the symbol left and never shows again. Cycle numbers come from one logical
-    clock, so, unlike readings of two wall clocks, they never run backwards against each other.
-    A seed cell, read at the call, shows while its symbol has not left the table since the
-    result was made. Under `Reread.NEVER` a returning symbol shows its kept cell at once, so no
-    stamp is needed. The caller holds the update graph's shared lock, so no cycle runs while
-    this is built.
+    symbol is stamped with the update cycle its row last joined the table (`_JOINED`), and a
+    cell shows only when its `HEARD` stamp, the latest cycle of the table whose change the
+    coordinator had applied when it decided to publish the cell, is that join cycle or later.
+    The coordinator hears of a join, with its cycle, before it starts the read, so the new
+    download's cell always shows. A read of the earlier membership was decided before the
+    coordinator heard of the removal, so its cell is stamped with an earlier cycle and never
+    shows, even when the coordinator publishes it after the symbol has left and come back
+    (the removal and re-add were queued behind its outcome). The landing cycle could not
+    tell these apart: such a stale cell lands after the re-add. Cycle numbers come from one
+    logical clock, so, unlike readings of two wall clocks, they never run backwards against
+    each other. A seed cell, read at the call, is stamped with the build cycle, so it shows
+    while its symbol has not left the table since the result was made. Under `Reread.NEVER` a
+    returning symbol shows its kept cell at once, so the stamp is not used. The caller holds
+    the update graph's shared lock, so no cycle runs while this is built.
 
     Args:
         blink: The result's blink table of cells.
@@ -486,14 +539,9 @@ def _shown(blink: Table, seed: Table | None, followed: Table, *, reread: Reread)
     Returns:
         The shown cells: `Symbol`, `Seq`, and `Constituent`.
     """
-    always = reread is Reread.ALWAYS
-    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED} = {_STEP}") if always else None
-    stamped = blink.update(f"{_LANDED} = {_STEP}") if always else blink
-    latest = stamped.last_by(SYMBOL)
+    latest = blink.last_by(SYMBOL)
     held = latest
     if seed is not None:
-        if always:
-            seed = seed.update(f"{_LANDED} = -1L")
         masked = (
             seed.natural_join(latest, on=SYMBOL, joins=f"{_OVER}={SEQ}")
             .where(f"isNull({_OVER})")
@@ -501,26 +549,23 @@ def _shown(blink: Table, seed: Table | None, followed: Table, *, reread: Reread)
         )
         held = merge([masked, latest])
     cells = held.where(f"!isNull({CONSTITUENT})")
-    if joined is None:
-        return watched_rows(cells, followed)
-    # No cycle runs: every symbol in the table now joined at this step or before.
-    start = int(blink.j_table.getUpdateGraph().clock().currentStep())
+    if reread is Reread.NEVER:
+        return watched_rows(cells, followed).drop_columns(HEARD)
+    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED} = {_STEP}")
     return (
         cells.natural_join(joined, on=SYMBOL, joins=_JOINED)
-        .where(
-            f"!isNull({_JOINED}) && ({_LANDED} >= {_JOINED} || "
-            f"({_LANDED} < 0 && {_JOINED} <= {start}L))"
-        )
-        .drop_columns([_LANDED, _JOINED])
+        .where(f"!isNull({_JOINED}) && {HEARD} >= {_JOINED}")
+        .drop_columns([HEARD, _JOINED])
     )
 
 
-def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...]) -> Table:
+def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...], built_step: int) -> Table:
     """Return the static table of the call-time symbols' cells.
 
     Args:
         seeded: Each symbol's static rows.
         columns: The dataset's columns, in schema order.
+        built_step: The update cycle the result is built at, each cell's `HEARD` stamp.
 
     Returns:
         One cell per symbol, numbered 0.
@@ -535,6 +580,7 @@ def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...]) -> Table:
                 data_type=TABLE,
                 input_data=[_viewed(seeded[name], columns).j_table for name in names],
             ),
+            long_col(HEARD, [built_step] * len(names)),
         ]
     )
 
@@ -549,7 +595,7 @@ def _build(
     router: _WatchRouter,
     seeded: Mapping[str, Table],
     note: str,
-) -> tuple[tuple[Table, BlinkPublisher, SymbolWatch], LivenessScope]:
+) -> tuple[tuple[Table, BlinkPublisher, SymbolWatch, int], LivenessScope]:
     """Create a followed read's result and watch in a new result scope (`make_result`).
 
     Args:
@@ -563,15 +609,16 @@ def _build(
         note: The sentences the description adds after the dataset's summary.
 
     Returns:
-        The result, its publisher, and the watch (not started), and the result scope.
+        The result, its publisher, the watch (not started), and the update cycle it was built
+        at; and the result scope.
     """
-    built: list[tuple[BlinkPublisher, SymbolWatch]] = []
+    built: list[tuple[BlinkPublisher, SymbolWatch, int]] = []
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
         blink, publisher = blink_publisher(
             f"massive.{spec.name}#{read.call}",
-            {SYMBOL: dtypes.string, SEQ: dtypes.long, CONSTITUENT: TABLE},
+            {SYMBOL: dtypes.string, SEQ: dtypes.long, CONSTITUENT: TABLE, HEARD: dtypes.long},
             on_shutdown=functools.partial(
                 _shut_down,
                 weakref.ref(core),
@@ -581,7 +628,9 @@ def _build(
             ),
             release_later=core.release_later,
         )
-        seed = _seed(seeded, schema.column_names) if seeded else None
+        # No cycle runs: every symbol in the table now joined at this cycle or before.
+        built_step = int(blink.j_table.getUpdateGraph().clock().currentStep())
+        seed = _seed(seeded, schema.column_names, built_step) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
         shown = _shown(blink, seed, followed, reread=read.reread)
         parts = PartitionedTable.from_partitioned_table(
@@ -603,7 +652,7 @@ def _build(
         )
         # A table derived from the result keeps the blink table, and so the watch, alive.
         watch.keep_alive_with(blink)
-        built.append((publisher, watch))
+        built.append((publisher, watch, built_step))
         return result
 
     # Under the update graph's shared lock: no cycle refreshes a new table in the step that
@@ -615,8 +664,8 @@ def _build(
         result, scope = make_result(core.exec_ctx, shape)
     finally:
         lock.unlock()
-    publisher, watch = built[0]
-    return (result, publisher, watch), scope
+    publisher, watch, built_step = built[0]
+    return (result, publisher, watch, built_step), scope
 
 
 def open_followed_read(
@@ -683,9 +732,11 @@ def open_followed_read(
             if isinstance(outcome, SymbolRows)
         }
     )
-    router = _WatchRouter(core.follows, read)
+    router = _WatchRouter(
+        core.follows, read, functools.partial(_current_step, core.exec_ctx.update_graph)
+    )
     with entered(core.exec_ctx):
-        (result, publisher, watch), scope = _build(
+        (result, publisher, watch, built_step), scope = _build(
             core,
             spec,
             read,
@@ -695,7 +746,7 @@ def open_followed_read(
             seeded=seeded,
             note=note,
         )
-    read.attach(publisher, watch)
+    read.attach(publisher, watch, built_step)
     registered = False
     try:
         core.register_worker(

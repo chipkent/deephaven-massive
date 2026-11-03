@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from deephaven import dtypes
-from deephaven.update_graph import shared_lock
+from deephaven.update_graph import exclusive_lock, has_shared_lock, shared_lock
 
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.liveness import new_scope, release_scope
@@ -256,3 +256,24 @@ def test_a_failure_that_raises_unpins_its_table(
     assert pinned.deferred_at_shutdown() == [1]
     pinned.release_deferred()
     assert pinned.destroyed()
+
+
+def test_a_blink_table_is_created_under_the_update_graphs_shared_lock(
+    dh_exec_ctx: ExecutionContext, blink_creations: list[bool]
+) -> None:
+    # Created while a cycle runs, a table could be refreshed in the step its creation stamp
+    # claims, and a first change in that step is fatal: no cycle runs under the lock.
+    pinned = _Pinned(dh_exec_ctx)
+    assert blink_creations == [True]
+    assert not has_shared_lock(dh_exec_ctx.update_graph)  # let go once the table exists
+    release_scope(dh_exec_ctx, pinned.scope)
+
+
+def test_a_blink_table_is_created_in_a_console_command(
+    dh_exec_ctx: ExecutionContext, blink_creations: list[bool]
+) -> None:
+    # A thread that holds the exclusive lock takes the shared lock again at once.
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        pinned = _Pinned(dh_exec_ctx)
+    assert blink_creations == [True]
+    release_scope(dh_exec_ctx, pinned.scope)

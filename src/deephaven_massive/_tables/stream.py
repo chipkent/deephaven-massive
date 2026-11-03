@@ -711,19 +711,27 @@ class StreamSink:
 
     - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
       when a reactive symbol table changes;
-    - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
-      flush thread takes it, but a stream is failed from the caller thread when
-      its connection failed while it was opening, from the closing thread at `m.close()`, and
-      from the reaper when its watchlist failed. The order is the flush lock (on a flush
+    - its publish lock serializes `publish`, `publish_held`, and `fail`, which call Deephaven.
+      Usually only the flush thread takes it, but a stream is failed from the caller thread
+      when its connection failed while it was opening, from the closing thread at
+      `m.close()`, and from the reaper when its watchlist failed; and the verb that opened a
+      stream adds its held rows from its own thread. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
       `fail` calls); the publish lock is never taken under `registry_lock`. A caller that holds
-      the update-graph lock (a console command) takes it to fail the stream, which is safe
-      because nothing done under it takes the update-graph lock or waits for an update cycle:
+      the update-graph lock (a console command) takes it to fail the stream or to add its held
+      rows, which is safe because nothing done under it takes the update-graph lock or waits
+      for an update cycle:
       `partition_by` and `where_in` of static tables, `publisher.add` of a static table,
       `publish_failure`, and `SessionCore.fail_stream`.
 
     A failed stream publishes nothing more, and is failed once, so a failure queued behind the
     session's close never replaces the close.
+
+    A new sink holds the rows routed to it until its stream's first result is built
+    (`publish_held`): the stream subscribes before the verb builds that result, and a row the
+    blink table delivered in between would never reach an aggregation such as `last_by`, which
+    only sees rows that arrive after it exists. The held tables are static and few (only those
+    of the open), and `publish_held` adds them in order before any later row.
 
     Attributes:
         stream_id: The stream's id.
@@ -736,6 +744,7 @@ class StreamSink:
         "_core",
         "_filter",
         "_filter_version",
+        "_held",
         "_lock",
         "_publish_lock",
         "_symbols",
@@ -777,6 +786,8 @@ class StreamSink:
         self._publish_lock = threading.Lock()
         self._filter: Table | None = None
         self._filter_version = -1
+        # The rows routed before the first result was built; None once `publish_held` ran.
+        self._held: list[Table] | None = []
         self.rows_published = 0
         self.failed = False
 
@@ -808,13 +819,14 @@ class StreamSink:
         a `where_in` against its cached filter table, rebuilt only when its symbols changed.
 
         Runs under the publish lock; the class docstring says why that is safe for a caller
-        that holds the update graph's lock.
+        that holds the update graph's lock. Until the stream's first result is built, the rows
+        are held rather than added (`publish_held`).
 
         Args:
             batch: The channel's shared batch for the stream's dataset.
 
         Returns:
-            The rows added; 0 once the stream has failed.
+            The rows added or held; 0 once the stream has failed.
         """
         with self._publish_lock:
             if self.failed:
@@ -822,9 +834,38 @@ class StreamSink:
             selected = self._select(batch)
             added = 0 if selected is None else selected.size
             if selected is not None and added:
-                self.publisher.add(selected)
+                if self._held is None:
+                    self.publisher.add(selected)
+                else:
+                    self._held.append(selected)
                 self.rows_published += added
             return added
+
+    def publish_held(self) -> None:
+        """Add the rows held since the stream opened, and every later row as it comes.
+
+        The verb that opened the stream calls it on its own thread right after it built the
+        stream's first result, so every row the stream received reaches the blink table in an
+        update cycle after that result exists. Idempotent; a failed stream drops what it held.
+        Takes the publish lock and calls Deephaven (`publisher.add` of static tables), so never
+        call it under `registry_lock` or on an update-graph thread; a caller that holds the
+        update graph's lock may (the class docstring says why). The thread needs an execution
+        context.
+        """
+        with self._publish_lock:
+            held = self._held
+            if held and not self.failed:
+                logger.debug(
+                    "%s stream %d: its first result is built; adding the %d rows it received "
+                    "while it opened",
+                    self.plan.dataset,
+                    self.stream_id,
+                    sum(table.size for table in held),
+                )
+                # One table at a time: an interrupt leaves the rest held for the next call.
+                while held:
+                    self.publisher.add(held.pop(0))
+            self._held = None
 
     @property
     def receives_all(self) -> bool:
@@ -1981,6 +2022,7 @@ def open_stream_tables(
             path,
             evidence,
             sink.fail,
+            sink.publish_held,
             stop_watch=None if watch is None else watch.stop,
             recency=recency,
         )

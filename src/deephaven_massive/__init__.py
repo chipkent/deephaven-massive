@@ -77,7 +77,9 @@ Public API:
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
     - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's
       exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
-      `C:EURUSD`, `X:BTCUSD`); these turn other spellings into it:
+      `C:EURUSD`, `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol`
+      column, and a live one is followed as rows are added and deleted: see
+      README.md#symbols. The converters turn other spellings into Massive's:
       `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function
       per class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
       `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,

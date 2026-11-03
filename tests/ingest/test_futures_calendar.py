@@ -383,9 +383,9 @@ def test_wait_loaded_returns_once_the_schedules_load(
 ) -> None:
     fetch.hold(SCHEDULES_PATH)
     calendar.watch(["ESM4", "ZCK4-ZCN4"])  # the spread is never looked up, nor waited for
-    assert not calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], 0.05)
+    assert not calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], 0.05, stop=threading.Event())
     fetch.release.set()
-    assert calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], TIMEOUT)
+    assert calendar.wait_loaded(["ESM4", "ZCK4-ZCN4"], TIMEOUT, stop=threading.Event())
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
 
 
@@ -394,13 +394,36 @@ def test_wait_loaded_returns_once_the_lookups_fail_or_find_nothing(
 ) -> None:
     fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 429")
     calendar.watch(["ESM4", "NOPZ5"])
-    assert calendar.wait_loaded(["ESM4", "NOPZ5"], TIMEOUT)
+    assert calendar.wait_loaded(["ESM4", "NOPZ5"], TIMEOUT, stop=threading.Event())
+
+
+def test_wake_ends_a_wait_whose_stop_is_set(calendar: FuturesCalendar, fetch: FakeFetch) -> None:
+    # A closing session sets its stop event and wakes the calendar, which other sessions keep
+    # open: the wait ends at once, reporting the schedules not loaded.
+    fetch.hold(SCHEDULES_PATH)
+    calendar.watch(["ESM4"])
+    stop = threading.Event()
+    waiting = threading.Event()
+    results: list[bool] = []
+
+    def wait() -> None:
+        waiting.set()
+        results.append(calendar.wait_loaded(["ESM4"], 3600.0, stop=stop))  # only a wake ends it
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert waiting.wait(TIMEOUT)
+    stop.set()
+    calendar.wake()
+    waiter.join(TIMEOUT)
+    assert results == [False]
+    fetch.release.set()
 
 
 def test_wait_loaded_returns_once_closed(fetch: FakeFetch, clock: Clock) -> None:
     calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     calendar.close()
-    assert calendar.wait_loaded(["ESM4"], 0)
+    assert calendar.wait_loaded(["ESM4"], 0, stop=threading.Event())
 
 
 @pytest.mark.parametrize(
@@ -596,7 +619,7 @@ def test_closing_wakes_a_caller_waiting_for_the_worker(fetch: FakeFetch, clock: 
 
     def wait() -> None:
         waiting.set()
-        results.append(calendar.wait_loaded(["ESM4"], TIMEOUT))
+        results.append(calendar.wait_loaded(["ESM4"], TIMEOUT, stop=threading.Event()))
 
     waiter = threading.Thread(target=wait)
     waiter.start()
@@ -678,7 +701,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
     closing = threading.Thread(target=calendar.close)
     with caplog.at_level(logging.WARNING):
         closing.start()
-        assert calendar.wait_loaded(["ESM4"], TIMEOUT)  # closed
+        assert calendar.wait_loaded(["ESM4"], TIMEOUT, stop=threading.Event())  # closed
         fetch.release.set()
         closing.join(TIMEOUT)
     assert not closing.is_alive()

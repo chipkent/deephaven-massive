@@ -14,9 +14,10 @@ from urllib.parse import urlencode
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -741,6 +742,7 @@ def test_news_polls_follow_a_live_watchlist(
     fake_rest: FakeRestServer,
     dh_to_pylist: ToRows,
     monkeypatch: pytest.MonkeyPatch,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     clock = FakeClock(manual=True)
     monkeypatch.setattr(poll, "CLOCK", clock)
@@ -751,7 +753,7 @@ def test_news_polls_follow_a_live_watchlist(
         _news_target("MSFT", published_utc_gte=since),
         Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT")])),
     )
-    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     table = rest_session.reference.news(symbols=watch, start="2024-06-24").poll(60)
     _until(lambda: [(r["Symbol"], r["Id"]) for r in dh_to_pylist(table)] == [("AAPL", "both")])
