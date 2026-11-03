@@ -937,9 +937,12 @@ You edit an input table in its panel:
 
 ```python
 # Makes a watchlist you can edit, and a table that reads the previous day's bar of each of
-# its stocks every minute: three Stocks requests a minute, within the free plan's five. You
-# should see two new tables: stock_watchlist, with three rows, and watched_bars, with one row
-# per stock within about a minute. Then follow the steps after this block.
+# its stocks every minute: three Stocks requests a minute, within the free plan's five. Then a
+# second watchlist, of futures products, and a table of each product's contracts that follows
+# it: one Futures request for each product you add. You should see four new tables:
+# stock_watchlist, with three rows; watched_bars, with one row per stock within about a
+# minute; product_watchlist, with one row; and watched_contracts, with up to 10 ES rows. Then
+# follow the steps after this block.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
@@ -947,6 +950,10 @@ from deephaven.column import string_col
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
+
+product_watchlist = input_table({"ProductCode": dht.string}, key_cols="ProductCode")
+product_watchlist.add(new_table([string_col("ProductCode", ["ES"])]))
+watched_contracts = m.futures.contracts(product_code=product_watchlist, limit=10).fetch()
 ```
 
 Then, in the `stock_watchlist` panel:
@@ -956,6 +963,13 @@ Then, in the `stock_watchlist` panel:
 2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read.
 3. In the `streams` panel, the `stocks.previous_day_bar` row's `SymbolCount` reads 3: the
    symbols its latest read covered.
+
+Then, in the `product_watchlist` panel:
+
+4. Add `NQ`. **You should see** up to 10 rows whose `ProductCode` is `NQ` land in
+   `watched_contracts` together, within about a minute.
+5. Delete `NQ`. **You should see** every `NQ` row leave `watched_contracts` at once, while the
+   `ES` rows stay.
 
 ### 22. A crypto watchlist, paid plans (`22_crypto_watchlist.py`)
 

@@ -1,7 +1,10 @@
 # Makes a watchlist you can edit, and a table that reads the previous day's bar of each of
-# its stocks every minute: three Stocks requests a minute, within the free plan's five. You
-# should see two new tables: stock_watchlist, with three rows, and watched_bars, with one row
-# per stock within about a minute. Then follow the steps after this block.
+# its stocks every minute: three Stocks requests a minute, within the free plan's five. Then a
+# second watchlist, of futures products, and a table of each product's contracts that follows
+# it: one Futures request for each product you add. You should see four new tables:
+# stock_watchlist, with three rows; watched_bars, with one row per stock within about a
+# minute; product_watchlist, with one row; and watched_contracts, with up to 10 ES rows. Then
+# follow the steps after this block.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
@@ -9,3 +12,7 @@ from deephaven.column import string_col
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
+
+product_watchlist = input_table({"ProductCode": dht.string}, key_cols="ProductCode")
+product_watchlist.add(new_table([string_col("ProductCode", ["ES"])]))
+watched_contracts = m.futures.contracts(product_code=product_watchlist, limit=10).fetch()
