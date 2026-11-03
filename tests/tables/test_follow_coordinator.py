@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import gc
 import logging
 import threading
+import weakref
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any, cast
 
 import pytest
@@ -30,14 +33,11 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
-from deephaven_massive._tables.diagnostics import (
-    FLAT_FILES_AND_REST,
-    SymbolReadRow,
-    SymbolReadState,
-)
+from deephaven_massive._tables.diagnostics import FLAT_FILES_AND_REST
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
+from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
     SymbolFailure,
@@ -126,8 +126,8 @@ class Script:
 
 
 def watchlist(*symbols: str) -> Table:
-    # Created under the update graph's lock, so no update cycle can refresh it in the step it
-    # was stamped with and make it notify twice.
+    # A user's watchlist, created under the update graph's lock: a table created while a cycle
+    # runs and written at once can notify twice in one step, which ends the process.
     with shared_lock(get_exec_ctx().update_graph):
         table = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     if symbols:
@@ -243,10 +243,13 @@ def test_a_symbol_goes_queued_loading_done(
     assert (done.rows, done.error, done.transport) == (2, None, Transport.REST)
     assert done.read_at == done.added_at == int(clock.time() * 1e9)
     drain()
-    shown = {r["Symbol"]: r for r in dh_to_pylist(massive_session.symbol_reads())}
-    assert shown["AAPL"]["State"] == "DONE"
-    assert shown["AAPL"]["Transport"] == "REST"
-    assert shown["MSFT"]["State"] == "LOADING"
+    view = massive_session.symbol_reads()
+
+    def shown() -> dict[str, tuple[str, str]]:
+        return {r["Symbol"]: (r["State"], r["Transport"]) for r in dh_to_pylist(view)}
+
+    until(lambda: shown() == {"AAPL": ("DONE", "REST"), "MSFT": ("LOADING", None)})
+    massive_session.release(view)
     hold.set()
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
     massive_session.release(result)
@@ -292,7 +295,7 @@ def test_a_permanent_failure_fails_only_its_symbol(
     assert (failed.attempts, failed.next_attempt_at, failed.rows) == (1, None, 0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "AAPL failed after 1 attempts (permanent)" in warnings[0]
+    assert "AAPL failed after 1 attempt (permanent)" in warnings[0]
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
@@ -450,7 +453,7 @@ def test_five_add_remove_cycles_before_the_first_read_land_one_read(
     done = wait_state(massive_session, "AAPL", SymbolReadState.DONE)
     assert script.reads_of("AAPL") == 2  # the first, dropped, and one final read
     assert done.attempts == 1
-    assert len(dh_to_pylist(result)) == 2
+    until(lambda: len(dh_to_pylist(result)) == 2)
     massive_session.release(result)
 
 
@@ -572,7 +575,7 @@ def test_release_while_loading_stops_every_symbol(
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
     wait_state(massive_session, "MSFT", SymbolReadState.STOPPED)
     gate.set()
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
     drain()
     assert state(massive_session, "AAPL") is SymbolReadState.STOPPED  # the late outcome is dropped
 
@@ -608,7 +611,7 @@ def test_close_marks_every_unfinished_symbol_closed(
     gate.set()  # its rows land after the close: the row stays CLOSED
     until(lambda: massive_session._core.follows.thread is None)
     assert state(massive_session, "AAPL") is SymbolReadState.CLOSED
-    assert result.j_table.isFailed()
+    until(lambda: bool(result.j_table.isFailed()))  # delivered on the next update cycle
 
 
 def test_a_symbol_table_view_after_close_keeps_the_final_rows(
@@ -619,7 +622,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     drain()
     view = massive_session.symbol_reads()
     massive_session.close()
-    assert [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")]
+    until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
     with pytest.raises(MassiveError, match=r"is closed$"):
         massive_session.symbol_reads()
     massive_session.release(view)
@@ -633,10 +636,10 @@ def test_two_results_of_one_table_keep_rows_of_their_own(
     first = follow(massive_session, wl, Script(massive_session))
     second = follow(massive_session, wl, Script(massive_session))
     until(lambda: [r.state for r in reads(massive_session).values()] == [SymbolReadState.DONE] * 2)
-    drain()
-    shown = sorted(
-        (r["StreamId"], r["Symbol"]) for r in dh_to_pylist(massive_session.symbol_reads())
-    )
+    view = massive_session.symbol_reads()
+    until(lambda: len(dh_to_pylist(view)) == 2)
+    shown = sorted((r["StreamId"], r["Symbol"]) for r in dh_to_pylist(view))
+    massive_session.release(view)
     assert [symbol for _, symbol in shown] == ["AAPL", "AAPL"]
     assert shown[0][0] != shown[1][0]
     massive_session.release(first)
@@ -735,8 +738,9 @@ def test_the_flat_files_and_rest_label(
     until(
         lambda: stream(massive_session, drain, dh_to_pylist)["Transport"] == "flat files and REST"
     )
-    (shown,) = dh_to_pylist(massive_session.symbol_reads())
-    assert shown["Transport"] == "flat files and REST"
+    view = massive_session.symbol_reads()
+    until(lambda: [r["Transport"] for r in dh_to_pylist(view)] == ["flat files and REST"])
+    massive_session.release(view)
     massive_session.release(result)
 
 
@@ -752,7 +756,11 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     wait_state(massive_session, "TSLA", SymbolReadState.LOADING)
     until(lambda: stream(massive_session, drain, dh_to_pylist)["RowsPublished"] == 4)
     summary = stream(massive_session, drain, dh_to_pylist)
-    symbols = dh_to_pylist(massive_session.symbol_reads())
+    view = massive_session.symbol_reads()
+    final = {"AAPL": "DONE", "MSFT": "DONE", "NVDA": "FAILED", "TSLA": "LOADING"}
+    until(lambda: {r["Symbol"]: r["State"] for r in dh_to_pylist(view)} == final)
+    symbols = dh_to_pylist(view)
+    massive_session.release(view)
     assert summary["SymbolCount"] == len(symbols)
     assert summary["RowsPublished"] == sum(r["Rows"] for r in symbols)
     assert summary["Loading"] == sum(
@@ -781,7 +789,11 @@ def test_one_coordinator_and_pool_serve_every_result(
     for result in results:
         massive_session.release(result)
     del results
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
+    thread = massive_session._core.follows.thread
+    assert thread is not None
+    assert thread.is_alive()  # one coordinator for the session's life, idle now
+    massive_session.close()
     until(lambda: not [t for t in threading.enumerate() if t.name.startswith(f"{prefix} follow")])
 
 
@@ -809,17 +821,33 @@ def test_a_dying_coordinator_fails_every_followed_table(
     assert "massive #" in caplog.text
     assert "died; its queue is no longer handled" in caplog.text
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
-    assert massive_session._core.follows.thread is None
+    assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
         errors = [w.row.error for w in massive_session._core._workers.values()]
     assert all("the follow coordinator died" in (e or "") for e in errors)
 
 
+def _holds_rows(to_list: ToList, table: Table, count: int) -> bool:
+    return len(to_list(table)) == count
+
+
 def test_a_session_freed_while_following_needs_no_close(dh_to_pylist: ToList) -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     result = follow(m, watchlist("AAPL"), Script(m))
-    until(lambda: len(dh_to_pylist(result)) == 2)
+    landed = functools.partial(_holds_rows, dh_to_pylist, result, 2)
+    until(landed)
+    del landed
+    core = weakref.ref(m._core)
+    thread = m._core.follows.thread
+    assert thread is not None
     m.release(result)
+    del result, m
+    # Once nothing uses the result it stops, and nothing keeps the session: it is freed, and
+    # its collection ends the coordinator thread.
+    # A free-threaded build merges references dropped on other threads at a collection.
+    until(lambda: gc.collect() >= 0 and core() is None)
+    thread.join(TIMEOUT)
+    assert not thread.is_alive()
 
 
 def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
@@ -831,7 +859,7 @@ def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
     with exclusive_lock(massive_session._core.exec_ctx.update_graph):
         massive_session.release(result)
     del result
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_sixteen_threads_editing_one_watchlist_while_four_results_follow_it(
@@ -951,6 +979,211 @@ def test_two_bad_rows_fail_the_table_once(
     add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
     until(lambda: bool(result.j_table.isFailed()))
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+
+
+def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The read sees the stop token and fails as reads do then; that failure is not the symbol's.
+    script = Script(massive_session)
+    gate = script.gates["AAPL"] = threading.Event()
+    script.answers["AAPL"] = [refused(503, "stopped")]
+    keeper = follow(massive_session, watchlist("MSFT"), Script(massive_session))
+    result = follow(massive_session, watchlist("AAPL"), script)
+    until(lambda: script.calls == [("AAPL",)])
+    massive_session.release(result)
+    del result
+    wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    gate.set()
+    until(lambda: massive_session._core.follows.following == 1)
+    assert state(massive_session, "AAPL") is SymbolReadState.STOPPED
+    massive_session.release(keeper)
+
+
+def test_one_result_s_defect_leaves_the_others_following(
+    *,
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: ToList,
+) -> None:
+    healthy_list, broken_list = watchlist("AAPL"), watchlist()
+    healthy = follow(massive_session, healthy_list, Script(massive_session))
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    broken = follow(massive_session, broken_list, Script(massive_session))
+    broken_id = max(_calls(massive_session))
+    membership = follow_coordinator.FollowCoordinator._membership
+
+    def fails(coordinator: follow_coordinator.FollowCoordinator, *event: object) -> None:
+        result, message = cast("tuple[Any, Any]", event)
+        if result.read.call == broken_id:
+            raise RuntimeError("a defect")
+        membership(coordinator, result, message)
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_membership", fails)
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        add(broken_list, "NVDA")
+        add(healthy_list, "MSFT")
+        until(lambda: bool(broken.j_table.isFailed()))
+    assert "follow: handling _" in caplog.text  # its start's set, or the later change
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
+    with massive_session._core.registry_lock:
+        error = massive_session._core._workers[broken_id].row.error or ""
+    assert "RuntimeError: a defect" in error
+    massive_session.release(healthy)
+    massive_session.release(broken)
+
+
+def _calls(m: dm.MassiveSession) -> set[int]:
+    # The StreamIds of the session's worker tables now.
+    with m._core.registry_lock:
+        return set(m._core._workers)
+
+
+def test_a_result_handed_over_as_the_session_closes_never_starts(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = massive_session._core
+    start = follow_coordinator.FollowCoordinator._start
+    started: list[bool] = []
+
+    def closing(self: follow_coordinator.FollowCoordinator, *event: object) -> object:
+        (message,) = event
+        with core.registry_lock:
+            core._closed = True  # as a close does, between the hand-over and the start
+        try:
+            result = start(self, cast("Any", message))
+        finally:
+            with core.registry_lock:
+                core._closed = False
+        started.append(result.ended)
+        return result
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_start", closing)
+    script = Script(massive_session)
+    result = follow(massive_session, watchlist("AAPL"), script)
+    until(lambda: started == [True])
+    massive_session.release(result)
+    assert script.calls == []
+
+
+def test_a_coordinator_that_dies_after_its_stop_has_no_pool_to_end(
+    massive_session: dm.MassiveSession,
+) -> None:
+    coordinator = massive_session._core.follows
+    coordinator.stop()
+    coordinator._died(SystemExit("late"))  # nothing to fail, no pool to shut down
+    assert coordinator.thread is None
+    assert coordinator.following == 0
+
+
+def test_a_flat_file_scan_fails_as_a_unit(massive_session: dm.MassiveSession) -> None:
+    script = Script(massive_session)
+    gate = script.gates["AAPL"] = threading.Event()
+    scan = SymbolFailure(
+        MassiveError("HTTP 403: the files are refused", status=403), FailureKind.PERMANENT
+    )
+    script.answers["MSFT"] = [scan]
+    script.answers["NVDA"] = [scan]
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script, one_scan=True)
+    until(lambda: script.calls == [("AAPL",)])
+    add(wl, "MSFT", "NVDA")
+    until(lambda: state(massive_session, "NVDA") is SymbolReadState.QUEUED)
+    gate.set()
+    msft = wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
+    nvda = wait_state(massive_session, "NVDA", SymbolReadState.FAILED)
+    assert script.calls == [("AAPL",), ("MSFT", "NVDA")]
+    assert msft.error == nvda.error == "HTTP 403: the files are refused"
+    massive_session.release(result)
+
+
+@pytest.mark.parametrize(
+    ("label", "wall"),
+    [
+        ("New York midnight", "2026-11-03T05:00:00Z"),
+        ("UTC midnight", "2026-11-03T00:00:00Z"),
+        ("17:00 Chicago", "2026-11-02T23:00:00Z"),
+        ("the fall-back", "2026-11-01T06:30:00Z"),
+    ],
+)
+def test_never_reuses_its_download_across_any_day_boundary(
+    *, massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, label: str, wall: str
+) -> None:
+    # NEVER reads no clock: crossing a day of any zone, in a JVM whose default zone is Tokyo,
+    # changes nothing.
+    jpy = pytest.importorskip("jpy")
+    zones = jpy.get_type("java.util.TimeZone")
+    before = zones.getDefault()
+    zones.setDefault(zones.getTimeZone("Asia/Tokyo"))
+    try:
+        crossing = datetime.fromisoformat(wall).timestamp()
+        clock = FakeClock(manual=True, wall=crossing - 60)
+        monkeypatch.setattr(follow_coordinator, "CLOCK", clock)
+        script = Script(massive_session)
+        wl = watchlist("AAPL")
+        result = follow(massive_session, wl, script, reread=Reread.NEVER)
+        done = wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+        clock.advance(120)  # past the boundary
+        delete(wl, "AAPL")
+        wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+        add(wl, "AAPL")
+        back = wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+        assert script.reads_of("AAPL") == 1, label
+        assert back.read_at == done.read_at
+        assert back.added_at > crossing * 1e9 > done.added_at
+        massive_session.release(result)
+    finally:
+        zones.setDefault(before)
+
+
+def test_results_opened_and_released_on_many_threads_share_one_coordinator(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The coordinator thread never changes hands, so its state has one owner on any build.
+    prefix = f"{massive_session._core.thread_prefix} follow"
+    idents: set[int] = set()
+    start = threading.Barrier(8)
+
+    def churn() -> None:
+        start.wait(TIMEOUT)
+        with entered(massive_session._core.exec_ctx):
+            for _ in range(4):
+                result = follow(massive_session, watchlist("AAPL"), Script(massive_session))
+                thread = massive_session._core.follows.thread
+                if thread is not None and thread.ident is not None:
+                    idents.add(thread.ident)
+                massive_session.release(result)
+
+    with caplog.at_level(logging.ERROR):
+        workers = ThreadPoolExecutor(8, thread_name_prefix="churn")
+        try:
+            for future in [workers.submit(churn) for _ in range(8)]:
+                future.result(TIMEOUT)
+        finally:
+            workers.shutdown(wait=False)
+        until(lambda: massive_session._core.follows.following == 0)
+    assert len(idents) == 1
+    assert len([t for t in threading.enumerate() if t.name == prefix]) == 1
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_an_outcome_after_the_stop_token_is_dropped(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The token is set (a failure or the shutdown) before the result's stop is handled.
+    script = Script(massive_session)
+    gate = script.gates["AAPL"] = threading.Event()
+    result = follow(massive_session, watchlist("AAPL"), script)
+    until(lambda: script.calls == [("AAPL",)])
+    (worker,) = massive_session._core._workers.values()
+    handle = cast("Any", worker.fail).__self__
+    handle.stop_token.set()
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        gate.set()
+        until(lambda: "a read ended after the stop; dropped" in caplog.text)
+    assert state(massive_session, "AAPL") is SymbolReadState.LOADING  # nothing recorded
+    massive_session.release(result)
 
 
 # --- Reads of several symbols, and crypto pairs Massive does not list ---------------------------

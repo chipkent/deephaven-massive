@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests._live.calendar import NEW_YORK
-from tests._live.live_run import commands, results
+from tests._live.live_run import commands, results, schedule
 from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunContext, RunMemory, RunRefusedError
 from tests._live.live_run.machine_checks import FAIL, OK, Item
@@ -211,6 +211,17 @@ def test_a_probe_plans_a_stream_night_around_massives_closures(harness: Harness)
     harness.clock.now = datetime(2026, 11, 9, 10, tzinfo=NEW_YORK)
     commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
     assert (state.stream_day, state.stream_night) == ("2026-11-10", "2026-11-11")
+
+
+def test_a_probe_inside_a_night_that_gave_up_plans_the_next(harness: Harness) -> None:
+    state, memory = RunState(commit="c1"), RunMemory()
+    state.stream_day, state.stream_night = "2026-11-12", "2026-11-05"  # Thursday's night
+    for _ in range(schedule.MAX_STREAM_STARTS):
+        state.attempts.append(run_state.Attempt("stream-night", "n", "2026-11-05", ""))
+    tiers = BASIC | {"currencies": "starter"}
+    harness.clock.now = datetime(2026, 11, 6, 8, tzinfo=NEW_YORK)  # Friday's probe, before 09:30
+    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    assert state.stream_night == "2026-11-08"  # Sunday's, not lost to the weekend
 
 
 def test_a_key_that_streams_neither_crypto_nor_futures_plans_no_night(harness: Harness) -> None:

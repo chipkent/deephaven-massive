@@ -39,7 +39,8 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import LIBRARY_BUG, UnlistedPairError
 from deephaven_massive._ingest import history_reads
-from deephaven_massive._massive import Transport
+from deephaven_massive._ingest import rest as rest_module
+from deephaven_massive._massive import Patience, Transport
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import (
     HistoryQuery,
@@ -68,7 +69,7 @@ from deephaven_massive._tables.transports import (
 )
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
-from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.stream import FakeStreamTransport
 
 if TYPE_CHECKING:
@@ -2092,8 +2093,8 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 
 
 def live(*symbols: str) -> Table:
-    # A refreshing, keyed watchlist holding the symbols, created under the update graph's lock
-    # so no update cycle can refresh it in the step it was stamped with.
+    # A refreshing, keyed watchlist holding the symbols, created under the update graph's lock:
+    # a table created while a cycle runs and written at once can notify twice in one step.
     with shared_lock(get_exec_ctx().update_graph):
         table = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     if symbols:
@@ -2105,7 +2106,7 @@ def follows(m: dm.MassiveSession) -> None:
     # Waits until no followed read of the session is left: its coordinator has ended.
     pause = threading.Event()
     for _ in range(int(TIMEOUT / 0.01)):
-        if m._core.follows.thread is None:
+        if m._core.follows.following == 0:
             return
         pause.wait(0.01)
     raise AssertionError("a followed read kept running")
@@ -2251,7 +2252,7 @@ def test_an_empty_refreshing_table_returns_an_empty_following_result(
     assert result.is_refreshing
     assert result.size == 0
     assert rest.by_symbol == []
-    assert rest.checks == []  # with no symbol, the first read checks the parameters
+    assert [verb for verb, _, _ in rest.checks] == ["history"]  # checked with no symbol too
     massive_session.release(result)
     follows(massive_session)
 
@@ -2638,3 +2639,44 @@ def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     _until(lambda: [r["Id"] for r in dh_to_pylist(result)] == ["both"])
     rest_session.release(result)
     follows(rest_session)
+
+
+def test_a_followed_read_s_patience_starts_when_its_read_does(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One read thread: MSFT waits in the queue while AAPL is read. Its patience for rate
+    # limits begins only when its own read begins, so the time it queued never counts.
+    events: list[str] = []
+    lock = threading.Lock()
+    patience = rest_module.RestReader.patience
+
+    def recorded(reader: rest_module.RestReader) -> Patience:
+        with lock:
+            events.append("patience")
+        return patience(reader)
+
+    def heard(received: Received) -> None:
+        with lock:
+            events.append(received.target.split("?")[0].rsplit("/", 1)[-1])
+
+    monkeypatch.setattr(rest_module.RestReader, "patience", recorded)
+    fake_rest.on_request(heard)
+    fake_rest.reply_default(Reply(envelope([])))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=1)
+    with dm.MassiveSession(config) as m:
+        result = m.stocks.trades(live("AAPL", "MSFT")).history(
+            "2025-03-03", "2025-03-03", wait=False
+        )
+        _until(lambda: events.count("patience") == 2 and len(events) == 4)
+        m.release(result)
+    assert events == ["patience", "AAPL", "patience", "MSFT"]
+
+
+def test_a_followed_range_no_row_can_lie_in_checks_nothing(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    result = trades(massive_session, live("AAPL")).history(moment, moment)  # an empty range
+    assert rest.checks == []  # nothing can be asked: no request, no parameter to check
+    massive_session.release(result)
+    follows(massive_session)

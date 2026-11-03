@@ -313,28 +313,6 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     rest_session.release(table)
 
 
-@pytest.mark.parametrize(
-    "name", ["filings.initial_insider_ownership", "filings.insider_transactions"]
-)
-def test_a_filing_two_named_tickers_return_under_a_limit_is_kept_once(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-) -> None:
-    # A `limit` sends each named ticker its own request, and a filing that lists both tickers
-    # comes back from each. It is kept once, though its nullable keys are empty: a null there
-    # is a value.
-    template = cast("str", spec_of(name).fetch_path)
-    body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
-    fake_rest.reply(template, Reply(body=body))
-    query = cast("Query", factory(rest_session, name)(["AAPL", "MSFT"], limit=1000))
-    table = query.fetch()
-    assert dh_arrow.to_arrow(table).num_rows == len(body["results"])
-    assert sorted(q["tickers.any_of"][0] for _, q in fake_rest.get_queries()) == ["AAPL", "MSFT"]
-
-
 @pytest.mark.parametrize("name", ["filings.index", "filings.text_8k"])
 def test_a_filing_under_two_filers_polls_as_two_rows(
     *,

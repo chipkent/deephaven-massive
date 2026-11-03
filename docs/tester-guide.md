@@ -932,6 +932,42 @@ trades_per_minute = crypto_trades.update("Minute = lowerBin(Timestamp, MINUTE)")
 )
 ```
 
+### History that follows a watchlist
+
+`history()` given a watchlist you can edit follows it: each symbol you add is read over the same
+range and its rows arrive all at once, and each symbol you delete leaves in the same update.
+`m.symbol_reads()` shows each symbol's read. This works on the free plan: each added symbol is
+one request.
+
+```python
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from deephaven import dtypes as dht
+from deephaven import input_table, new_table
+from deephaven.column import string_col
+
+names = input_table({"Symbol": dht.string}, key_cols="Symbol")
+names.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
+month_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=30)
+followed = m.stocks.bars(names, dm.Timespan.DAY).history(month_ago)
+reads = m.symbol_reads()
+
+names.add(new_table([string_col("Symbol", ["NVDA"])]))
+```
+
+**You should see** `followed` with AAPL's and MSFT's bars at once, and NVDA's bars a few seconds
+later, all of them in one update. In `reads`, NVDA goes `QUEUED`, `LOADING`, then `DONE`, with
+`Rows` equal to its bars in `followed`. Then delete NVDA: its bars leave `followed` in the same
+update, and its row in `reads` becomes `REMOVED`.
+
+```python
+names.delete(new_table([string_col("Symbol", ["NVDA"])]))
+```
+
+Add NVDA back and it is downloaded again: its `ReadAt` in `reads` is newer. To get the earlier
+download back with no request, pass `reread=dm.Reread.NEVER` to `history()`.
+
 ## 2.3 Save the diagnostics, and finish
 
 ### 21. Save the diagnostics (`21_save_diagnostics.py`)

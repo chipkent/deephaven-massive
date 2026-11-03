@@ -327,7 +327,7 @@ def test_a_nights_bars_are_compared_over_the_night_and_at_its_boundaries(
     assert (night["streamed"], night["fetched"], night["only_fetched"]) == ("3", "4", "1")
 
 
-def test_a_night_bar_dated_unlike_history_fails_its_unit(
+def test_a_crypto_bar_dated_other_than_its_utc_date_fails_its_unit(
     fake_rest: FakeRestServer, tmp_path: Path
 ) -> None:
     streamed = tmp_path / "stream-night"
@@ -336,9 +336,24 @@ def test_a_night_bar_dated_unlike_history_fails_its_unit(
         [(MIDNIGHT, "2026-10-29"), (MIDNIGHT + timedelta(minutes=1), "2026-10-28")],
     )
     seen = _night_reconcile(fake_rest, streamed, tmp_path / "reconcile")
-    assert seen[0] == ("crypto real-time", "failed", "1 bars dated other than in history")
+    assert seen[0] == ("crypto real-time", "failed", "1 bars dated other than their UTC date")
     summary = json.loads((tmp_path / "reconcile" / "summary.json").read_text())
     assert summary["streams"]["crypto-minute-bars"]["00:00 UTC after"]["date_mismatches"] == 1
     with (tmp_path / "reconcile" / "reconciliation.csv").open(encoding="utf-8") as file:
         rows = [r for r in csv.DictReader(file) if r["window"] == "night"]
     assert rows[0]["date_mismatches"] == "1"
+
+
+def test_a_futures_date_is_held_to_historys_and_a_crypto_date_to_its_start() -> None:
+    start = _ns(MIDNIGHT)
+    right, wrong = (1.0, "2026-10-29"), (1.0, "2026-10-28")
+    bar = ("X:BTCUSD", start)
+    # Futures: the sides must agree, whatever the date; a bar on one side only is not compared.
+    assert reconcile.misdated({bar: wrong}, {bar: wrong}, utc_dated=False) == []
+    assert reconcile.misdated({bar: right}, {bar: wrong}, utc_dated=False) == [bar]
+    assert reconcile.misdated({bar: wrong}, {}, utc_dated=False) == []
+    # Crypto: each side must carry the UTC date of the bar's start, even when they agree.
+    assert reconcile.misdated({bar: right}, {bar: right}, utc_dated=True) == []
+    assert reconcile.misdated({bar: wrong}, {bar: wrong}, utc_dated=True) == [bar, bar]
+    assert reconcile.misdated({}, {bar: wrong}, utc_dated=True) == [bar]
+    assert reconcile.utc_date(start - 1) == "2026-10-28"

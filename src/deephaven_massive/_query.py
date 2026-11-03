@@ -1700,10 +1700,10 @@ class HistoryQuery(QueryBase):
         span = _window_text(first, last, window.now)
         if source is HistorySource.REST:
             self._check_rest_history()
-            plan = self._rest_plan(call, request, window=window, call_time=call_time)
+            plan = self._rest_plan(call, request, window=window)
             note = "Read from REST: requested with source=dm.HistorySource.REST."
         elif source is HistorySource.AUTO and rest_history_problem(spec, request) is None:
-            plan = self._rest_plan(call, request, window=window, call_time=call_time)
+            plan = self._rest_plan(call, request, window=window)
             note = (
                 "Read from REST: AUTO reads a followed symbol table from REST, which can serve it."
             )
@@ -1748,24 +1748,20 @@ class HistoryQuery(QueryBase):
             first=loaded,
         )
 
-    def _rest_plan(
-        self, call: int, request: Request, *, window: HistoryWindow, call_time: tuple[str, ...]
-    ) -> FollowPlan:
+    def _rest_plan(self, call: int, request: Request, *, window: HistoryWindow) -> FollowPlan:
         """Return the plan of a followed `history()` that reads REST, its parameters checked.
 
         Args:
             call: The call id.
             request: The request with the call-time symbols and the parsed bounds.
             window: The call's window.
-            call_time: The call-time symbols; with none, the parameters are checked by the
-                first read.
 
         Returns:
             One read per symbol (`RestTransport.history_by_symbol`).
         """
         spec = self._spec
         rest = self._core.rest_transport()
-        if call_time and not window.empty:  # a parameter error raises now
+        if not window.empty:  # a parameter error raises now, with symbols or without
             rest.check_history(spec, request, window)
         return FollowPlan(
             Transport.REST,

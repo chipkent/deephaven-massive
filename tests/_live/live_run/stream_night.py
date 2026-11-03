@@ -55,7 +55,6 @@ from tests._live.live_run.stream_capture import (
     Clock,
     Recorder,
     Stream,
-    append_csv,
     diagnostics_rows,
     failed_streams,
     held_streams,
@@ -63,6 +62,7 @@ from tests._live.live_run.stream_capture import (
     record_gap,
     sample_until,
     total_gaps,
+    write_csv,
 )
 from tests._live.live_run.stream_units import delay_of
 
@@ -251,6 +251,9 @@ def summarize_night(
 ) -> dict[str, Any]:
     """Write a night's `hours.csv`, `boundaries.csv`, and `summary.json`, and return the summary.
 
+    Each file is rewritten from every child's files, so a summary written twice holds each
+    row once.
+
     Args:
         folder: The night's attempt folder, with every child's files.
         streams: The night's streams.
@@ -262,7 +265,7 @@ def summarize_night(
         The summary, as written to `summary.json`.
     """
     hours = hourly_rows(folder)
-    append_csv(
+    write_csv(
         folder / "hours.csv",
         [{"stream": s, "hour": h, "rows": n} for (s, h), n in sorted(hours.items())],
     )
@@ -282,7 +285,7 @@ def summarize_night(
         for boundary in boundaries(unit, night):
             for stream in own:
                 found += boundary_rows(folder, stream, boundary, unreadable=unreadable)
-    append_csv(folder / "boundaries.csv", found)
+    write_csv(folder / "boundaries.csv", found)
     summary = {
         "night": night.isoformat(),
         "start": timetable.night_start(night).isoformat(),

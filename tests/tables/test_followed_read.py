@@ -30,18 +30,18 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import AuthenticationError, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator, followed_read
-from deephaven_massive._tables.diagnostics import SymbolReadState
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
 from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
-from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch
+from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -112,8 +112,8 @@ class Script:
 
 
 def watchlist(*symbols: str | None, keyed: bool = True) -> Table:
-    # Created under the update graph's lock, so no update cycle can refresh it in the step it
-    # was stamped with and make it notify twice.
+    # A user's watchlist, created under the update graph's lock: a table created while a cycle
+    # runs and written at once can notify twice in one step, which ends the process.
     with shared_lock(get_exec_ctx().update_graph):
         table = input_table({"Symbol": dtypes.string}, key_cols="Symbol" if keyed else None)
     if symbols:
@@ -471,7 +471,7 @@ def test_release_marks_the_row_released_and_stops_the_reads(
     drain()
     (row,) = stream_rows()
     assert row["State"] == "RELEASED"
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_a_derived_table_keeps_the_result_following(
@@ -493,7 +493,7 @@ def test_a_derived_table_keeps_the_result_following(
     del derived
     with shared_lock(massive_session._core.exec_ctx.update_graph):
         scope.release()
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
 
 
 def test_close_inside_a_console_command_fails_the_table_and_joins_nothing(
@@ -564,7 +564,7 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
         follow(massive_session, wl, script)
     drain()
     until(lambda: massive_session._core._workers == {})
-    until(lambda: massive_session._core.follows.thread is None)
+    until(lambda: massive_session._core.follows.following == 0)
     assert script.calls == []
 
 
@@ -642,3 +642,175 @@ def test_a_failure_during_the_first_read_is_kept_for_the_coordinator(
 
 
 _ = (weakref, exclusive_lock, follow_coordinator)
+
+
+def test_always_hides_an_old_download_before_its_empty_cell_lands(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The symbol leaves and returns while the empty cell that frees its rows is held back:
+    # the old download is still the symbol's latest cell, and must not show again.
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+    held = threading.Event()
+    publish = followed_read.FollowedRead.publish
+
+    def holding(read: followed_read.FollowedRead, *cell: object) -> None:
+        symbol, seq, table = cast("tuple[str, int, Table | None]", cell)
+        if table is None:  # the empty cell of a removal
+            assert held.wait(TIMEOUT)
+        publish(read, symbol, seq, table)
+
+    monkeypatch.setattr(followed_read.FollowedRead, "publish", holding)
+    gate = script.gates["AAPL"] = threading.Event()  # and the new download waits too
+    delete(wl, "AAPL")
+    add(wl, "AAPL")  # the next cycle: the old cell is still the latest
+    assert counts(dh_to_pylist(result)) == {}
+    held.set()
+    gate.set()
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})  # the new download shows
+    massive_session.release(result)
+
+
+def test_never_shows_its_kept_download_in_the_cycle_the_symbol_returns(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+) -> None:
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script, reread=Reread.NEVER)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+    delete(wl, "AAPL")
+    add(wl, "AAPL")
+    assert counts(dh_to_pylist(result)) == {"AAPL": 2}
+    massive_session.release(result)
+
+
+def test_an_add_remove_and_re_add_inside_one_cycle_changes_nothing(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList, drain: Callable[[], None]
+) -> None:
+    script = Script(massive_session)
+    wl = cast("Any", watchlist("AAPL"))
+    result = follow(massive_session, wl, script)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+    with exclusive_lock(massive_session._core.exec_ctx.update_graph):
+        # All three land in the next cycle together: the table's rows end where they began.
+        wl.delete_async(new_table([string_col("Symbol", ["AAPL"])]))
+        wl.add_async(new_table([string_col("Symbol", ["AAPL"])]))
+        wl.add_async(new_table([string_col("Symbol", ["MSFT"])]))
+        wl.delete_async(new_table([string_col("Symbol", ["MSFT"])]))
+    add(wl, "NVDA")  # a later edit: the cycle above has run once it lands
+    wait_rows(dh_to_pylist, result, {"AAPL": 2, "NVDA": 2})
+    drain()
+    assert sorted(script.calls) == [("AAPL",), ("NVDA",)]  # neither AAPL nor MSFT read again
+    massive_session.release(result)
+
+
+def test_an_empty_table_s_row_counts_no_symbol(
+    massive_session: dm.MassiveSession, stream_rows: Rows
+) -> None:
+    result = follow(massive_session, watchlist(), Script(massive_session))
+    (row,) = stream_rows()
+    assert (row["SymbolCount"], row["Symbols"], row["Loading"]) == (0, "", 0)
+    massive_session.release(result)
+
+
+class _Heard:
+    # Stands in for the coordinator: records each report a router hands on, in order.
+    def __init__(self) -> None:
+        self.reports: list[tuple[str, object]] = []
+
+    def baseline(self, _read: object, symbols: frozenset[str]) -> None:
+        self.reports.append(("baseline", symbols))
+
+    def changed(self, _read: object, added: frozenset[str], removed: frozenset[str]) -> None:
+        self.reports.append(("changed", (added, removed)))
+
+    def skipped(self, _read: object, text: str | None) -> None:
+        self.reports.append(("skipped", text))
+
+    def invalid(self, _read: object, message: str) -> None:
+        self.reports.append(("invalid", message))
+
+
+def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> None:
+    # The listener reports from an update-graph thread; here a plain thread stands in for it.
+    class Read:
+        pass
+
+    read = Read()
+    heard = _Heard()
+    router = followed_read._WatchRouter(cast("Any", heard), cast("Any", read))
+    router.on_change(frozenset({"AAPL", "MSFT"}), frozenset())  # the replay, on this thread
+
+    def listener() -> None:  # a change that comes before the replay is handed on
+        router.on_change(frozenset({"NVDA"}), frozenset({"MSFT"}))
+        router.on_invalid("a bad row")
+
+    other = threading.Thread(target=listener, name="update graph stand-in")
+    other.start()
+    other.join(TIMEOUT)
+    router.on_skipped(("msft",))
+    router.finish(cast("Any", read))
+    router.on_skipped(())  # handed on at once now
+    assert heard.reports == [
+        ("baseline", frozenset({"AAPL", "MSFT"})),
+        ("changed", (frozenset({"NVDA"}), frozenset({"MSFT"}))),
+        ("invalid", "a bad row"),
+        ("skipped", skipped_rows_text(("msft",))),
+        ("skipped", None),
+    ]
+
+
+def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSession) -> None:
+    coordinator = massive_session._core.follows
+    coordinator.stop()
+    read = cast("Any", object())
+    coordinator.follow(read, None)  # the session closed: nothing starts
+    coordinator.changed(read, frozenset({"AAPL"}), frozenset())
+    coordinator.invalid(read, "a bad row")
+    coordinator.skipped(read, None)
+    coordinator.wake()
+    assert coordinator.thread is None
+    assert coordinator.following == 0
+
+
+def test_never_shows_a_seeded_symbol_until_it_leaves(
+    massive_session: dm.MassiveSession, dh_to_pylist: ToList
+) -> None:
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+    result = follow(
+        massive_session, wl, script, reread=Reread.NEVER, first=first_read(massive_session, AAPL=3)
+    )
+    assert counts(dh_to_pylist(result)) == {"AAPL": 3}
+    delete(wl, "AAPL")
+    assert counts(dh_to_pylist(result)) == {}
+    add(wl, "AAPL")  # its seed cell is still its download: shown again, with no request
+    assert counts(dh_to_pylist(result)) == {"AAPL": 3}
+    assert script.calls == []
+    massive_session.release(result)
+
+
+def test_the_shutdown_callback_stops_following_and_tells_the_session(
+    massive_session: dm.MassiveSession, drain: Callable[[], None]
+) -> None:
+    # Deephaven runs it on whichever thread shut the table down; here, on the test thread.
+    class Read:
+        def __init__(self) -> None:
+            self.shut_down_event = threading.Event()
+            self.watch_stopped = threading.Event()
+
+        def stop_watch(self) -> None:
+            self.watch_stopped.set()
+
+    read = Read()
+    stop = threading.Event()
+    core = massive_session._core
+    followed_read._shut_down(
+        weakref.ref(core), weakref.ref(cast("Any", read)), call=12_345, stop=stop
+    )
+    assert stop.is_set()
+    assert read.shut_down_event.is_set()
+    drain()  # the watch's stop ran on the reaper
+    assert read.watch_stopped.is_set()

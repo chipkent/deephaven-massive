@@ -2116,24 +2116,13 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` caps each named symbol's rows wherever symbols are named (a list, or a static or
-  live table), and the total rows with `symbols=None` or `dm.ALL` (decisions 74 and 87).
-  Under a `limit`, every request names one symbol: a per-symbol path (the indicators), a
-  symbol parameter that takes one ticker (`reference.tickers`, `stocks.ipos`,
-  `reference.news`), and a list parameter (`ticker.any_of`, `tickers`), which then carries
-  one ticker a request instead of up to `symbols_per_request`. Each request is capped on its
-  own, so one ticker's rows never crowd out another's, and a `poll(REPLACE)` that gains a
-  symbol never pushes another symbol's rows out of the cycle (which would delete them).
-  Without a `limit` nothing changes: a list parameter still carries many tickers a request.
-  The split changes only how requests are made, never a value. Where one row can answer
-  several tickers' requests (`DatasetSpec.symbols_overlap`: news, financial statements, the
-  insider and 8-K disclosure filings, Benzinga news, each of whose rows lists its tickers), a
-  row of a later request is dropped when an earlier request returned a row equal to it in
-  every column but `TimestampInsert`; rows of one request are never merged, so a restatement
-  Massive sends beside the original stays. The catalog's `overlapping symbols`
-  gate requires the flag on every dataset whose symbol parameter filters such a list. The
-  extra requests count against the rate governor, run at most `max_concurrency` at a time,
-  and appear in the slow-poll WARNING's request count. Page size is internal. The README states the rule once, and each dataset's docstring says so. The cap is
+- `limit` is Massive's total-row cap: named symbols that share a request share the cap, so a
+  `limit` samples and a read without one is complete (decision 87). The exception is where
+  each request names one symbol: a per-symbol path
+  (the indicators) or a symbol parameter that takes one ticker
+  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
+  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is the path's documented maximum (or
   `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
@@ -2322,7 +2311,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy: a later request's article equal to an earlier one in every column but `TimestampInsert` is dropped (`symbols_overlap`); a `poll()` table, keyed by `Id`, fails on an article without one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -3101,8 +3090,9 @@ range's start and its `TimestampEnd` is no later than the earlier of now and the
 The window carries these as `HistoryWindow.bars`, a `row_times.BarBounds` whose `start_rule` is
 explicit: `StartRule.RANGE` checks the start, and `StartRule.LABEL`, for futures intraday and
 1-session bars named by dates, keeps bars by their session label instead, since a folded session
-opens before its date. For futures bars of a session or longer, `BarBounds.futures_completion` adds the
-judgment that the bar has certainly ended (below). Ticks have no bar window (`bars` is None). A range of dates ends where its last day's bar would
+opens before its date. For futures bars of a session or longer, `BarBounds.futures_completion`
+adds the judgment that the bar has certainly ended (below). Ticks have no bar window (`bars` is
+None). A range of dates ends where its last day's bar would
 (`dates.day_end`: the next midnight in the class day zone; 01:00 New York time for indices;
 17:00 Chicago on the last session's date for futures); a range of datetimes at its end. The
 transports drop a later bar once its time columns are filled (`row_times.within`), so selection
@@ -3160,9 +3150,11 @@ windows:
   label lies in the range; every longer bar (several sessions, a week, a month, a quarter, a
   year) when the first weekday on or after its bucket's first day is on or after the first
   date, its label is on or before the last date, its `TimestampStart` is no earlier than the
-  `{from}` sent (which drops a bucket Massive cut short at `{from}`), and it has certainly
-  ended. One rule covers every longer unit and is predictable from the visible columns.
-  So `history("2026-09-01", "2026-09-30")` of month bars returns no bar, and
+  `{from}` sent (so its whole window lies in the request), and it has certainly ended. One
+  rule covers every longer unit and is predictable from the visible columns. It selects whole
+  windows by their stamps: a bucket Massive cut short and stamped at `{from}` would look whole
+  and be kept; whether Massive cuts one short is open ([section 23](#23-open-verification-items)
+  item 40). So `history("2026-09-01", "2026-09-30")` of month bars returns no bar, and
   `history("2026-09-01", "2026-10-01")` returns September's.
 
 A bar whose window has not ended yet is never returned, so the current day, week, month,
@@ -7679,7 +7671,6 @@ document already reflects them.
     ([section 7](#7-query-classes-and-verbs)).
 74. **`limit` caps each symbol's rows where a request names one symbol** (2026-10-30, owner),
     so a few symbols with many rows never crowd out the rest; elsewhere it stays a total cap.
-    Decision 87 extends it to every dataset with named symbols.
 75. **Price columns lead every table** (2026-10-30, owner): the naming policy's rule 6b,
     applied at refresh time by `naming.lead_order`.
 76. **The debug log says what it needs to** (2026-10-30, owner). A rate-limit pause logs its
@@ -7805,19 +7796,12 @@ document already reflects them.
     `TimestampInsert` before `TimestampEnd` and gives the filter, and when it is approximate;
     each indicator docstring gives the filter in one line. A `poll(mode=APPEND)` table keeps
     the first unfinished value it sees for a period ([section 8.8](#88-mindicators)).
-87. **`limit` means N rows per symbol wherever symbols are named** (owner decision D3(a),
-    2026-11-02). On the datasets that sent many tickers in one request (dividends, splits,
-    short interest, short volume, share float, financials, filings, partners, the snapshots,
-    and the options and futures snapshots and contracts), `limit` was one total cap across
-    them, so one ticker's rows could fill it, and under `poll(REPLACE)` a symbol added to a
-    live table could push another's rows out of the cycle and delete them. Now a `limit`
-    with named symbols (a list, or a static or live table) sends one request per symbol, each
-    with that `limit`; with `symbols=None` or `dm.ALL` it stays one total cap; without a
-    `limit` nothing changes; datasets that already sent one symbol per request are unchanged.
-    The requests respect `max_concurrency` and the rate governor, the slow-poll WARNING counts
-    them all, and only how requests are made changes, never Massive's values. A row that
-    several tickers' requests return whole is kept once, and rows of one request are never
-    merged ([section 8](#8-namespace-tree)).
+87. **`limit` is Massive's total cap per request** (2026-11-02, owner). Reversed by the owner
+    on 2026-11-02: `limit` is Massive's total cap per request; one request for the named
+    symbols. Use `limit` to sample; read without it for complete data. The earlier decision
+    (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
+    of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
+    read whole ([section 8](#8-namespace-tree)).
 90. **A followed `fetch()` lists a shared row under each symbol, and an unlisted crypto pair
     follows `unlisted_symbols` in every REST verb** (2026-11-02, owner). A followed `fetch()`
     of a dataset whose rows list their tickers (news, financial statements, filings) reads
@@ -7920,4 +7904,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 78 | Which futures snapshot rows carry a `timeframe`: the host check read one row, sorted by ticker | Settled by the live check of 2026-11-02: only traded contracts. Of the first three ES rows, `ESH0` and `ESH1`, far-dated, carried only `details` and `session`, and `ESH7` carried `last_minute`, `last_trade`, and `last_quote`, each `timeframe` `REAL-TIME` (evidence `c1525b4b-live-evidence-20261102T152504Z.log` and `c54bbc29-live.log`); with one row the decision recorded "no timeframe in the futures snapshot". The probe reads up to 100 ES contracts in one request and takes the labels of every row | `tests/ingest/test_host_decision.py`: rows shaped as the live response decide from the third row's label | `tests/ingest/test_host_decision_integration.py`: the futures snapshot's envelope status and the timeframes of its rows |
 | 79 | The unit of the futures snapshot's `last_minute.last_updated`: undescribed, with a 13-digit (millisecond) documentation sample | Settled against the sample by the live run of 2026-11-02 at 17:24 UTC: 19 digits, nanoseconds (`1793640180000000000`, 2026-11-02 17:23 UTC), like the snapshot's other times; read as milliseconds, the value was out of range and `LastMinuteLastUpdated` was null with a drift warning. The field is read by magnitude (`ms\|ns`), so either unit reads | `tests/namespaces/test_futures.py`: a snapshot shaped as the live one fills `LastMinuteLastUpdated` from nanoseconds without drift, and the documented sample still reads from milliseconds | `tests/datasets/test_catalog_integration.py`: `futures.snapshots`; record `LastMinuteLastUpdated` and any drift |
 | 80 | Which day each index day source (the range, `/prev`, the daily open and close, `us_indices/day_aggs_v1`) covers across many indices, and whether the index day and minute files match REST: so far only `I:SPX` and `I:AAVE100` were compared, on two days, and `I:AAVE100`'s day file and `/prev` matched no REST window. One odd index must not drive a library change | Unchanged: the handling of items 52 and 60 stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_index_day_sources.py` | `tests/namespaces/test_indices_integration.py` (Indices Starter and `s3`): `I:SPX`, `I:NDX`, `I:DJI`, `I:RUT`, `I:VIX`, `I:AAVE100`, and up to two AAVE, BTC, and ETH indices from the index ticker list, over the three trading days before the run, the most recent Monday, and the day after the most recent holiday; record each source's window against minute rebuilds over the New York and the Chicago day, the minute file against REST's minutes, and a verdict line per question: do REST day bars cover the Chicago day, do the files match REST beyond the regular-hours indices, is `I:AAVE100`'s mismatch isolated |
-| 81 | How Massive buckets futures bars of a session or longer: whether each whole session falls in the bucket of the UTC day of its first minute, buckets are whole UTC days on a fixed grid starting at `window_start` (N days for N sessions, 7N for N weeks, calendar months), the label is the bucket's last session, and a bar read from inside its bucket is clipped at `{from}`; for products whose sessions open at 17:00 (ES), 19:00 (corn), and 08:30 Chicago time (live cattle) | Unchanged: item 40's rule stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_futures_bar_buckets.py` | `tests/namespaces/test_futures_integration.py` (Futures Starter): the ES, ZC, and LE contracts front at the end of the most recent whole month; record each 1-session bar's `window_start` against its first minute bar, 2-session bars from an even and an odd epoch day, the start day of 1-week bars, each 2-session, week, month, and 2-month bar against the 1-session and minute bars of its bucket, and one 2-month bucket read from before it and from a month into it; a verdict line per question and contract |
+| 81 | How Massive buckets futures bars of a session or longer: whether each whole session falls in the bucket of the UTC day of its first minute, buckets are whole UTC days on a fixed grid starting at `window_start` (N days for N sessions, 7N for N weeks, calendar months), the label is the bucket's last session, and a bar read from inside its bucket is clipped at `{from}`; for products whose sessions open at 17:00 (ES), 19:00 (corn), and 08:30 Chicago time (live cattle), and for Micro Bitcoin (MBT), whose underlying never stops trading: whether any session opens on a Friday evening or a Saturday, which the certain-end judgment assumes no session does | Unchanged: item 40's rule stands until this evidence is read | None: evidence only; the check's comparisons are unit-tested in `tests/live/test_futures_bar_buckets.py` | `tests/namespaces/test_futures_integration.py` (Futures Starter): the ES, ZC, LE, and MBT contracts front at the end of the most recent whole month; record each 1-session bar's `window_start` against its first minute bar, the UTC days 1-session bars start on and their labels' weekdays, 2-session bars from an even and an odd epoch day, the start day of 1-week bars, each 2-session, week, month, and 2-month bar against the 1-session and minute bars of its bucket, and one 2-month bucket read from before it and from a month into it; a verdict line per question and contract |

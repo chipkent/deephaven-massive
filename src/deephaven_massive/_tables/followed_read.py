@@ -73,6 +73,7 @@ from deephaven.column import InputColumn, long_col, string_col
 from deephaven.stream import blink_to_append_only
 from deephaven.table import PartitionedTable
 
+from deephaven_massive._enums import Reread
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState, shown_query
@@ -89,7 +90,6 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._enums import Reread
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.follow_coordinator import FirstRead, FollowCoordinator
     from deephaven_massive._tables.session_core import SessionCore
@@ -115,6 +115,18 @@ TABLE: Final = dtypes.DType(j_name="io.deephaven.engine.table.Table")
 _OVER: Final = "__MassiveOver"
 """The hidden column that marks a seed cell a newer cell masks; dataset columns are PascalCase
 wire names, so none can take this name."""
+
+_LANDED: Final = "__MassiveLanded"
+"""The hidden column of the update cycle a cell landed in (-1 for a seed cell)."""
+
+_JOINED: Final = "__MassiveJoined"
+"""The hidden column of the update cycle a symbol's row last joined the symbol table."""
+
+_STEP: Final = (
+    "io.deephaven.engine.context.ExecutionContext.getContext().getUpdateGraph().clock()"
+    ".currentStep()"
+)
+"""The formula of the update cycle being run: its logical clock's step."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +306,7 @@ class FollowedRead:
         """
         self.stop_token.set()
         failed = self.fail_table(error)
-        self.core.follows.stop(self)
+        self.core.follows.stop_following(self)
         return failed
 
     def release(self) -> None:
@@ -420,7 +432,7 @@ def _shut_down(
     # Alive: the session's record of the result holds it until `worker_shut_down` below.
     read = cast("FollowedRead", read_ref())
     read.shut_down_event.set()
-    core.follows.stop(read)
+    core.follows.stop_following(read)
     core.defer(read.stop_watch)  # a Deephaven call: never here
     core.worker_shut_down(call)
 
@@ -444,27 +456,63 @@ def _viewed(table: Table, columns: tuple[str, ...]) -> Table:
     return table.view(list(columns))
 
 
-def _cells(blink: Table, seed: Table | None) -> Table:
-    """Return each symbol's current cell that holds rows: the latest published, else the seed's.
+def _shown(blink: Table, seed: Table | None, followed: Table, *, reread: Reread) -> Table:
+    """Return each symbol's cell that the result shows now: one per symbol in the table.
+
+    A symbol's cell is its latest published one, or its seed cell while none was published,
+    when it holds rows and the symbol is in the symbol table (the table is joined, so a symbol
+    whose row leaves takes its cell with it in that cycle).
+
+    Under `Reread.ALWAYS` a returning symbol must show no rows until its new download lands,
+    though its earlier cell stays the latest until the empty cell that frees it lands. So each
+    symbol is stamped with the update cycle its row last joined the table (`_JOINED`, made
+    first), each cell with the cycle it landed in (`_LANDED`, by `update` before any
+    aggregation), and a cell shows only when it landed in the cycle its symbol joined or later.
+    The coordinator hears of a join in the cycle that makes it and only then starts the read,
+    so that read's cell lands in a later cycle and always shows; the earlier download's cell
+    landed before the symbol left and never shows again. Cycle numbers come from one logical
+    clock, so, unlike readings of two wall clocks, they never run backwards against each other.
+    A seed cell, read at the call, shows while its symbol has not left the table since the
+    result was made. Under `Reread.NEVER` a returning symbol shows its kept cell at once, so no
+    stamp is needed. The caller holds the update graph's shared lock, so no cycle runs while
+    this is built.
 
     Args:
         blink: The result's blink table of cells.
         seed: The call-time symbols' cells (`wait=True`), or None.
+        followed: The user's symbol table, made append-only when it is a blink table.
+        reread: Whether a returning symbol is read again.
 
     Returns:
-        One row per symbol with rows: its latest cell, or its seed cell while no cell of it
-        was published.
+        The shown cells: `Symbol`, `Seq`, and `Constituent`.
     """
-    latest = blink.last_by(SYMBOL)
+    always = reread is Reread.ALWAYS
+    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED} = {_STEP}") if always else None
+    stamped = blink.update(f"{_LANDED} = {_STEP}") if always else blink
+    latest = stamped.last_by(SYMBOL)
     held = latest
     if seed is not None:
+        if always:
+            seed = seed.update(f"{_LANDED} = -1L")
         masked = (
             seed.natural_join(latest, on=SYMBOL, joins=f"{_OVER}={SEQ}")
             .where(f"isNull({_OVER})")
             .drop_columns(_OVER)
         )
         held = merge([masked, latest])
-    return held.where(f"!isNull({CONSTITUENT})")
+    cells = held.where(f"!isNull({CONSTITUENT})")
+    if joined is None:
+        return watched_rows(cells, followed)
+    # No cycle runs: every symbol in the table now joined at this step or before.
+    start = int(blink.j_table.getUpdateGraph().clock().currentStep())
+    return (
+        cells.natural_join(joined, on=SYMBOL, joins=_JOINED)
+        .where(
+            f"!isNull({_JOINED}) && ({_LANDED} >= {_JOINED} || "
+            f"({_LANDED} < 0 && {_JOINED} <= {start}L))"
+        )
+        .drop_columns([_LANDED, _JOINED])
+    )
 
 
 def _seed(seeded: Mapping[str, Table], columns: tuple[str, ...]) -> Table:
@@ -535,7 +583,7 @@ def _build(
         )
         seed = _seed(seeded, schema.column_names) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
-        shown = watched_rows(_cells(blink, seed), followed)
+        shown = _shown(blink, seed, followed, reread=read.reread)
         parts = PartitionedTable.from_partitioned_table(
             shown,
             key_cols=[SYMBOL],
@@ -558,7 +606,15 @@ def _build(
         built.append((publisher, watch))
         return result
 
-    result, scope = make_result(core.exec_ctx, shape)
+    # Under the update graph's shared lock: no cycle refreshes a new table in the step that
+    # stamped it, and the symbols' join cycles are read against a cycle that is not running.
+    # A thread that already holds the lock, as a console command does, takes it again at once.
+    lock = core.exec_ctx.update_graph.j_update_graph.sharedLock()
+    lock.lock()
+    try:
+        result, scope = make_result(core.exec_ctx, shape)
+    finally:
+        lock.unlock()
     publisher, watch = built[0]
     return (result, publisher, watch), scope
 
@@ -648,8 +704,8 @@ def open_followed_read(
                 kind=StreamKind.READ,
                 dataset=spec.name,
                 query=shown_query(query),
-                symbol_count=None,
-                symbols="reactive table",
+                symbol_count=0,
+                symbols="",
                 held_results=1,
                 transport=plan.transport,
                 state=StreamState.LOADING,

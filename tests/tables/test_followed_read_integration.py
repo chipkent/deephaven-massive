@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.execution_context import get_exec_ctx
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 
@@ -148,7 +150,8 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
     session of the key shares it.
     """
     m = live_session
-    wl = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    with shared_lock(get_exec_ctx().update_graph):  # created before any cycle can refresh it
+        wl = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     query = m.stocks.bars(wl, dm.Timespan.DAY, adjusted=False)
     never = query.history(_START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER)
     seen = _Diagnostics(m, table_rows)
