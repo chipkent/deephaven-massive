@@ -89,7 +89,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          name: Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
   symbols.py             the canonical ticker grammar and its checks (check_symbol(),
-                         normalize()), the public scalar converters, option_roots(),
+                         check_symbols()), the public scalar converters, option_roots(),
                          symbol_class() (section 10)
   wire_symbols.py        a symbol's transport spellings, both ways: canonical_from_wire(),
                          wire_spellings(), ws_symbol(), WireSymbols, ReadSymbols,
@@ -152,6 +152,8 @@ _ingest/                 the only holder of wire clients
   shared_lookup.py       SharedLookup: a session's lookups one caller makes while the others
                          wait, each within its own patience (the host decisions, the crypto
                          ticker list)
+  crypto_tickers.py      CryptoTickerList: Massive's crypto ticker list, read once per session,
+                         which splits each crypto pair into its two currencies
   recency_labels.py      the DELAYED and REAL-TIME labels of a REST response (envelope status,
                          timeframe fields) and the refusal of delayed data not asked for
                          (sections 13.2 and 13.4)

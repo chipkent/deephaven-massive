@@ -16,10 +16,10 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
     check_symbol,
+    check_symbols,
     forex_codes,
     is_canonical,
     is_forex_currency,
-    normalize,
     option_roots,
     symbol_class,
 )
@@ -161,7 +161,7 @@ def test_every_futures_ticker_massive_writes_round_trips(
     # written; so is a combo form made up here, since combo forms are not enumerated.
     tickers = json.loads(load_fixture("datasets/symbols", "futures_tickers.json"))
     every = [*tickers["vendor_samples"], *tickers["live_evidence"], "SR3:PK H7"]
-    assert normalize(FUT, every) == tuple(sorted(set(every)))
+    assert check_symbols(FUT, every) == tuple(sorted(set(every)))
     rule = SymbolRowRule("futures.trades", FUT, as_written=False, noncanonical=OnError.RAISE)
     rows = read_symbols(rule, new_table([string_col("Symbol", every)]), stream_id=None)
     assert rows == CurrentSymbols(tuple(sorted(set(every))))
@@ -567,10 +567,10 @@ def test_option_roots() -> None:
     assert roots.to_pylist() == ["SPXW", "AAPL1", "F", None]
 
 
-def test_normalize_sorts_and_deduplicates_canonical_symbols() -> None:
-    assert normalize(STK, ["MSFT", "AAPL", "MSFT"]) == ("AAPL", "MSFT")
-    assert normalize(STK, "KIMpL") == ("KIMpL",)
-    assert normalize(ClassFromPrefix.ANY, ["X:BTCUSD", "I:SPX", "AAPL"]) == (
+def test_check_symbols_sorts_and_deduplicates_canonical_symbols() -> None:
+    assert check_symbols(STK, ["MSFT", "AAPL", "MSFT"]) == ("AAPL", "MSFT")
+    assert check_symbols(STK, "KIMpL") == ("KIMpL",)
+    assert check_symbols(ClassFromPrefix.ANY, ["X:BTCUSD", "I:SPX", "AAPL"]) == (
         "AAPL",
         "I:SPX",
         "X:BTCUSD",
@@ -586,35 +586,35 @@ def test_normalize_sorts_and_deduplicates_canonical_symbols() -> None:
         (ClassFromPrefix.ANY, ["X:BTC-USD"]),
     ],
 )
-def test_normalize_refuses_what_is_not_canonical(
+def test_check_symbols_refuses_what_is_not_canonical(
     asset_class: AssetClass | ClassFromPrefix, value: str | list[str]
 ) -> None:
     with pytest.raises(ValueError, match="symbols must be Massive's exact tickers"):
-        normalize(asset_class, value)
+        check_symbols(asset_class, value)
 
 
-def test_normalize_materializes_generators() -> None:
-    assert normalize(STK, cast("Iterable[str]", (s for s in ["B", "A"]))) == ("A", "B")
+def test_check_symbols_materializes_generators() -> None:
+    assert check_symbols(STK, cast("Iterable[str]", (s for s in ["B", "A"]))) == ("A", "B")
 
 
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
-        normalize(STK, cast("Iterable[str]", items))
+        check_symbols(STK, cast("Iterable[str]", items))
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
-        normalize(STK, [])
+        check_symbols(STK, [])
 
 
-def test_normalize_all_passes_through() -> None:
-    assert normalize(STK, dm.ALL) is dm.ALL
+def test_check_symbols_all_passes_through() -> None:
+    assert check_symbols(STK, dm.ALL) is dm.ALL
 
 
-def test_normalize_rejects_non_iterables_and_non_strings() -> None:
+def test_check_symbols_rejects_non_iterables_and_non_strings() -> None:
     with pytest.raises(TypeError, match="symbols must be"):
-        normalize(STK, cast("Iterable[str]", 5))
+        check_symbols(STK, cast("Iterable[str]", 5))
     with pytest.raises(TypeError, match="must be a str"):
-        normalize(STK, cast("Iterable[str]", ["AAPL", 5]))
+        check_symbols(STK, cast("Iterable[str]", ["AAPL", 5]))
 
 
 def test_symbol_tables_compare_by_wrapper(dh_exec_ctx: object) -> None:
@@ -649,7 +649,7 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert is_canonical(STK, text, as_written=True)
         assert check_symbol(STK, text, as_written=True) == text
         assert canonical_from_wire(STK, text, as_written=True) == text
-    assert normalize(STK, ["ERIC B", "7203"], as_written=True) == ("7203", "ERIC B")
+    assert check_symbols(STK, ["ERIC B", "7203"], as_written=True) == ("7203", "ERIC B")
     for bad in ("", " ERIC B", "X:BTCUSD", "A\tB"):
         assert not is_canonical(STK, bad, as_written=True)
         assert canonical_from_wire(STK, bad, as_written=True) is None

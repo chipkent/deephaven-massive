@@ -180,7 +180,7 @@ FMV: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
-    family=ChannelFamily.FMV,
+    channel_family=ChannelFamily.FMV,
     keys={(_W, "crypto/FMV"): ticker_key("FmvLastUpdated")},
 )
 """`m.crypto.fmv`: the Business-only `FMV` stream."""

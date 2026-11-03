@@ -240,7 +240,7 @@ FMV: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
-    family=ChannelFamily.FMV,
+    channel_family=ChannelFamily.FMV,
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
 )
 

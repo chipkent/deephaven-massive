@@ -54,6 +54,7 @@ __all__ = [
     "axis_query",
     "fetch_paths",
     "history_calls",
+    "largest_page",
     "own_symbols",
     "page_size",
     "plan_calls",
@@ -436,6 +437,29 @@ def page_size(spec: DatasetSpec, rest_path: RestPath) -> int | None:
         if param.name == "limit" and not param.in_path:
             return param.maximum if spec.page_size is None else spec.page_size
     return None
+
+
+def largest_page(rest_path: RestPath) -> int:
+    """Return the largest page a path serves: its documented maximum `limit`.
+
+    The library's own lookups read whole lists (the crypto ticker list, the futures contracts
+    and schedules), so each asks for this page, the fewest requests Massive allows, and
+    follows the specification when Massive changes it.
+
+    Args:
+        rest_path: The path.
+
+    Returns:
+        The maximum of its `limit` query parameter (`Param.maximum`), such as `1000`.
+
+    Raises:
+        ValueError: If the path documents no maximum `limit`, a defect of the library: a
+            lookup was pointed at a path that does not serve one.
+    """
+    for param in rest_path.params:
+        if param.name == "limit" and not param.in_path and param.maximum is not None:
+            return param.maximum
+    raise ValueError(f"{rest_path.template} documents no maximum page size (`limit`)")
 
 
 def shared_params(

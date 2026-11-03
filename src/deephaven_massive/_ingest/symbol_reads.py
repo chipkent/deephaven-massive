@@ -50,6 +50,7 @@ reader's pool (`RestReader.read_each`).
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import replace
 from http import HTTPStatus
@@ -69,6 +70,7 @@ from deephaven_massive._errors import (
     PermanentError,
     library_bug,
 )
+from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
     fetch_paths,
     history_calls,
@@ -175,30 +177,24 @@ def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(symbols))
 
 
-def _recording_split(
+def _failure_recorder(
     reader: RestReader, failed: dict[str, MassiveError], cancel: Cancel | None
 ) -> CryptoSplit:
-    """Return a crypto split that records a pair it cannot split instead of raising.
+    """Return a crypto split that records any pair it cannot split instead of raising.
+
+    Each such pair fails alone, a failed read of the crypto ticker list included, while the
+    read goes on with the other symbols (`recording_split`).
 
     Args:
-        reader: The reader whose session's crypto ticker list splits each pair
-            (`RestReader.crypto_pair`).
-        failed: Receives each pair that cannot be split, with its error; the plan's calls of
-            that pair are then dropped.
+        reader: The reader whose session's crypto ticker list splits each pair.
+        failed: Receives each pair that cannot be split, with its error.
         cancel: The read's stop token, which the list's read listens to.
 
     Returns:
-        A split that returns `("", "")` for a pair it recorded.
+        The split.
     """
-
-    def split(symbol: str) -> tuple[str, str]:
-        try:
-            return reader.crypto_pair(symbol, cancel=cancel)
-        except MassiveError as error:
-            failed.setdefault(symbol, error)
-            return "", ""
-
-    return split
+    pair = functools.partial(reader.crypto_pair, cancel=cancel)
+    return recording_split(pair, failed, catching=MassiveError)
 
 
 def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveError]:
@@ -252,7 +248,7 @@ def fetch_units(
     if alone:
         groups = [(template, (symbol,)) for template, own in groups for symbol in own]
     failed: dict[str, MassiveError] = {}
-    split = _recording_split(reader, failed, cancel)
+    split = _failure_recorder(reader, failed, cancel)
     units: list[RestUnit] = []
     for template, own in groups:
         rest_path = reader.rest_path(template)
@@ -319,7 +315,7 @@ def history_units(
                 rest_path,
                 replace(request, symbols=asked),
                 window=window,
-                split=_recording_split(reader, failed, cancel),
+                split=_failure_recorder(reader, failed, cancel),
             )
         except ValueError as error:
             failed.update(_refused(asked, error))

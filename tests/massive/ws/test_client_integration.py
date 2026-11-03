@@ -560,9 +560,12 @@ def test_the_options_cap_counts_contracts_or_topics(
     `Q`, 2,000 topics, and records the acknowledgements, the refusals, and the client's states,
     stopping as soon as every topic is answered; rows are not kept. Reading it: all 2,000
     acknowledged means contracts count, and the library's cap could count contracts; refusals
-    past 1,000 topics, or a closed socket (a reconnect in the client states), mean topics count
-    and record how the server answers. Needs an options plan with real-time trades and quotes
-    on the WebSocket: refused ones (a Business plan without the expansion) skip, naming the
+    past 1,000 topics, or a socket the server closed after a status saying why, mean topics
+    count and record how the server answers. Two outcomes prove nothing and skip as
+    inconclusive, after recording their evidence: a refusal for want of a plan, which is not
+    the cap, and a reconnect with no status other than acknowledgements, which a network drop
+    causes as well. Needs an options plan with real-time trades and quotes on the WebSocket:
+    a plan that refuses every topic (a Business plan without the expansion) skips, naming the
     plan.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
@@ -585,8 +588,14 @@ def test_the_options_cap_counts_contracts_or_topics(
     evidence(f"acknowledged {len(records.acked())} topics; status kinds {dict(kinds)}")
     evidence(f"other statuses: {others[:10]}")
     evidence(f"client states: {records.states}")
-    if not records.acked() and any(_refuses_plan(message) for message in others):
+    plan_refusals = [message for message in others if _refuses_plan(message)]
+    if not records.acked() and plan_refusals:
         pytest.skip(f"not entitled: needs an options plan with trades and quotes ({others[:1]})")
+    if plan_refusals:
+        pytest.skip(f"inconclusive: Massive refused topics for the plan ({plan_refusals[:1]})")
+    reconnected = any(state.startswith(WsState.RECONNECTING.value) for state in records.states)
+    if reconnected and not others:
+        pytest.skip("inconclusive: the socket reconnected with no status saying why; run it again")
     assert tickers
 
 

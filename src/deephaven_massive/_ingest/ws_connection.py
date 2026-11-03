@@ -310,6 +310,23 @@ class ConnectionStream:
     static: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _TopicStates:
+    """The topic sets an outage's recovery check reads, taken once per check.
+
+    Attributes:
+        generation: The current socket's generation.
+        acknowledged: The topics Massive acknowledged on it.
+        answered: Those and the topics in `NO_ACK`.
+        deferred: The options topics the cap keeps off the wire.
+    """
+
+    generation: int
+    acknowledged: frozenset[str]
+    answered: frozenset[str]
+    deferred: frozenset[str]
+
+
 @dataclass(slots=True)
 class _Episodes:
     """A connection's two silence episodes, each logged once as a WARNING. Loop-confined.
@@ -327,8 +344,6 @@ class _Episodes:
             outage warns once.
         down: The streams the outage holds down, each with the loop timer that fails it at
             `max_outage`, by id.
-        published_at_open: Each down stream's `StreamSink.rows_published` when the current
-            socket opened (or when it joined), so rows since then show its data flows again.
         gap_since: When each down stream's rows may have started to go missing (seconds since
             the epoch): the outage's start, or the stream's open when it opened during the
             outage. Its recovery records the gap from then to now in its `Gaps`.
@@ -347,7 +362,6 @@ class _Episodes:
     slot_warned: bool = False
     down_since: float | None = None
     down: dict[int, asyncio.TimerHandle] = field(default_factory=dict)
-    published_at_open: dict[int, int] = field(default_factory=dict)
     gap_since: dict[int, float] = field(default_factory=dict)
     data_since_open: bool = False
     down_note: str | None = None
@@ -429,6 +443,8 @@ class Connection:
             f"{group.label} flush {decision.host}{self.path}",
             interval=group.flush_interval,
             sessions=sessions,
+            # Rows of a reconnected socket may recover a stream the outage holds down.
+            on_new_generation=lambda: self.post(self._check_recovered),
         )
         cluster = f"{asset_class.value}/"
         sources = [s for k, s in _massive.sources(Transport.WS).items() if k.startswith(cluster)]
@@ -437,9 +453,8 @@ class Connection:
             sources=sources,
             on_open=self._on_open,
             on_status=self._on_status,
-            # Rows of every generation are delivered alike, so the generation is not needed.
-            on_data=lambda _generation, channel, rows, rejects, drift: self._on_data(
-                channel, rows, rejects=rejects, drift=drift
+            on_data=lambda generation, channel, rows, rejects, drift: self._on_data(
+                channel, rows, generation=generation, rejects=rejects, drift=drift
             ),
             on_state=self._on_state,
             reconnect_deadline=self._reconnect_deadline,
@@ -774,8 +789,6 @@ class Connection:
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
         episodes.data_since_open = False
-        for stream_id in episodes.down:  # only rows of the new socket show data flows again
-            episodes.published_at_open[stream_id] = self._streams[stream_id].sink.rows_published
         self.subscriptions.opened(generation)
         self._check_recovered()  # with nothing to confirm, the outage ends now
 
@@ -796,6 +809,7 @@ class Connection:
         channel: str,
         rows: list[tuple[object, ...]],
         *,
+        generation: int,
         rejects: list[Reject],
         drift: DriftReport,
     ) -> None:
@@ -809,6 +823,9 @@ class Connection:
             channel: The channel.
             rows: The decoded rows, each a tuple of the source's fields, without the dropped
                 ones.
+            generation: The generation of the socket the frame arrived on, which the streams
+                its rows reach record, so only rows of a reconnected socket recover a stream
+                (`_recovered`).
             rejects: The rows the client dropped.
             drift: The frame's drift for the channel.
         """
@@ -822,7 +839,7 @@ class Connection:
             lost = DriftReport(dropped_rows=len(rejects), dropped_reason=rejects[0].error.message)
             drift = drift.merge(lost)
         if rows:
-            self.flusher.rows(channel, rows)
+            self.flusher.rows(channel, rows, generation=generation)
             self._arm_backlog_row()  # the row write below may be throttled
         if drift.fields_drifted or drift.dropped_rows:
             self._record_drift(channel, drift, dropped=self._dropped_symbols(rejects))
@@ -1258,7 +1275,6 @@ class Connection:
         episodes.down[stream_id] = self._client.loop.call_later(
             left, self._stream_expired, stream_id
         )
-        episodes.published_at_open[stream_id] = self._streams[stream_id].sink.rows_published
 
     def _release_down(self, stream_id: int) -> None:
         """Stop holding a stream down: cancel its timer. Does nothing for a stream not down.
@@ -1269,7 +1285,6 @@ class Connection:
         timer = self._episodes.down.pop(stream_id, None)
         if timer is not None:
             timer.cancel()
-        self._episodes.published_at_open.pop(stream_id, None)
         self._episodes.gap_since.pop(stream_id, None)
 
     def _stream_expired(self, stream_id: int) -> None:
@@ -1285,7 +1300,6 @@ class Connection:
         """
         episodes = self._episodes
         del episodes.down[stream_id]
-        episodes.published_at_open.pop(stream_id, None)
         episodes.gap_since.pop(stream_id, None)
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
@@ -1300,40 +1314,43 @@ class Connection:
             )
         self.flusher.fail([stream_id], episodes.failure)
 
-    def _recovered(self, stream: ConnectionStream) -> bool:
+    @staticmethod
+    def _recovered(stream: ConnectionStream, topics: _TopicStates) -> bool:
         """Tell whether a down stream's data flows again on the reconnected socket.
 
-        It does once rows reached it since the socket opened, or once each of its topics the
-        options cap admits is acknowledged (directly or through its channel's wildcard). A
-        topic in `NO_ACK` keeps down a stream that has received rows: Massive never confirmed
-        it, so its rows may never come, and its last values could look current. A stream that
-        has never received a row shows no stale data, so it recovers once each such topic is
-        acknowledged or in `NO_ACK`, and runs on with its no-acknowledgement note.
+        It does once rows that arrived on the current socket reached it (its sink's
+        `rows_generation`), so rows of the dropped socket that a slow flush published late
+        never count, or once each of its topics the options cap admits is acknowledged
+        (directly or through its channel's wildcard). A topic in `NO_ACK` keeps down a stream
+        that has received rows: Massive never confirmed it, so its rows may never come, and
+        its last values could look current. A stream that has never received a row shows no
+        stale data, so it recovers once each such topic is acknowledged or in `NO_ACK`, and
+        runs on with its no-acknowledgement note.
 
         Args:
             stream: A down stream.
+            topics: The connection's topic states, read once per check.
 
         Returns:
             Whether it has recovered.
         """
-        published = stream.sink.rows_published
-        if published > self._episodes.published_at_open[stream.stream_id]:
+        sink = stream.sink
+        if sink.rows_generation == topics.generation:
             return True
-        subscriptions = self.subscriptions
-        acked = subscriptions.acknowledged
-        resolved = acked if published else acked | subscriptions.no_ack
+        resolved = topics.acknowledged if sink.rows_published else topics.answered
         return all(
-            t in resolved or wildcard(channel_of(t)) in acked
-            for t in stream.topics - subscriptions.deferred
+            t in resolved or wildcard(channel_of(t)) in topics.acknowledged
+            for t in stream.topics - topics.deferred
         )
 
     def _check_recovered(self) -> None:
         """Release each down stream whose data flows again; end the outage when all have.
 
         Runs while the connection is `CONNECTED` after a change of its subscriptions, a data
-        frame, and each summary. A recovered stream's timer is cancelled and its note
-        cleared, while a stream with rows and a topic in `NO_ACK` stays down and fails at its
-        limit (`_recovered`), so one silent topic never holds the others down. The outage
+        frame, each summary, and a flush that gave a stream its first rows of the socket. A
+        recovered stream's timer is cancelled and its note cleared, while a stream with rows
+        and a topic in `NO_ACK` stays down and fails at its limit (`_recovered`), so one
+        silent topic never holds the others down. The outage
         ends once no stream is down and the socket has proved itself: a topic is
         acknowledged, or data arrived; that end is logged at INFO with the outage's length. A
         socket that the server accepts but never answers is still down, so a stream that opens
@@ -1342,7 +1359,15 @@ class Connection:
         episodes = self._episodes
         if episodes.down_since is None or self._state is not ConnectionState.CONNECTED:
             return
-        recovered = [s for s in episodes.down if self._recovered(self._streams[s])]
+        subscriptions = self.subscriptions
+        acknowledged = subscriptions.acknowledged
+        topics = _TopicStates(
+            generation=cast("int", subscriptions.generation),  # set while connected
+            acknowledged=acknowledged,
+            answered=acknowledged | subscriptions.no_ack,
+            deferred=subscriptions.deferred,
+        )
+        recovered = [s for s in episodes.down if self._recovered(self._streams[s], topics)]
         now = time.time_ns()
         gaps = {s: (int(episodes.gap_since[s] * 1e9), now) for s in recovered}
         for stream_id in recovered:

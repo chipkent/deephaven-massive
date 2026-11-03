@@ -437,7 +437,7 @@ def test_streams_take_symbols_and_all(
 @pytest.mark.parametrize("name", STREAMED)
 def test_each_stream_names_its_channel_family(name: str) -> None:
     expected = ChannelFamily.FMV if name == "fmv" else ChannelFamily.TICK
-    assert spec_of(name).family is expected
+    assert spec_of(name).channel_family is expected
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:

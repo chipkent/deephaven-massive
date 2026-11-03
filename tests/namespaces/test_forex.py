@@ -82,10 +82,6 @@ FOREX_SOURCES = {
 }
 
 
-def request(query: QueryBase) -> Request:
-    return query._request
-
-
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.forex
     assert type(namespace) is forex._Forex
@@ -227,7 +223,7 @@ def test_only_the_canonical_ticker_is_taken(
         forex_ns.snapshots,
     )
     for factory in factories:
-        assert request(factory("C:EURUSD")).symbols == ("C:EURUSD",)
+        assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
         with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
             factory(symbols)
 
@@ -235,23 +231,23 @@ def test_only_the_canonical_ticker_is_taken(
 def test_quotes(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.quotes(["C:GBPUSD", "C:EURUSD"])
     assert type(query) is StreamHistoryQuery
-    assert request(query) == Request(symbols=("C:EURUSD", "C:GBPUSD"))
-    assert request(massive_session.forex.quotes(dm.ALL)).symbols is dm.ALL
+    assert query._request == Request(symbols=("C:EURUSD", "C:GBPUSD"))
+    assert massive_session.forex.quotes(dm.ALL)._request.symbols is dm.ALL
 
 
 def test_the_one_row_datasets(massive_session: dm.MassiveSession) -> None:
     last = massive_session.forex.last_quote(["C:GBPUSD", "C:EURUSD"])
     assert type(last) is Query
-    assert request(last) == Request(symbols=("C:EURUSD", "C:GBPUSD"))
+    assert last._request == Request(symbols=("C:EURUSD", "C:GBPUSD"))
     prev = massive_session.forex.previous_day_bar("C:EURUSD")
     assert type(prev) is Query
     # The bar's request carries its timespan, so its rows get the 1-day day rules.
-    assert request(prev) == Request(symbols=("C:EURUSD",), timespan=dm.Timespan.DAY)
+    assert prev._request == Request(symbols=("C:EURUSD",), timespan=dm.Timespan.DAY)
 
 
 def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD"])])
-    symbols = request(massive_session.forex.quotes(table)).symbols
+    symbols = massive_session.forex.quotes(table)._request.symbols
     assert isinstance(symbols, SymbolTable)
     assert symbols.table is table
 
@@ -273,7 +269,7 @@ def test_bars_pick_their_class_from_the_timespan(
     timespan, multiplier = case
     query = massive_session.forex.bars("C:EURUSD", timespan, multiplier=multiplier)
     assert type(query) is expected
-    assert request(query) == Request(
+    assert query._request == Request(
         symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )
 
@@ -284,7 +280,7 @@ def test_bars_default_to_one_minute_and_take_no_adjusted(
     query = massive_session.forex.bars(dm.ALL, dm.Timespan.MINUTE)
     assert type(query) is StreamHistoryQuery
     # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
-    assert request(query) == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
+    assert query._request == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
     with pytest.raises(TypeError, match="adjusted"):
         massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-overload]  # no such argument
 
@@ -302,19 +298,19 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
 def test_fmv(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.fmv(dm.ALL)
     assert type(query) is StreamQuery
-    assert request(query) == Request(symbols=dm.ALL)
+    assert query._request == Request(symbols=dm.ALL)
 
 
 def test_snapshots(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.snapshots(dm.ALL)
     assert type(query) is Query
-    assert request(query) == Request(symbols=dm.ALL)
+    assert query._request == Request(symbols=dm.ALL)
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.movers(dm.Direction.LOSERS)
     assert type(query) is Query
-    assert request(query) == Request(params=(("direction", dm.Direction.LOSERS),))
+    assert query._request == Request(params=(("direction", dm.Direction.LOSERS),))
     with pytest.raises(TypeError, match=r"direction must be dm\.Direction"):
         massive_session.forex.movers("gainers")  # type: ignore[arg-type]  # a str is refused
 
@@ -322,17 +318,17 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 def test_conversion(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.conversion("AUD", "USD", amount=100, precision=4)
     assert type(query) is Query
-    assert request(query) == Request(
+    assert query._request == Request(
         params=(("amount", 100), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
     )
-    default = request(massive_session.forex.conversion("EUR", "USD"))
+    default = massive_session.forex.conversion("EUR", "USD")._request
     assert dict(default.params) == {"amount": 1.0, "from": "EUR", "precision": "2", "to": "USD"}
 
 
 def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSession) -> None:
     amount = 10**17 + 1
     query = massive_session.forex.conversion("EUR", "USD", amount=amount)
-    assert dict(request(query).params)["amount"] == amount
+    assert dict(query._request.params)["amount"] == amount
 
 
 @pytest.mark.parametrize(

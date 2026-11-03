@@ -46,6 +46,7 @@ from deephaven_massive._datasets.dates import (
     TimeRange,
     day_start,
     day_zone,
+    midnight,
     trades_at_weekends,
 )
 from deephaven_massive._datasets.epoch import EPOCH
@@ -131,21 +132,10 @@ def futures_bar_request(span: DaySpan, *, timespan: Timespan, multiplier: int) -
         lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
         return TimeRange(lower.astimezone(UTC), upper)
     if timespan is Timespan.SESSION:
-        return TimeRange(_utc_midnight(futures_first_bucket_day(span.first)), upper)
+        # A futures bucket starts at 00:00 UTC of its first day.
+        return TimeRange(midnight(futures_first_bucket_day(span.first), UTC), upper)
     period = _Periods(AssetClass.FUTURES, timespan).anchor(span.first)
-    return TimeRange(_utc_midnight(period), upper)
-
-
-def _utc_midnight(day: date) -> datetime:
-    """Return 00:00 UTC on a day: where a futures bucket of that first day starts.
-
-    Args:
-        day: The day.
-
-    Returns:
-        The aware instant, in UTC.
-    """
-    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return TimeRange(midnight(period, UTC), upper)
 
 
 def futures_first_bucket_day(first: date) -> date:

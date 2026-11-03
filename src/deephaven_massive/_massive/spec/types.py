@@ -61,6 +61,8 @@ else:
 
 __all__ = [
     "ENVELOPE_KEYS",
+    "NANOS_PER_SECOND",
+    "SECONDS_PER_DAY",
     "Conversion",
     "DriftReport",
     "DriftSample",
@@ -189,6 +191,12 @@ class WireUnit(StrEnum):
     nanoseconds (any instant after 1973), a smaller one milliseconds (any instant before the
     year 3,170,000). For a field whose documentation and samples disagree on the two; never a
     parameter's unit."""
+
+
+SECONDS_PER_DAY = 86_400
+"""The seconds of a day in Unix time, which counts no leap second."""
+NANOS_PER_SECOND = 1_000_000_000
+"""The nanoseconds of a second."""
 
 
 class ParamKind(StrEnum):

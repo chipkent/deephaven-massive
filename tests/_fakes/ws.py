@@ -15,7 +15,8 @@ the client's authentication frame) never reaches a test that captures every logg
 
 Tests script the next connections before they happen (`reject_next`, `greet_next`, and
 `auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or
-`NoReply.TO_KEY` for a server that never answers the key) and act on the live one (`send`,
+`NoReply.TO_KEY` for a server that never answers the key; `hold_slot`, for another connection
+that holds the account's one slot until the test frees it) and act on the live one (`send`,
 `close`) from the test thread. Everything the server observes is kept under one lock, and
 `wait_for` blocks on a condition until a predicate over it holds, so tests synchronize with the
 client's thread deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
@@ -173,6 +174,7 @@ class FakeMassiveServer:
         self.refuse: dict[str, str] = {}
         self.silent: set[str] = set()
         self.step_refusals: list[str] = []
+        self._slot_held = False
         self._rejects: list[tuple[int, dict[str, str]]] = []
         self._greetings: list[str] = []
         self._live: dict[int, ServerConnection] = {}
@@ -244,6 +246,20 @@ class FakeMassiveServer:
             reason: The close frame's reason text; empty for none.
         """
         self._call(lambda ws: ws.close(code, reason))
+
+    def hold_slot(self, *, held: bool) -> None:
+        """Take or free the account's one connection slot, as another connection would.
+
+        While the slot is held, every authentication that `auth_replies` does not script is
+        answered `max_connections`, so a client waits for the slot for as long as the test
+        needs, whatever its backoff.
+
+        Args:
+            held: True to hold the slot, False to free it.
+        """
+        with self._lock:
+            self._slot_held = held
+            self._lock.notify_all()
 
     def hold_reads(self, *, held: bool) -> None:
         """Stop or resume reading from the latest connection.
@@ -369,7 +385,10 @@ class FakeMassiveServer:
             auth = await ws.recv()
             with self._lock:
                 record.auth = str(auth)
-                reply = self.auth_replies.pop(0) if self.auth_replies else "auth_success"
+                if self.auth_replies:
+                    reply = self.auth_replies.pop(0)
+                else:
+                    reply = "max_connections" if self._slot_held else "auth_success"
                 self._lock.notify_all()
             if reply is NoReply.TO_KEY:  # the client's handshake timeout must end it
                 await ws.wait_closed()
