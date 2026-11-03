@@ -119,14 +119,19 @@ def _ok(*, status: str = "OK", request_id: str = "req-1", next_url: str | None =
 # Construction and transport.
 
 
-def test_the_pool_never_retries_and_has_the_timeouts_and_size(client: RestClient) -> None:
-    options = client._pool.connection_pool_kw
-    retries = options["retries"]
-    assert retries is client_module._NO_RETRIES
-    assert (retries.total, retries.redirect) == (False, False)
-    assert (options["timeout"].connect_timeout, options["timeout"].read_timeout) == (10.0, 30.0)
-    assert options["maxsize"] == 4
-    assert options["ssl_context"] is not None
+def test_each_connection_has_a_pool_that_never_retries_with_the_timeouts(
+    client: RestClient,
+) -> None:
+    assert len(client._pools) == 4  # one pool of one connection per connection slot
+    for pool in client._pools:
+        options = pool.connection_pool_kw
+        retries = options["retries"]
+        assert retries is client_module._NO_RETRIES
+        assert (retries.total, retries.redirect) == (False, False)
+        timeout = options["timeout"]
+        assert (timeout.connect_timeout, timeout.read_timeout) == (10.0, 30.0)
+        assert options["maxsize"] == 1
+        assert options["ssl_context"] is not None
 
 
 @pytest.mark.parametrize(
@@ -476,7 +481,7 @@ def test_proxy_credentials_go_to_the_proxy_and_the_bearer_key_never_does(
     assert _KEY not in repr(connect.headers)
     (received,) = tunnelled.requests
     assert "proxy-authorization" not in received.headers
-    assert "s%40cret" not in str(rest._pool.proxy)
+    assert all("s%40cret" not in str(pool.proxy) for pool in rest._pools)
     rest.close()
 
 
@@ -510,13 +515,15 @@ def test_a_proxy_reached_over_https_is_verified_like_massive(
     rest = RestClient(
         _KEY, base_url="https://api.massive.test", max_concurrency=1, governor=_governor()
     )
-    assert type(rest._pool).__name__ == "ProxyManager"
-    proxy_context = rest._pool.connection_pool_kw["_proxy_config"].ssl_context
+    (pool,) = rest._pools
+    assert type(pool).__name__ == "ProxyManager"
+    proxy_context = pool.connection_pool_kw["_proxy_config"].ssl_context
     assert proxy_context is not None
     assert proxy_context.verify_mode is ssl.CERT_REQUIRED
     assert proxy_context.check_hostname
-    # One lookup serves both legs, so the proxy and Massive are verified against one trust store.
-    assert proxy_context is rest._pool.connection_pool_kw["ssl_context"]
+    # One context serves both legs, so the proxy and Massive are verified against one trust
+    # store; the one thread holding the slot opens them one after the other.
+    assert proxy_context is pool.connection_pool_kw["ssl_context"]
     rest.close()
 
 
@@ -576,6 +583,58 @@ def test_ssl_cert_file_supplies_the_trusted_certificates(
     monkeypatch.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
     tls_server.reply("/v3/trades/AAPL", _ok())
     assert _client(tls_server).get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+
+
+def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
+    tls_server: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # urllib3 writes to a connection's SSLContext as it opens it, while OpenSSL may be copying
+    # that state for another thread's handshake with the GIL released, which corrupts the
+    # handshake or crashes. So each connection slot has a pool of its own, with one connection
+    # and its own context, and the requests in flight at once never share a context.
+    monkeypatch.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
+    # Every reply closes its connection, so every request opens a connection and handshakes.
+    tls_server.reply_default(Reply(_ok().body, headers={"Connection": "close"}))
+    rest = _client(tls_server, max_concurrency=3)
+    handshakes: list[int] = []  # the context of each connection the client opened
+    wrap_socket = ssl.SSLContext.wrap_socket
+
+    def recorded(self: ssl.SSLContext, *args: object, **kwargs: object) -> ssl.SSLSocket:
+        if not kwargs.get("server_side"):  # the fake's own handshakes are not the client's
+            handshakes.append(id(self))
+        return wrap_socket(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recorded)
+    ready = threading.Condition()
+    hold = threading.Event()
+    in_flight = 0
+
+    def held(_received: object) -> None:
+        nonlocal in_flight
+        with ready:
+            in_flight += 1
+            ready.notify_all()
+        hold.wait(10)
+
+    tls_server.on_request(held)
+    tickers = [{"stockTicker": f"T{i}"} for i in range(6)]
+    with ThreadPoolExecutor(3) as pool:
+        calls = [pool.submit(rest.get, _TRADES, ticker, {}, bucket="stocks") for ticker in tickers]
+        with ready:
+            assert ready.wait_for(lambda: in_flight == 3, 10)
+        assert rest._idle == []  # every slot's pool is held
+        held_at_once = set(handshakes)
+        hold.set()
+        assert [call.result(10).rows for call in calls] == [[{"i": 1}]] * 6
+    rest.close()
+    # The three requests held at once each opened their connection on a context of its own,
+    assert len(held_at_once) == 3
+    # every connection was opened on one of the pools' three contexts, one per pool,
+    contexts = {id(pool.connection_pool_kw["ssl_context"]) for pool in rest._pools}
+    assert len(contexts) == 3
+    assert (len(handshakes), set(handshakes)) == (6, contexts)
+    # and every pool was given back, to be taken again.
+    assert sorted(map(id, rest._idle)) == sorted(map(id, rest._pools))
 
 
 # Retries.
@@ -1325,10 +1384,12 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
     def interrupted(*_: object, **__: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(rest._pool, "request", interrupted)
+    for pool in rest._pools:
+        monkeypatch.setattr(pool, "request", interrupted)
     with pytest.raises(KeyboardInterrupt):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert governor.snapshot()[0].in_flight == 0
+    assert sorted(map(id, rest._idle)) == sorted(map(id, rest._pools))  # its pool is back
     rest.close()
 
 
@@ -1532,7 +1593,8 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     def unreachable(*_: object, **__: object) -> None:
         raise error
 
-    monkeypatch.setattr(rest._pool, "request", unreachable)
+    for pool in rest._pools:
+        monkeypatch.setattr(pool, "request", unreachable)
     with pytest.raises(WireError):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     state = governor.snapshot()[0]

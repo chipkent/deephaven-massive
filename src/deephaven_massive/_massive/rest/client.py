@@ -1,4 +1,4 @@
-"""The REST client: one connection pool per session, shared by every thread that calls Massive.
+"""The REST client: one per session, shared by every thread that calls Massive.
 
 `RestClient` sends GET requests to Massive's REST API and returns decoded `Page`s. It owns the
 transport (urllib3, with TLS and proxy settings from `net.http`, and a cap on the decompressed
@@ -11,11 +11,21 @@ shares the governor. Encoding lives in `rest.query`, decoding and error mapping 
 `rest.response`, and conversion to Arrow in `rest.batch`.
 
 **Thread-safety.** One client serves a whole session: the caller thread, every poller, and
-every fan-out worker call it at once. Its shared mutable state is urllib3's pool, which locks
-internally, the governor, which locks its own state, the connection slots (`net.slots`), which
-bound the requests in flight to the pool's size, and the closed `Cancel` token. Every
-request listens to a token of its own, made from the client's and the caller's, so closing
-the client ends its waits and nobody else's. No call modifies its arguments.
+every fan-out worker call it at once. Its shared mutable state is the governor, which locks its
+own state, the connection slots (`net.slots`), which bound the requests in flight to the number
+of connections, the list of idle connection pools, behind a leaf lock, and the closed `Cancel`
+token. Every request listens to a token of its own, made from the client's and the caller's, so
+closing the client ends its waits and nobody else's. No call modifies its arguments.
+
+**One TLS context per connection.** The client keeps `max_concurrency` urllib3 pools of one
+connection each, and each pool has an `ssl.SSLContext` of its own (`net.http.new_ssl_context`).
+A request takes a connection slot and, with it, an idle pool, uses that pool alone, and gives
+both back together, so no two threads ever open connections on one context. urllib3 writes the
+ALPN protocol list onto the context of every connection it opens, while OpenSSL may be copying
+that list for another thread's handshake with the GIL released: CPython does not guard the
+copy, so a context shared between threads can corrupt a handshake (`TLSV1_ALERT_DECODE_ERROR`)
+or crash the process (python/cpython#141012). No CPython or urllib3 release avoids it, the
+free-threaded build included.
 
 **Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
@@ -32,6 +42,7 @@ import ipaddress
 import logging
 import random
 import re
+import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -49,10 +60,9 @@ from deephaven_massive._massive.net.errors import (
     linked_errors,
 )
 from deephaven_massive._massive.net.http import (
-    TlsConsumer,
     https_proxy,
+    new_ssl_context,
     proxy_credentials,
-    ssl_context,
 )
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import Redactor, without_userinfo
@@ -134,6 +144,38 @@ _READ_CHUNK = 1024 * 1024
 
 _VISIBLE_ASCII = re.compile(r"[!-~]+")
 """A non-empty run of visible ASCII: what an API key, sent in a header, may contain."""
+
+
+def _new_pool(proxy: str | None) -> urllib3.PoolManager:
+    """Build one connection slot's pool: one connection, with a TLS context of its own.
+
+    Args:
+        proxy: The HTTPS proxy URL from `net.http.https_proxy`, credentials included, or
+            `None` to connect directly.
+
+    Returns:
+        A `ProxyManager` through `proxy`, or a `PoolManager`, keeping one connection per host,
+        with urllib3's retries off and the client's timeouts. A new `net.http.new_ssl_context`
+        verifies both Massive and an HTTPS proxy, so the two legs of a request never see two
+        trust stores; they are opened one after the other by the one thread that holds the
+        slot. The proxy's user and password go in `Proxy-Authorization`, never in the pool.
+    """
+    timeout = urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT)
+    context = new_ssl_context()
+    if proxy is None:
+        return urllib3.PoolManager(
+            maxsize=1, retries=_NO_RETRIES, timeout=timeout, ssl_context=context
+        )
+    proxy_url, proxy_headers = proxy_credentials(proxy)
+    return urllib3.ProxyManager(
+        proxy_url,
+        proxy_headers=proxy_headers,
+        proxy_ssl_context=context,
+        maxsize=1,
+        retries=_NO_RETRIES,
+        timeout=timeout,
+        ssl_context=context,
+    )
 
 
 def _check_api_key(api_key: str) -> None:
@@ -296,12 +338,14 @@ class RestClient:
         governor: RequestGovernor,
         on_refused: RefusalHook | None = None,
     ) -> None:
-        """Create the client and its connection pool; no request is sent.
+        """Create the client and its connection pools; no request is sent.
 
         The proxy (`HTTPS_PROXY`, `NO_PROXY`) and the certificate authorities
         (`SSL_CERT_FILE`, `SSL_CERT_DIR`, else `certifi`) are read from the environment once,
         here, through `net.http`. Credentials in the proxy URL go to the proxy as a
-        `Proxy-Authorization` header; the pool holds the proxy URL without them.
+        `Proxy-Authorization` header; the pools hold the proxy URL without them. Each of the
+        `max_concurrency` pools gets a TLS context of its own, built here: a few milliseconds
+        of CPU each, to parse the certificate bundle.
 
         Args:
             api_key: The Massive API key, sent as a bearer token: non-empty visible ASCII,
@@ -310,9 +354,9 @@ class RestClient:
                 such as `"https://api.massive.com"`. `http` is accepted only for a loopback
                 host (a local test server), so the key never travels in clear text.
             max_concurrency: The most requests the client has in flight at once, whatever
-                its callers send: the pool keeps that many connections to the host, and a
-                request waits for one to be free (`net.slots`), so none is discarded and
-                reopened under load however many fan-outs overlap. At least 1.
+                its callers send: the client keeps that many pools of one connection to the
+                host, and a request waits for one to be free (`net.slots`), so none is
+                discarded and reopened under load however many fan-outs overlap. At least 1.
             governor: Admits every attempt and pauses a bucket Massive refused. It may be
                 shared with other clients of the same API key; its clock is the time source of
                 this client's retry waits too.
@@ -343,33 +387,25 @@ class RestClient:
             "Accept-Encoding": "gzip",
         }
         proxy = https_proxy(self._host)
-        timeout = urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT)
-        # One context for both legs: looking it up examines the certificate files once, and
-        # the proxy and Massive legs can never see two different trust stores.
-        context = ssl_context(TlsConsumer.URLLIB3)
-        self._pool: urllib3.PoolManager
-        if proxy:
-            proxy_url, proxy_headers = proxy_credentials(proxy)
-            self._pool = urllib3.ProxyManager(
-                proxy_url,
-                proxy_headers=proxy_headers,
-                proxy_ssl_context=context,
-                maxsize=max_concurrency,
-                retries=_NO_RETRIES,
-                timeout=timeout,
-                ssl_context=context,
-            )
-        else:
-            self._pool = urllib3.PoolManager(
-                maxsize=max_concurrency,
-                retries=_NO_RETRIES,
-                timeout=timeout,
-                ssl_context=context,
-            )
+        # One pool per connection slot, each with a TLS context of its own: see the module
+        # docstring for why no two threads may open connections on one context.
+        self._pools: Final = tuple(_new_pool(proxy) for _ in range(max_concurrency))
+        # The pools no request holds; a request takes one only with a slot, so it is never
+        # empty when one is taken. Guarded by `_idle_lock`, a leaf lock.
+        self._idle = list(self._pools)
+        self._idle_lock = threading.Lock()
         self._closed = Cancel()
-        # Every request of every caller takes one, so the session never has more requests in
-        # flight than the pool keeps connections, however many fan-outs overlap.
+        # Every request of every caller takes one, and an idle pool with it, so the session
+        # never has more requests in flight than it keeps connections, however many fan-outs
+        # overlap.
         self._slots = ConnectionSlots(max_concurrency)
+        _log.debug(
+            "REST client for %s: %d connection pools of one connection, each with its own "
+            "TLS context, through %s",
+            self._base,
+            max_concurrency,
+            "no proxy" if proxy is None else f"the proxy {proxy_credentials(proxy)[0]}",
+        )
 
     def get(
         self,
@@ -470,7 +506,7 @@ class RestClient:
         return self._governor
 
     def close(self) -> None:
-        """Close the pool's connections; every later request raises `WireError`.
+        """Close the pools' connections; every later request raises `WireError`.
 
         Safe from any thread and idempotent. A thread waiting for the governor or a retry
         stops waiting at once and raises `WireError`; a request already on the wire finishes
@@ -478,7 +514,8 @@ class RestClient:
         that share it are not affected.
         """
         self._closed.set()
-        self._pool.clear()
+        for pool in self._pools:
+            pool.clear()
 
     def _pages(self, job: _Job, target: str, limit: int | None) -> Iterator[Page]:
         """Yield the pages of a request, following `next_url`.
@@ -591,13 +628,26 @@ class RestClient:
             if not self._slots.acquire(stop):
                 self._governor.release(permit)
                 raise self._stopped(request)
+            # The slot's pool: no other thread uses it, or its TLS context, until it is back.
+            with self._idle_lock:
+                pool = self._idle.pop()
             try:
-                return self._send(job, request, permit, waited=self._clock.monotonic() - queued)
+                return self._send(
+                    job, request, permit, pool=pool, waited=self._clock.monotonic() - queued
+                )
             finally:
+                with self._idle_lock:
+                    self._idle.append(pool)
                 self._slots.release()
 
     def _send(
-        self, job: _Job, request: RequestTarget, permit: Permit, *, waited: float
+        self,
+        job: _Job,
+        request: RequestTarget,
+        permit: Permit,
+        *,
+        pool: urllib3.PoolManager,
+        waited: float,
     ) -> Page | _Retryable | object:
         """Send an admitted attempt and report its end to the governor.
 
@@ -606,6 +656,7 @@ class RestClient:
             request: The request.
             permit: The attempt's permit: released when the request never left (the
                 connection could not be made), refused for a 429, and done otherwise.
+            pool: The pool of the connection slot the attempt holds, used by no other thread.
             waited: Seconds the attempt waited for its permit (a slot, a pause, a probe, or
                 its lane's turn), for the attempt's log line.
 
@@ -616,7 +667,7 @@ class RestClient:
         """
         started = self._clock.monotonic()
         try:
-            response = self._pool.request(
+            response = pool.request(
                 "GET",
                 self._base + request.target,
                 headers=self._headers,
