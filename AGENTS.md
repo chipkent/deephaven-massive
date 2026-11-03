@@ -1,9 +1,10 @@
 # AGENTS.md
 
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
-Deephaven tables: a Python library managed with `uv`. Until the rework ends,
-`plans/rework/DESIGN.md` is the specification and wins over this file. The library has no users
-yet, so nothing is kept, aliased, or shimmed for compatibility: a rename is an ordinary edit.
+Deephaven tables: a Python library managed with `uv`. Until the rework ends, the design in
+`plans/rework/design/`, indexed by `plans/rework/DESIGN.md`, is the specification and wins over
+this file. The library has no users yet, so nothing is kept, aliased, or shimmed for
+compatibility: a rename is an ordinary edit.
 
 ## Commands
 
@@ -149,10 +150,12 @@ Several agents work at once, and every collision costs a full check and a paid C
   files the branch changes: never run the check yourself just before a push.
 - **Take a free `DESIGN.md` number.** A new decision (§ 22) or verification item (§ 23) takes
   the number the coordinator reserved for you, or else the next after the highest on `main` and
-  in every open PR's diff. Name the number in the PR body.
+  in every open PR's diff. Decisions live in `plans/rework/design/22-decisions.md`, verification
+  items in `plans/rework/design/23-open-verification-items.md`. Name the number in the PR body.
 - **Keep context small.** Every turn re-reads all the context so far: `grep -n` and read only
   the section you need, keep command output short (`-q`, `| tail`, `--stat`), and never re-read
   a file you just edited. The `plan-parallel-prs` skill has the full list.
+- Read only the `plans/rework/design/` file for your topic, never all of them.
 
 ## Documentation standard
 
@@ -258,8 +261,8 @@ These prevent deadlocks and leaks.
 | Task | Read first |
 |---|---|
 | Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
-| Where new code goes; the layout cleanup and its feature pause | `plans/rework/DESIGN.md` § 4.1, `plans/rework/LAYOUT.md` |
-| Design, by topic | `plans/rework/DESIGN.md`: § 3 exports, § 4 layout and layers, § 6 session and liveness, § 7 and § 11 API and enums, § 8 datasets, § 13 connections, § 14 fan-out, § 18 threads and locks, § 19 wire and schemas, § 20 tooling |
+| Where new code goes; the layout cleanup and its feature pause | `plans/rework/design/04-package-layout.md` (§ 4.1), `plans/rework/LAYOUT.md` |
+| Design, by topic | One file per section in `plans/rework/design/`; `plans/rework/DESIGN.md` is the index. Exports `03-exports.md`; layout and layers `04-package-layout.md`; session and liveness `06-massivesession-and-lifecycle.md`; API and enums `07-query-classes-and-verbs.md`, `11-enums-and-types.md`; datasets `08-namespace-tree.md`; connections `13-host-resolution-and-connection-protocol.md`; fan-out `14-publishers-fan-out-and-failure-semantics.md`; threads and locks `18-concurrency-model.md`; wire and schemas `19-wire-clients-and-the-spec-snapshot.md`; tooling `20-quality-gates.md` |
 | Splitting work across agents | The `plan-parallel-prs` skill, `.claude/skills/plan-parallel-prs/SKILL.md` |
 | PR descriptions | `docs/dev/pull-requests.md` |
 | Vendor changes and drift | `docs/dev/spec-refresh.md` |
