@@ -1077,7 +1077,7 @@ def test_a_static_symbol_table_is_a_fixed_symbol_list(
     ]
     assert all(r.is_refreshing for r in results)
     assert len(fake_streams.opened) == 1
-    assert massive_session._core.diagnostics.barrier().wait(10.0)
+    assert massive_session._core.diagnostics.wait_until_shown(10.0)
     [row] = dh_to_pylist(massive_session.streams())
     assert (row["SymbolCount"], row["Symbols"]) == (2, "AAPL, MSFT")
     for result in results:
@@ -1802,7 +1802,7 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     assert (rest.calls, rest.checks) == ([], [])
     assert [call[0] for call in flat.calls] == ["history"]  # only the range with rows
     assert isinstance(flat.calls[0][3]["stop"], threading.Event)
-    assert s3_session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert s3_session._core.diagnostics.wait_until_shown(TIMEOUT)
     rows = sorted(dh_to_pylist(s3_session.streams()), key=lambda r: r["StreamId"])
     assert [(r["State"], r["Transport"]) for r in rows] == [
         ("DONE", "flat files"),

@@ -385,6 +385,8 @@ def test_a_night_records_its_rows_and_judges_its_units(
             lambda: bool(list((tmp_path / "rows").glob("crypto-minute-bars-*.parquet"))),
             "the bars' Parquet file",
         )
+        # The later samples must see the connection in the session's diagnostics.
+        assert harness.session._core.diagnostics.wait_until_shown(15.0)
 
     clock = _Night(publish)
     seen: list[tuple[str, str, str]] = []

@@ -1705,7 +1705,7 @@ def routed_session(
 
 def streams_of(m: dm.MassiveSession, to_pylist: ToPylist) -> list[dict[str, Any]]:
     # The session's m.streams() rows, once every row queued so far is applied.
-    assert m._core.diagnostics.barrier().wait(TIMEOUT)
+    assert m._core.diagnostics.wait_until_shown(TIMEOUT)
     return to_pylist(m.streams())
 
 
@@ -2240,7 +2240,7 @@ def test_a_failed_append_remembers_nothing(
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0)])
     fail_one_poll_conversion(monkeypatch)
     next_cycle(clock)  # b's cycle fails to publish
-    assert feed_session._core.diagnostics.barrier().wait(30.0)
+    assert feed_session._core.diagnostics.wait_until_shown(30.0)
     assert dh_to_pylist(feed_session.streams())[0]["Error"] == f"conversion failed; {GOOD}"
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
@@ -2405,7 +2405,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
         until(lambda: len(fake_rest.requests) == 2)
         until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
-        assert m._core.diagnostics.barrier().wait(30.0)
+        assert m._core.diagnostics.wait_until_shown(30.0)
         assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
         failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
         assert not failed
@@ -2777,4 +2777,18 @@ def test_a_cycles_labels_set_the_rows_recency(
         massive_session.streams(), lambda rows: bool(rows and rows[0]["RowsPublished"])
     )
     assert row["Recency"] == shown
+    massive_session.release(table)
+
+
+def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    blink_creations: list[bool],
+) -> None:
+    before = len(blink_creations)
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    assert blink_creations[before:] == [True]
     massive_session.release(table)

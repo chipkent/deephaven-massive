@@ -396,8 +396,32 @@ def dh_exec_ctx() -> ExecutionContext:
 
 
 @pytest.fixture
+def blink_creations(dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record, for each blink table the library creates, whether the update graph's lock was held.
+
+    Wraps Deephaven's `table_publisher` as `blink_publisher` calls it; each creation appends
+    whether the creating thread then held the update graph's shared lock. Every library blink
+    table must be created under that lock, so a test asserts the list is all True.
+
+    Returns:
+        The list, in creation order; empty until a table is created.
+    """
+    publisher = importlib.import_module("deephaven_massive._tables.publisher")
+    update_graph = importlib.import_module("deephaven.update_graph")
+    real = publisher.table_publisher
+    locked: list[bool] = []
+
+    def recording(*args: object, **kwargs: object) -> object:
+        locked.append(update_graph.has_shared_lock(dh_exec_ctx.update_graph))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(publisher, "table_publisher", recording)
+    return locked
+
+
+@pytest.fixture
 def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
-    """Return a function that asks the update graph for a cycle and returns once one has run.
+    """Return a function that returns once an update cycle that started after the call has run.
 
     For a test that needs the live tables to have updated between two steps, such as two
     console commands that must count as two pauses. The function fails the test when no cycle
@@ -407,26 +431,10 @@ def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
     Returns:
         The function.
     """
+    execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
 
     def run() -> None:
-        graph = dh_exec_ctx.update_graph.j_update_graph
-        lock = graph.exclusiveLock()
-        signal = lock.newCondition()
-        first = graph.clock().currentStep()
-        # Asked for outside the lock, the signal comes from a terminal notification of the next
-        # cycle, which runs under the exclusive lock. Holding the lock, the waiter sees either a
-        # finished cycle (the step moved) or one not yet begun, whose signal `awaitNanos` waits
-        # for, so a cycle that ends before the wait starts is never missed.
-        graph.requestSignal(signal)
-        graph.requestRefresh()
-        remaining = 30_000_000_000  # nanoseconds
-        lock.lock()
-        try:
-            while graph.clock().currentStep() == first and remaining > 0:
-                remaining = signal.awaitNanos(remaining)
-        finally:
-            lock.unlock()
-        if graph.clock().currentStep() == first:
+        if not execution_context.wait_for_update_cycle(dh_exec_ctx, 30.0):
             pytest.fail("no update cycle ran within 30 s")
 
     return run
@@ -1521,7 +1529,7 @@ def drain(massive_session: MassiveSession) -> Callable[[], None]:
         released = threading.Event()
         core._reaper.submit(released.set)
         assert released.wait(10.0)
-        assert core.diagnostics.barrier().wait(30.0)
+        assert core.diagnostics.wait_until_shown(30.0)
 
     return wait
 

@@ -478,7 +478,7 @@ def test_loading_counts_background_downloads_and_none_once_closed(market: Market
     assert examples.loading(session) in {0, 1}
     # The download's LOADING row reaches `streams()` on the diagnostics writer's thread: wait
     # for it, or the wait below can see no download yet and return before it starts.
-    assert session._core.diagnostics.barrier().wait(30.0)
+    assert session._core.diagnostics.wait_until_shown(30.0)
     assert examples.wait_for_downloads({"m": session})
     assert examples.loading(session) == 0
     session.close()

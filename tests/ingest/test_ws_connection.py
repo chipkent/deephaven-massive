@@ -134,7 +134,7 @@ def streams_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     settle(ws_session)
-    assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     return sorted(dh_to_pylist(ws_session.session.streams()), key=lambda r: r["StreamId"])
 
 
@@ -142,7 +142,7 @@ def connections_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
     settle(ws_session)
-    assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     rows = dh_to_pylist(ws_session.session.connections())
     return [r for r in rows if r["Transport"] == "WebSocket"]
 
@@ -691,7 +691,7 @@ def join(ws_session: WsSession) -> dm.MassiveSession:
 
 
 def rows_of(session: dm.MassiveSession, to_pylist: ToPylist) -> list[dict[str, Any]]:
-    assert session._core.diagnostics.barrier().wait(TIMEOUT)
+    assert session._core.diagnostics.wait_until_shown(TIMEOUT)
     return sorted(to_pylist(session.streams()), key=lambda r: r["StreamId"])
 
 
@@ -719,7 +719,7 @@ def test_sessions_with_one_key_share_one_connection(
     assert [r["StreamId"] for r in rows_of(ws_session.session, dh_to_pylist)] == [1]
     assert [r["StreamId"] for r in rows_of(other, dh_to_pylist)] == [2]
     for session in (ws_session.session, other):
-        assert session._core.diagnostics.barrier().wait(TIMEOUT)
+        assert session._core.diagnostics.wait_until_shown(TIMEOUT)
         (row,) = [r for r in dh_to_pylist(session.connections()) if r["Transport"] == "WebSocket"]
         assert row["Host"] == "socket.test"
     # Closing one session fails its tables and leaves the connection to the other.
