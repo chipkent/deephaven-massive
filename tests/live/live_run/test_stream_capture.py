@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from deephaven.table import Table
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive import MassiveSession
@@ -713,9 +714,31 @@ def test_a_stall_between_samples_is_recorded_as_a_gap(
     assert stream_capture.total_gaps(tmp_path) == timedelta(hours=2)
 
 
+def _record_diagnostics_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # Records, in order, each wait for the diagnostics rows to show and each diagnostics read.
+    steps: list[str] = []
+    wait, read = stream_capture.wait_for_diagnostics, stream_capture.diagnostics_rows
+
+    def waited(m: MassiveSession) -> None:
+        steps.append("wait")
+        wait(m)
+
+    def read_rows(m: MassiveSession, view: Table) -> list[dict[str, Any]]:
+        steps.append("read")
+        return read(m, view)
+
+    monkeypatch.setattr(stream_capture, "wait_for_diagnostics", waited)
+    monkeypatch.setattr(stream_capture, "diagnostics_rows", read_rows)
+    return steps
+
+
 @pytest.mark.jvm_held
 def test_a_stream_that_failed_fails_its_unit(
-    make_ws_session: Callable[..., WsSession], fake_ws_server: FakeMassiveServer, tmp_path: Path
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_ws_server.refuse["AM.I:SPX"] = "not authorized"
     harness = make_ws_session()
@@ -731,6 +754,7 @@ def test_a_stream_that_failed_fails_its_unit(
 
     day = _Day(stop_after=1, action=refused)
     seen, report = _reports()
+    steps = _record_diagnostics_reads(monkeypatch)
     stream_capture.run_stream_day(
         harness.session,
         units=["indices delayed"],
@@ -742,6 +766,8 @@ def test_a_stream_that_failed_fails_its_unit(
         clock=day.clock(),
     )
     [(unit, status, reason)] = seen
+    # The final read of failed streams waits for the queued diagnostics rows to show first.
+    assert steps[-2:] == ["wait", "read"]
     assert (unit, status) == ("indices delayed", "failed")
     assert reason.startswith("a stream failed: ")
     assert "not authorized" in reason
@@ -769,7 +795,11 @@ def test_an_options_unit_without_contracts_fails(
 
 @pytest.mark.jvm_held
 def test_a_throughput_stream_that_failed_fails_its_unit(
-    make_ws_session: Callable[..., WsSession], fake_ws_server: FakeMassiveServer, tmp_path: Path
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_ws_server.refuse["XT.*"] = "not authorized"
     harness = make_ws_session()
@@ -784,6 +814,7 @@ def test_a_throughput_stream_that_failed_fails_its_unit(
         fake_ws_server.wait_for(lambda _: failed())
 
     seen, report = _reports()
+    steps = _record_diagnostics_reads(monkeypatch)
     stream_capture.run_throughput(
         harness.session,
         units=["currencies real-time"],
@@ -795,5 +826,6 @@ def test_a_throughput_stream_that_failed_fails_its_unit(
         window=(START, START + timedelta(seconds=40)),
     )
     [(unit, status, reason)] = seen
+    assert steps[-2:] == ["wait", "read"]
     assert (unit, status) == ("currencies real-time", "failed")
     assert "not authorized" in reason

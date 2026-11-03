@@ -330,6 +330,26 @@ def diagnostics_rows(m: MassiveSession, view: Table) -> list[dict[str, Any]]:
         m.release(view)
 
 
+DIAGNOSTICS_SHOWN: Final = 30.0
+"""The most seconds `wait_for_diagnostics` waits for the queued diagnostics rows to show."""
+
+
+def wait_for_diagnostics(m: MassiveSession) -> None:
+    """Wait until every diagnostics row the session has queued shows in its views.
+
+    The session's writer thread adds each diagnostics row, and the row reaches a view only on
+    the next update cycle, so a read right after a stream fails, or right after a call changes
+    a rate limit, can still show the row from before. Call it before a read whose rows decide
+    a verdict. It waits at most `DIAGNOSTICS_SHOWN` seconds; past that the library logs a
+    WARNING and the read that follows may miss the latest rows.
+
+    Args:
+        m: The session; not on an update-graph thread, and not holding the update graph's
+            lock, under which no cycle runs.
+    """
+    m._core.diagnostics.wait_until_shown(DIAGNOSTICS_SHOWN)
+
+
 def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     """Append rows to a CSV file, writing its header when the file is new.
 
@@ -699,6 +719,7 @@ def run_stream_day(
     recorder = Recorder(folder)
     with held_streams(m, streams, recorder):
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        wait_for_diagnostics(m)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     rows = unit_rows(folder, streams)
     for unit in units:
@@ -927,6 +948,7 @@ def run_throughput(
     recorder = Recorder(folder)
     try:
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        wait_for_diagnostics(m)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     finally:
         _release(m, tables)

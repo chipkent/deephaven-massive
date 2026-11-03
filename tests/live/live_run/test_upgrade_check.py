@@ -188,7 +188,6 @@ def test_a_limit_never_learned_stops_the_check(
     open_session: Callable[[], MassiveSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(upgrade_check, "LEARN_SHOWN", 0.0)  # one read after each call
     fake_rest.reply(PREV, BAR)
     with open_session() as m, pytest.raises(RuntimeError, match="no limit was learned after 2"):
         upgrade_check.learn_limit(m, "stocks", limit=2)
@@ -232,13 +231,31 @@ def test_the_options_call_reads_an_endpoint_basic_includes(
     assert request.target.startswith("/v2/aggs/ticker/O%3ASPY261218C00600000/prev")
 
 
-def test_a_limit_learned_after_the_call_is_read_once_the_row_shows_it(
+def test_each_call_s_effect_is_shown_before_its_row_is_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The call's effect reaches m.rate_limits() on a later update cycle: the first read after
-    # the call misses it, and a later one, still within the wait, sees it.
-    rows: list[dict[str, Any]] = [{}, {"LimitSource": "LEARNED"}]
-    monkeypatch.setitem(upgrade_check.CALLS, "stocks", lambda _m: None)
-    monkeypatch.setattr(upgrade_check, "_row", lambda _m, _subscription: rows.pop(0))
-    assert upgrade_check.learn_limit(cast("MassiveSession", None), "stocks") == 1
-    assert rows == []
+    # A call's effect reaches m.rate_limits() only on a later update cycle: learn_limit waits
+    # for it after each call and then reads the row once, so the second call, whose effect
+    # is the learned limit, is the last one made.
+    steps: list[str] = []
+    calls = shown = 0
+
+    def call(_m: MassiveSession) -> None:
+        nonlocal calls
+        calls += 1
+        steps.append("call")
+
+    def wait(_m: MassiveSession) -> None:
+        nonlocal shown
+        shown = calls
+        steps.append("wait")
+
+    def row(_m: MassiveSession, _subscription: str) -> dict[str, Any]:
+        steps.append("read")
+        return {"LimitSource": "LEARNED"} if shown >= 2 else {}
+
+    monkeypatch.setitem(upgrade_check.CALLS, "stocks", call)
+    monkeypatch.setattr(upgrade_check, "wait_for_diagnostics", wait)
+    monkeypatch.setattr(upgrade_check, "_row", row)
+    assert upgrade_check.learn_limit(cast("MassiveSession", None), "stocks") == 2
+    assert steps == ["call", "wait", "read"] * 2
