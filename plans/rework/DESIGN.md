@@ -5108,11 +5108,11 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
     a session opens its first stream and to drop it when its last session leaves;
   - the REST transport's host-decision cache, which holds one future per (class, family);
     callers wait on a future outside every lock (§ 13.2);
-  - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
-    boto3 S3 client (creation reads local AWS configuration but makes no request, since the
-    credentials are given); its closed flag is a `threading.Event`, read without the lock by
-    the reader threads. The only lock taken under it is the model-loader lock below, while the
-    client is built. The session's `SessionClients` creates the `FlatFileClient` on the
+  - `FlatFileClient`'s lock, one per session, which guards the creation and the close of its
+    boto3 S3 clients, one per connection slot, and the list of idle ones (creation reads local
+    AWS configuration but makes no request, since the credentials are given); its closed flag
+    is a `threading.Event`, read without the lock by the reader threads. The only lock taken
+    under it is the model-loader lock below, while a client is built. The session's `SessionClients` creates the `FlatFileClient` on the
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
   - the flat-file model-loader lock, one per process, held while an S3 client is built. Every
@@ -5366,7 +5366,7 @@ ws/                  imports net, spec
 flatfiles/           imports net, spec
   __init__.py        docstring only: _massive's interface maps each name to its submodule,
                      so no flat-file name but FlatFileClient imports boto3
-  client.py          FlatFileClient: lazy boto3 client under its lock, shared model loader,
+  client.py          FlatFileClient: a lazy boto3 client per connection slot, shared model loader,
                      closed flag, open(key) -> FlatFile | None, S3 error mapping, prefixes(),
                      close(); botocore's body read errors become OSError
   object_keys.py     object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
@@ -5798,10 +5798,20 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
 `_massive.FlatFileClient(access_key_id, secret_access_key, endpoint_url, bucket, max_pool,
 clock=SYSTEM_CLOCK)` is one object per session, created by the session's first flat-file read
 (only after the source choice has required both credentials, which are therefore `str`) and
-closed by `m.close()`; `clock` is the `net.retry.Clock` its retry waits use. It creates its
-boto3 S3 client lazily, under its own lock, and keeps a closed flag (a `threading.Event`);
-once closed, it makes no request. A request in flight at the close closes the client again as
-it returns. Every S3 client in the process is built on one shared botocore model loader, so
+closed by `m.close()`; `clock` is the `net.retry.Clock` its retry waits use. A request takes
+one of `max_pool` connection slots (`net.slots.ConnectionSlots`), and an open object keeps
+it until it is closed. Each slot has a boto3 S3 client of its own, with a pool of one
+connection, built lazily from one boto3 session, under the client's lock, the first time a
+request takes a slot and finds no idle client; taking a slot is the only way to get a client,
+and the client goes back with the slot. So no `ssl.SSLContext` is used by two threads at once:
+urllib3 sets the ALPN protocols on the context of every connection it opens (and botocore has
+it load the CA bundle), while another thread's handshake may copy that state with the GIL
+released, a use-after-free in CPython (python/cpython#141012, unfixed in every release, the
+free-threaded build included) that corrupts the handshake (`TLSV1_ALERT_DECODE_ERROR`) or
+crashes the process. The client keeps a closed flag (a `threading.Event`); once closed, it
+makes no request, and `close()` closes every client built. A client given back after the
+close (by a request in flight at the close, as it returns or as its object is closed) is
+closed again. Every S3 client in the process is built on one shared botocore model loader, so
 botocore parses its S3 model files once per process instead of once per client; the loader
 stays in memory for the life of the process, and its lock serializes client builds (section
 18).
