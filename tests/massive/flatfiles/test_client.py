@@ -153,7 +153,7 @@ def _body(streaming: StreamingBody) -> client_module._Body:
     # A response body as the client wraps it, holding one of its own connection slots.
     slots = ConnectionSlots(1)
     assert slots.acquire(Cancel())
-    return client_module._Body(streaming, slots)
+    return client_module._Body(streaming, slots.release)
 
 
 def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
@@ -205,20 +205,24 @@ def test_each_object_request_is_logged_at_debug(
     at = "at https://files.massive.com"
     request_id = fake_s3.request_id
     # A refused request is logged too, with its status, S3's code, and its request id.
+    # The first object is still open while the next is requested, so a second client is built.
+    built = f"S3 client {{}} of at most 4 for https://files.massive.com (one per connection; {''}"
     assert caplog.messages == [
+        "built " + built.format(1) + "proxy None)",
         f"GET s3://flatfiles/{KEY} {at} -> 200, 4 bytes (request_id {request_id})",
+        "built " + built.format(2) + "proxy None)",
         f"GET s3://flatfiles/{missing} {at} -> 404 NoSuchKey (request_id {request_id})",
         f"GET s3://flatfiles/{refused} {at} -> 403 AccessDenied (request_id {request_id})",
     ]
 
 
-def test_the_client_is_created_once_on_first_use_from_its_settings(fake_s3: FakeS3) -> None:
+def test_a_client_is_created_on_first_use_from_its_settings_and_reused(fake_s3: FakeS3) -> None:
     client = make_client(endpoint_url="https://s3.example.com", bucket="other", max_pool=3)
     try:
         assert fake_s3.clients == []  # nothing is created before the first request
         assert not client.closed
         client.open(KEY)
-        client.open(KEY)
+        client.open(KEY)  # the first request gave its client back, so this one reuses it
     finally:
         client.close()
     assert fake_s3.clients == [
@@ -227,13 +231,23 @@ def test_the_client_is_created_once_on_first_use_from_its_settings(fake_s3: Fake
             "access_key": "AKIDFLATFILES",
             "secret_key": PRIVATE_KEY,
             "signature_version": "s3v4",
-            "max_pool_connections": 3,
+            "max_pool_connections": 1,  # one connection per client: one client per slot
         }
     ]
     assert {bucket for bucket, _ in fake_s3.requests} == {"other"}
 
 
-def test_concurrent_first_requests_create_one_client(fake_s3: FakeS3) -> None:
+def test_concurrent_first_requests_build_one_session_and_a_client_per_connection(
+    fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sessions: list[object] = []
+    session_for = FlatFileClient._session_for
+
+    def counted(self: FlatFileClient, bundle: str, proxy: str | None) -> object:
+        sessions.append(bundle)
+        return session_for(self, bundle, proxy)
+
+    monkeypatch.setattr(FlatFileClient, "_session_for", counted)
     client = make_client()
     start = threading.Barrier(8, timeout=TIMEOUT)
 
@@ -249,7 +263,8 @@ def test_concurrent_first_requests_create_one_client(fake_s3: FakeS3) -> None:
             thread.join(TIMEOUT)
     finally:
         client.close()
-    assert len(fake_s3.clients) == 1
+    assert len(sessions) == 1
+    assert 1 <= len(fake_s3.clients) <= 4  # never more clients than the pool's 4 connections
     assert len(fake_s3.requests) == 8
 
 
@@ -352,8 +367,8 @@ def loaders(monkeypatch: pytest.MonkeyPatch) -> list[_CheckedLoader]:
 
 
 def _loader_of(client: FlatFileClient) -> object:
-    """Return the botocore model loader the client's boto3 client was built with."""
-    built: Any = client._client
+    """Return the botocore model loader the client's first boto3 client was built with."""
+    built: Any = client._clients[0]
     return built._loader
 
 
@@ -1047,9 +1062,10 @@ def test_a_request_in_flight_at_close_closes_the_client_again(
     # The answer still arrives; the caller sees the close through `closed`.
     assert (file is not None) is stored
     assert client.closed
-    assert fake_s3.closes == 2
     if file is not None:
+        assert fake_s3.closes == 1  # the open object still holds its client
         file.close()
+    assert fake_s3.closes == 2  # closed again when it was given back
 
 
 class _BrokenRaw(io.BytesIO):
@@ -1783,9 +1799,8 @@ def test_a_close_ends_the_wait_for_a_connection_of_open_and_prefixes(
 
 def test_overlapping_reads_share_the_pool_without_discarding_connections(
     *,
-    fake_rest: FakeRestServer,
-    network_env: pytest.MonkeyPatch,
-    no_aws_settings: None,
+    tls_server: FakeRestServer,
+    trusted: pytest.MonkeyPatch,
     make_csv_gz: Callable[[str], bytes],
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
@@ -1793,13 +1808,10 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     # Two reads of two files each, on a client of two connections: two objects are open at
     # once while the others wait for one to be closed, so urllib3 never opens an extra
     # connection only to discard it ("Connection pool is full").
-    # Plain HTTP: over TLS, two connections set up at once race on the pool's shared SSL
-    # context (urllib3 replaces its ALPN list while another thread copies it), and the
-    # handshake fails now and then. Issue #491 tracks the fix in the flat-file client.
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     keys = [KEY.replace("03-03", f"03-0{day}") for day in range(3, 7)]
     for key in keys:
-        fake_rest.reply(f"/flatfiles/{key}", Reply(data))
+        tls_server.reply(f"/flatfiles/{key}", Reply(data))
     ready = threading.Condition()
     hold = threading.Event()
     in_flight = 0
@@ -1811,8 +1823,8 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
             ready.notify_all()
         hold.wait(TIMEOUT)
 
-    fake_rest.on_request(held)
-    client = make_client(endpoint_url=fake_rest.url, max_pool=2)
+    tls_server.on_request(held)
+    client = make_client(endpoint_url=tls_server.url, max_pool=2)
     waiting = _waits_seen(client)
     caplog.set_level(logging.WARNING, logger="urllib3")
     with ThreadPoolExecutor(2) as one, ThreadPoolExecutor(2) as other:
@@ -1829,6 +1841,41 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     assert symbols == [["AAPL", "MSFT", "AAPL", "SPY"]] * 4
     assert in_flight == 4
     assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []
+
+
+def _ssl_context_of(client: object) -> ssl.SSLContext:
+    """Return the `SSLContext` a boto3 client's connections to the endpoint are made with."""
+    # botocore keeps the client's urllib3 pool manager, and the context it gives every
+    # connection, in private attributes with no public accessor; reading them is the only way
+    # to check that no two connection slots share a context.
+    manager: Any = cast("Any", client)._endpoint.http_session._manager
+    context: ssl.SSLContext = manager.connection_pool_kw["ssl_context"]
+    return context
+
+
+def test_no_two_held_connection_slots_share_an_ssl_context(fake_s3: FakeS3) -> None:
+    # urllib3 writes to a connection's SSLContext as it opens it, while OpenSSL may be copying
+    # that state for another thread's handshake with the GIL released, which corrupts the
+    # handshake or crashes. So each slot has its own client, with one connection, and the
+    # objects held open at once never share a context.
+    keys = [KEY.replace("03-03", f"03-0{day}") for day in range(3, 6)]
+    for key in keys:
+        fake_s3.put(key, b"data")
+    client = make_client(max_pool=3)
+    files = [client.open(key) for key in keys]
+    try:
+        built = list(client._clients)
+        assert (len(built), client._idle) == (3, [])  # one client per held slot
+        pools = [cast("Any", each.meta.config).max_pool_connections for each in built]
+        assert pools == [1, 1, 1]
+        assert len({id(_ssl_context_of(each)) for each in built}) == 3
+        cast("FlatFile", files[0]).close()
+        files[0] = client.open(keys[0])  # takes the slot given back, and its client
+        assert client._clients == built
+    finally:
+        for file in files:
+            cast("FlatFile", file).close()
+        client.close()
 
 
 def test_an_endpoint_s_user_and_password_never_reach_a_message(
@@ -1874,7 +1921,7 @@ class _UnclosableRaw(io.BytesIO):
 def test_a_body_whose_close_raises_still_gives_its_slot_back() -> None:
     slots = ConnectionSlots(1)
     assert slots.acquire(Cancel())
-    body = client_module._Body(StreamingBody(_UnclosableRaw(b"data"), 4), slots)
+    body = client_module._Body(StreamingBody(_UnclosableRaw(b"data"), 4), slots.release)
     with pytest.raises(OSError, match="broke while closing"):
         body.close()
     assert slots._free == 1  # given back

@@ -1,4 +1,4 @@
-"""The client of Massive's flat-file bucket: one boto3 S3 client, its errors, and its close.
+"""The client of Massive's flat-file bucket: its boto3 S3 clients, its errors, and its close.
 
 `FlatFileClient` opens the objects of Massive's S3 flat-file bucket (`flatfiles` at
 `https://files.massive.com`) for `FlatFile` to decode, and lists the bucket's top-level
@@ -48,6 +48,14 @@ The client follows the network rules the REST and WebSocket clients follow, from
   at INFO and giving up at DEBUG (the call that fails raises the error, which the library
   logs); an error names S3's code and message, with the secret replaced by `***` should S3
   ever quote it.
+
+Each connection slot has a boto3 client of its own, with a pool of one connection, so no
+`ssl.SSLContext` is ever used by two threads at once. urllib3 writes to the context of every
+connection it opens (it sets the ALPN protocols, and botocore has it load the certificate
+bundle), while OpenSSL may be copying that same state for another thread's handshake with the
+GIL released: CPython does not guard the copy, so a context shared between threads can corrupt
+a handshake (`TLSV1_ALERT_DECODE_ERROR`) or crash the process. No CPython or urllib3 release
+avoids it, the free-threaded build included.
 
 botocore parses the JSON files that describe S3 once per process, not once per client: every
 client's botocore session is given the same model loader, which stays in memory for the life of
@@ -219,6 +227,13 @@ _MODEL_LOADER: Final = _ModelLoader()
 """The one botocore model loader of the process, shared by every `FlatFileClient`."""
 
 
+class _WaitCancelledError(Exception):
+    """The caller's cancel token ended the wait for a connection slot; no slot was taken.
+
+    Raised by `FlatFileClient._take` and caught by `open`, which then returns None.
+    """
+
+
 @dataclass(frozen=True)
 class _Retryable:
     """An attempt that failed before the object's first byte, in a way a retry may fix.
@@ -240,22 +255,23 @@ class _Body:
     lets some of urllib3's through unwrapped (a TLS failure while reading, which urllib3
     raises as its `SSLError`); this stream raises all of them as `OSError` (chained to the
     original), the error every other stream
-    raises for a failed read. It holds one of the client's connection slots until it is
-    closed. Used by one reader thread; `close()` is safe from any thread.
+    raises for a failed read. It holds one of the client's connection slots, and the boto3
+    client of that slot, until it is closed. Used by one reader thread; `close()` is safe from
+    any thread.
     """
 
-    __slots__ = ("_body", "_lock", "_slots")
+    __slots__ = ("_body", "_give_back", "_lock")
 
-    def __init__(self, body: StreamingBody, slots: ConnectionSlots) -> None:
+    def __init__(self, body: StreamingBody, give_back: Callable[[], None]) -> None:
         """Wrap a response body.
 
         Args:
             body: The body of a successful `GetObject` response.
-            slots: The client's connection slots, one of which the request took; `close()`
-                gives it back.
+            give_back: Gives back the connection slot, and its boto3 client, that the request
+                took; the first `close()` calls it.
         """
         self._body = body
-        self._slots: ConnectionSlots | None = slots
+        self._give_back: Callable[[], None] | None = give_back
         self._lock = threading.Lock()
 
     def read(self, size: int = -1, /) -> bytes:
@@ -285,24 +301,29 @@ class _Body:
             self._body.close()
         finally:
             with self._lock:
-                slots, self._slots = self._slots, None
-            if slots is not None:
-                slots.release()
+                give_back, self._give_back = self._give_back, None
+            if give_back is not None:
+                give_back()
 
 
 class FlatFileClient:
-    """The connection to Massive's flat-file bucket: one S3 client, created on first use.
+    """The connection to Massive's flat-file bucket: one S3 client per connection, made on use.
 
     The library's session creates one on its first flat-file read and closes it when the
-    session closes. The boto3 client is created by the first request, under the client's own
-    lock (no network call and no wait happen while it is held: the credentials are given, the
-    proxy is decided before the lock is taken, and the `legacy` defaults mode keeps boto3 from
-    asking the instance-metadata service for a region), and shared by every reader thread,
-    since boto3 clients are thread-safe. Every client in the process reads botocore's model
-    files through one shared loader, so only the first pays to parse them; building a client
-    takes that loader's lock, a leaf lock, inside the client's own. Once `close()` has run, no
-    request starts; a request already in flight when the client closed is answered, and its
-    connection pool is closed once more as it returns, so nothing it opened outlives the close.
+    session closes. Each of its `max_pool` connection slots gets a boto3 client of its own, with
+    a pool of one connection, the first time a request takes that slot while no idle client is
+    left; a request gets a client only by taking a slot, and gives both back together, so no
+    two threads ever use one client, its connection, or its `ssl.SSLContext` at once (the
+    module docstring says why a shared context is unsafe). Every client is built from one boto3
+    session, under the client's own lock (no network call and no wait happen while it is held:
+    the credentials are given, the proxy is decided before the lock is taken, and the `legacy`
+    defaults mode keeps boto3 from asking the instance-metadata service for a region). Every
+    client in the process reads botocore's model files through one shared loader, so only the
+    first pays to parse them; building a client takes that loader's lock, a leaf lock, inside
+    the client's own. Once `close()` has run, no request starts; a request already in flight
+    when the client closed is answered, and its boto3 client is closed once more when it is
+    given back (as the request returns, or when its object's body is closed), so nothing it
+    opened outlives the close.
 
     Example:
         ::
@@ -328,13 +349,15 @@ class FlatFileClient:
     __slots__ = (
         "_access_key_id",
         "_bucket",
-        "_client",
+        "_clients",
         "_clock",
         "_closed",
         "_endpoint_shown",
         "_endpoint_url",
         "_host",
+        "_idle",
         "_lock",
+        "_make_client",
         "_max_pool",
         "_proxy",
         "_rereads",
@@ -367,7 +390,8 @@ class FlatFileClient:
                 text is cleaned of them.
             bucket: The bucket, such as `"flatfiles"`.
             max_pool: The most connections the client keeps open, and the most objects it
-                has open at once: a further `open` waits for one to be closed.
+                has open at once: a further `open` waits for one to be closed. It is also the
+                most boto3 clients it builds, one per connection.
             clock: The time source retry waits are taken on. Tests pass a fake; the default is
                 the real clock.
         """
@@ -381,13 +405,21 @@ class FlatFileClient:
         self._max_pool = max_pool
         self._clock = clock
         self._lock = threading.Lock()
-        self._client: S3Client | None = None
-        # The proxy the client was created with, without its user and password, for messages.
+        # Builds one more boto3 client from the one boto3 session, with the network settings
+        # read for the first; None until the first request needs a client. Guarded by `_lock`.
+        self._make_client: Callable[[], S3Client] | None = None
+        # Every boto3 client built and not yet closed, for `close()`; guarded by `_lock`.
+        self._clients: list[S3Client] = []
+        # The clients no request holds, which the next requests take before a new one is
+        # built: there are never more clients than slots. Guarded by `_lock`.
+        self._idle: list[S3Client] = []
+        # The proxy the clients are built with, without its user and password, for messages.
         self._proxy: str | None = None
         self._closed = Cancel()
-        # One per pooled connection: a request takes one before it is sent and an object's
-        # body keeps it until it is closed, so the client never has more requests open than
-        # its pool keeps connections, however many reads overlap.
+        # One per connection: a request takes one, with that slot's own boto3 client, before
+        # it is sent, and an object's body keeps both until it is closed, so the client never
+        # has more requests open than it keeps connections, however many reads overlap, and
+        # no two requests share a boto3 client.
         self._slots = ConnectionSlots(max_pool)
         # The cancel event of every `wait_to_reread` in progress, which `close()` sets. A list,
         # since the readers of one call share their event; guarded by `_lock`.
@@ -408,7 +440,7 @@ class FlatFileClient:
         20 % jitter) when it fails before the object's first byte for a reason that may pass,
         such as HTTP 503 `SlowDown` or a reset connection. The body is read later, through the
         returned file, and a failure while it is read is never retried. `close()` ends a retry
-        wait at once. The first call creates the boto3 client.
+        wait at once. A request that finds no idle boto3 client builds one, up to `max_pool`.
 
         Errors: `WireError` when the client is closed (no request is made) or cannot be
         created, TLS fails (never retried), a retryable failure persists after the last retry,
@@ -461,19 +493,21 @@ class FlatFileClient:
             )
             return answer["Body"]
 
-        with Cancel(*(self._closed,) if cancel is None else (self._closed, cancel)) as stop:
-            if not self._slots.acquire(stop):
-                self._refuse_if_closed(key)
-                return None
         try:
-            body = self._request(get, key=key, location=location, verb="read")
+            with Cancel(*(self._closed,) if cancel is None else (self._closed, cancel)) as stop:
+                client = self._take(stop, key)
+        except _WaitCancelledError:
+            return None
+        try:
+            body = self._request(client, get, key=key, location=location, verb="read")
         except BaseException:
-            self._slots.release()
+            self._give_back(client)
             raise
         if body is None:
-            self._slots.release()
+            self._give_back(client)
             return None
-        return FlatFile(_Body(body, self._slots), key, location=location, host=self._host)
+        give_back = functools.partial(self._give_back, client)
+        return FlatFile(_Body(body, give_back), key, location=location, host=self._host)
 
     def wait_to_reread(self, error: WireError, retry: int, cancel: threading.Event) -> bool:
         """Wait before reading an object again whose body failed part-way, if a reread is left.
@@ -550,17 +584,18 @@ class FlatFileClient:
         found: list[str] = []
         token: str | None = None
         while True:
-            if not self._slots.acquire(self._closed):  # one of `max_pool`, as for `open`
-                self._refuse_if_closed("")  # the client closed while it waited: this raises
+            # One of `max_pool`, as for `open`; only `close()` ends the wait, and then it raises.
+            client = self._take(self._closed, "")
             try:
                 page = self._request(
+                    client,
                     functools.partial(self._list_page, token=token),
                     key="",
                     location=location,
                     verb="list",
                 )
             finally:
-                self._slots.release()
+                self._give_back(client)
             found += [entry["Prefix"].removesuffix("/") for entry in page.get("CommonPrefixes", [])]
             # Read as plain data: a server other than S3 may leave either field out.
             fields: Mapping[str, object] = page
@@ -590,12 +625,19 @@ class FlatFileClient:
         return client.list_objects_v2(Bucket=self._bucket, Delimiter="/", ContinuationToken=token)
 
     def _request(
-        self, call: Callable[[S3Client], _Answer], *, key: str, location: str, verb: str
+        self,
+        client: S3Client,
+        call: Callable[[S3Client], _Answer],
+        *,
+        key: str,
+        location: str,
+        verb: str,
     ) -> _Answer:
         """Send one request, retrying a failure before its answer on the shared schedule.
 
         Args:
-            call: Sends the request on the boto3 client and returns what the caller needs of
+            client: The boto3 client of the connection slot the caller holds (`_take`).
+            call: Sends the request on that client and returns what the caller needs of
                 the answer. A `ClientError` it lets through is mapped to a wire error here.
             key: The object key the request concerns, or `""` for the bucket, for the errors'
                 `path`.
@@ -610,7 +652,7 @@ class FlatFileClient:
         """
         retry = 0
         while True:
-            outcome = self._attempt(call, key=key, location=location, verb=verb)
+            outcome = self._attempt(client, call, key=key, location=location, verb=verb)
             if not isinstance(outcome, _Retryable):
                 return outcome
             if retry == MAX_RETRIES:
@@ -623,12 +665,19 @@ class FlatFileClient:
             retry += 1
 
     def _attempt(
-        self, call: Callable[[S3Client], _Answer], *, key: str, location: str, verb: str
+        self,
+        client: S3Client,
+        call: Callable[[S3Client], _Answer],
+        *,
+        key: str,
+        location: str,
+        verb: str,
     ) -> _Answer | _Retryable:
         """Send one attempt of a request.
 
         Args:
-            call: Sends the request on the boto3 client.
+            client: The boto3 client of the connection slot the caller holds.
+            call: Sends the request on that client.
             key: The object key, or `""` for the bucket.
             location: The object's or bucket's location, for messages.
             verb: What the request does, for messages.
@@ -639,7 +688,9 @@ class FlatFileClient:
         Raises:
             WireError: When the failure is not retryable; see `open`.
         """
-        client, proxy = self._client_for(key)
+        with self._lock:
+            self._refuse_if_closed(key)  # a retry after `close()` is never sent
+            proxy = self._proxy
         try:
             return call(client)
         except ClientError as error:
@@ -697,69 +748,127 @@ class FlatFileClient:
                 ),
                 error,
             )
-        finally:
-            if self._closed.is_set():
-                # The client was closed while this request was in flight, and the request may
-                # have opened a new connection pool: close it again now that it has returned.
-                client.close()
 
     def close(self) -> None:
-        """Close the boto3 client, if one was created, and refuse every further request.
+        """Close every boto3 client built, and refuse every further request.
 
         Idempotent and safe from any thread. Reads in progress keep their open bodies until
-        their readers close them; a request in flight closes the client again as it returns.
-        Every `wait_to_reread` in progress ends at once: its `cancel` event is set.
+        their readers close them. A request in flight, which may open a new connection on its
+        client after this closed it, closes the client again when it gives it back: as it
+        returns, or when its object's body is closed. Every
+        `wait_to_reread` in progress ends at once: its `cancel` event is set.
         """
         with self._lock:
             self._closed.set()
-            client, self._client = self._client, None
+            clients, self._clients, self._idle = self._clients, [], []
+            self._make_client = None
             waiting = list(self._rereads)
         for cancel in waiting:
             cancel.set()
-        if client is not None:
+        for client in clients:
             client.close()
 
-    def _client_for(self, key: str) -> tuple[S3Client, str | None]:
-        """Return the boto3 client and its proxy, creating the client on the first call.
+    def _take(self, stop: Cancel, key: str) -> S3Client:
+        """Take a connection slot and the boto3 client that goes with it: the only way to get one.
 
-        The certificate bundle and the proxy are read first, outside the client's lock: on
-        macOS, the system's proxy exceptions can make the proxy lookup resolve the endpoint's
-        host name, and nothing waits on the network under the lock. Creating the client then
-        reads local AWS configuration but makes no request, so it is done under the lock
-        (taking the shared model loader's leaf lock inside it); concurrent first calls create
-        exactly one client.
+        Blocks while every slot is taken, until one is given back or `stop` is set. The caller
+        owns the client until it calls `_give_back` with it, and no other thread uses it
+        meanwhile, so its one connection and its `ssl.SSLContext` are never shared.
+
+        Args:
+            stop: Ends the wait for a slot when set.
+            key: The key about to be requested, for the errors' `path`.
+
+        Returns:
+            The slot's boto3 client: an idle one, or one built now.
+
+        Raises:
+            _WaitCancelledError: If `stop` was set first while the client is open; no slot is
+                taken.
+            WireError: If the client is closed, or boto3 cannot create a client (for example,
+                `AWS_PROFILE` names a profile that does not exist); no slot is kept.
+        """
+        if not self._slots.acquire(stop):
+            self._refuse_if_closed(key)
+            raise _WaitCancelledError
+        try:
+            return self._client_for(key)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def _give_back(self, client: S3Client) -> None:
+        """Give back a connection slot and its client, which `_take` returned.
+
+        The client waits, idle, for the next request; once the client is closed, it is
+        closed instead, since it may have opened a connection after `close()` closed it.
+
+        Args:
+            client: The client `_take` returned.
+        """
+        with self._lock:
+            kept = not self._closed.is_set()
+            if kept:
+                self._idle.append(client)
+        if not kept:
+            client.close()
+        self._slots.release()
+
+    def _client_for(self, key: str) -> S3Client:
+        """Return an idle boto3 client, or build one; the caller holds a slot without one.
+
+        The first request reads the certificate bundle and the proxy, outside the client's
+        lock: on macOS, the system's proxy exceptions can make the proxy lookup resolve the
+        endpoint's host name, and nothing waits on the network under the lock. It then creates
+        the one boto3 session every client is built from; concurrent first requests create
+        exactly one. Building a client reads local AWS configuration but makes no request, so
+        it is done under the lock (taking the shared model loader's leaf lock inside it).
+        There are never more clients than slots: a client is built only when none is idle,
+        under the same hold of the lock, and every other client is idle or held with a slot.
 
         Args:
             key: The key about to be requested, for the errors' `path`.
 
         Returns:
-            The shared boto3 S3 client, and the URL of its proxy without the user and password
-            (None when it connects directly), for messages.
+            A boto3 S3 client no other request holds.
 
         Raises:
-            WireError: If the client is closed, or boto3 cannot create the client (for
-                example, `AWS_PROFILE` names a profile that does not exist).
+            WireError: If the client is closed, or boto3 cannot create a client (for example,
+                `AWS_PROFILE` names a profile that does not exist).
         """
         with self._lock:
-            self._refuse_if_closed(key)
-            if self._client is not None:
-                return self._client, self._proxy
-        bundle = ca_file()
-        proxy = https_proxy(self._host or "")
-        with self._lock:
-            # Another thread may have created the client, or closed this one, meanwhile.
-            self._refuse_if_closed(key)
-            if self._client is None:
-                try:
-                    self._client = self._create(bundle, proxy)
-                except BotoCoreError as error:
-                    raise WireError(
-                        f"cannot create the S3 client for {self._endpoint_shown}: "
-                        f"{self._clean(error)}",
-                        host=self._host,
-                    ) from error
-                self._proxy = None if proxy is None else proxy_credentials(proxy)[0]
-            return self._client, self._proxy
+            make_client = self._make_client
+        try:
+            if make_client is None:
+                bundle, proxy = ca_file(), https_proxy(self._host or "")
+                with self._lock:
+                    # Another request may have created the session, or closed this client,
+                    # while the settings were read.
+                    self._refuse_if_closed(key)
+                    if self._make_client is None:
+                        self._make_client = self._session_for(bundle, proxy)
+                        self._proxy = None if proxy is None else proxy_credentials(proxy)[0]
+                    make_client = self._make_client
+            with self._lock:
+                self._refuse_if_closed(key)
+                if self._idle:
+                    return self._idle.pop()
+                client = make_client()
+                self._clients.append(client)
+                built, proxy_shown = len(self._clients), self._proxy
+        except BotoCoreError as error:
+            raise WireError(
+                f"cannot create the S3 client for {self._endpoint_shown}: {self._clean(error)}",
+                host=self._host,
+            ) from error
+        _log.debug(  # outside the lock, which is a leaf
+            "built S3 client %d of at most %d for %s (one per connection; proxy %s)",
+            built,
+            self._max_pool,
+            self._endpoint_shown,
+            proxy_shown,
+        )
+        return client
 
     def _clean(self, error: object) -> str:
         """Return an error's text without the endpoint's user and password.
@@ -791,25 +900,28 @@ class FlatFileClient:
                 path=key,
             )
 
-    def _create(self, bundle: str, proxy: str | None) -> S3Client:
-        """Create the boto3 S3 client.
+    def _session_for(self, bundle: str, proxy: str | None) -> Callable[[], S3Client]:
+        """Create the one boto3 session, and return what builds each S3 client from it.
 
         A dedicated boto3 session is created, because boto3's default session is not safe to
-        create from several threads. Requests are signed with Signature Version 4, as Massive's
-        endpoint requires, and the connection pool holds `max_pool` connections. botocore
-        makes one attempt per call, so that `open` alone decides what is retried and every
-        wait goes through the client's clock. The retry mode is fixed at `standard` because
-        `AWS_RETRY_MODE=adaptive` would otherwise add botocore's client-side rate limiter,
-        which sleeps on its own clock. With no proxy, `proxies` is an empty mapping rather than
-        None, because None makes botocore look the proxy up itself, under the client's lock
-        and from more variables (`HTTP_PROXY`, `ALL_PROXY`) than the other clients read. The
-        session's defaults mode is fixed at `legacy` because `AWS_DEFAULTS_MODE=auto` would
-        make boto3 ask the instance-metadata service for the region, a network call under the
-        lock. The session reads botocore's model files through the process-wide loader
-        (`_ModelLoader`), whose lock is held, under the client's lock, while the client is
-        built: the first client of the process parses the files, and every later one reuses
-        them. The boto3 session appends boto3's data directory to the shared loader's search
-        paths; leaving the loader's block removes that copy again once the path is listed.
+        create from several threads, and one session serves every client: each client gets
+        its own HTTP session, connection pool, and `ssl.SSLContext` from it all the same.
+        Requests are signed with Signature Version 4, as Massive's endpoint requires, and each
+        client's connection pool holds one connection, since each serves one connection slot.
+        botocore makes one attempt per call, so that `open` alone decides what is retried and
+        every wait goes through the client's clock. The retry mode is fixed at `standard`
+        because `AWS_RETRY_MODE=adaptive` would otherwise add botocore's client-side rate
+        limiter, which sleeps on its own clock. With no proxy, `proxies` is an empty mapping
+        rather than None, because None makes botocore look the proxy up itself, under the
+        client's lock and from more variables (`HTTP_PROXY`, `ALL_PROXY`) than the other
+        clients read. The session's defaults mode is fixed at `legacy` because
+        `AWS_DEFAULTS_MODE=auto` would make boto3 ask the instance-metadata service for the
+        region, a network call under the lock. The session reads botocore's model files
+        through the process-wide loader (`_ModelLoader`), whose lock is held, under the
+        client's lock, while the session is created and while each client is built: the first
+        client of the process parses the files, and every later one reuses them. The boto3
+        session appends boto3's data directory to the shared loader's search paths; leaving
+        the loader's block removes that copy again once the path is listed.
 
         Args:
             bundle: The certificate bundle (`ca_file()`) that verifies the endpoint and an
@@ -817,7 +929,8 @@ class FlatFileClient:
             proxy: The proxy URL (`https_proxy()`), or None to connect directly.
 
         Returns:
-            A client for the endpoint; it makes no request until it is used.
+            Builds one more client for the endpoint each call, under the client's lock; a
+            client makes no request until it is used.
         """
         with _MODEL_LOADER.building() as loader:
             core = botocore.session.get_session()
@@ -829,20 +942,23 @@ class FlatFileClient:
                 aws_secret_access_key=self._secret_access_key,
                 botocore_session=core,
             )
-            return session.client(
-                "s3",
-                endpoint_url=self._endpoint_url,
-                verify=bundle,
-                config=Config(
-                    signature_version="s3v4",
-                    max_pool_connections=self._max_pool,
-                    connect_timeout=_CONNECT_TIMEOUT,
-                    read_timeout=_READ_TIMEOUT,
-                    proxies={} if proxy is None else {"https": proxy},
-                    proxies_config={"proxy_ca_bundle": bundle},
-                    retries={"total_max_attempts": 1, "mode": "standard"},
-                ),
-            )
+        config = Config(
+            signature_version="s3v4",
+            max_pool_connections=1,
+            connect_timeout=_CONNECT_TIMEOUT,
+            read_timeout=_READ_TIMEOUT,
+            proxies={} if proxy is None else {"https": proxy},
+            proxies_config={"proxy_ca_bundle": bundle},
+            retries={"total_max_attempts": 1, "mode": "standard"},
+        )
+
+        def build() -> S3Client:
+            with _MODEL_LOADER.building():
+                return session.client(
+                    "s3", endpoint_url=self._endpoint_url, verify=bundle, config=config
+                )
+
+        return build
 
     def _refusal(self, error: ClientError, *, key: str, location: str, verb: str) -> WireError:
         """Map an S3 error response to the wire error it means.
