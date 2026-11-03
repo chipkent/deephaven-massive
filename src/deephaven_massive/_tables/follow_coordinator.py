@@ -356,7 +356,7 @@ class FollowCoordinator:
     first followed read (`follow`), and keeps its thread and pool until `stop` (the session's
     close, or its collection), so one thread owns the per-symbol state for the session's life.
     It never refers to the core. `follow`, `post`, `wake`, and `stop` are safe from any thread
-    and never block: they take a leaf lock only around a queue put. Every handler runs on the
+    and never block: they take its lock only around a queue put. Every handler runs on the
     coordinator thread.
     """
 
@@ -384,7 +384,8 @@ class FollowCoordinator:
         self._exec_ctx = exec_ctx
         self._thread_prefix = thread_prefix
         self._max_workers = max_workers
-        # A leaf lock: guards the thread, the pool, the count of followed reads, and the stop.
+        # Guards the thread, the pool, the count of followed reads, and the stop. Held only
+        # around a queue put or a pool submit, which never waits on another thread's lock.
         self._lock = threading.Lock()
         self._worker: QueueWorker[_Message] | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -946,15 +947,26 @@ class FollowCoordinator:
             self._submit(result.read, generations)
 
     def _submit(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
-        """Hand one read to the pool.
+        """Hand one read to the pool, or drop it once `stop` has ended the pool.
+
+        `stop` may end the pool while this thread still handles the events queued before it;
+        a read of those is dropped, since every result is failed or about to fail. The submit
+        runs under the lock, so `stop` never shuts the pool down between the check and the
+        submit; a submit only queues the task and at most starts a pool thread.
 
         Args:
             read: The result.
             generations: The symbols to read, at their generations.
         """
         with self._lock:
-            pool = cast("ThreadPoolExecutor", self._pool)  # it lives as long as this thread
-        pool.submit(self._read, read, dict(generations))
+            if self._pool is not None:
+                self._pool.submit(self._read, read, dict(generations))
+                return
+        logger.debug(
+            "call %d follow: the coordinator stopped; the read of %s is dropped",
+            read.call,
+            bounded_list(sorted(generations)),
+        )
 
     def _read(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
         """A pool task: read some symbols of one result and queue the outcome.

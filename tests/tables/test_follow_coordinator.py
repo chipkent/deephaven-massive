@@ -1180,3 +1180,39 @@ def test_an_outcome_after_the_stop_token_is_dropped(
         until(lambda: "a read ended after the stop; dropped" in caplog.text)
     assert state(massive_session, "AAPL") is SymbolReadState.LOADING  # nothing recorded
     massive_session.release(result)
+
+
+def test_a_read_scheduled_after_the_coordinator_stopped_is_dropped(
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The session stops the coordinator while it still handles an add queued before the stop:
+    # the add's read finds no pool, and is dropped without killing the thread.
+    coordinator = massive_session._core.follows
+    script = Script(massive_session)
+    wl = watchlist()
+    result = follow(massive_session, wl, script)
+    thread = cast("threading.Thread", coordinator.thread)
+    membership = follow_coordinator.FollowCoordinator._membership
+    handling, go = threading.Event(), threading.Event()
+
+    def held(self: follow_coordinator.FollowCoordinator, *event: object) -> None:
+        followed, message = cast("tuple[Any, Any]", event)
+        if isinstance(message, follow_coordinator._Changed):
+            handling.set()
+            assert go.wait(TIMEOUT)
+        membership(self, followed, message)
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_membership", held)
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        add(wl, "AAPL")
+        assert handling.wait(TIMEOUT)
+        coordinator.stop()
+        go.set()
+        thread.join(TIMEOUT)
+    assert not thread.is_alive()
+    assert "the coordinator stopped; the read of 1 [AAPL] is dropped" in caplog.text
+    assert "died" not in caplog.text
+    assert script.calls == []
+    massive_session.release(result)
