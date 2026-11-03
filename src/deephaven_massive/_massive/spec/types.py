@@ -708,7 +708,6 @@ class PlanAccess:
     it, so the reference follows Massive's own plan tables after every refresh.
 
     Attributes:
-        title: The page's title, its one `###` heading, such as `"Custom Bars (OHLC)"`.
         access: The access summary line, such as `"Included in all Stocks plans"`.
         recency: The recency summary line, such as `"End-of-day, 15-minute delayed, or
             real-time"`.
@@ -723,7 +722,6 @@ class PlanAccess:
             from deephaven_massive._massive.spec.types import PlanAccess, PlanTerms
 
             bars = PlanAccess(
-                title="Custom Bars (OHLC)",
                 access="Included in all Stocks plans",
                 recency="End-of-day, 15-minute delayed, or real-time",
                 history="Records date back to September 10, 2003",
@@ -731,7 +729,6 @@ class PlanAccess:
             )
     """
 
-    title: str
     access: str
     recency: str
     history: str
@@ -758,6 +755,9 @@ class Provenance:
         plans: What each vendor page says about Massive's plans, by the page's URL; a page
             without plan tables has no entry. Empty by default. Copied into a read-only view,
             like `urls`.
+        titles: Each vendor page's title, its one `###` heading such as `"Custom Bars
+            (OHLC)"`, by the page's URL: every page in `urls` has one. Empty by default. Copied
+            into a read-only view, like `urls`.
 
     Example:
         ::
@@ -777,9 +777,10 @@ class Provenance:
     fetched: dt.date
     urls: Mapping[tuple[Transport, str], Sequence[str]] = dataclasses.field(hash=False)
     plans: Mapping[str, PlanAccess] = dataclasses.field(default_factory=dict, hash=False)
+    titles: Mapping[str, str] = dataclasses.field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
-        """Freeze a copy of the URLs, each source's as a tuple, and of the plans.
+        """Freeze a copy of the URLs, each source's as a tuple, of the plans, and of the titles.
 
         Raises:
             TypeError: If a source's URLs are one string rather than a sequence of strings,
@@ -793,6 +794,7 @@ class Provenance:
         frozen = {key: tuple(found) for key, found in self.urls.items()}
         object.__setattr__(self, "urls", MappingProxyType(frozen))
         object.__setattr__(self, "plans", MappingProxyType(dict(self.plans)))
+        object.__setattr__(self, "titles", MappingProxyType(dict(self.titles)))
 
 
 @dataclass(frozen=True)

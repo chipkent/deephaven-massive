@@ -363,8 +363,8 @@ def _library_sentence(spec: DatasetSpec, name: str) -> str:
     return KEY_SENTENCES[name]
 
 
-Contribution = tuple[Transport, SourceColumn]
-"""One column one source of a dataset contributes, with the source's transport."""
+Contribution = tuple[Transport, str, SourceColumn]
+"""One column one source of a dataset contributes, with the source's transport and key."""
 
 
 def _key_part(
@@ -383,7 +383,9 @@ def _key_part(
         list `column_description` joins with "; ", with no closing punctuation:
         `` `sip_timestamp`: "<field description>"`` for a wire key with a description,
         `` `sip_timestamp` `` for one without, or ``: the request's `stocksTicker` parameter``
-        for a key filled from the request. Sources whose rest is the same share one item.
+        for a key filled from the request. Sources whose rest is the same share one item; where
+        one transport's sources quote one wire key with different texts, `_chosen` adds each
+        source's key to its label (REST `/v2/aggs/grouped/locale/us/market/stocks/{date}`).
     """
     label = TRANSPORT_LABELS[transport]
     if column.field is None:
@@ -480,8 +482,17 @@ def _chosen(
         # The transports whose source reads the same, in source order, by what they read.
         sources: dict[str, list[str]] = {}
         if name in _FROM_PARTS:
-            for transport, column in own:
-                label, rest = _key_part(transport, column, asset_class)
+            items = [
+                (transport, key, column.wire_key, *_key_part(transport, column, asset_class))
+                for transport, key, column in own
+            ]
+            # One transport's sources that quote one wire key with different texts (a custom
+            # bar's `t` is its start, a grouped daily bar's its end) each name their source.
+            texts: dict[tuple[Transport, str | None], set[str]] = {}
+            for transport, _, wire_key, _, rest in items:
+                texts.setdefault((transport, wire_key), set()).add(rest)
+            for transport, key, wire_key, plain, rest in items:
+                label = f"{plain} `{key}`" if len(texts[transport, wire_key]) > 1 else plain
                 labels = sources.setdefault(rest, [])
                 if label not in labels:
                     labels.append(label)
@@ -494,7 +505,7 @@ def _chosen(
         listed = "; ".join(parts)
         end = "" if listed.endswith(_QUOTED_ENDS) else "."
         return f"{sentence} From {listed}{end}"
-    for _, column in own:
+    for _, _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:
             return described

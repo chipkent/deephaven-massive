@@ -95,7 +95,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/partners/benzinga/earnings.md>
+- [Earnings (REST)](https://massive.com/docs/rest/partners/benzinga/earnings)
 
 ---
 

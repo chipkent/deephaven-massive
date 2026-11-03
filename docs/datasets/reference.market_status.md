@@ -96,11 +96,11 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/market-operations/market-status.md>
-- <https://massive.com/docs/rest/forex/market-operations/market-status.md>
-- <https://massive.com/docs/rest/indices/market-operations/market-status.md>
-- <https://massive.com/docs/rest/options/market-operations/market-status.md>
-- <https://massive.com/docs/rest/stocks/market-operations/market-status.md>
+- [Market Status (REST, crypto)](https://massive.com/docs/rest/crypto/market-operations/market-status)
+- [Market Status (REST, forex)](https://massive.com/docs/rest/forex/market-operations/market-status)
+- [Market Status (REST, indices)](https://massive.com/docs/rest/indices/market-operations/market-status)
+- [Market Status (REST, options)](https://massive.com/docs/rest/options/market-operations/market-status)
+- [Market Status (REST, stocks)](https://massive.com/docs/rest/stocks/market-operations/market-status)
 
 ---
 

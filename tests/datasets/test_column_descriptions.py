@@ -301,6 +301,39 @@ def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     )
 
 
+def test_a_key_part_quoted_differently_by_one_transport_names_each_source() -> None:
+    # A custom bar's `t` is its window's start, a grouped daily bar's its end: each quote
+    # names its path, and paths that quote one text share an item.
+    def stamp(text: str) -> Field:
+        return Field(
+            wire_key="t", column="T", wire_type=WireType.EPOCH, unit=WireUnit.MS, description=text
+        )
+
+    texts = {"/first": "The start.", "/second": "The end.", "/third": "The start."}
+    paths = tuple(texts)
+    dataset = DatasetSpec(
+        name="reference.x",
+        summary="A dataset for the tests.",
+        fetch_path=paths[0],
+        extra_paths=paths[1:],
+        keys={(R, path): SourceKeys(KeySpec("Ticker"), KeySpec("T")) for path in paths},
+    )
+    ticker = Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING)
+    made = {
+        path: Source(key=path, transport=R, fields=(ticker, stamp(text)))
+        for path, text in texts.items()
+    }
+    columns = dataset_schema(dataset, (dataset,), lambda _, key: made[key]).columns
+    timestamp = next(c for c in columns if c.name == "Timestamp")
+    assert timestamp.description == (
+        "The row's primary time, as an Instant. From REST `/first` and REST `/third` `t`: "
+        '"The start."; REST `/second` `t`: "The end."'
+    )
+    # The symbol's key is quoted alike by every path, so its item names none.
+    symbol = next(c for c in columns if c.name == "Symbol")
+    assert symbol.description.endswith("From REST `sym`.")
+
+
 def description(dataset: DatasetSpec, name: str) -> str:
     columns = CATALOG.dataset_schema(dataset).columns
     return next(c.description for c in columns if c.name == name)

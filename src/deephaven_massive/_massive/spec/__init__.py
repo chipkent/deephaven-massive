@@ -255,6 +255,8 @@ def provenance() -> Provenance:
             for transport, by_key in described.urls.items():
                 _load(transport)  # checks this transport's URLs against its sources
                 urls.update({(transport, key): pages for key, pages in by_key.items()})
-            found = Provenance(fetched=described.fetched, urls=urls, plans=described.plans)
+            found = Provenance(
+                fetched=described.fetched, urls=urls, plans=described.plans, titles=described.titles
+            )
             _cache.provenance = found
     return found

@@ -136,7 +136,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot.md>
+- [Full Market Snapshot (REST)](https://massive.com/docs/rest/stocks/snapshots/full-market-snapshot)
 
 ---
 

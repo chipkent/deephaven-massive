@@ -457,7 +457,7 @@ def _own_contributions(
         for declared, key in spec.sources:
             if declared is transport:
                 for column in rename(spec, source(transport, key)):
-                    own.setdefault(column.column, []).append((transport, column))
+                    own.setdefault(column.column, []).append((transport, key, column))
     return own
 
 
@@ -488,7 +488,7 @@ def _column(
         The column.
     """
     wire_keys: dict[Transport, list[str | None]] = {}
-    for transport, column in own:
+    for transport, _, column in own:
         keys = wire_keys.setdefault(transport, [])
         key = None if column.field is None else column.field.wire_key
         if key not in keys:

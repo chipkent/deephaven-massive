@@ -196,7 +196,6 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         urls={Transport.REST: {_PATH.key: (_URL, _OTHER)}},
         plans={
             _URL: PlanAccess(
-                title="Things",
                 access="Included in select Stocks plans",
                 recency="Real-time",
                 history="",
@@ -206,13 +205,13 @@ def test_render_descriptions_writes_the_documented_format() -> None:
                 ),
             ),
             _OTHER: PlanAccess(
-                title="Crypto things",
                 access="Available to existing subscribers only",
                 recency="Updated daily",
                 history="",
                 plans=(),
             ),
         },
+        titles={_URL: "Things", _OTHER: "Crypto things"},
     )
     assert json.loads(text) == {
         "generated_by": "python -m deephaven_massive._massive.refresh",
@@ -229,14 +228,12 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         # Pages are sorted by URL; each page's plans keep their table order.
         "plans": {
             _OTHER: {
-                "title": "Crypto things",
                 "access": "Available to existing subscribers only",
                 "recency": "Updated daily",
                 "history": "",
                 "plans": [],
             },
             _URL: {
-                "title": "Things",
                 "access": "Included in select Stocks plans",
                 "recency": "Real-time",
                 "history": "",
@@ -256,8 +253,11 @@ def test_render_descriptions_writes_the_documented_format() -> None:
                 ],
             },
         },
+        # Titles are sorted by URL.
+        "titles": {_OTHER: "Crypto things", _URL: "Things"},
     }
     assert list(json.loads(text)["plans"]) == [_OTHER, _URL]
+    assert list(json.loads(text)["titles"]) == [_OTHER, _URL]
     # One line per entry, so a reworded description is one changed line of the diff.
     assert '    "price": "The price."' in text.splitlines()
     assert f'    "{_URL}"' in text.splitlines()
@@ -276,6 +276,7 @@ def test_a_source_without_descriptions_has_no_entry_but_keeps_its_url() -> None:
             fetched=dt.date(2026, 1, 2),
             urls={Transport.REST: {"/v1/bare": [_URL]}},
             plans={},
+            titles={},
         )
     )
     assert document["descriptions"] == {"REST": {}}
@@ -288,6 +289,6 @@ def test_render_descriptions_keeps_text_that_is_not_ascii() -> None:
         fields=(Field(wire_key="x", column="X", wire_type=WireType.LONG, description="Café ≥ 1"),),
     )
     text = render.render_descriptions(
-        {Transport.REST: [accented]}, fetched=dt.date(2026, 1, 2), urls={}, plans={}
+        {Transport.REST: [accented]}, fetched=dt.date(2026, 1, 2), urls={}, plans={}, titles={}
     )
     assert '"x": "Café ≥ 1"' in text

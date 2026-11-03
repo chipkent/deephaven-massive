@@ -80,7 +80,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/options/trades-quotes/last-trade.md>
+- [Last Trade (REST)](https://massive.com/docs/rest/options/trades-quotes/last-trade)
 
 ---
 

@@ -73,7 +73,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/options/aggregates/previous-day-bar.md>
+- [Previous Day Bar (OHLC) (REST)](https://massive.com/docs/rest/options/aggregates/previous-day-bar)
 
 ---
 

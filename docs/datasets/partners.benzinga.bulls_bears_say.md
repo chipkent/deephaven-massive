@@ -57,7 +57,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/partners/benzinga/bulls-bears-say.md>
+- [Bulls Bears Say (REST)](https://massive.com/docs/rest/partners/benzinga/bulls-bears-say)
 
 ---
 

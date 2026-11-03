@@ -62,7 +62,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/economy/labor-market.md>
+- [Labor Market (REST)](https://massive.com/docs/rest/economy/labor-market)
 
 ---
 

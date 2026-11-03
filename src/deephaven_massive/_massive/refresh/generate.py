@@ -30,7 +30,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
-from deephaven_massive._massive.refresh import gates, kinds, render
+from deephaven_massive._massive.refresh import docs, gates, kinds, render
 from deephaven_massive._massive.refresh.flat_file_sources import (
     FlatFileCoverage,
     generate_flat_files,
@@ -72,6 +72,7 @@ class Generated:
             for a futures dataset).
         plans: What each of those pages says about Massive's plans, by the page's URL
             (`plan_access.plan_access`); a page without plan tables has no entry.
+        titles: Each of those pages' title, by the page's URL (`docs.title`).
     """
 
     rest: tuple[RestPath, ...]
@@ -82,6 +83,7 @@ class Generated:
     flat_file_coverage: FlatFileCoverage
     urls: Mapping[Transport, Mapping[str, list[str]]]
     plans: Mapping[str, PlanAccess]
+    titles: Mapping[str, str]
 
 
 def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
@@ -96,11 +98,11 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
 
     Returns:
         The generated sources, each with its memberships and its fields in its kind's order,
-        their pages' URLs, and those pages' plan tables.
+        their pages' URLs, and those pages' plan tables and titles.
 
     Raises:
         DocsError: If a page that documents a generated source has plan sections of an
-            unexpected shape (`plan_access.plan_access`).
+            unexpected shape (`plan_access.plan_access`), or no title (`docs.title`).
     """
     hand = hand or HandInput()
     (paths, rest), (channels, ws), (files, flat) = _generate_each(snapshot, hand)
@@ -113,12 +115,14 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
         snapshot.flat_file_page_urls,
     )
     plans: dict[str, PlanAccess] = {}
+    titles: dict[str, str] = {}
     for texts, page_urls, by_key, keys in (
         (snapshot.pages, rest_urls, rest.pages, [p.key for p in paths]),
         (snapshot.websocket_pages, ws_urls, ws.pages, [c.key for c in channels]),
         (snapshot.flat_file_pages, file_urls, flat.pages, [f.key for f in files]),
     ):
         for name in sorted({name for key in keys for name in by_key[key]}):
+            titles[page_urls[name]] = docs.title(texts[name])
             page = plan_access(texts[name])
             if page is not None:
                 plans[page_urls[name]] = page
@@ -135,6 +139,7 @@ def generate(snapshot: Snapshot, hand: HandInput | None = None) -> Generated:
             Transport.FLAT_FILES: {f.key: [file_urls[n] for n in flat.pages[f.key]] for f in files},
         },
         plans=plans,
+        titles=titles,
     )
 
 
@@ -300,6 +305,7 @@ def refresh(
             fetched=snapshot.fetched,
             urls=generated.urls,
             plans=generated.plans,
+            titles=generated.titles,
         ),
     }
     written: list[Path] = []

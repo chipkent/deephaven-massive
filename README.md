@@ -481,9 +481,13 @@ the default, skips the symbol or row and logs each distinct value once at WARNIN
 skips it and logs only at DEBUG; `RAISE` fails the read or the table instead. Only a problem
 that affects every row, such as a rejected API key, fails a table short of `RAISE`.
 
-Tables of one kind from two asset classes, such as stock and forex quotes, share their common
-columns' names and types but can differ in which columns they have. To stack them, keep the
-shared columns:
+Tables of one kind from two asset classes, such as stock and forex quotes, can differ in which
+columns they have. The columns they share have the same names, and the same types except for
+a few size and volume columns of snapshots and movers, where Massive declares a whole number
+for one class and a decimal for another: `LastTradeSize` is a `long` for stocks and a `double`
+for crypto. The [dataset reference](docs/datasets/README.md) lists each one; cast it before
+stacking, such as `stock.update("LastTradeSize = (double) LastTradeSize")`. To stack the
+tables, keep the shared columns:
 
 ```python
 from deephaven import merge

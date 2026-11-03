@@ -65,7 +65,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/stocks/filings/10-k-sections.md>
+- [Annual Report Sections (10-K) (REST)](https://massive.com/docs/rest/stocks/filings/10-k-sections)
 
 ---
 

@@ -113,6 +113,16 @@ def test_page_file_rejects_other_pages(url: str) -> None:
         docs.page_file(url, docs.REST)
 
 
+def test_title_reads_the_first_level_three_heading() -> None:
+    page = "# REST\n## Stocks\n\n### Custom Bars (OHLC)  \n\n#### Not this\n### Nor this\n"
+    assert docs.title(page) == "Custom Bars (OHLC)"
+
+
+def test_a_page_without_a_title_is_rejected() -> None:
+    with pytest.raises(docs.DocsError, match="no ### title"):
+        docs.title("# REST\n## Stocks\n\n#### Too deep\n###\n")
+
+
 def test_endpoint_reads_the_endpoint_line() -> None:
     page = "### Trades\n\n**Endpoint:** `GET /v3/trades/{stockTicker}`\n\nText.\n"
     assert docs.endpoint(page) == "/v3/trades/{stockTicker}"

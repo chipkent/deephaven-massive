@@ -77,17 +77,17 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/cme.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/comex.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md>
-- <https://massive.com/docs/rest/futures/aggregates.md>
-- <https://massive.com/docs/websocket/futures/aggregates-per-minute.md>
-- <https://massive.com/docs/websocket/futures/aggregates-per-second.md>
+- [Minute Aggregates - CBOT (flat files)](https://massive.com/docs/flat-files/futures/minute-aggregates/cbot)
+- [Minute Aggregates - CME (flat files)](https://massive.com/docs/flat-files/futures/minute-aggregates/cme)
+- [Minute Aggregates - COMEX (flat files)](https://massive.com/docs/flat-files/futures/minute-aggregates/comex)
+- [Minute Aggregates - NYMEX (flat files)](https://massive.com/docs/flat-files/futures/minute-aggregates/nymex)
+- [Session Aggregates - CBOT (flat files)](https://massive.com/docs/flat-files/futures/session-aggregates/cbot)
+- [Session Aggregates - CME (flat files)](https://massive.com/docs/flat-files/futures/session-aggregates/cme)
+- [Session Aggregates - COMEX (flat files)](https://massive.com/docs/flat-files/futures/session-aggregates/comex)
+- [Session Aggregates - NYMEX (flat files)](https://massive.com/docs/flat-files/futures/session-aggregates/nymex)
+- [Aggregate Bars (OHLC) (REST)](https://massive.com/docs/rest/futures/aggregates)
+- [Aggregates (Per Minute) (WebSocket)](https://massive.com/docs/websocket/futures/aggregates-per-minute)
+- [Aggregates (Per Second) (WebSocket)](https://massive.com/docs/websocket/futures/aggregates-per-second)
 
 ---
 

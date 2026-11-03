@@ -54,8 +54,8 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/forex/tickers/ticker-types.md>
-- <https://massive.com/docs/rest/stocks/tickers/ticker-types.md>
+- [Ticker Types (REST, forex)](https://massive.com/docs/rest/forex/tickers/ticker-types)
+- [Ticker Types (REST, stocks)](https://massive.com/docs/rest/stocks/tickers/ticker-types)
 
 ---
 

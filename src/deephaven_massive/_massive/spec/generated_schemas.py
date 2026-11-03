@@ -63,6 +63,7 @@ class DescriptionsFile:
             descriptions mapped to them, by asset class. Only those fields have an entry.
         plans: What each vendor page says about Massive's plans, by the page's URL. A page
             without plan tables has no entry.
+        titles: Each vendor page's title, by the page's URL.
     """
 
     fetched: dt.date
@@ -70,6 +71,7 @@ class DescriptionsFile:
     texts: Mapping[Transport, Mapping[str, Mapping[str, str]]]
     class_texts: Mapping[Transport, Mapping[str, Mapping[str, Mapping[str, str]]]]
     plans: Mapping[str, PlanAccess]
+    titles: Mapping[str, str]
 
 
 def parse(
@@ -139,8 +141,8 @@ def parse_descriptions(text: str) -> DescriptionsFile:
             {<transport>: {<source key>: [<url>, ...]}}, "descriptions": {<transport>:
             {<source key>: {<wire key>: <text>}}}, "class_descriptions": {<transport>:
             {<source key>: {<wire key>: {<asset class>: <text>}}}}, "plans": {<page url>:
-            {"title", "access", "recency", "history", "plans": [{"plan", "access", "recency",
-            "history"}, ...]}}}`, as the refresh writes it.
+            {"access", "recency", "history", "plans": [{"plan", "access", "recency",
+            "history"}, ...]}}, "titles": {<page url>: <title>}}`, as the refresh writes it.
 
     Returns:
         The parsed values, every mapping read-only.
@@ -150,6 +152,7 @@ def parse_descriptions(text: str) -> DescriptionsFile:
     texts = _object(_member(document, "descriptions"), "descriptions")
     by_class = _object(_member(document, "class_descriptions"), "class_descriptions")
     plans = _object(_member(document, "plans"), "plans")
+    titles = _strings(_member(document, "titles"), "titles")
     return DescriptionsFile(
         fetched=dt.date.fromisoformat(_text(document, "fetched")),
         urls=MappingProxyType(
@@ -199,6 +202,7 @@ def parse_descriptions(text: str) -> DescriptionsFile:
         plans=MappingProxyType(
             {url: _plan_access(_object(page, f"plans of {url}")) for url, page in plans.items()}
         ),
+        titles=titles,
     )
 
 
@@ -212,7 +216,6 @@ def _plan_access(page: dict[str, object]) -> PlanAccess:
         The page's plan access.
     """
     return PlanAccess(
-        title=_text(page, "title"),
         access=_text(page, "access"),
         recency=_text(page, "recency"),
         history=_text(page, "history"),
