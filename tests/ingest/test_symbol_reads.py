@@ -29,9 +29,9 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     RowDataError,
+    UnlistedPairError,
 )
 from deephaven_massive._ingest import rate_limits
-from deephaven_massive._ingest.rest import UnlistedPairError
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
     failure_kind,
@@ -67,8 +67,17 @@ DIVIDENDS = DatasetSpec(
     keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     symbols_per_request=2,
 )
-# The same rows, as a dataset whose symbols' requests may return the same row.
-OVERLAPPING = dataclasses.replace(DIVIDENDS, name="stocks.overlapping", symbols_overlap=True)
+BENZINGA_NEWS_PATH = "/benzinga/v2/news"
+# A dataset whose rows list their tickers: the library fills Symbol from them.
+LISTED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.benzinga.news",
+    fetch_path=BENZINGA_NEWS_PATH,
+    symbol_param="tickers.any_of",
+    ticker_list="Tickers",
+    poll_keys=("BenzingaId", "Symbol"),
+    nullable_poll_keys={"Symbol": "no ticker named"},
+)
 CRYPTO_LAST_PATH = "/v1/last/crypto/{from}/{to}"
 CRYPTO_LAST = DatasetSpec(
     summary="A dataset for the tests.",
@@ -99,7 +108,7 @@ TRADES = DatasetSpec(
         )
     },
 )
-SPECS = (DIVIDENDS, OVERLAPPING, CRYPTO_LAST, NEWS, TRADES)
+SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, NEWS, TRADES)
 
 TICKERS_PATH = "/v3/reference/tickers"
 MONDAY = date(2025, 3, 3)
@@ -256,20 +265,51 @@ def test_an_unowned_row_warns_once_per_dataset_and_path(
     assert unowned == [logging.WARNING, logging.DEBUG]
 
 
-def test_overlapping_symbols_are_read_one_a_request(
+def test_a_row_listing_two_named_tickers_goes_to_each(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Each symbol's rows are those its own request returned, the shared row in both.
+    # One request names both tickers; the article that lists both is each one's row.
     fake_rest.reply(
-        DIVIDENDS_PATH,
-        Reply(envelope([_dividend("AAPL", 0.25)])),
-        Reply(envelope([_dividend("AAPL", 0.25), _dividend("MSFT", 0.83)])),
+        BENZINGA_NEWS_PATH,
+        Reply(
+            envelope(
+                [
+                    {"benzinga_id": 1, "tickers": ["AAPL", "MSFT"]},
+                    {"benzinga_id": 2, "tickers": ["MSFT"]},
+                ]
+            )
+        ),
     )
-    out = _fetch(session, OVERLAPPING, ["AAPL", "MSFT"])
-    sent = [query["ticker.any_of"] for _, query in fake_rest.get_queries()]
-    assert sent == [["AAPL"], ["MSFT"]]
-    assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
-    assert [r["Symbol"] for r in _rows(out["MSFT"])] == ["AAPL", "MSFT"]
+    out = _fetch(session, LISTED, ["AAPL", "MSFT"])
+    assert [query["tickers.any_of"] for _, query in fake_rest.get_queries()] == [["AAPL,MSFT"]]
+    assert [r["BenzingaId"] for r in _rows(out["AAPL"])] == [1]
+    assert [r["BenzingaId"] for r in _rows(out["MSFT"])] == [1, 2]
+
+
+def test_a_row_listing_none_of_the_named_tickers_keeps_a_null_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A static read keeps such a row with a null Symbol; a read by symbol keeps it too, with
+    # the request's first symbol, and the listing step logs its WARNING.
+    fake_rest.reply(
+        BENZINGA_NEWS_PATH,
+        Reply(
+            envelope(
+                [
+                    {"benzinga_id": 1, "tickers": ["MSFT"]},
+                    {"benzinga_id": 2, "tickers": ["IBM"]},
+                ]
+            )
+        ),
+    )
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, LISTED, ["MSFT", "AAPL"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["AAPL"])] == [(2, None)]
+    assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["MSFT"])] == [(1, "MSFT")]
+    listing = [r for r in caplog.records if "list none of the request's tickers" in r.getMessage()]
+    assert [r.levelno for r in listing] == [logging.WARNING]
+    assert "name none of those symbols" not in caplog.text
+    assert "null Symbol; they are kept with AAPL" in caplog.text
 
 
 def test_rows_of_a_request_that_names_no_symbol_belong_to_none(

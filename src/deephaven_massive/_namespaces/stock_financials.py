@@ -1,9 +1,9 @@
 """The `m.stocks.financials` namespace: company financial statements and valuation ratios.
 
-Datasets: balance sheets, income statements, and cash flow statements, quarterly, annual, or
-(for the flow statements) trailing twelve months, and the daily valuation ratios. A statement's
-rows each describe one filer's period and list the filer's tickers, so the three statements have
-no `Symbol` column and keep `Tickers`; the ratios name one ticker each.
+Datasets: balance sheets, income statements, and cash flow statements, quarterly, annual, or (for
+the flow statements) trailing twelve months, and the daily valuation ratios. A statement's rows each
+describe one filer's period and list the filer's tickers, so the three statements keep `Tickers`,
+and a row is listed under each named ticker it lists, in `Symbol`; the ratios name one ticker each.
 
 Each dataset is one factory method that validates its arguments and returns a query; nothing
 touches the network until a verb is called on the query. This module owns the namespace's
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Final
 
-from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec
 from deephaven_massive._enums import AssetClass, Order, Timeframe, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
@@ -50,7 +50,7 @@ _STATEMENT_KEYS: Final = ("Cik", "PeriodEnd", "Timeframe")
 
 
 def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
-    """Return the spec of one financial statement: no `Symbol`, axis `period_end`.
+    """Return the spec of one financial statement: `Symbol` from its `Tickers`, axis `period_end`.
 
     Args:
         dataset: The dataset name below `stocks.financials`, such as `"balance_sheets"`.
@@ -67,7 +67,9 @@ def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
         fetch_path=path,
         time_axis=("period_end.gte", "period_end.lte"),
         symbol_param="tickers.any_of",
-        poll_keys=_STATEMENT_KEYS,
+        ticker_list="Tickers",
+        poll_keys=(*_STATEMENT_KEYS, "Symbol"),
+        nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
         # Below the documented 50,000: a statement row holds some fifty line items, over a
         # kilobyte of JSON, so a full page would pass 60 MB; 10,000 keeps it near 15 MB.
         page_size=10_000,
@@ -201,10 +203,10 @@ class _StockFinancials(Namespace):
         """Balance sheets of US public companies, one row per filer and reporting period.
 
         Each row is a company's assets, liabilities, and equity at the end of a quarter or fiscal
-        year, as filed with the SEC. A filing can name several share classes, so a row has no
-        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
-        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
-        and `Timeframe`.
+        year, as filed with the SEC. A filing can name several share classes, so its `Tickers`
+        column holds the filing's tickers, `symbols` selects the filings that list any of them, and
+        a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols). `poll()`
+        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
@@ -270,10 +272,10 @@ class _StockFinancials(Namespace):
         """Income statements of US public companies, one row per filer and reporting period.
 
         Each row is a company's revenue, expenses, earnings, and per-share figures for a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so a row has no
-        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
-        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
-        and `Timeframe`.
+        fiscal year, as filed with the SEC. A filing can name several share classes, so its
+        `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
+        them, and a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols).
+        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See
@@ -333,10 +335,10 @@ class _StockFinancials(Namespace):
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
         Each row is a company's operating, investing, and financing cash flows for a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so a row has no
-        `Symbol`: its `Tickers` column holds the filing's tickers, and `symbols` selects the filings
-        that list any of them. `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`,
-        and `Timeframe`.
+        fiscal year, as filed with the SEC. A filing can name several share classes, so its
+        `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
+        them, and a row is listed under each named ticker it lists, in `Symbol` (README.md#symbols).
+        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
             symbols: Tickers whose filings to return; None, the default, for every filing. See

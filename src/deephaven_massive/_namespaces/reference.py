@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
-from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import (
     AssetClass,
     ConditionDataType,
@@ -106,11 +106,12 @@ NEWS: Final = DatasetSpec(
     fetch_path="/v2/reference/news",
     time_axis=("published_utc.gte", "published_utc.lt"),
     # `ticker` takes one value, so a watchlist fans out one request per ticker, and an
-    # article that mentions two of its tickers comes back twice.
+    # article that mentions two of its tickers comes back once for each, under each.
     symbol_param="ticker",
-    symbols_overlap=True,
+    ticker_list="Tickers",
     poll_mode=PollMode.APPEND,
-    poll_keys=("Id",),
+    poll_keys=("Id", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
 )
 EXCHANGES: Final = DatasetSpec(
     name="reference.exchanges",
@@ -502,12 +503,11 @@ class _Reference(Namespace):
     ) -> Query:
         """News articles about tickers, with their publishers and sentiment insights.
 
-        One row per article. An article names several tickers, so the table has no `Symbol`
-        but a `Tickers` array: `t.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps one
-        ticker's articles. The endpoint takes one ticker per request, so each ticker is its own
-        request, `limit`, `sort`, and `order` apply to each ticker's request (newest first by
-        default), and an article several tickers share is kept once, by `Id`. `poll()` appends
-        new articles and needs `start` or `limit`; it re-reads a watchlist table every cycle,
+        One row per article. An article names several tickers, in its `Tickers` array, and is listed
+        under each ticker it was read for, in `Symbol` (README.md#symbols). The endpoint takes one
+        ticker per request, so each ticker is its own request, `limit`, `sort`, and `order` apply to
+        each ticker's request (newest first by default). `poll()` appends new articles, keyed by
+        `Id` and `Symbol`, and needs `start` or `limit`; it re-reads a watchlist table every cycle,
         and a fixed `start` widens the window of a poll that runs for days.
 
         Args:

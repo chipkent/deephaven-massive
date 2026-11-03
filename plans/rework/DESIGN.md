@@ -673,7 +673,7 @@ the field defaults of this class. `MassiveConfig.from_file` builds one from a se
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. Validated like `rest_base_url`. |
 | `s3_bucket: str` | `flatfiles` | Rarely changed. A blank bucket raises `ValueError`. |
 | `noncanonical_symbols: OnError` | `LOG` | What a row of a symbol table that is not Massive's exact ticker does, for every verb and every row, present at the call or added later ([section 10](#10-symbols-and-all)). `RAISE` raises `ValueError` for such a row present at the call and fails the result for one added later. `LOG` skips the row and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, a stream's or poll's `m.streams()` row lists the skipped values in `Error` (their count and the first five), and a table whose rows are all bad raises `ValueError` rather than start an empty result. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
-| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. `fetch()` and `poll()` of the two crypto REST paths that need the split are not covered. |
+| `unlisted_symbols: OnError` | `LOG` | What a crypto pair of a symbol table does in a live stream (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker list does not hold it, or the list cannot be read after the bounded retries, so the pair cannot be split into the topic Massive streams it on ([section 10](#10-symbols-and-all)); present at the call or added later. `RAISE` raises `MassiveError` for such a pair present at the call and fails the stream for one added later. `LOG` skips the pair and logs each distinct value once at WARNING (at most 100 per process); `IGNORE` skips it with nothing logged above DEBUG. Under both, the stream keeps its other pairs, its `m.streams()` row lists a reactive table's skipped pairs in `Error` (saying when the list could not be read), and a table whose pairs are all unlisted raises `MassiveError` rather than start an empty result. A skipped pair stays skipped until its row is deleted and added again. The two crypto REST paths that need the split (the last trade, the daily open and close) follow it too (decision 90): under `LOG` and `IGNORE`, `fetch()` and each `poll()` cycle leave such a pair out (a `poll()` lists it in `Error`, and a followed `fetch()` marks it `FAILED` in `m.symbol_reads()`), and a static table whose every pair is unlisted raises `MassiveError`; under `RAISE`, `fetch()` raises and a `poll()` or followed table fails. A failed read of the list fails them as before. A `str` or a sequence passed as `symbols` in code always raises, whatever the setting. |
 | `unreadable_symbols: OnError` | `LOG` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `RAISE` fails the request or stream that received it, naming the spelling, this setting, and where to report the gap. `LOG` keeps the row with a null `Symbol` and the text in the `RawSymbol` column, and logs each spelling once at ERROR with the library-bug text (at most 100 per process): the library's grammar lacks a spelling Massive uses, which is a library defect, yet every table keeps running. `IGNORE` keeps the row the same way with nothing logged above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under `LOG` and `IGNORE`, so the log choice never changes a schema; under `RAISE` it has none. |
 | `unavailable_symbols: OnError` | `LOG` | What a `poll()` table does with a symbol it cannot read from Massive: one Massive answers with HTTP 404 (no data), or one whose path does not take a parameter the poll sends (a reactive table's crypto pair on an indicator polled with `adjusted=False`). Owner standard, 2026-11-02: a problem with one symbol is logged and the table continues by default, with an `OnError` setting for other behavior. `LOG` leaves the symbol out of each cycle, logs it once per session at WARNING (then DEBUG), and lists it in the table's `m.streams()` `Error` (`no rows this cycle for ...`) until it is readable again or removed; a `REPLACE` table drops its rows; the other symbols keep polling. `IGNORE` does the same with nothing logged above DEBUG, and `Error` still lists it. `RAISE` fails the table with an error naming the symbol, the reason, and this setting (`ErrorCause.EXPECTED` for a 404, `USER_DEFECT` for a refused parameter). `fetch()` and `history()` always leave a symbol with no data out, with a WARNING. |
 
@@ -2019,14 +2019,17 @@ it.`).
 - **Per-symbol paths** (one symbol in the path): one read per symbol.
 - **`ticker.any_of` and `tickers` batches:** the waiting symbols are batched as today, and each
   row is assigned to its symbol by its `Symbol` column, which the filter matches exactly.
-- **List-column datasets** (rows with a `Tickers` list and no `Symbol`: the financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, `partners.benzinga.news`):
-  one request per symbol, each row belonging to the request that returned it. A row returned
-  for two symbols is two copies the library made, so the result removes the duplicates in the
-  engine, keeping one per row; removing one symbol leaves the other symbol's copy.
+- **List-column datasets** (rows with a `Tickers` list: the financial statements, Forms 3 and
+  4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+  `partners.benzinga.news`): requested as a static `fetch()` requests them, and each row is
+  listed under each named ticker it lists, with that ticker in `Symbol`, as a static
+  `fetch()` lists it ([section 10](#10-symbols-and-all), decision 90). Nothing removes a
+  copy across requests. A row that lists none of a batch's named tickers keeps its null
+  `Symbol`, as in a static `fetch()`, and goes with the batch's first symbol: it leaves the
+  result when that symbol does.
 
-**`limit`** caps each symbol's rows in a followed read, on every dataset (§ 22, decision 84):
-a symbol read in a batch that has a `limit` is read one symbol per request.
+**`limit`** is sent on each request of a followed read as Massive's own cap on that request's
+rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
 
 **One-value inputs** follow tables too: `options.chain(underlying=)` and
 `options.contracts(underlying=)` take a table with a `Symbol` column, and every futures
@@ -2052,7 +2055,7 @@ query re-reads it each cycle, as for `symbols`.
 |---|---|
 | HTTP 404 on the first request (Massive has no data) | `DONE` with 0 rows, and the existing WARNING |
 | Transient: a rate limit beyond the read's patience, a network failure, or a 5xx after the REST client's own retries | `RETRYING`, then read again 1, 5, and 15 minutes later; `FAILED` after the last |
-| Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold | `FAILED` at once |
+| Permanent: `EntitlementError`, any other refusal, a later page's 404, unreadable data (`RowDataError`), a crypto pair Massive's list does not hold (logged as `MassiveConfig.unlisted_symbols` says; under `RAISE` it fails the table) | `FAILED` at once |
 
 A read of several symbols (an `any_of` batch, a flat-file scan) fails as a unit: every symbol
 of it gets the same state and error. Deleting and re-adding a `FAILED` symbol's row reads it
@@ -2144,9 +2147,10 @@ Notation:
   `limit` samples and a read without one is complete (decision 87). The exception is where
   each request names one symbol: a per-symbol path
   (the indicators) or a symbol parameter that takes one ticker
-  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
+  (`reference.tickers`, `stocks.ipos`, `reference.news`). There it caps each symbol's
+  request, so one ticker's rows never crowd out another's (owner decision 74). On a dataset
+  whose rows list their tickers, the cap is on the rows Massive returns, before each is listed
+  under its named tickers, so the table can hold more rows than `limit` (decision 90). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is the path's documented maximum (or
   `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
@@ -2182,8 +2186,9 @@ Notation:
   an article, not one instrument: the three financial statements,
   `filings.initial_insider_ownership` and `filings.insider_transactions` (Forms 3 and 4),
   `filings.insider_activity` and `filings.insider_holdings`, `filings.disclosures_8k`,
-  `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
-  column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
+  `reference.news`, and `partners.benzinga.news` keep their `Tickers` column, and their
+  `Symbol` is the library's: each ticker the request named that a row lists, one row per
+  such ticker ([section 10](#10-symbols-and-all)).
 
 ### 8.1 `m.stocks`
 
@@ -2335,7 +2340,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is listed under each, with that ticker in `Symbol` (decision 90); a `poll()` table is keyed by `Id` and `Symbol`, and fails on an article without an `Id`. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -2716,8 +2721,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   ends the retries at once. At the call there is no retry: a failed read treats the pairs it
   could not split as unlisted, and the stream's worker looks a reactive table's skipped pairs
   up again, with the retries, as it subscribes the table's rows. Nothing
-  falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
-  fails a `poll()` table, since every later cycle would read the same list. Every other REST
+  falls back to a guess. On the two REST paths a pair in code raises the same refusal from
+  `fetch()` and `poll()`; a pair of a symbol table follows `MassiveConfig.unlisted_symbols`
+  (decision 90). Every other REST
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
   at every point. Every grammar is
   matched against the whole text, so a trailing newline never passes. A dataset that spans classes
@@ -2889,11 +2895,17 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
-  (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
-  each list several tickers, because no single instrument is the row's: the three financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
-  `partners.benzinga.news` keep their `Tickers` column (`String[]`), and `symbols` there only
-  filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column. A dataset whose rows each list
+  several tickers (the three financial statements, Forms 3 and 4, insider activity and
+  holdings, the 8-K disclosures, `reference.news`, and `partners.benzinga.news`) keeps its
+  `Tickers` column (`String[]`) and gets a `Symbol` the library fills
+  (`DatasetSpec.ticker_list`, decision 90): each ticker the request named that the row
+  lists, the row repeated once per such ticker. An article about AAPL and MSFT read for both
+  is two rows, `Symbol` AAPL and `Symbol` MSFT. A request that named one ticker gives it to
+  every row; a row that lists none of a request's several named tickers keeps a null
+  `Symbol`, never dropped, with one WARNING per dataset a session; `symbols=None` leaves it
+  null. Requests stay batched (`tickers.any_of`). The datasets' `poll()` keys add `Symbol`,
+  which may be null. `Symbol` is never a list.
 
 ## 11. Enums and types
 
@@ -6374,8 +6386,8 @@ per source in a
   dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
   filled from the request, or a `symbol_param` that filters a single-ticker field. A
   `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
-  article is `string-array`) does not make one: those rows have no `Symbol`
-  ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
+  article is `string-array`) does not make one: those rows' `Symbol` is the library's,
+  filled from the request ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
   name, singular or plural, read from the generated path, never from a hand list. Its asset
   class alone does not make a dataset one either: `futures.exchanges` and
   `futures.schedules` keep `FUTURES` for the session-day rule and take no symbols;
@@ -7817,8 +7829,8 @@ document already reflects them.
     and only authentication, a closed session, a failed symbol table, `RAISE`, or a library
     bug fails the table. `wait=True` raises only when every call-time symbol fails. The
     single-value inputs `underlying=` and `product_code=` follow tables too. Within it:
-    - **`limit` caps each symbol's rows** in a followed read, on every dataset, extending
-      decision 74 there.
+    - **`limit`** in a followed read is sent as on any read, once on each request; decision
+      90 replaces the per-symbol cap this first said.
     - **`reread=dm.Reread.ALWAYS`** on `history()` (owner decision D-1, 2026-11-02: `ALWAYS`
       the default, `NEVER` opt-in): `ALWAYS` downloads a returning symbol again, and `NEVER`
       reuses its earlier download for the life of the table. There is no automatic member,
@@ -7862,6 +7874,24 @@ document already reflects them.
     (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
     of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
     read whole ([section 8](#8-namespace-tree)).
+90. **A row that lists several tickers is listed under each named one, and an unlisted crypto
+    pair follows `unlisted_symbols` in every REST verb** (owner decision 2026-11-02, option
+    (a)). A row returned for two symbols "is the data listed by symbol", not a duplicate. The
+    ten datasets whose rows list their tickers (the three financial statements, Forms 3 and
+    4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+    `partners.benzinga.news`) gain a `Symbol` column: each ticker the request named that the
+    row lists, one row per such ticker, so an article about AAPL and MSFT read for both is
+    listed under AAPL and under MSFT. A request that named one ticker gives it to every row;
+    a row listing none of the named tickers keeps a null `Symbol`, with one WARNING per
+    dataset, and is never dropped; `symbols=None` gives a null `Symbol`. Requests stay
+    batched, with no extra request. `limit` caps the rows Massive returns before the split,
+    so the split can give more table rows than `limit`. A static `fetch()` and a followed one
+    list rows the same way, and nothing merges copies by `Id`. Each dataset's `poll()` keys
+    add `Symbol` (news: `Id` and `Symbol`). In a followed read, `limit` is sent as on any
+    read, once on a per-symbol request and once on a batch. Rule 24 covers an unlisted
+    crypto pair of a symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and
+    `IGNORE` leave it out, and `RAISE` fails; before, both verbs always failed
+    ([section 5](#5-massiveconfig)).
 91. **`last_by()` on a live symbol table shows a row by update cycle, not by receive time**
     (owner decision, 2026-11-02). A symbol's row shows when it reached the table in or after
     the update cycle in which the symbol last joined the symbol table; it was "received after

@@ -492,7 +492,8 @@ class OnError(StrEnum):
       that is not Massive's exact ticker. A `str` or a list passed in code always raises,
       whatever the setting. The default is `LOG`.
     - `MassiveConfig.unlisted_symbols`, for a crypto pair of a symbol table that Massive's
-      crypto ticker list does not hold, in a live stream. The default is `LOG`.
+      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default
+      is `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
     - `MassiveConfig.unavailable_symbols`, for a symbol a `poll()` table cannot read from

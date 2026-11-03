@@ -45,7 +45,7 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG, RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, RowDataError, UnlistedPairError
 from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests, shared_lookup
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
@@ -274,6 +274,17 @@ NEWS = DatasetSpec(
     time_axis=("published_utc.gte", "published_utc.lt"),
     keys={(R, NEWS_PATH): SourceKeys()},
 )
+LISTED_PATH = "/benzinga/v2/news"
+# Rows that list their tickers: the library fills Symbol from the named tickers they list.
+LISTED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.benzinga.news",
+    fetch_path=LISTED_PATH,
+    symbol_param="tickers.any_of",
+    ticker_list="Tickers",
+    poll_keys=("BenzingaId", "Symbol"),
+    nullable_poll_keys={"Symbol": "no ticker named"},
+)
 RATINGS_PATH = "/benzinga/v1/ratings"
 RATINGS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -327,6 +338,7 @@ UNIFIED = DatasetSpec(
 )
 SPECS = (
     UNIFIED,
+    LISTED,
     DIVIDENDS,
     MIXED,
     CRYPTO_LAST,
@@ -870,7 +882,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
         return
-    with pytest.raises(rest.UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+    with pytest.raises(UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
         reader.crypto_pair("X:DOTUSD")
 
 
@@ -891,13 +903,13 @@ def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
     clock[0] += 3599
-    with pytest.raises(rest.UnlistedPairError, match="does not list it"):
+    with pytest.raises(UnlistedPairError, match="does not list it"):
         reader.crypto_pair("X:DOTUSD")  # the list is not an hour old: no read
     assert len(fake_rest.get_queries()) == 2
     clock[0] += 1
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # read again, and listed now
     assert len(fake_rest.get_queries()) == 4
-    with pytest.raises(rest.UnlistedPairError, match="does not list it"):
+    with pytest.raises(UnlistedPairError, match="does not list it"):
         reader.crypto_pair("X:ABCUSD")  # the new list is recent: no read
     assert len(fake_rest.get_queries()) == 4
     # A caller holding a list another caller has since replaced reads the current one.
@@ -1338,7 +1350,7 @@ def test_a_stopped_fetch_reads_no_crypto_ticker_list(
     stop = Cancel()
     stop.set()
     with pytest.raises(dm.MassiveError, match="cancelled"):
-        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop)
+        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
     assert fake_rest.requests == []
 
 
@@ -1581,32 +1593,96 @@ def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
     assert fresh_when_failed == [True]
 
 
-def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def _failed_soon(table: Table) -> bool:
+    # Waits up to 30 s for a live table to fail.
+    pause = threading.Event()
+    for _ in range(3000):
+        if table.j_table.isFailed():
+            return True
+        pause.wait(0.01)
+    return False
+
+
+def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Static symbols are planned at the call; a symbol table's are planned each cycle, and
-    # since every later cycle would read the same list, the table fails at its first cycle.
-    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])), Reply(envelope([])))
+    # A pair passed in code is planned at the call and raises. A symbol table's pairs are
+    # planned each cycle: under LOG the unlisted one is left out with one WARNING, and under
+    # RAISE the table fails at its first cycle.
+    serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
     static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
     assert isinstance(static, Query)
-    with pytest.raises(rest.UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
         static.poll(60)
-    watch = new_table([string_col("Symbol", ["X:DOTUSD"])])
-    q = query(session, CRYPTO_OPEN_CLOSE, symbols=watch, params=params)
-    assert isinstance(q, Query)
-    table = q.poll(60)
-    failed = threading.Event()
-    for _ in range(3000):
-        if table.j_table.isFailed():
-            failed.set()
-            break
-        failed.wait(0.01)
-    assert failed.is_set()
-    assert fake_rest.get_queries() == [
-        ("/v3/reference/tickers", LIST_QUERY),
-        ("/v3/reference/tickers", DELISTED_QUERY),
-    ]
+    reader = cast("Any", session._core.rest_transport())._reader("poll")
+    watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
+    request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for _ in range(2):
+            planned, left_out = reader._plan_cycle(
+                CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
+            )
+            assert [call.symbol for _, calls in planned for call in calls] == ["X:BTCUSD"]
+            assert left_out == ["X:DOTUSD (not in Massive's crypto ticker list)"]
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.getMessage() for r in warned] == [
+        (
+            "crypto.daily_open_close poll(): 'X:DOTUSD' cannot be split into its two "
+            "currencies: Massive's reference data does not list it; it is left out and the "
+            "table's other symbols are read. Delete its row, or set "
+            "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
+        )
+    ]  # once a session: the second cycle logs at DEBUG
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as strict:
+        serve_pairs(fake_rest)
+        table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
+        assert isinstance(table, Query)
+        assert _failed_soon(table.poll(60))
+
+
+def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    last = {
+        "conditions": [1],
+        "exchange": 1,
+        "price": 97000.5,
+        "size": 0.1,
+        "timestamp": 1704310200000,
+    }
+    btc = Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last})
+    fake_rest.reply("/v1/last/crypto/BTC/USD", btc, btc, btc)
+    serve_pairs(fake_rest)
+    table = new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])])
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = fetch(session, CRYPTO_LAST, symbols=table)  # LOG, the default
+    assert [r["Symbol"] for r in out] == ["X:BTCUSD"]
+    assert [path for path, _ in sent_data(fake_rest)] == ["/v1/last/crypto/BTC/USD"]
+    assert len(caplog.records) == 1
+    assert caplog.messages[0].startswith("crypto.last fetch(): 'X:DOTUSD' cannot be split")
+    # A pair in code always raises; a table whose every pair is unlisted would read nothing.
+    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
+        fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"])
+    with pytest.raises(dm.MassiveError, match=r"no symbol of the symbol table is a crypto pair"):
+        fetch(session, CRYPTO_LAST, symbols=new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
+        config = dm.MassiveConfig(
+            api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=setting
+        )
+        with dm.MassiveSession(config) as other:
+            serve_pairs(fake_rest)
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, LOGGER):
+                if setting is dm.OnError.RAISE:
+                    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
+                        fetch(other, CRYPTO_LAST, symbols=table)
+                else:
+                    assert len(fetch(other, CRYPTO_LAST, symbols=table)) == 1
+            assert caplog.records == []  # IGNORE logs only at DEBUG
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -2207,7 +2283,7 @@ def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
     with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
-        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
+        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1, unlisted=dm.OnError.RAISE)
 
 
 # --- History -----------------------------------------------------------------------------------
@@ -2813,7 +2889,9 @@ def test_an_error_row_needs_only_its_symbol(
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
-    table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
+    table, _ = reader.read_fetch(
+        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), unlisted=dm.OnError.RAISE
+    )
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
 
@@ -2903,7 +2981,7 @@ def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> N
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
-    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
+    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), unlisted=dm.OnError.RAISE)
     assert (table.num_rows, requests) == (0, 0)
     assert table.schema.names[0] == "Symbol"
 
@@ -3958,7 +4036,7 @@ def test_a_set_stop_token_ends_a_read_before_its_first_request(
     stop.set()
     q = query(session, DIVIDENDS, symbols=["AAPL"])
     with pytest.raises(dm.MassiveError):
-        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
     assert fake_rest.requests == []
 
 
@@ -4471,3 +4549,55 @@ def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
             "the row is delayed and serves it"
         )
     ]
+
+
+# --- Rows that list their tickers ------------------------------------------------------------
+
+
+def _listed(*rows: tuple[int, list[str]]) -> Reply:
+    # A page of articles, each with its id and the tickers it lists.
+    return Reply(envelope([{"benzinga_id": i, "tickers": t} for i, t in rows]))
+
+
+def test_a_row_is_listed_under_each_named_ticker_it_lists(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One request names both tickers; a row listing both is each one's, in its list's order,
+    # and a row listing neither keeps a null Symbol, with one WARNING a session.
+    page = _listed((1, ["MSFT", "AAPL"]), (2, ["AAPL"]), (3, ["TSLA"]))
+    fake_rest.reply(LISTED_PATH, page, page)
+    with caplog.at_level(logging.WARNING, LOGGER):
+        for _ in range(2):
+            out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+            assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [
+                (1, "MSFT"),
+                (1, "AAPL"),
+                (2, "AAPL"),
+                (3, None),
+            ]
+    assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
+    assert [m for m in caplog.messages if "list none" in m] == [
+        (
+            "partners.benzinga.news: 1 rows Massive returned from /benzinga/v2/news list none "
+            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so their Symbol is null"
+        )
+    ]
+
+
+def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    page = _listed((4, ["TSLA"]))
+    fake_rest.reply(LISTED_PATH, page, page)
+    assert [r["Symbol"] for r in fetch(session, LISTED, symbols=["AAPL"])] == ["AAPL"]
+    assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
+
+
+def test_listing_a_row_under_each_ticker_can_pass_the_limit(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # `limit` caps the rows Massive returns; each is then listed under its named tickers.
+    fake_rest.reply(LISTED_PATH, _listed((1, ["AAPL", "MSFT"])))
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"], limit=1)
+    assert [r["Symbol"] for r in out] == ["AAPL", "MSFT"]
+    assert fake_rest.get_queries()[0][1]["limit"] == ["1"]

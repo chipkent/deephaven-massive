@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Recency
+    from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, PollMode, Recency
     from deephaven_massive._errors import MassiveError
 
 __all__ = [
@@ -248,6 +248,7 @@ class RestTransport(Protocol):
         *,
         call: int,
         stop: threading.Event | None = None,
+        unlisted: OnError,
     ) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
@@ -260,6 +261,11 @@ class RestTransport(Protocol):
                 read's requests stop waiting for the rate governor and no new one starts, so
                 the call ends soon with an error the caller ignores. None for a call only the
                 session's close stops.
+            unlisted: What a crypto pair that Massive's crypto ticker list does not hold does,
+                on a path that takes the pair as two currencies: `OnError.RAISE` raises (always
+                for symbols passed in code); `LOG` and `IGNORE`, the session's
+                `MassiveConfig.unlisted_symbols` for a symbol table's pairs, leave it out and
+                log it once, at WARNING or at DEBUG.
 
         Returns:
             A static table with the dataset's columns, in its schema's order.
@@ -270,8 +276,9 @@ class RestTransport(Protocol):
             AuthenticationError: If Massive rejects the API key (HTTP 401).
             EntitlementError: If the plan does not include the endpoint (HTTP 403).
             MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
-                schema, a symbol's later page answers HTTP 404, or a request fails in any other
-                way.
+                schema, a symbol's later page answers HTTP 404, a crypto pair cannot be split
+                under `RAISE`, every symbol is a pair Massive does not list under `LOG` or
+                `IGNORE`, or a request fails in any other way.
         """
         ...
 
@@ -308,9 +315,9 @@ class RestTransport(Protocol):
         request reads it alone, and a dataset that names several symbols in one request
         (`ticker.any_of`) reads them up to `DatasetSpec.symbols_per_request` at a time and
         splits the rows by their `Symbol`, so every symbol of such a request shares its
-        failure. A dataset whose rows carry no
-        `Symbol` column, or whose rows several symbols' requests may return
-        (`DatasetSpec.symbols_overlap`), reads each symbol in a request of its own. Each
+        failure; a row a dataset lists under several named tickers (`DatasetSpec.ticker_list`)
+        goes to each of them. A dataset whose rows carry no `Symbol` column reads each symbol
+        in a request of its own. Each
         request is capped at `Request.limit`; the rows of all symbols together are not.
         Requests run on up to `max_concurrency` threads, and one read's requests take one
         turn in the rate governor.

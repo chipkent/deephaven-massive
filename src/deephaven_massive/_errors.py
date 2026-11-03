@@ -73,6 +73,7 @@ __all__ = [
     "MassiveError",
     "PermanentError",
     "RowDataError",
+    "UnlistedPairError",
     "cause_of",
     "failure_text",
     "from_wire",
@@ -259,11 +260,10 @@ class PermanentError(MassiveError):
     (`UnlistedPairError`), and, in a read by symbol, a parameter a symbol's path does not take
     (`UnsupportedParameterError`, `_ingest/symbol_reads.py`). A `poll()` table fails with one
     rather than retrying it every cycle.
-    `RowDataError` is defined here, since the REST transport raises it and the tables layer
-    names it; `SymbolRowError` is the poll module's
-    (`_tables/poll.py`) and `UnlistedPairError` the REST transport's (`_ingest/rest.py`). The
-    fatal set of `poll()` names only this base, so a subclass defined in a module the poll
-    module cannot import (the ingest layer) still fails the table.
+    `RowDataError` and `UnlistedPairError` are defined here, since the REST transport raises
+    them and the tables layer names them; `SymbolRowError` is the poll module's
+    (`_tables/poll.py`). The fatal set of `poll()` names only this base, so a subclass defined
+    in a module the poll module cannot import (the ingest layer) still fails the table.
 
     Example:
         ::
@@ -457,3 +457,17 @@ class RowDataError(PermanentError):
     """
 
     default_cause = ErrorCause.LIBRARY_DEFECT
+
+
+class UnlistedPairError(PermanentError):
+    """A crypto ticker whose two currencies Massive's reference data does not give.
+
+    A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
+    `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
+    data gives; the session's crypto ticker list, read again on a miss at most once an hour,
+    does not list the ticker, or gives currencies that do not join to it
+    (`RestReader.crypto_pair` in `_ingest/rest.py`). A pair of a symbol table follows
+    `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE`, `fetch()` and each `poll()`
+    cycle leave it out, and a followed read marks it `FAILED`; under `RAISE`, `fetch()` raises
+    it and a `poll()` or followed table fails with it. A pair passed in code always raises it.
+    """

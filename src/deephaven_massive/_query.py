@@ -26,24 +26,23 @@ Deephaven console runs every command holding it, and every verb works there.
 
 The verbs delegate the transport work to three interfaces, one per transport, defined in
 `_tables/transports.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
-`poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and
-`FlatFileTransport` (flat-file `history`).
-`history()` chooses its source itself (`choose_source` in `_datasets/history_source.py`) and
-then calls one transport, so the transports only do I/O; under `AUTO` a flat-file read whose
-last days are not published yet reads those days from REST too.
-Each static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id from the
-session's stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows>
-rows in <s> s` or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their
-worker threads after it (`massive #1 call-7 rest_0`), so every line of one call can be found.
-With `wait=False` a static verb checks its arguments on the calling thread, then returns at once
-a refreshing table that a library thread of its own fills in one update when the download
-completes (`open_read` in `_tables/background_read.py`); that thread logs the call's outcome.
-A `history()` whose symbols are a refreshing table follows it instead: the result is always
-refreshing, each symbol added to the table is read over the call's fixed window and lands
-whole, and each symbol removed leaves it (`open_followed_read` in `_tables/followed_read.py`,
-run by the session's follow coordinator).
-Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
-every stream verb shares one stream per (dataset, channel, symbol set).
+`poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and `FlatFileTransport`
+(flat-file `history`). `history()` chooses its source itself (`choose_source` in
+`_datasets/history_source.py`) and then calls one transport, so the transports only do I/O; under
+`AUTO` a flat-file read whose last days are not published yet reads those days from REST too. Each
+static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id from the session's
+stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows> rows in <s> s`
+or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their worker threads after it
+(`massive #1 call-7 rest_0`), so every line of one call can be found. With `wait=False` a static
+verb checks its arguments on the calling thread, then returns at once a refreshing table that a
+library thread of its own fills in one update when the download completes (`open_read` in
+`_tables/background_read.py`); that thread logs the call's outcome. A `history()` or `fetch()` whose
+symbols are a refreshing table follows it instead: the result is always refreshing, each symbol
+added to the table is read (by `history()` over the call's fixed window, by `fetch()` as Massive
+answers then) and lands whole, and each symbol removed leaves it (`open_followed_read` in
+`_tables/followed_read.py`, run by the session's follow coordinator). Live stream results are shaped
+and tracked by the session (`SessionCore.stream_result`), so every stream verb shares one stream per
+(dataset, channel, symbol set).
 
 A dataset's class follows from the transports its spec declares (`query_class`), and a
 `bars()` call's from its timespan and multiplier (`bar_query_class`), so no spec names a
@@ -90,6 +89,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     HistorySource,
+    OnError,
     PollMode,
     Reread,
     Timespan,
@@ -98,6 +98,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
+    UnlistedPairError,
     failure_text,
     raises_through,
 )
@@ -765,6 +766,79 @@ class QueryBase:
             run=run,
         )
 
+    def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...], *, verb: str) -> FirstRead:
+        """Read the call-time symbols of a followed `history()` or `fetch()` now, as one read.
+
+        The read of `wait=True`, on the caller thread. A crypto pair Massive's crypto ticker
+        list does not hold follows `MassiveConfig.unlisted_symbols`: under `RAISE` the call
+        raises its error, and under `IGNORE` the WARNING leaves it out.
+
+        Args:
+            plan: How the symbols are read.
+            call_time: The call-time symbols; at least one.
+            verb: The verb, `"history"` or `"fetch"`, for the WARNING.
+
+        Returns:
+            Each symbol's outcome, with when the read began and how long it took.
+
+        Raises:
+            MassiveError: The first symbol's error, when every symbol failed; or, under
+                `unlisted_symbols=RAISE`, the first unlisted pair's. A failure of every symbol
+                alike (a rejected key, a closed session) propagates from the read.
+        """
+        began_at = int(follow_coordinator.CLOCK.time() * 1e9)
+        started = time.monotonic()
+        outcomes = plan.read(call_time, self._core.read_stop())
+        failed = {
+            name: outcome
+            for name, outcome in outcomes.items()
+            if isinstance(outcome, SymbolFailure)
+        }
+        unlisted = self._core.config.unlisted_symbols
+        pairs = [
+            name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
+        ]
+        if pairs and unlisted is OnError.RAISE:
+            raise failed[pairs[0]].error
+        if len(failed) == len(call_time):
+            raise failed[call_time[0]].error
+        warned = {
+            name: outcome
+            for name, outcome in failed.items()
+            if not (unlisted is OnError.IGNORE and name in pairs)
+        }
+        if warned:
+            logger.warning(
+                "%s %s: %d of the %d symbols of the call failed and are left out of the "
+                "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
+                self._spec.name,
+                verb,
+                len(warned),
+                len(call_time),
+                "; ".join(
+                    f"{name}: {failure_text(outcome.error)}"
+                    for name, outcome in list(warned.items())[:_FAILED_SHOWN]
+                ),
+            )
+        return FirstRead(outcomes, began_at, time.monotonic() - started)
+
+
+def _symbols_per_read(spec: DatasetSpec) -> int:
+    """Return how many symbols one read of a followed `fetch()` takes.
+
+    A dataset whose list parameter (`ticker.any_of`) names many symbols in one request reads
+    up to `DatasetSpec.symbols_per_request` symbols at once, as a static `fetch()` groups
+    them, and a `limit` is sent once on that request, as Massive's cap on its rows. Every
+    other dataset reads one symbol a read.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The most symbols one read takes, at least 1.
+    """
+    return spec.symbols_per_request or 1
+
 
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
@@ -787,6 +861,8 @@ class Query(QueryBase):
         refuse_update_graph_thread,
         _read_symbol_table,
         RestTransport.fetch,
+        RestTransport.fetch_by_symbol,
+        open_followed_read,
         _wait,
     )
     def fetch(self, *, wait: bool = True) -> Table:
@@ -794,21 +870,30 @@ class Query(QueryBase):
 
         The requests run on the calling thread, or, for an endpoint that takes one symbol per
         request, on up to `max_concurrency` threads. A `limit` the query was built with caps the
-        rows (README.md#sort-order-limit); a symbol table is read once, now. A symbol with no
-        data (HTTP 404 on its first request) returns no rows, with a WARNING; HTTP 404 on a later
-        page raises `MassiveError`, since its data was cut short. Current data of a
-        subscription not in `MassiveConfig.delayed_subscriptions` must be real-time: a response
-        Massive labels `DELAYED` raises; a listed subscription's data is returned as the plan
-        serves it, and the table's description says so (README.md#real-time-or-delayed).
+        rows (README.md#sort-order-limit). A static symbol table is read once, now; a crypto pair in
+        it that Massive does not list follows `MassiveConfig.unlisted_symbols`. A refreshing one is
+        followed: the result is a refreshing table that holds, for each symbol now in the table, the
+        rows of its latest read, each Massive's answer as of that read; a symbol removed from the
+        table leaves the result in the same update, and one that returns is read again. A failure of
+        one symbol leaves the others, and `m.symbol_reads()` shows each symbol's state
+        (README.md#symbols). A symbol with no data (HTTP 404 on its first request) returns no rows,
+        with a WARNING; HTTP 404 on a later page raises `MassiveError`, since its data was cut
+        short. Current data of a subscription not in `MassiveConfig.delayed_subscriptions` must be
+        real-time: a response Massive labels `DELAYED` raises; a listed subscription's data is
+        returned as the plan serves it, and the table's description says so
+        (README.md#real-time-or-delayed).
 
         Args:
             wait: True (the default) blocks and returns a static table; False returns at once a
-                refreshing table a background read fills in one update. See
+                refreshing table a background read fills in one update. For a refreshing
+                symbol table, True blocks until each symbol in it has had one read and False
+                returns at once; the result is refreshing either way. See
                 README.md#verb-arguments.
 
         Returns:
             A static table in the dataset's schema; with `wait=False`, a refreshing table
-            filled once in the background.
+            filled once in the background; for a refreshing symbol table, a refreshing table
+            that follows it.
 
         Raises:
             TypeError: If `wait` is not a `bool`.
@@ -817,13 +902,18 @@ class Query(QueryBase):
                 query set; or if a symbol table holds no symbol, only rows that are not
                 Massive's exact tickers, or any such row under `noncanonical_symbols=RAISE`.
             AuthenticationError: If Massive rejects the API key (HTTP 401). With `wait=False`
-                this and every other request failure fails the table instead.
+                this and every other request failure fails the table instead; a followed table
+                fails on it too.
             EntitlementError: If the plan does not include the endpoint (HTTP 403), or Massive
                 labels the data `DELAYED` for a subscription not in
                 `MassiveConfig.delayed_subscriptions`; the message names the line to add.
             MassiveError: If the session is closed, a rate limit outlives the retries, every
-                row of a page is unreadable, a symbol's later page answers HTTP 404, or a
-                request fails in any other way.
+                row of a page is unreadable, a symbol's later page answers HTTP 404, a crypto
+                pair cannot be split into its currencies (for a symbol table's pair, only under
+                `unlisted_symbols=RAISE`, or when no pair of it is listed), or a request fails
+                in any other way. For a refreshing symbol table with `wait=True`, only when
+                every symbol in it failed, with the first symbol's error, or for an unlisted
+                pair under `unlisted_symbols=RAISE`.
 
         Example:
             ::
@@ -840,14 +930,27 @@ class Query(QueryBase):
     def _fetch(self, call: int, *, wait: bool) -> Table:
         """Run `fetch()` as call `call`.
 
+        A refreshing symbol table is followed (`_followed_fetch`). A static one is read once,
+        and its crypto pairs that Massive's crypto ticker list does not hold follow
+        `MassiveConfig.unlisted_symbols`; pairs passed in code always raise.
+
         Args:
             call: The call id.
             wait: As `fetch` takes it.
 
         Returns:
-            The static table, or the refreshing one a background read fills.
+            The static table, or the refreshing one a background read fills, or the one that
+            follows a refreshing symbol table.
         """
         spec = self._spec
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
+            return self._followed_fetch(call, symbols, wait=wait)
+        unlisted = (
+            self._core.config.unlisted_symbols
+            if isinstance(symbols, SymbolTable)
+            else OnError.RAISE
+        )
         request = self._static_request()
         rest = self._core.rest_transport()
         if not wait:  # a parameter error raises now, as it would before the first request
@@ -858,7 +961,56 @@ class Query(QueryBase):
             wait=wait,
             transport=Transport.REST,
             note=rest_recency_note(spec, self._core.config.delayed_subscriptions),
-            run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
+            run=lambda stop: rest.fetch(spec, request, call=call, stop=stop, unlisted=unlisted),
+        )
+
+    def _followed_fetch(self, call: int, symbols: SymbolTable, *, wait: bool) -> Table:
+        """Run a `fetch()` call that follows a refreshing symbol table.
+
+        The table's current rows are checked now, as a live verb checks them, and the request's
+        parameters with them. Every symbol, at the call or added later, is read with the
+        requests `fetch()` makes for it (`RestTransport.fetch_by_symbol`), as Massive answers
+        at that read, and is read again whenever it returns to the table. With `wait=True`
+        the call-time symbols are read now, as one read; the call raises only when every one
+        of them failed, and logs one WARNING when some did.
+
+        Args:
+            call: The call id.
+            symbols: The boxed refreshing table.
+            wait: As `fetch` takes it.
+
+        Returns:
+            The refreshing result (`open_followed_read`).
+        """
+        spec, core = self._spec, self._core
+        call_time = _read_symbol_table(core, spec, symbols, query=repr(self), live=True)
+        request = replace(self._request, symbols=call_time)
+        rest = core.rest_transport()
+        if call_time:  # a parameter error raises now; with none, the first read checks them
+            rest.check_fetch(spec, request)
+        plan = FollowPlan(
+            Transport.REST,
+            one_scan=False,
+            symbols_per_read=_symbols_per_read(spec),
+            read=lambda names, stop: rest.fetch_by_symbol(
+                spec, request, symbols=names, call=call, stop=stop
+            ),
+        )
+        recency = rest_recency_note(spec, core.config.delayed_subscriptions)
+        note = "Follows its symbol table: each symbol's rows are Massive's answer as of its read."
+        logger.info("%s fetch: follows its symbol table", spec.name)
+        loaded = self._first_read(plan, call_time, verb="fetch") if wait and call_time else None
+        return open_followed_read(
+            core,
+            spec=spec,
+            call=call,
+            query=repr(self),
+            symbol_table=symbols.table,
+            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
+            reread=Reread.ALWAYS,
+            plan=plan,
+            note=note if recency is None else f"{note} {recency}",
+            first=loaded,
         )
 
     @_verb
@@ -875,7 +1027,9 @@ class Query(QueryBase):
 
         Each cycle reads the whole query again; a symbol table is re-read each cycle, and a row
         that is not Massive's exact ticker is skipped and listed in `m.streams()` (or fails the
-        table under `noncanonical_symbols=RAISE`). A feed (a dataset whose default mode is
+        table under `noncanonical_symbols=RAISE`); a crypto pair of a symbol table that Massive's
+        crypto ticker list does not hold is left out of the cycle and listed the same way (or
+        fails the table under `unlisted_symbols=RAISE`). A feed (a dataset whose default mode is
         `APPEND`: news and filings) needs a `start` or a `limit`. The poller runs while the
         table or anything derived from it is in use (README.md#live-tables). Once the table
         exists, an authentication, entitlement, or schema failure, a null or NaN poll key, or a
@@ -910,8 +1064,8 @@ class Query(QueryBase):
             AuthenticationError: If Massive rejects the API key while the call reads its
                 crypto ticker list, to split a crypto ticker a path takes as two currencies.
             EntitlementError: If the plan does not include that list.
-            MassiveError: If the session is closed, or a crypto ticker cannot be split into
-                its currencies.
+            MassiveError: If the session is closed, or a crypto ticker passed in code cannot be
+                split into its currencies.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")
@@ -1570,6 +1724,7 @@ class HistoryQuery(QueryBase):
             plan = FollowPlan(
                 Transport.FLAT_FILES,
                 one_scan=True,
+                symbols_per_read=1,
                 read=lambda names, stop: files.history_by_symbol(
                     spec,
                     request,
@@ -1588,7 +1743,7 @@ class HistoryQuery(QueryBase):
                 f"since {rest_history_problem(spec, request)}."
             )
         logger.info("%s history: follows its symbol table; %s", spec.name, note)
-        loaded = self._first_read(plan, call_time) if wait and call_time else None
+        loaded = self._first_read(plan, call_time, verb="history") if wait and call_time else None
         return open_followed_read(
             core,
             spec=spec,
@@ -1620,48 +1775,11 @@ class HistoryQuery(QueryBase):
         return FollowPlan(
             Transport.REST,
             one_scan=False,
+            symbols_per_read=1,
             read=lambda names, stop: rest.history_by_symbol(
                 spec, request, window, symbols=names, call=call, stop=stop
             ),
         )
-
-    def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...]) -> FirstRead:
-        """Read the call-time symbols of a followed `history(wait=True)` now, as one read.
-
-        Args:
-            plan: How the symbols are read.
-            call_time: The call-time symbols; at least one.
-
-        Returns:
-            Each symbol's outcome, with when the read began and how long it took.
-
-        Raises:
-            MassiveError: The first symbol's error, when every symbol failed. A failure of
-                every symbol alike (a rejected key, a closed session) propagates from the read.
-        """
-        began_at = int(follow_coordinator.CLOCK.time() * 1e9)
-        started = time.monotonic()
-        outcomes = plan.read(call_time, self._core.read_stop())
-        failed = {
-            name: outcome
-            for name, outcome in outcomes.items()
-            if isinstance(outcome, SymbolFailure)
-        }
-        if len(failed) == len(call_time):
-            raise failed[call_time[0]].error
-        if failed:
-            logger.warning(
-                "%s history: %d of the %d symbols of the call failed and are left out of the "
-                "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
-                self._spec.name,
-                len(failed),
-                len(call_time),
-                "; ".join(
-                    f"{name}: {failure_text(outcome.error)}"
-                    for name, outcome in list(failed.items())[:_FAILED_SHOWN]
-                ),
-            )
-        return FirstRead(outcomes, began_at, time.monotonic() - started)
 
     def _flat_history(
         self,

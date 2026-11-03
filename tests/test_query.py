@@ -34,10 +34,11 @@ from deephaven_massive._enums import (
     ClassFromPrefix,
     HistorySource,
     NotBars,
+    OnError,
     PollMode,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, UnlistedPairError
 from deephaven_massive._ingest import history_reads
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience, Transport
@@ -50,6 +51,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
     _shown,
+    _symbols_per_read,
     bar_query_class,
     query_class,
 )
@@ -197,6 +199,14 @@ class Recorder:
         self.by_symbol: list[tuple[tuple[str, ...], HistoryWindow, str]] = []
         # The outcome of a symbol's read by symbol, by symbol; rows of none otherwise.
         self.outcomes: dict[str, SymbolOutcome] = {}
+        # Each followed fetch() read: its symbols, its request, and its thread.
+        self.fetched: list[tuple[tuple[str, ...], Request, str]] = []
+        # The gates that hold a followed fetch() read of a symbol, one per read, in turn.
+        self.gates: dict[str, list[threading.Event]] = {}
+        # A followed fetch() read's outcome of a symbol, one per read, in turn; then `outcomes`.
+        self.turns: dict[str, list[SymbolOutcome]] = {}
+        # The unlisted_symbols setting each static fetch() passed.
+        self.unlisted: list[OnError] = []
         # Raised by every read by symbol, when set: a failure of every symbol alike.
         self.raises: BaseException | None = None
         self._catalog = catalog
@@ -206,10 +216,42 @@ class Recorder:
         return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
     def fetch(
-        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
+        unlisted: OnError,
     ) -> Table:
         self.call_ids.append(call)
+        self.unlisted.append(unlisted)
         return self._record("fetch", spec, request, **({} if stop is None else {"stop": stop}))
+
+    def fetch_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        del stop
+        self.call_ids.append(call)
+        self.fetched.append((tuple(symbols), request, threading.current_thread().name))
+        if self.raises is not None:
+            raise self.raises
+        for name in symbols:  # a held read waits for its gate
+            held = self.gates.get(name, [])
+            if held:
+                assert held.pop(0).wait(TIMEOUT)
+        empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
+        found: dict[str, SymbolOutcome] = {}
+        for name in symbols:
+            turns = self.turns.get(name, [])
+            found[name] = turns.pop(0) if turns else self.outcomes.get(name, SymbolRows(empty))
+        return found
 
     def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         self.checks.append(("fetch", spec, request))
@@ -2364,6 +2406,264 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
     assert found["MSFT"][:2] == ("FAILED", 0)
     assert "403" in (found["MSFT"][2] or "")
     assert any("AAPL" in m for m in caplog.messages)  # the 404's WARNING is in the log only
+    rest_session.release(result)
+    follows(rest_session)
+
+
+# --- fetch() of a refreshing symbol table -----------------------------------------------------
+
+
+def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
+    # A symbol's static rows, as a read returns them: `count` rows of nulls.
+    schema = m._core.dataset_schema(spec)
+    with entered(m._core.exec_ctx):
+        return SymbolRows(dh_arrow.to_table(schema.to_arrow([{}] * count)))
+
+
+def symbol_reads(
+    m: dm.MassiveSession, drain: Callable[[], None], to_list: Callable[[Table], list[Any]]
+) -> dict[str, dict[str, Any]]:
+    drain()
+    return {row["Symbol"]: row for row in to_list(m.symbol_reads())}
+
+
+def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    static = new_table([string_col("Symbol", ["AAPL"])])
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
+    assert isinstance(q, Query)
+    assert not q.fetch().is_refreshing
+    assert not last_trade(massive_session).fetch().is_refreshing
+    # A symbol table's crypto pairs follow the session's setting; symbols in code always raise.
+    assert rest.unlisted == [OnError.LOG, OnError.RAISE]
+    assert rest.fetched == []
+
+
+def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    rest.outcomes = {"AAPL": rows_of(massive_session, LAST_TRADE_SPEC, 1)}
+    wl = live("AAPL")
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
+    assert isinstance(q, Query)
+    result = q.fetch()
+    assert result.is_refreshing
+    assert result.size == 1  # the call-time read is in the result when the call returns
+    assert [(names, thread) for names, _, thread in rest.fetched] == [
+        (("AAPL",), threading.current_thread().name)
+    ]
+    assert result.attributes()["TableDescription"].endswith(
+        "Follows its symbol table: each symbol's rows are Massive's answer as of its read."
+    )
+    rest.outcomes["MSFT"] = rows_of(massive_session, LAST_TRADE_SPEC, 2)
+    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    _until(lambda: len(dh_to_pylist(result)) == 3)
+    assert "follow-read" in rest.fetched[1][2]
+    _until(lambda: symbol_reads(massive_session, drain, dh_to_pylist)["MSFT"]["State"] == "DONE")
+    reads = symbol_reads(massive_session, drain, dh_to_pylist)
+    # Each symbol's rows are Massive's answer as of its own read.
+    assert reads["MSFT"]["ReadAt"] > reads["AAPL"]["ReadAt"]
+    cast("Any", wl).delete(new_table([string_col("Symbol", ["MSFT"])]))
+    _until(lambda: len(dh_to_pylist(result)) == 1)
+    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    _until(lambda: len(rest.fetched) == 3)  # read again, with no reread option
+    _until(lambda: len(dh_to_pylist(result)) == 3)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # MSFT's first read is held while its row is deleted and added again; that read's outcome
+    # (5 rows) lands after the re-add was queued, so only the second read's 1 row is shown.
+    gate = threading.Event()
+    rest.gates["MSFT"] = [gate]
+    rest.turns["MSFT"] = [
+        rows_of(massive_session, LAST_TRADE_SPEC, 5),
+        rows_of(massive_session, LAST_TRADE_SPEC, 1),
+    ]
+    wl = live()
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
+    assert isinstance(q, Query)
+    result = q.fetch()
+    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    _until(lambda: len(rest.fetched) == 1)
+    cast("Any", wl).delete(new_table([string_col("Symbol", ["MSFT"])]))
+    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    gate.set()
+    _until(lambda: len(rest.fetched) == 2)
+    _until(lambda: len(dh_to_pylist(result)) == 1)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
+    assert isinstance(q, Query)
+    result = q.fetch(wait=False)
+    assert result.is_refreshing
+    _until(lambda: len(rest.fetched) == 1)
+    assert "follow-read" in rest.fetched[0][2]
+    assert rest.checks == [("fetch", LAST_TRADE_SPEC, rest.checks[0][2])]  # checked at the call
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    refusal = dm.EntitlementError("HTTP 403: not in the plan")
+    rest.outcomes = {"AAPL": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
+    assert isinstance(q, Query)
+    with pytest.raises(dm.EntitlementError, match="not in the plan"):
+        q.fetch()
+    both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
+    assert isinstance(both, Query)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+        result = both.fetch()
+    assert caplog.messages == [
+        (
+            "stocks.last_trade fetch: 1 of the 2 symbols of the call failed and are left out "
+            "of the result for now; m.symbol_reads() shows each one (retrying, or failed): "
+            "AAPL: HTTP 403: not in the plan"
+        )
+    ]
+    rest.outcomes = {}  # the raised error's traceback holds the session
+    massive_session.release(result)
+    follows(massive_session)
+
+
+@pytest.mark.parametrize("setting", [OnError.LOG, OnError.IGNORE, OnError.RAISE])
+def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    setting: OnError,
+) -> None:
+    core = massive_session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
+    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
+    rest.outcomes = {"DOT": SymbolFailure(error, FailureKind.PERMANENT)}
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
+    assert isinstance(q, Query)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+        if setting is OnError.RAISE:
+            with pytest.raises(UnlistedPairError, match="does not list it"):
+                q.fetch()
+            rest.outcomes = {}  # the raised error's traceback holds the session
+            return
+        result = q.fetch()
+    assert len(caplog.messages) == (1 if setting is OnError.LOG else 0)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> None:
+    batched = dataclasses.replace(LAST_TRADE_SPEC, symbols_per_request=250)
+    assert _symbols_per_read(batched) == 250
+    assert _symbols_per_read(LAST_TRADE_SPEC) == 1
+
+
+def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_rows(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Through the real REST transport: one ticker.any_of request names both symbols, and each
+    # row goes to its symbol by its ticker.
+    rows = [{"ticker": "AAPL", "type": "stocks"}, {"ticker": "MSFT", "type": "stocks"}]
+    fake_rest.reply("/v3/snapshot", Reply(envelope(rows)))
+    result = rest_session.snapshots(live("AAPL", "MSFT")).fetch()
+    assert sorted(r["Symbol"] for r in dh_to_pylist(result)) == ["AAPL", "MSFT"]
+    ((path, query),) = fake_rest.get_queries()
+    assert path == "/v3/snapshot"
+    assert query["ticker.any_of"] == ["AAPL,MSFT"]
+    rest_session.release(result)
+    follows(rest_session)
+
+
+def test_a_followed_fetch_sends_its_limit_on_its_request(
+    *, live: Callable[..., Table], rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # `limit` is Massive's own cap on a request's rows, sent as the caller gave it.
+    fake_rest.reply("/v3/snapshot", Reply(envelope([{"ticker": "AAPL", "type": "stocks"}])))
+    result = rest_session.snapshots(live("AAPL"), limit=1).fetch()
+    ((_, query),) = fake_rest.get_queries()
+    assert (query["ticker.any_of"], query["limit"]) == (["AAPL"], ["1"])
+    rest_session.release(result)
+    follows(rest_session)
+
+
+def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
+    *,
+    live: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    rest.outcomes = {"AAPL": rows_of(massive_session, LAST_TRADE_SPEC, 1)}
+    wl = live()
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
+    assert isinstance(q, Query)
+    result = q.fetch()
+    assert result.is_refreshing
+    assert result.size == 0
+    assert (rest.fetched, rest.checks) == ([], [])  # the first read checks the parameters
+    cast("Any", wl).add(new_table([string_col("Symbol", ["AAPL"])]))
+    _until(lambda: len(dh_to_pylist(result)) == 1)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Through the real REST transport: each ticker is read in a request of its own, and an
+    # article Massive returns for both is the data listed by symbol, so it is listed twice;
+    # deleting one ticker leaves the other's copy.
+    shared = {
+        "id": "both",
+        "published_utc": "2024-06-24T18:00:00Z",
+        "tickers": ["AAPL", "MSFT"],
+        "title": "Article both",
+        "article_url": "https://example.com/both",
+        "publisher": {"name": "Example"},
+    }
+    for ticker in ("AAPL", "MSFT"):
+        fake_rest.reply(f"/v2/reference/news?limit=1000&ticker={ticker}", Reply(envelope([shared])))
+    wl = live("AAPL", "MSFT")
+    result = rest_session.reference.news(symbols=wl).fetch()
+    assert [r["Id"] for r in dh_to_pylist(result)] == ["both", "both"]
+    assert sorted(query["ticker"][0] for _, query in fake_rest.get_queries()) == ["AAPL", "MSFT"]
+    cast("Any", wl).delete(new_table([string_col("Symbol", ["AAPL"])]))
+    _until(lambda: [r["Id"] for r in dh_to_pylist(result)] == ["both"])
     rest_session.release(result)
     follows(rest_session)
 

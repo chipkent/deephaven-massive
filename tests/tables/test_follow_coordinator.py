@@ -29,7 +29,7 @@ from deephaven.update_graph import exclusive_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import FLAT_FILES_AND_REST
@@ -155,10 +155,14 @@ def follow(
     reread: Reread = Reread.ALWAYS,
     first: FirstRead | None = None,
     one_scan: bool = False,
+    symbols_per_read: int = 1,
 ) -> Table:
     core = m._core
     plan = FollowPlan(
-        Transport.FLAT_FILES if one_scan else Transport.REST, one_scan=one_scan, read=script.read
+        Transport.FLAT_FILES if one_scan else Transport.REST,
+        one_scan=one_scan,
+        symbols_per_read=symbols_per_read,
+        read=script.read,
     )
     return open_followed_read(
         core,
@@ -1350,3 +1354,74 @@ def test_a_follow_handed_to_a_dying_coordinator_fails_its_table(
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     assert script.calls == [("AAPL",)]
+
+
+# --- Reads of several symbols, and crypto pairs Massive does not list ---------------------------
+
+
+def test_a_rest_read_takes_up_to_symbols_per_read_symbols(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    # A fetch() whose list parameter names many symbols a request reads them in groups.
+    script = Script(massive_session)
+    result = follow(massive_session, watchlist("AAPL", "MSFT", "NVDA"), script, symbols_per_read=2)
+    until(lambda: len(dh_to_pylist(result)) == 6)
+    assert sorted(len(names) for names in script.calls) == [1, 2]
+    assert sorted(name for names in script.calls for name in names) == ["AAPL", "MSFT", "NVDA"]
+    massive_session.release(result)
+
+
+def unlisted() -> SymbolFailure:
+    error = UnlistedPairError(
+        "'X:DOTUSD' cannot be split: Massive's reference data does not list it"
+    )
+    return SymbolFailure(error, FailureKind.PERMANENT)
+
+
+@pytest.mark.parametrize(("setting", "warns"), [(dm.OnError.LOG, True), (dm.OnError.IGNORE, False)])
+def test_an_unlisted_pair_fails_alone_and_warns_only_under_log(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    setting: dm.OnError,
+    warns: bool,
+) -> None:
+    core = massive_session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
+    script = Script(massive_session)
+    script.answers["DOT"] = [unlisted()]
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = follow(massive_session, watchlist("AAPL", "DOT"), script)
+        failed = wait_state(massive_session, "DOT", SymbolReadState.FAILED)
+        wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    assert "does not list it" in (failed.error or "")
+    assert not result.j_table.isFailed()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [("DOT failed" in m) for m in warnings] == ([True] if warns else [])
+    assert any("DOT failed" in r.getMessage() for r in caplog.records)  # DEBUG at least
+    massive_session.release(result)
+
+
+def test_an_unlisted_pair_fails_the_result_under_raise(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+) -> None:
+    core = massive_session._core
+    config = dataclasses.replace(core.config, unlisted_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(core, "config", config)
+    script = Script(massive_session)
+    script.answers["DOT"] = [unlisted()]
+    result = follow(massive_session, watchlist("DOT"), script)
+    until(lambda: bool(result.j_table.isFailed()))
+    shown = stream(massive_session, drain, dh_to_pylist)
+    assert shown["State"] == "FAILED"
+    assert "does not list it" in shown["Error"]

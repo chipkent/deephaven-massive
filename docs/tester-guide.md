@@ -936,10 +936,12 @@ You edit an input table in its panel:
 ### 21. A watchlist that drives a poll (`21_watchlist_poll.py`)
 
 ```python
-# Makes a watchlist you can edit, and a table that reads the previous day's bar of each of
-# its stocks every minute: three Stocks requests a minute, within the free plan's five. You
-# should see two new tables: stock_watchlist, with three rows, and watched_bars, with one row
-# per stock within about a minute. Then follow the steps after this block.
+# Makes a watchlist you can edit, a table that reads the previous day's bar of each of its
+# stocks every minute (three Stocks requests a minute, within the free plan's five), and a
+# fetch() of their dividends that follows the watchlist. You should see three new tables:
+# stock_watchlist, with three rows; watched_bars, with one row per stock within about a
+# minute; and watched_dividends, with each stock's dividends. Then follow the steps after
+# this block.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
@@ -947,15 +949,19 @@ from deephaven.column import string_col
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
+watched_dividends = m.stocks.dividends(stock_watchlist).fetch()
 ```
 
 Then, in the `stock_watchlist` panel:
 
 1. Add `AAPL`. **You should see** an `AAPL` row in `watched_bars` within about a minute, at
-   its next read.
-2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read.
+   its next read, and AAPL's dividends join `watched_dividends` once they are read.
+2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read, and
+   TSLA's dividends leave `watched_dividends` at once.
 3. In the `streams` panel, the `stocks.previous_day_bar` row's `SymbolCount` reads 3: the
-   symbols its latest read covered.
+   symbols its latest read covered. The `stocks.dividends` row has `Kind` `read`.
+4. Run `reads = m.symbol_reads()`. **You should see** one row per symbol of
+   `watched_dividends`: `DONE` for JPM, XOM, and AAPL, and `REMOVED` for TSLA.
 
 ### 22. A crypto watchlist, paid plans (`22_crypto_watchlist.py`)
 

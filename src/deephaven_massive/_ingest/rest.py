@@ -21,9 +21,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   ascending direction (`_ascending`).
   `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
   sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
-  indicator) it caps each symbol's rows instead, and for a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, the news of a watchlist) each request's rows, keeping a row
-  several requests return once (`_first_copies`).
+  indicator, or the news of one ticker) it caps each symbol's rows instead.
+- **Listed tickers.** A dataset whose rows list their tickers (`DatasetSpec.ticker_list`: news,
+  financial statements, insider and 8-K filings) gets its `Symbol` from the request: each
+  ticker the request named that a row lists, the row repeated once per such ticker
+  (`_listed_rows`), so the split comes after `limit`, which caps what Massive returns.
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -139,6 +141,7 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
+    UnlistedPairError,
     cause_of,
     failure_text,
     from_wire,
@@ -222,9 +225,8 @@ _Item = TypeVar("_Item")
 _Done = TypeVar("_Done")
 """What one task of a fan-out returns."""
 
-_ROW_NUMBER: Final = "__row_number"
-"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
-
+_SYMBOL: Final = "Symbol"
+"""The column of a row's instrument, which `_listed_rows` fills on a dataset with a ticker list."""
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists crypto tickers with their base and quote currencies."""
@@ -279,17 +281,6 @@ class UnavailableSymbolError(PermanentError):
     """
 
 
-class UnlistedPairError(PermanentError):
-    """A crypto ticker whose two currencies Massive's reference data does not give.
-
-    A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
-    `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
-    data gives; the session's crypto ticker list, read again on a miss at most once an hour,
-    does not list the ticker, or gives currencies that do not join to it
-    (`RestReader.crypto_pair`). A `poll()` table fails with it.
-    """
-
-
 def _bare_index(request: Request, call: Call) -> str | None:
     """Return the index a call asked for by its bare ticker (`SPX` sent for `I:SPX`).
 
@@ -306,26 +297,47 @@ def _bare_index(request: Request, call: Call) -> str | None:
     return None
 
 
-def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
-    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+def _listed_rows(
+    batch: pa.RecordBatch, named: Sequence[str], *, column: str
+) -> tuple[pa.RecordBatch, int]:
+    """Fill a page's `Symbol` from the tickers its request named and each row lists.
 
-    A row is identified by `keys` alone. A row with a null key is never merged with another:
-    a null cannot tell two rows apart, so every such row is kept, in place.
+    A request that named one ticker gives it to every row. A request that named several gives
+    each row every one of them its list holds, the row repeated once per such ticker, in the
+    order of its list; a row that lists none of them keeps a null `Symbol`, never dropped. A
+    request that named none leaves `Symbol` null.
 
     Args:
-        rows: The rows of every request, in request order.
-        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
+        batch: One page's rows in the dataset's schema, with a null `Symbol`.
+        named: The tickers the request named (`own_symbols`).
+        column: The column of each row's tickers (`DatasetSpec.ticker_list`).
 
     Returns:
-        The rows, each identity once, in the order of their first copies.
+        The rows with their `Symbol`, and how many rows listed none of several named tickers.
     """
-    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
-    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in keys))
-    identified = numbered.filter(keyed)
-    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
-    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
-    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
-    return rows.take(kept.sort())
+    if not named:
+        return batch, 0
+    if len(named) == 1:
+        taken = batch
+        symbols: list[str | None] = [named[0]] * batch.num_rows
+        unmatched = 0
+    else:
+        wanted = set(named)
+        rows: list[int] = []
+        symbols = []
+        unmatched = 0
+        for index, listed in enumerate(batch.column(column).to_pylist()):
+            hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
+            if not hits:
+                unmatched += 1
+                hits = [None]
+            rows.extend([index] * len(hits))
+            symbols.extend(hits)
+        taken = batch.take(pa.array(rows, pa.int64()))
+    position = taken.schema.get_field_index(_SYMBOL)
+    arrays = list(taken.columns)
+    arrays[position] = pa.array(symbols, taken.schema.field(position).type)
+    return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unmatched
 
 
 def _cut(text: str) -> str:
@@ -498,6 +510,9 @@ class RestReader:
             read (`MassiveConfig.unreadable_symbols`).
         unavailable_symbols: The session's setting for a symbol a `poll()` cycle cannot read
             from Massive (`MassiveConfig.unavailable_symbols`).
+        unlisted_symbols: The session's setting for a crypto pair of a symbol table that
+            Massive's crypto ticker list does not hold (`MassiveConfig.unlisted_symbols`), which
+            a `poll()` cycle follows (`_plan_cycle`).
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -515,6 +530,7 @@ class RestReader:
     max_concurrency: int
     unreadable_symbols: OnError
     unavailable_symbols: OnError
+    unlisted_symbols: OnError
     delayed_subscriptions: AbstractSet[Subscription]
     threads: str
     exec_ctx: ExecutionContext
@@ -1140,6 +1156,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
+                if spec.ticker_list is not None:
+                    batches = self._listed(spec, batches, own, template=template)
                 if bare_index is not None:
                     self._check_index_rows(spec, batches, bare_index, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
@@ -1198,6 +1216,48 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _listed(
+        self,
+        spec: DatasetSpec,
+        batches: Sequence[pa.RecordBatch],
+        named: Sequence[str],
+        *,
+        template: str,
+    ) -> list[pa.RecordBatch]:
+        """Fill the `Symbol` of a dataset whose rows list their tickers (`_listed_rows`).
+
+        Logs one WARNING per dataset a session, then DEBUG, when a row lists none of the
+        request's several named tickers: it keeps a null `Symbol`.
+
+        Args:
+            spec: The dataset, with a `ticker_list`.
+            batches: One page's rows in the dataset's schema.
+            named: The tickers the request named.
+            template: The path, for the message.
+
+        Returns:
+            The rows with their `Symbol`.
+        """
+        listed: list[pa.RecordBatch] = []
+        unmatched = 0
+        for batch in batches:
+            rows, missed = _listed_rows(batch, named, column=cast("str", spec.ticker_list))
+            listed.append(rows)
+            unmatched += missed
+        if unmatched:
+            first = self.state.first("unlisted rows", spec.name)
+            logger.log(
+                logging.WARNING if first else logging.DEBUG,
+                "%s: %d rows Massive returned from %s list none of the request's tickers "
+                "(%s) in %s, so their Symbol is null",
+                spec.name,
+                unmatched,
+                template,
+                bounded_list(named),
+                spec.ticker_list,
+            )
+        return listed
 
     def _check_index_rows(
         self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, template: str
@@ -1737,6 +1797,9 @@ class RestReader:
         `ValueError`) is left out with its symbols, and the cycle reads every other path, as
         `MassiveConfig.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
         one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
+        A crypto pair of a symbol table that Massive's crypto ticker list does not hold follows
+        `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE` it is left out of the cycle
+        (`_skip_unlisted`); under `RAISE` its `UnlistedPairError` fails the table.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1749,29 +1812,95 @@ class RestReader:
             with why, such as `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take
             ['adjusted'])"`.
 
-        A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair`, and a
-        refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.
+        A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair` (a pair
+        of a symbol table that the list does not hold only under `unlisted_symbols=RAISE`), and
+        a refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.
         """
         if symbols == ():
             return [], []
         planned = []
         left_out: list[str] = []
+        unlisted: dict[str, UnlistedPairError] = {}
+        skips = (
+            isinstance(request.symbols, SymbolTable) and self.unlisted_symbols is not OnError.RAISE
+        )
+        split = self._listed_split(unlisted, cancel) if skips else None
         for template, own in fetch_paths(spec, symbols):
             try:
                 path = self._plan_path(
-                    spec, request, template=template, own=own, split=None, cancel=cancel
+                    spec, request, template=template, own=own, split=split, cancel=cancel
                 )
             except ValueError as error:
                 reason = str(error).removeprefix(f"{spec.name}: ")
             else:
-                planned.append(path)
+                planned.append(_without(path, unlisted))
                 continue
             # Only a reactive table's symbols can meet a refusing path here: static symbols
             # were planned when the table was made, so `own` is a tuple.
             names = cast("tuple[str, ...]", own)
             self._unavailable(spec, template, names, reason=reason, missing=False)
             left_out.extend(f"{name} ({reason})" for name in names)
+        if unlisted:
+            self._skip_unlisted(spec, unlisted, verb="poll()", setting=self.unlisted_symbols)
+            left_out.extend(
+                f"{name} (not in Massive's crypto ticker list)" for name in sorted(unlisted)
+            )
         return planned, left_out
+
+    def _listed_split(
+        self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
+    ) -> CryptoSplit:
+        """Return a crypto split that records a pair Massive does not list instead of raising.
+
+        Any other failure to split, such as a failed read of the list, still raises.
+
+        Args:
+            unlisted: Receives each pair the list does not hold, with its error; the plan's
+                calls of that pair are then dropped (`_without`).
+            cancel: The read's stop token, which the list's read listens to.
+
+        Returns:
+            A split that returns `("", "")` for a pair it recorded.
+        """
+
+        def split(symbol: str) -> tuple[str, str]:
+            try:
+                return self.crypto_pair(symbol, cancel=cancel)
+            except UnlistedPairError as error:
+                unlisted.setdefault(symbol, error)
+                return "", ""
+
+        return split
+
+    def _skip_unlisted(
+        self,
+        spec: DatasetSpec,
+        unlisted: Mapping[str, UnlistedPairError],
+        *,
+        verb: str,
+        setting: OnError,
+    ) -> None:
+        """Log the crypto pairs of a symbol table a read leaves out, each once per session.
+
+        At WARNING under `unlisted_symbols=LOG` the first time a pair is left out in the
+        session, and at DEBUG after that and under `IGNORE`. Never called under `RAISE`.
+
+        Args:
+            spec: The dataset.
+            unlisted: The pairs, with their errors.
+            verb: The verb that leaves them out, `"fetch()"` or `"poll()"`.
+            setting: The `unlisted_symbols` setting the read follows.
+        """
+        for symbol, error in sorted(unlisted.items()):
+            first = self.state.first("unlisted", spec.name, symbol)
+            logger.log(
+                logging.WARNING if first and setting is OnError.LOG else logging.DEBUG,
+                "%s %s: %s; it is left out and the table's other symbols are read. Delete its "
+                "row, or set dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead",
+                spec.name,
+                verb,
+                error,
+            )
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
         """Check, before any symbol is known, that some fetch path can take the parameters.
@@ -1894,6 +2023,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
         pauses_live_tables: bool = False,
+        unlisted: OnError,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
 
@@ -1913,16 +2043,36 @@ class RestReader:
             pauses_live_tables: True when the calling thread holds the update graph's lock (a
                 console command), so the read pauses every live table of the worker while it
                 runs.
+            unlisted: What a crypto pair Massive's crypto ticker list does not hold does:
+                `RAISE` (always for symbols passed in code) raises its
+                `UnlistedPairError`; `LOG` and `IGNORE`, for a symbol table's pairs under
+                `MassiveConfig.unlisted_symbols`, leave it out (`_skip_unlisted`).
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit` (each symbol's
             rows where a request names one symbol, each request's rows for a dataset whose
             symbols overlap; `_read_planned`), and the request count.
 
-        Errors are those of `read`, and a parameter a path does not take raises the
+        Raises:
+            MassiveError: Under `LOG` and `IGNORE`, when every symbol is a pair the list does
+                not hold, so the read would read nothing.
+
+        Other errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
         """
-        planned = self.plan_fetch(spec, request, symbols, cancel=cancel)
+        found: dict[str, UnlistedPairError] = {}
+        skips = unlisted is not OnError.RAISE
+        split = self._listed_split(found, cancel) if skips else None
+        planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
+        if found:
+            asked = cast("tuple[str, ...]", symbols)  # only named pairs are split
+            if set(asked) <= found.keys():
+                raise MassiveError(
+                    f"{spec.name} fetch(): no symbol of the symbol table is a crypto pair "
+                    f"Massive lists, so the call would read nothing: {bounded_list(found)}"
+                )
+            self._skip_unlisted(spec, found, verb="fetch()", setting=unlisted)
+            planned = [_without(path, found) for path in planned]
         patience = self.patience()  # once for every path, on this thread, before any fan-out
         logger.debug(
             "%s fetch: %d requests on %d paths; the read waits out %.0f s of pauses",
@@ -1966,10 +2116,9 @@ class RestReader:
 
         The cap is on the total rows, except where each request names one symbol
         (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few symbols
-        with many rows never crowd out the rest. For a dataset whose symbols overlap
-        (`DatasetSpec.symbols_overlap`), such as the news of a watchlist, each request is
-        capped too, and a row several requests returned is kept once, at its first copy
-        (`_first_copies`).
+        with many rows never crowd out the rest. A dataset whose rows list their tickers may
+        hold more rows than the cap: each row is repeated once per named ticker it lists
+        (`_listed_rows`) after Massive capped it.
 
         Args:
             spec: The dataset.
@@ -2017,20 +2166,6 @@ class RestReader:
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
-        if spec.symbols_overlap:
-            # Each request was capped on its own, so one symbol's rows never crowd out another's.
-            kept = _first_copies(rows, spec.poll_keys)
-            logger.debug(
-                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
-                "request",
-                spec.name,
-                kept.num_rows,
-                rows.num_rows,
-                requests,
-                ", ".join(spec.poll_keys),
-                request.limit,
-            )
-            return kept, requests
         per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
         if request.limit is not None and per_symbol:
             # Each request named one symbol and was capped on its own.
@@ -2039,6 +2174,16 @@ class RestReader:
                 spec.name,
                 rows.num_rows,
                 requests,
+                request.limit,
+            )
+        elif request.limit is not None and spec.ticker_list is not None:
+            # Massive capped the rows; listing each under every named ticker it lists can
+            # give more, all of which are kept.
+            logger.debug(
+                "%s: kept %d rows, each listed under its named tickers, from rows Massive "
+                "capped at limit=%d",
+                spec.name,
+                rows.num_rows,
                 request.limit,
             )
         elif request.limit is not None:
@@ -2085,6 +2230,7 @@ class RestEndpoints:
             core.config.max_concurrency,
             core.config.unreadable_symbols,
             core.config.unavailable_symbols,
+            core.config.unlisted_symbols,
             core.config.delayed_subscriptions,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
@@ -2247,7 +2393,13 @@ class RestEndpoints:
         )
 
     def fetch(
-        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
+        unlisted: OnError,
     ) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
@@ -2266,6 +2418,9 @@ class RestEndpoints:
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`),
                 which ends the read's waits when set; None when only the session's close
                 should.
+            unlisted: What a crypto pair Massive's crypto ticker list does not hold does
+                (`RestReader.read_fetch`): `RAISE` for symbols passed in code, the session's
+                `MassiveConfig.unlisted_symbols` for a symbol table's.
 
         Returns:
             A static table in the dataset's schema.
@@ -2287,6 +2442,7 @@ class RestEndpoints:
             symbols=request.symbols,
             cancel=_token(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            unlisted=unlisted,
         )
         return self._static(spec, table)
 
@@ -2804,6 +2960,22 @@ def _unsplit(symbol: str) -> tuple[str, str]:
     """
     del symbol
     return "", ""
+
+
+def _without(
+    path: tuple[RestPath, list[Call]], unlisted: Mapping[str, UnlistedPairError]
+) -> tuple[RestPath, list[Call]]:
+    """Return a planned path without the requests of the crypto pairs left out.
+
+    Args:
+        path: A path and its planned calls.
+        unlisted: The pairs left out (`RestReader._listed_split`).
+
+    Returns:
+        The path with only the calls of the other symbols.
+    """
+    rest_path, calls = path
+    return rest_path, [call for call in calls if call.symbol not in unlisted]
 
 
 def _token(stop: threading.Event | None) -> Cancel | None:

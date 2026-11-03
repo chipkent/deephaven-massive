@@ -143,7 +143,10 @@ def follow(
 ) -> Table:
     core = m._core
     plan = FollowPlan(
-        Transport.FLAT_FILES if one_scan else Transport.REST, one_scan=one_scan, read=script.read
+        Transport.FLAT_FILES if one_scan else Transport.REST,
+        one_scan=one_scan,
+        symbols_per_read=1,
+        read=script.read,
     )
     return open_followed_read(
         core,

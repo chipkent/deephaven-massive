@@ -49,6 +49,7 @@ __all__ = [
     "OPTION_ROOT",
     "OTHER_ROWS",
     "RAW_SYMBOL",
+    "SYMBOL",
     "TRANSPORT_LABELS",
     "TRANSPORT_ORDER",
     "Contribution",
@@ -68,6 +69,10 @@ TRANSPORT_LABELS: Final[Mapping[Transport, str]] = MappingProxyType(
 `SuppliedBy` column of `columns()`, the column reference, and the `Transport` column of the
 diagnostics tables all use it, so a filter copied from one works on another. The `Transport`
 values stay internal names, which only logs and code show. Read-only."""
+
+SYMBOL: Final = "Symbol"
+"""The column of a row's instrument: a renamed key, or, on a dataset whose rows list their
+tickers (`DatasetSpec.ticker_list`), a column the library fills from the request."""
 
 KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
@@ -331,8 +336,9 @@ def _library_sentence(spec: DatasetSpec, name: str) -> str:
 
     Args:
         spec: The dataset.
-        name: A key column (`Symbol`, `Timestamp`, `Underlying`) or a time column the
-            library fills (`Date`, `TimestampStart`, `TimestampEnd`, `TimestampInsert`).
+        name: A key column (`Symbol`, `Timestamp`, `Underlying`), the `Symbol` the library
+            fills on a dataset with a `ticker_list`, or a time column the library fills
+            (`Date`, `TimestampStart`, `TimestampEnd`, `TimestampInsert`).
 
     Returns:
         The sentence, before any wire keys it quotes.
@@ -345,6 +351,14 @@ def _library_sentence(spec: DatasetSpec, name: str) -> str:
         return _end_sentence(spec)
     if name == INSERT:
         return _INSERT_SENTENCE
+    if name == SYMBOL and spec.ticker_list is not None:
+        return (
+            f"The ticker the request named that the row lists in `{spec.ticker_list}`: a row "
+            "that lists several of the named tickers appears once for each, so an article "
+            "about AAPL and MSFT read for both is listed under each. A request that named one "
+            "ticker gives it to every row. Null when the call named no ticker, and on a row "
+            "that lists none of a request's named tickers."
+        )
     return KEY_SENTENCES[name]
 
 

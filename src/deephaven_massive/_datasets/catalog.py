@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath, Source
 
 __all__ = [
+    "NO_NAMED_TICKER",
     "REFERENCE_PATH",
     "Catalog",
     "DatasetSpec",
@@ -100,6 +101,12 @@ _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
 _LIBRARY_TIME_NAME: Final = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")
 """`Timestamp` alone or with a qualifier (`TimestampEnd`): the names of the library's time
 columns, which no vendor field keeps outside a declared key."""
+
+NO_NAMED_TICKER: Final = (
+    "the call named no ticker, or the row lists none of its request's named tickers"
+)
+"""Why the `Symbol` of a dataset with a `ticker_list` can be null: its `nullable_poll_keys`
+reason."""
 
 _DEFAULT_POLL_KEYS: Final = ("Symbol",)
 """The `poll()` key of a dataset that declares none: one row per symbol."""
@@ -341,15 +348,14 @@ class DatasetSpec:
             (a ticker not yet updated). Empty by default.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
-        symbols_overlap: True when one row can answer several symbols' requests, such as a
-            news article that mentions two tickers of a watchlist, so a fan-out over several
-            symbols can return it more than once. It has two effects: a `fetch()` or `poll()`
-            cycle keeps the first copy of each row whose `poll_keys` (and only those columns)
-            are all set, and `limit` caps each request's rows rather than the total, so one
-            symbol's rows never crowd out another's. Such a dataset needs `poll_keys` of scalar
-            columns, since rows are grouped by their values, and no `nullable_poll_keys`.
-            `fetch()` keeps every row whose key is null; a `poll()` table fails on one. False
-            by default.
+        ticker_list: The column of a dataset whose rows each list several tickers, such as a
+            news article's `Tickers`, or None for any other dataset. The library then fills a
+            `Symbol` column of its own: each ticker the request named that the row lists, one
+            row per such ticker, so an article about AAPL and MSFT read for both is listed
+            once under each. A request that named one ticker gives it to every row; a row that
+            lists none of a request's several named tickers keeps a null `Symbol`, with one
+            WARNING per dataset; a call that names no ticker leaves `Symbol` null. Such a
+            dataset has `Symbol` among its `poll_keys` and its `nullable_poll_keys`.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
             one asset class, where it differs from `fetch_path`, such as
             `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`; the symbols of every
@@ -429,7 +435,7 @@ class DatasetSpec:
     nullable_poll_keys: Mapping[str, str] = field(default_factory=dict)
     revision_keys: tuple[str, ...] = ()
     per_symbol: bool = False
-    symbols_overlap: bool = False
+    ticker_list: str | None = None
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
     page_size: int | None = None
@@ -457,9 +463,9 @@ class DatasetSpec:
                 a dataset without row times, or, for a daily summary, leaves a source without its
                 `date` key; a daily summary has an asset class without a calendar day zone
                 (futures, or none); `poll_keys` holds the `Symbol` of an optional symbol key or
-                `TimestampInsert`, is empty on an `APPEND` dataset or one whose symbols overlap,
-                is empty together with `revision_keys`, or shares a column with `revision_keys`;
-                a dataset whose symbols overlap has `nullable_poll_keys`;
+                `TimestampInsert`, is empty on an `APPEND` dataset, is empty together with
+                `revision_keys`, or shares a column with `revision_keys`; a dataset with a
+                `ticker_list` lacks `Symbol` among its `poll_keys` or `nullable_poll_keys`;
                 `nullable_poll_keys` names a column that is no poll key, or gives an empty
                 reason; a flat-file prefix does not declare its `symbol` and `time` keys from
                 its own columns (and, for futures, its `date` key, the session against which
@@ -726,10 +732,10 @@ class DatasetSpec:
         Raises:
             ValueError: If `poll_keys` holds the `Symbol` of an optional symbol key (a row
                 without one would have a null poll key) or `TimestampInsert`; is empty on an
-                `APPEND` dataset, on one whose symbols overlap (its repeated rows are found by
-                them), or together with `revision_keys`; shares a column with `revision_keys`; or if
-                `nullable_poll_keys` names a column that is no poll key, gives no reason, or
-                is set on a dataset whose symbols overlap.
+                `APPEND` dataset or together with `revision_keys`; shares a column with
+                `revision_keys`; lacks `Symbol`, as a key and as a nullable one, on a dataset
+                with a `ticker_list`; or if `nullable_poll_keys` names a column that is no poll
+                key or gives no reason.
         """
         optional = any(
             declared.symbol is not None and not declared.symbol.required
@@ -750,15 +756,12 @@ class DatasetSpec:
             )
         if not self.poll_keys and self.poll_mode is PollMode.APPEND:
             raise ValueError(f"{self.name}: an APPEND dataset needs poll_keys")
-        if self.symbols_overlap and not self.poll_keys:
+        if self.ticker_list is not None and "Symbol" not in self.nullable_poll_keys:
+            # A row is listed once per named ticker it lists, and a call that names none
+            # leaves Symbol null.
             raise ValueError(
-                f"{self.name}: a dataset whose symbols overlap needs poll_keys, which find the "
-                "rows several symbols return"
-            )
-        if self.symbols_overlap and self.nullable_poll_keys:
-            raise ValueError(
-                f"{self.name}: a dataset whose symbols overlap cannot have nullable_poll_keys: "
-                "a null key cannot tell two rows apart"
+                f"{self.name}: a dataset whose rows list their tickers ({self.ticker_list}) "
+                "needs Symbol among its poll_keys and its nullable_poll_keys"
             )
         if not (*self.poll_keys, *self.revision_keys):
             raise ValueError(
@@ -1271,8 +1274,9 @@ class Catalog:
         instrument), `per_symbol` requests, a symbol filled from the request, or a
         `symbol_param` that selects rows by one ticker each. A symbol parameter that filters a
         field holding several tickers (a filing's or an article's `tickers`, a list) does
-        not make one: such a row describes no single instrument, so the dataset has no
-        `Symbol` and keeps its `Tickers` column. The filtered field is the row field of the
+        not make one: such a row describes no single instrument, so the dataset keeps its
+        `Tickers` column, and its `Symbol` is the library's, the requested ticker a row was
+        read for (`DatasetSpec.ticker_list`). The filtered field is the row field of the
         parameter's base name, singular or plural (`tickers.any_of` filters `tickers`, and
         `ticker` filters `tickers` on the news path); with no such field, the parameter counts.
         Its asset class alone does not make a dataset an instrument dataset:

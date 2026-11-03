@@ -219,6 +219,7 @@ def test_insider_datasets_normalize_every_documented_field(
     # Every row carries the instant its page arrived, last.
     assert list(row)[-1] == "TimestampInsert"
     assert row.pop("TimestampInsert") is not None
+    assert row.pop("Symbol") is None  # no ticker named: the library's Symbol is null
     assert row == INSIDER_ROWS[name]
 
 

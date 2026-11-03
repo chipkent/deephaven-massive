@@ -15,7 +15,7 @@ m.reference.news(symbols=None, *, start=None, end=None, sort=None, order=None, l
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published_utc.gte` and `published_utc.lt` |
-| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` and `Symbol` |
 | `sort` | `published_utc` |
 | `filters` | `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
@@ -35,6 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `AmpUrl` | String | The mobile friendly Accelerated Mobile Page (AMP) URL. | REST |
 | `ArticleUrl` | String | A link to the news article. | REST |
 | `Author` | String | The article's author. | REST |
@@ -58,6 +59,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `AmpUrl` | `amp_url` |
 | `ArticleUrl` | `article_url` |
 | `Author` | `author` |

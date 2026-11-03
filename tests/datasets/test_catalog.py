@@ -15,6 +15,7 @@ from typing import Any, cast
 import pytest
 
 from deephaven_massive._datasets.catalog import (
+    NO_NAMED_TICKER,
     Catalog,
     DatasetSpec,
     KeySpec,
@@ -507,14 +508,21 @@ def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys(
     assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)
 
 
-def test_rows_several_symbols_return_are_found_by_poll_keys() -> None:
-    # A row that answers several symbols' requests is kept once, by its poll keys, which
-    # must exist and never be null.
-    with pytest.raises(ValueError, match=r"reference.exchanges: a dataset whose symbols overlap"):
-        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), symbols_overlap=True)
-    with pytest.raises(ValueError, match=r"symbols overlap cannot have nullable_poll_keys"):
-        change(EXCHANGES, nullable_poll_keys={"Id": "absent"}, symbols_overlap=True)
-    assert change(EXCHANGES, symbols_overlap=True).symbols_overlap
+def test_a_dataset_whose_rows_list_tickers_keys_its_polls_by_symbol() -> None:
+    # A row is listed once per named ticker it lists, so Symbol tells its copies apart, and
+    # it is null when the call names no ticker.
+    match = r"reference.exchanges: a dataset whose rows list their tickers \(Tickers\) needs Symbol"
+    with pytest.raises(ValueError, match=match):
+        change(EXCHANGES, ticker_list="Tickers")
+    with pytest.raises(ValueError, match=match):
+        change(EXCHANGES, ticker_list="Tickers", poll_keys=("Id", "Symbol"))
+    listed = change(
+        EXCHANGES,
+        ticker_list="Tickers",
+        poll_keys=("Id", "Symbol"),
+        nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
+    )
+    assert listed.ticker_list == "Tickers"
 
 
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:

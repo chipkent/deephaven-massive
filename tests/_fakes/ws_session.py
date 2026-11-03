@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any, cast
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
-from deephaven_massive._ingest.rest import UnlistedPairError
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables.transports import HostDecision
