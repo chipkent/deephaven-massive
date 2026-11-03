@@ -64,7 +64,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/forex/currency-conversion.md>
+- [Currency Conversion (REST)](https://massive.com/docs/rest/forex/currency-conversion)
 
 ---
 

@@ -1307,6 +1307,15 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             "at 5 PM CT on January 1st has a session_end_date of 2025-01-01.",
             reason=_PARAMETER_TEXT_REASON,
         ),
+        ("/benzinga/v1/ratings", "importance"): DescriptionFix(
+            vendor="A subjective indicator of the importance of the earnings event, on a scale "
+            "from 0 (lowest) to 5 (highest).",
+            text="A subjective indicator of the importance of the event, on a scale from 0 "
+            "(lowest) to 5 (highest).",
+            reason="An analyst rating is not an earnings event. The text is Massive's own for "
+            "the same field of corporate guidance and earnings (`/benzinga/v1/guidance` and "
+            "`/benzinga/v1/earnings` `importance`), which names no kind of event.",
+        ),
     }
 )
 """`(source, wire key)` to the corrected description of a field whose vendor text is wrong,

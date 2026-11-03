@@ -63,7 +63,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/websocket/crypto/quotes.md>
+- [Quotes (WebSocket)](https://massive.com/docs/websocket/crypto/quotes)
 
 ---
 

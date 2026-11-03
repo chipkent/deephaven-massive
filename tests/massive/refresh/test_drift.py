@@ -105,12 +105,12 @@ def item(
 
 
 def rest_page(path: str) -> str:
-    return f"# A page\n\n**Endpoint:** `GET {path}`\n\nWhat it returns.\n"
+    return f"### A page\n\n**Endpoint:** `GET {path}`\n\nWhat it returns.\n"
 
 
 def ws_page(cluster: str, channel: str) -> str:
     return (
-        f"# A feed\n\n| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
+        f"### A feed\n\n| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
         f"The channel prefix for this feed is `{channel}`.\n"
     )
 
@@ -124,7 +124,7 @@ def overview(*rows: tuple[str, str]) -> str:
 def dataset_page(columns: Mapping[str, str], header: tuple[str, ...] | None = None) -> str:
     header = tuple(columns) if header is None else header
     lines = [
-        "# A dataset",
+        "### A dataset",
         "",
         "## Columns",
         "",

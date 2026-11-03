@@ -79,9 +79,9 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/flat-files/stocks/trades.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/trades.md>
-- <https://massive.com/docs/websocket/stocks/trades.md>
+- [Trades (flat files)](https://massive.com/docs/flat-files/stocks/trades)
+- [Trades (REST)](https://massive.com/docs/rest/stocks/trades-quotes/trades)
+- [Trades (WebSocket)](https://massive.com/docs/websocket/stocks/trades)
 
 ---
 

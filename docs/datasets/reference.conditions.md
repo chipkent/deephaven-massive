@@ -94,9 +94,9 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/market-operations/condition-codes.md>
-- <https://massive.com/docs/rest/options/market-operations/condition-codes.md>
-- <https://massive.com/docs/rest/stocks/market-operations/condition-codes.md>
+- [Condition Codes (REST, crypto)](https://massive.com/docs/rest/crypto/market-operations/condition-codes)
+- [Condition Codes (REST, options)](https://massive.com/docs/rest/options/market-operations/condition-codes)
+- [Condition Codes (REST, stocks)](https://massive.com/docs/rest/stocks/market-operations/condition-codes)
 
 ---
 

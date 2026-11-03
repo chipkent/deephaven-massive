@@ -44,7 +44,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 | `Currency` | String | The ISO 4217 currency code in which the price target is denominated. | REST |
 | `Date` | String | The calendar date (formatted as YYYY-MM-DD) when the rating was issued. | REST |
 | `Firm` | String | The name of the research firm or investment bank issuing the rating. | REST |
-| `Importance` | long | A subjective indicator of the importance of the earnings event, on a scale from 0 (lowest) to 5 (highest). | REST |
+| `Importance` | long | A subjective indicator of the importance of the event, on a scale from 0 (lowest) to 5 (highest). | REST |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the rating was last updated in the system. | REST |
 | `Notes` | String | Additional context or commentary. | REST |
 | `PreviousAdjustedPriceTarget` | double | The previous price target adjusted for stock splits and dividends. | REST |
@@ -95,7 +95,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/partners/benzinga/analyst-ratings.md>
+- [Analyst Ratings (REST)](https://massive.com/docs/rest/partners/benzinga/analyst-ratings)
 
 ---
 

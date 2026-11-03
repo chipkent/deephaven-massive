@@ -89,10 +89,10 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/forex/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/indices/tickers/all-tickers.md>
-- <https://massive.com/docs/rest/stocks/tickers/all-tickers.md>
+- [All Tickers (REST, crypto)](https://massive.com/docs/rest/crypto/tickers/all-tickers)
+- [All Tickers (REST, forex)](https://massive.com/docs/rest/forex/tickers/all-tickers)
+- [All Tickers (REST, indices)](https://massive.com/docs/rest/indices/tickers/all-tickers)
+- [All Tickers (REST, stocks)](https://massive.com/docs/rest/stocks/tickers/all-tickers)
 
 ---
 

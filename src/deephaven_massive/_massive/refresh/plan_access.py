@@ -33,9 +33,9 @@ in three sections that say which of Massive's plans get the data:
 
 Each section has its summary line and up to two tables (individual and business plans) of
 `| <plan> | <value> |` rows; a WebSocket page's history section has a summary line and no
-table. `plan_access(page)` reads the three sections and the page's title (its one `###`
-heading) into one `PlanAccess`, with one `PlanTerms` per plan, merged across the sections by
-the plan's name. The refresh stores the result in `descriptions.json`, keyed by page URL, and
+table. `plan_access(page)` reads the three sections into one `PlanAccess`, with one
+`PlanTerms` per plan, merged across the sections by the plan's name. The refresh stores the
+result in `descriptions.json`, keyed by page URL, beside the page's title (`docs.title`), and
 the generated dataset reference renders it, so the reference shows Massive's own plan tables
 and follows them on every refresh.
 
@@ -59,9 +59,6 @@ __all__ = ["plan_access"]
 
 _SECTIONS: Final = ("Access", "Recency", "History")
 """The three plan sections, in page order, by the word after `## Plan `."""
-
-_TITLE: Final = re.compile(r"^### (?P<title>\S.*?)\s*$", re.MULTILINE)
-"""A page's title heading."""
 
 _SECTION: Final = re.compile(r"^## Plan (?P<name>Access|Recency|History)\s*$")
 """The heading of one plan section."""
@@ -87,24 +84,21 @@ def plan_access(page: str) -> PlanAccess | None:
         page: The page's Markdown text, as the snapshot stores it.
 
     Returns:
-        The page's title, the three summary lines (a summary Massive left empty is `""`), and
-        one `PlanTerms` per plan, in the order the access section lists the plans (a plan only
+        The three summary lines (a summary Massive left empty is `""`) and one `PlanTerms`
+        per plan, in the order the access section lists the plans (a plan only
         the recency or history section names follows them, `"Not included"` in access); no
         plans for a page whose sections have only their summary lines ("Available to existing
         subscribers only"); None for a page without a "Plan Access" section.
 
     Raises:
-        DocsError: If the page has a "Plan Access" section but no title, a section is missing,
-            out of order, or repeated, a section lacks its summary line, a section holds a line
+        DocsError: If the page has a "Plan Access" section and a section is missing, out
+            of order, or repeated, a section lacks its summary line, a section holds a line
             that is not part of a plan table, or a plan appears twice in one section.
     """
     lines = page.splitlines()
     starts = [(i, found["name"]) for i, line in enumerate(lines) if (found := _SECTION.match(line))]
     if not starts:
         return None
-    title = _TITLE.search(page)
-    if title is None:
-        raise DocsError("a page with plan tables has no ### title")
     if [name for _, name in starts] != list(_SECTIONS):
         raise DocsError(f"plan sections {[name for _, name in starts]}, expected {list(_SECTIONS)}")
     summaries: dict[str, str] = {}
@@ -114,7 +108,6 @@ def plan_access(page: str) -> PlanAccess | None:
         summaries[name], values[name] = _section(name, lines[start + 1 : end])
     plans = list(dict.fromkeys([*values["Access"], *values["Recency"], *values["History"]]))
     return PlanAccess(
-        title=title["title"],
         access=summaries["Access"],
         recency=summaries["Recency"],
         history=summaries["History"],

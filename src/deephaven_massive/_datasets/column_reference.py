@@ -46,6 +46,7 @@ from deephaven_massive._datasets.column_descriptions import (
     joined_with_and,
 )
 from deephaven_massive._datasets.filters import filter_keys
+from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._massive import ParamKind, Transport
 
@@ -121,13 +122,32 @@ _SESSION_HEADING: Final = "Session methods"
 
 _MERGE: Final = (
     "Tables of one kind from two asset classes (stock and forex quotes, say) can differ in "
-    "their columns, while the columns they share have one name and type. To merge them, keep "
-    "the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then "
-    "`merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each "
-    'missing one to the other table as a typed null first, such as `b.update("Tape = '
-    'NULL_LONG")`.'
+    "their columns. To merge them, keep the shared columns: `common = [c for c in "
+    "a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. "
+    "To keep every column instead, add each missing one to the other table as a typed null "
+    'first, such as `b.update("Tape = NULL_LONG")`.'
 )
 """The paragraph of the index on merging tables of different classes."""
+
+_TYPE_DIFFERENCES: Final = (
+    "A column such tables share has one name, and one type in every class except those listed "
+    "below, where Massive declares a different type for some classes than for others. Cast one "
+    "table's column to the other's type before a merge, such as "
+    '`a.update("LastTradeSize = (double) LastTradeSize")`.'
+)
+"""The paragraph of the index over the shared columns whose type differs between classes."""
+
+_TYPE_NAMES: Final[Mapping[ColumnType, str]] = {
+    ColumnType.DOUBLE: "a 64-bit decimal number",
+    ColumnType.LONG: "a 64-bit whole number",
+    ColumnType.INT: "a 32-bit whole number",
+    ColumnType.BOOLEAN: "true or false",
+    ColumnType.STRING: "text",
+    ColumnType.INSTANT: "an exact moment in time",
+    ColumnType.LONG_ARRAY: "an array of `long`",
+    ColumnType.STRING_ARRAY: "an array of `String`",
+}
+"""What each Deephaven type a page names holds, as the index's type legend says it."""
 
 _WIRE_GUIDE: Final = (
     "The Massive field behind each column, per transport (`request` for a value the library "
@@ -273,8 +293,9 @@ def render(
     **Description**, **Supplied by**, the transports that fill it), and, folded in
     `<details>`, the Massive field behind each column per
     transport the dataset reads (`request` for a key filled from the request). Last come the
-    sorted, distinct vendor pages and a footer with the generator command and the date
-    Massive's documentation was fetched.
+    sorted, distinct vendor pages, each a link to the web page (the fetched URL without its
+    `.md`) labeled with the page's title and documentation area (`Provenance.titles`), and a
+    footer with the generator command and the date Massive's documentation was fetched.
 
     A `|` in a table cell is escaped with a backslash, no line has trailing whitespace, and
     every page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -288,8 +309,8 @@ def render(
         catalog: Every dataset to document, in declaration order; the process's catalog for
             the real pages, or a synthetic one in tests.
         provenance: The fetch date, the vendor URLs of the generated sources, and their pages'
-            plan tables, as `_massive.provenance()` returns them; a source without URLs adds
-            none, and a page without plan tables adds no column.
+            plan tables and titles, as `_massive.provenance()` returns them; a source without
+            URLs adds none, and a page without plan tables adds no column.
         calls: Each dataset's call, by dataset name; it must name every dataset of `catalog`.
 
     Returns:
@@ -308,7 +329,7 @@ def render(
         raise KeyError(f"no call given for the datasets {missing}")
     fetched = provenance.fetched.isoformat()
     footer = ["---", "", _PROVENANCE.format(command=COMMAND, fetched=fetched)]
-    pages = {INDEX: _index(specs, calls, footer)}
+    pages = {INDEX: _index(specs, calls, footer, catalog=catalog)}
     for spec in specs:
         pages[page_name(spec)] = _page(
             spec, calls[spec.name], catalog=catalog, provenance=provenance, footer=footer
@@ -317,24 +338,36 @@ def render(
 
 
 def _index(
-    specs: Sequence[DatasetSpec], calls: Mapping[str, DatasetCall], footer: list[str]
+    specs: Sequence[DatasetSpec],
+    calls: Mapping[str, DatasetCall],
+    footer: list[str],
+    *,
+    catalog: Catalog,
 ) -> str:
     """Render the index page: the grid of asset classes, then every dataset by namespace.
+
+    Under the title come what a page shows and what each type a page names holds; under the
+    grid, how to merge tables of one kind from two classes, and the columns they share whose
+    type differs between classes (`_type_differences`).
 
     Args:
         specs: Every dataset, in catalog order.
         calls: Each dataset's call, by name.
         footer: The footer's lines.
+        catalog: The catalog that merges each dataset's schema, for the columns' types.
 
     Returns:
         The page text, ending in one newline.
     """
+    types = "; ".join(f"`{name.value}`, {meaning}" for name, meaning in _TYPE_NAMES.items())
     lines = [
         "# Dataset reference",
         "",
         f"<!-- Generated by `{COMMAND}`; do not edit by hand. -->",
         "",
         _INDEX_GUIDE,
+        "",
+        f"A column's Deephaven type is one of: {types}.",
     ]
     classes = [c.value for c in AssetClass]
     grid: dict[str, dict[str, DatasetSpec]] = {}
@@ -351,6 +384,9 @@ def _index(
             cells = [f"[✓]({page_name(by_class[c])})" if c in by_class else "" for c in classes]
             lines.append(_row([f"`{name}`", *cells]))
         lines.extend(("", _MERGE))
+        differences = _type_differences(grid, catalog)
+        if differences:
+            lines.extend(("", _TYPE_DIFFERENCES, "", *differences))
     # A dataset named without a dot, such as `snapshots`, is a method of the session rather than
     # of a namespace, so it goes under a heading that names no namespace.
     by_heading: dict[str, list[DatasetSpec]] = {}
@@ -376,6 +412,40 @@ def _index(
     return "\n".join(lines) + "\n"
 
 
+def _type_differences(grid: Mapping[str, Mapping[str, DatasetSpec]], catalog: Catalog) -> list[str]:
+    """List the columns that tables of one kind share with a different type in some classes.
+
+    Massive declares some fields with one type for one asset class and another for the next
+    (a snapshot's `LastTradeSize` is a whole number for stocks and a decimal for crypto), and
+    the library keeps each declared type, so such a column must be cast before a merge.
+
+    Args:
+        grid: Each dataset name that several classes have, mapped to its dataset per class.
+        catalog: The catalog that merges each dataset's schema.
+
+    Returns:
+        One list item per dataset name with such a column, in grid order, such as
+        ``- `movers`: `LastTradeSize` is long for stocks, double for crypto``; empty when
+        every shared column has one type.
+    """
+    items = []
+    for name, by_class in grid.items():
+        types: dict[str, dict[str, list[str]]] = {}
+        for asset_class, spec in by_class.items():
+            for column in catalog.dataset_schema(spec).columns:
+                by_type = types.setdefault(column.name, {})
+                by_type.setdefault(column.type.value, []).append(asset_class)
+        differing = [
+            f"`{column}` is "
+            + ", ".join(f"{t} for {joined_with_and(found)}" for t, found in by_type.items())
+            for column, by_type in types.items()
+            if len(by_type) > 1
+        ]
+        if differing:
+            items.append(f"- `{name}`: " + "; ".join(differing))
+    return items
+
+
 def _page(
     spec: DatasetSpec,
     call: DatasetCall,
@@ -390,7 +460,7 @@ def _page(
         spec: The dataset.
         call: Its call.
         catalog: The catalog that merges its schema and holds its REST paths.
-        provenance: The vendor URLs of its sources and their plan tables.
+        provenance: The vendor URLs of its sources and their plan tables and titles.
         footer: The footer's lines.
 
     Returns:
@@ -418,7 +488,7 @@ def _page(
     lines.extend(_columns(spec, catalog))
     if urls:
         lines.extend(("", _LINKS_HEADING, ""))
-        lines.extend(f"- <{url}>" for url in urls)
+        lines.extend(_links(urls, provenance))
     lines.extend(("", *footer))
     return "\n".join(lines) + "\n"
 
@@ -520,7 +590,7 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
 
     Args:
         urls: The dataset's vendor pages.
-        provenance: Their plan tables, by URL.
+        provenance: Their plan tables and titles, by URL.
 
     Returns:
         The section's lines, starting with a blank line; empty when no page has plan tables.
@@ -538,7 +608,7 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
     if listed:
         plans = list(dict.fromkeys(terms.plan for _, page in listed for terms in page.plans))
         # Pages of one title and area, such as one per asset class, share one column.
-        titles = [f"{page.title} ({_area(url)})" for url, page in listed]
+        titles = [_label(url, provenance) for url, _ in listed]
         columns = {
             title: [page for (_, page), own in zip(listed, titles, strict=True) if own == title]
             for title in titles
@@ -556,7 +626,7 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
     if unlisted:
         lines.append("")
         lines.extend(
-            f"- {page.title} ({_area(url)}): "
+            f"- {_label(url, provenance)}: "
             + "; ".join(text for text in (page.access, page.recency, page.history) if text)
             for url, page in unlisted
         )
@@ -579,6 +649,47 @@ def _plan_cell(access: str, recency: str | None, history: str | None) -> str:
         return _NOT_INCLUDED
     shown = [part for part in (recency, history) if part and part != _NOT_INCLUDED]
     return ", ".join(shown) or access
+
+
+def _label(url: str, provenance: Provenance) -> str:
+    """Name a vendor page as the reference shows it: its title, then its documentation area.
+
+    Args:
+        url: The page's URL.
+        provenance: The titles of the vendor pages, by URL, which include this page's.
+
+    Returns:
+        Such as `"Custom Bars (OHLC) (REST)"`.
+    """
+    return f"{provenance.titles[url]} ({_area(url)})"
+
+
+def _links(urls: Sequence[str], provenance: Provenance) -> list[str]:
+    """Render a page's list of vendor pages: one link per page, labeled with its name.
+
+    Massive serves each documentation page twice: as Markdown at the URL the snapshot fetched,
+    which ends in `.md`, and as the web page people read at the same URL without it. Each link
+    goes to the web page. Massive documents a source several classes share once per class
+    under one title (`Unified Snapshot`), so a label that two pages of the list share names
+    the asset class its URL names, as a path segment, after the area.
+
+    Args:
+        urls: The dataset's vendor pages, as the snapshot fetched them.
+        provenance: The titles of the vendor pages, by URL, which include these.
+
+    Returns:
+        One list item per URL, in order, such as
+        `"- [Unified Snapshot (REST, crypto)](https://massive.com/docs/rest/crypto/snapshots/unified-snapshot)"`.
+    """
+    labels = [_label(url, provenance) for url in urls]
+    items = []
+    for url, label in zip(urls, labels, strict=True):
+        named = next((c.value for c in AssetClass if c.value in _segments(url)), None)
+        shown = label
+        if labels.count(label) > 1 and named is not None:
+            shown = f"{provenance.titles[url]} ({_area(url)}, {named})"
+        items.append(f"- [{shown}]({url.removesuffix('.md')})")
+    return items
 
 
 def _area(url: str) -> str:

@@ -106,9 +106,9 @@ refresh/             build time only; excluded from the wheel; may import any of
   snapshot.py        the snapshot's location (vendor/massive/), layout, and manifest; store
                      (staged write, atomic swap) and verified load
   fetch.py           download and put each file in canonical form; stores through snapshot.py
-  docs.py            llms.txt and the pages it links: each REST page's endpoint line, each
-                     WebSocket page's feed (cluster and channel), the flat-file overview
-                     prefix tables, "Columns" tables, and "Example Data" headers
+  docs.py            llms.txt and the pages it links: each page's title, each REST page's
+                     endpoint line, each WebSocket page's feed (cluster and channel), the
+                     flat-file overview prefix tables, "Columns" tables, and "Example Data" headers
   knowledge_base.py  ARTICLES (slug -> what the library takes from it), the knowledge-base
                      articles the library relies on; the Markdown of an article's HTML page
   plan_access.py     each vendor page's "Plan Access", "Plan Recency", and "Plan History"
@@ -1050,10 +1050,11 @@ checks.
   schema lacks, raises, so `sources` and `provenance` reject the same files. A description
   belongs to a `(source, wire key)`, so a projected field keeps the description of its wire
   key.
-  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]], plans: Mapping[str, PlanAccess])`
-  exposes the fetch date, the URLs of each source, and each vendor page's plan tables (by page
-  URL: its title, the access, recency, and history summaries, and one `PlanTerms` per plan,
-  which the refresh's `plan_access` reads into `descriptions.json`), for the dataset reference;
+  `provenance() -> Provenance(fetched: date, urls: Mapping[tuple[Transport, str], tuple[str, ...]], plans: Mapping[str, PlanAccess], titles: Mapping[str, str])`
+  exposes the fetch date, the URLs of each source, each vendor page's plan tables (by page
+  URL: the access, recency, and history summaries, and one `PlanTerms` per plan, which the
+  refresh's `plan_access` reads into `descriptions.json`), and each documenting page's title
+  (its `###` heading, which the refresh's `docs.title` reads), for the dataset reference;
   it loads every transport the file gives URLs for. Each file is read once under the lock,
   whichever of `sources` and `provenance` comes first. No other name is added to the interface.
 

@@ -70,11 +70,11 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/forex/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/indices/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/options/market-operations/market-holidays.md>
-- <https://massive.com/docs/rest/stocks/market-operations/market-holidays.md>
+- [Market Holidays (REST, crypto)](https://massive.com/docs/rest/crypto/market-operations/market-holidays)
+- [Market Holidays (REST, forex)](https://massive.com/docs/rest/forex/market-operations/market-holidays)
+- [Market Holidays (REST, indices)](https://massive.com/docs/rest/indices/market-operations/market-holidays)
+- [Market Holidays (REST, options)](https://massive.com/docs/rest/options/market-operations/market-holidays)
+- [Market Holidays (REST, stocks)](https://massive.com/docs/rest/stocks/market-operations/market-holidays)
 
 ---
 

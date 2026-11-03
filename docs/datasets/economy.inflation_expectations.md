@@ -68,7 +68,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/economy/inflation-expectations.md>
+- [Inflation Expectations (REST)](https://massive.com/docs/rest/economy/inflation-expectations)
 
 ---
 

@@ -214,11 +214,11 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/forex/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/indices/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/options/snapshots/unified-snapshot.md>
-- <https://massive.com/docs/rest/stocks/snapshots/unified-snapshot.md>
+- [Unified Snapshot (REST, crypto)](https://massive.com/docs/rest/crypto/snapshots/unified-snapshot)
+- [Unified Snapshot (REST, forex)](https://massive.com/docs/rest/forex/snapshots/unified-snapshot)
+- [Unified Snapshot (REST, indices)](https://massive.com/docs/rest/indices/snapshots/unified-snapshot)
+- [Unified Snapshot (REST, options)](https://massive.com/docs/rest/options/snapshots/unified-snapshot)
+- [Unified Snapshot (REST, stocks)](https://massive.com/docs/rest/stocks/snapshots/unified-snapshot)
 
 ---
 

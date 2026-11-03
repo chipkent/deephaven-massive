@@ -275,7 +275,6 @@ def _descriptions(**change: object) -> str:
         "class_descriptions": {"REST": {"/v1/x": {"price": {"options": "Per share."}}}},
         "plans": {
             _URL: {
-                "title": "X",
                 "access": "Included in all Stocks plans",
                 "recency": "Real-time",
                 "history": "",
@@ -284,6 +283,7 @@ def _descriptions(**change: object) -> str:
                 ],
             }
         },
+        "titles": {_URL: "X"},
     }
     return json.dumps({**document, **change})
 
@@ -300,14 +300,15 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
     assert isinstance(found.texts[Transport.REST], MappingProxyType)
     assert isinstance(found.texts[Transport.REST]["/v1/x"], MappingProxyType)
     page = found.plans[_URL]
-    assert (page.title, page.access, page.recency, page.history) == (
-        "X",
+    assert (page.access, page.recency, page.history) == (
         "Included in all Stocks plans",
         "Real-time",
         "",
     )
     assert page.plans == (PlanTerms(plan="Stocks Basic", access="Included"),)
     assert isinstance(found.plans, MappingProxyType)
+    assert found.titles == {_URL: "X"}
+    assert isinstance(found.titles, MappingProxyType)
 
 
 @pytest.mark.parametrize(
@@ -373,7 +374,6 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             _descriptions(
                 plans={
                     _URL: {
-                        "title": "X",
                         "access": "A",
                         "recency": "R",
                         "history": "H",
@@ -388,7 +388,6 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             _descriptions(
                 plans={
                     _URL: {
-                        "title": "X",
                         "access": "A",
                         "recency": "R",
                         "history": "H",
@@ -399,6 +398,12 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             TypeError,
             "'recency' is 1, not a string",
         ),
+        (
+            json.dumps({k: v for k, v in json.loads(_descriptions()).items() if k != "titles"}),
+            ValueError,
+            "missing member 'titles'",
+        ),
+        (_descriptions(titles={_URL: 1}), TypeError, "titles is .* not an object of strings"),
     ],
     ids=[
         "not an object",
@@ -421,6 +426,8 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
         "a page's plans not an object",
         "a plan row not an object",
         "a plan's recency not text",
+        "no titles",
+        "a title not text",
     ],
 )
 def test_parse_descriptions_coerces_nothing(

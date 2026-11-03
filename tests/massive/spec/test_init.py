@@ -267,7 +267,6 @@ def _descriptions(**change: object) -> str:
         "class_descriptions": {"REST": {"/v1/x": {"price": {"options": "Per share."}}}},
         "plans": {
             _URL: {
-                "title": "X",
                 "access": "Included in all Stocks plans",
                 "recency": "Real-time",
                 "history": "",
@@ -276,6 +275,7 @@ def _descriptions(**change: object) -> str:
                 ],
             }
         },
+        "titles": {_URL: "X"},
     }
     return json.dumps({**document, **change})
 
@@ -319,6 +319,7 @@ def test_the_loader_joins_and_checks_files_of_its_own(
         fetched=dt.date(2026, 10, 27),
         urls={(Transport.REST, "/v1/x"): (_URL,)},
         plans={_URL: found.plans[_URL]},
+        titles={_URL: "X"},
     )
     assert found.plans[_URL].plans[0].plan == "Stocks Basic"
 

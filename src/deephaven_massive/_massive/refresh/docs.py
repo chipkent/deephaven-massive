@@ -22,7 +22,7 @@ This module turns those documents into plain values and nothing else:
 - `page_urls(index, area)` lists the pages of one area (`REST`, `WEBSOCKET`, `FLAT_FILES`)
   that `fetch` downloads, after checking each URL;
 - `page_file(url, area)` maps a page URL to its file below the area's snapshot directory;
-- `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`,
+- `title(page)`, `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`,
   `example_header(page)`, and `example_rows(page)` read what one page documents.
 
 `fetch` and `snapshot` use them to store and find the pages; `rest_sources`, `ws_sources`, and
@@ -57,6 +57,7 @@ __all__ = [
     "links",
     "page_file",
     "page_urls",
+    "title",
 ]
 
 
@@ -86,6 +87,8 @@ FLAT_FILES: Final = Area(section="Flat Files", prefix="https://massive.com/docs/
 # A section heading and a link item of the index.
 _SECTION = re.compile(r"^## (?P<title>\S.*?)\s*$")
 _LINK = re.compile(r"^- \[(?P<title>[^\]]+)\]\((?P<url>[^)\s]+)\)")
+# A page's title, its one `###` heading.
+_TITLE = re.compile(r"^### (?P<title>\S.*?)\s*$", re.MULTILINE)
 # A REST page's endpoint line.
 _ENDPOINT = re.compile(r"^\*\*Endpoint:\*\* `GET (?P<path>/[^`\s]*)`\s*$", re.MULTILINE)
 # A WebSocket page's channel sentence and connection URLs.
@@ -218,6 +221,29 @@ def page_urls(index: str, area: Area) -> list[str]:
     for url in urls:
         page_file(url, area)
     return urls
+
+
+def title(page: str) -> str:
+    """Return the title of a documentation page: the text of its first `###` heading.
+
+    A page starts with its area and asset class as `#` and `##` headings (`# REST`,
+    `## Stocks`), then names itself in its one `###` heading (`### Custom Bars (OHLC)`). The
+    dataset reference shows that name over the page's plan tables and as the text of its link.
+
+    Args:
+        page: The Markdown text of a page.
+
+    Returns:
+        The heading's text, without the `###` and surrounding whitespace, such as
+        `"Custom Bars (OHLC)"`.
+
+    Raises:
+        DocsError: If the page has no `###` heading, so it names nothing a link could show.
+    """
+    found = _TITLE.search(page)
+    if found is None:
+        raise DocsError("a page has no ### title")
+    return found["title"]
 
 
 def endpoint(page: str) -> str | None:

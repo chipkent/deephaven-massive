@@ -71,12 +71,12 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/flat-files/futures/trades/cbot.md>
-- <https://massive.com/docs/flat-files/futures/trades/cme.md>
-- <https://massive.com/docs/flat-files/futures/trades/comex.md>
-- <https://massive.com/docs/flat-files/futures/trades/nymex.md>
-- <https://massive.com/docs/rest/futures/trades-quotes/trades.md>
-- <https://massive.com/docs/websocket/futures/trades.md>
+- [Trades Aggregates - CBOT (flat files)](https://massive.com/docs/flat-files/futures/trades/cbot)
+- [Trades Aggregates - CME (flat files)](https://massive.com/docs/flat-files/futures/trades/cme)
+- [Trades Aggregates - COMEX (flat files)](https://massive.com/docs/flat-files/futures/trades/comex)
+- [Trades Aggregates - NYMEX (flat files)](https://massive.com/docs/flat-files/futures/trades/nymex)
+- [Trades (REST)](https://massive.com/docs/rest/futures/trades-quotes/trades)
+- [Trades (WebSocket)](https://massive.com/docs/websocket/futures/trades)
 
 ---
 

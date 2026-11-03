@@ -80,11 +80,11 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/flat-files/options/day-aggregates.md>
-- <https://massive.com/docs/flat-files/options/minute-aggregates.md>
-- <https://massive.com/docs/rest/options/aggregates/custom-bars.md>
-- <https://massive.com/docs/websocket/options/aggregates-per-minute.md>
-- <https://massive.com/docs/websocket/options/aggregates-per-second.md>
+- [Day Aggregates (flat files)](https://massive.com/docs/flat-files/options/day-aggregates)
+- [Minute Aggregates (flat files)](https://massive.com/docs/flat-files/options/minute-aggregates)
+- [Custom Bars (OHLC) (REST)](https://massive.com/docs/rest/options/aggregates/custom-bars)
+- [Aggregates (Per Minute) (WebSocket)](https://massive.com/docs/websocket/options/aggregates-per-minute)
+- [Aggregates (Per Second) (WebSocket)](https://massive.com/docs/websocket/options/aggregates-per-second)
 
 ---
 

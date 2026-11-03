@@ -4,6 +4,8 @@
 
 Every dataset the library serves, one page each. A page shows how to call the dataset, its verbs, the `sort` values and `filters` keys it accepts, which of Massive's plans include it, and every column of its tables, in the order every verb returns them. The same column descriptions appear in the web UI's column tooltips and in a query's `columns()`, and `dm.datasets()` lists these datasets as a table.
 
+A column's Deephaven type is one of: `double`, a 64-bit decimal number; `long`, a 64-bit whole number; `int`, a 32-bit whole number; `boolean`, true or false; `String`, text; `Instant`, an exact moment in time; `long[]`, an array of `long`; `String[]`, an array of `String`.
+
 ## By asset class
 
 The datasets that several asset classes have, one row each; a mark links that class's page. Every other dataset is listed under its namespace below, and a method of the session itself, such as `m.snapshots`, under Session methods.
@@ -22,7 +24,12 @@ The datasets that several asset classes have, one row each; a mark links that cl
 | `daily_open_close` | [✓](stocks.daily_open_close.md) | [✓](options.daily_open_close.md) |  | [✓](indices.daily_open_close.md) |  | [✓](crypto.daily_open_close.md) |
 | `contracts` |  | [✓](options.contracts.md) | [✓](futures.contracts.md) |  |  |  |
 
-Tables of one kind from two asset classes (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
+Tables of one kind from two asset classes (stock and forex quotes, say) can differ in their columns. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
+
+A column such tables share has one name, and one type in every class except those listed below, where Massive declares a different type for some classes than for others. Cast one table's column to the other's type before a merge, such as `a.update("LastTradeSize = (double) LastTradeSize")`.
+
+- `snapshots`: `LastQuoteBidSize` is long for stocks and futures, double for options; `LastQuoteAskSize` is long for stocks and futures, double for options; `LastTradeSize` is long for stocks, options and futures, double for crypto; `LastMinuteVolume` is double for stocks, options, forex and crypto, long for futures; `SessionVolume` is double for options, long for futures
+- `movers`: `LastTradeSize` is long for stocks, double for crypto
 
 ## `m.stocks`
 

@@ -108,7 +108,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/snapshots/top-market-movers.md>
+- [Top Market Movers (REST)](https://massive.com/docs/rest/crypto/snapshots/top-market-movers)
 
 ---
 

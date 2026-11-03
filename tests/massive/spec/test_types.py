@@ -480,7 +480,6 @@ def test_provenance_urls_are_copied_and_read_only() -> None:
 
 def test_provenance_plans_are_copied_and_read_only() -> None:
     page = PlanAccess(
-        title="Trades",
         access="Included in select Stocks plans",
         recency="Real-time",
         history="Not applicable to websockets",
@@ -494,6 +493,16 @@ def test_provenance_plans_are_copied_and_read_only() -> None:
     with pytest.raises(TypeError):
         cast("dict[str, PlanAccess]", provenance.plans)["x"] = page
     assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).plans == {}
+
+
+def test_provenance_titles_are_copied_and_read_only() -> None:
+    titles = {_URL: "Trades"}
+    provenance = Provenance(fetched=dt.date(2026, 10, 27), urls={}, titles=titles)
+    titles.clear()
+    assert provenance.titles == {_URL: "Trades"}
+    with pytest.raises(TypeError):
+        cast("dict[str, str]", provenance.titles)["x"] = "X"
+    assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).titles == {}
 
 
 def test_provenance_refuses_a_single_string_of_urls() -> None:

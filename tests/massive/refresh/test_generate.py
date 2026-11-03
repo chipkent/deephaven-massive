@@ -87,6 +87,14 @@ def test_every_transport_s_descriptions_and_urls_are_recorded() -> None:
     assert document["urls"]["WS"]["stocks/T"] == [
         "https://massive.com/docs/websocket/stocks/trades.md"
     ]
+    # Every documenting page has its title, its `###` heading, whether or not it has plans.
+    urls = {
+        url for by_key in document["urls"].values() for found in by_key.values() for url in found
+    }
+    assert set(document["titles"]) == urls
+    types = "https://massive.com/docs/rest/forex/tickers/ticker-types.md"
+    assert types not in document["plans"]
+    assert document["titles"][types] == "Ticker Types"
 
 
 def test_refresh_writes_only_a_changed_file(tmp_path: Path) -> None:

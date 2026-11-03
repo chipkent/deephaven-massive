@@ -91,7 +91,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/futures/contracts.md>
+- [Contracts (REST)](https://massive.com/docs/rest/futures/contracts)
 
 ---
 

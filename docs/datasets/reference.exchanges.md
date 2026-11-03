@@ -74,10 +74,10 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/crypto/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/forex/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/options/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/stocks/market-operations/exchanges.md>
+- [Exchanges (REST, crypto)](https://massive.com/docs/rest/crypto/market-operations/exchanges)
+- [Exchanges (REST, forex)](https://massive.com/docs/rest/forex/market-operations/exchanges)
+- [Exchanges (REST, options)](https://massive.com/docs/rest/options/market-operations/exchanges)
+- [Exchanges (REST, stocks)](https://massive.com/docs/rest/stocks/market-operations/exchanges)
 
 ---
 

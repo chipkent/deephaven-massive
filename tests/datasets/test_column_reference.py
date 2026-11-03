@@ -38,6 +38,7 @@ from deephaven_massive._datasets.column_reference import (
     render,
     sync,
 )
+from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import (
     Field,
@@ -475,11 +476,10 @@ _CATALOG = Catalog(
 )
 
 
-def _plan_page(title: str, rows: tuple[tuple[str, str, str | None, str | None], ...]) -> object:
+def _plan_page(rows: tuple[tuple[str, str, str | None, str | None], ...]) -> object:
     """Return a page's plan tables, built from a real one, as `Provenance.plans` holds them.
 
     Args:
-        title: The page's title.
         rows: Each plan's name, access, recency, and history.
 
     Returns:
@@ -488,7 +488,6 @@ def _plan_page(title: str, rows: tuple[tuple[str, str, str | None, str | None], 
     terms = _REAL_PLANS.plans[0]
     return dataclasses.replace(
         _REAL_PLANS,
-        title=title,
         access="Access.",
         recency="Recency.",
         history="",
@@ -520,7 +519,6 @@ _PROVENANCE = Provenance(
         "Mapping[str, Any]",
         {
             "https://docs.example/a.md": _plan_page(
-                "Trades",
                 (
                     ("Stocks Basic", "Included", "End-of-day", "2 years"),
                     ("Stocks Starter", "Included", None, None),
@@ -528,16 +526,23 @@ _PROVENANCE = Provenance(
                 ),
             ),
             "https://massive.com/docs/websocket/stocks/trades.md": _plan_page(
-                "Trades",
                 (
                     ("Stocks Basic", "Included", "Not included", None),
                     ("Stocks Advanced", "Included", "Real-time", None),
                 ),
             ),
             # A page that lists no plan, only its summaries.
-            "https://docs.example/rest/stocks/ratios.md": _plan_page("Ratios", ()),
+            "https://docs.example/rest/stocks/ratios.md": _plan_page(()),
         },
     ),
+    titles={
+        "https://docs.example/rest/crypto/ratios.md": "Ratios",
+        "https://docs.example/rest/stocks/ratios.md": "Ratios",
+        "https://docs.example/ws/crypto/trades.md": "Trades",
+        "https://massive.com/docs/websocket/stocks/trades.md": "Trades",
+        "https://docs.example/a.md": "Trades",
+        "https://docs.example/ws/crypto.md": "Crypto Trades",
+    },
 )
 
 _CALLS = {
@@ -689,8 +694,8 @@ from the request; empty for a column the library computes).
 
 Massive's documentation of this dataset:
 
-- <https://docs.example/a.md>
-- <https://massive.com/docs/websocket/stocks/trades.md>
+- [Trades (Massive)](https://docs.example/a)
+- [Trades (WebSocket)](https://massive.com/docs/websocket/stocks/trades)
 
 ---
 
@@ -739,7 +744,10 @@ def test_the_rendered_crypto_trades_page() -> None:
     assert "| Column | WebSocket field |\n" in page
     received = "| `Received` | Instant | When Massive received it. | WebSocket |\n"
     assert received in page
-    links = "\nMassive's documentation of this dataset:\n\n- <https://docs.example/ws/crypto.md>\n"
+    links = (
+        "\nMassive's documentation of this dataset:\n\n"
+        "- [Crypto Trades (Massive)](https://docs.example/ws/crypto)\n"
+    )
     assert page.endswith(f"</details>\n{links}\n---\n\n{_FOOTER}\n")
     # Its page has no plan tables.
     assert "## Plan access" not in page
@@ -754,14 +762,16 @@ def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
 
 def test_the_real_pages_link_only_the_datasets_own_class() -> None:
     options = rendered()["options.snapshots.md"]
-    snapshot = "https://massive.com/docs/rest/{}/snapshots/unified-snapshot.md"
-    assert f"- <{snapshot.format('options')}>" in options
+    snapshot = "https://massive.com/docs/rest/{}/snapshots/unified-snapshot"
+    # A link opens the web page: the Markdown URL without its `.md`.
+    assert f"- [Unified Snapshot (REST)]({snapshot.format('options')})\n" in options
     for other in ("stocks", "forex", "crypto", "indices"):
         assert snapshot.format(other) not in options
-    # The session-wide snapshot spans classes, so it links every class's page.
+    # The session-wide snapshot spans classes, so it links every class's page, each of one
+    # title, so each label names its class.
     snapshots = rendered()["snapshots.md"]
     for every in ("stocks", "options", "forex", "crypto", "indices"):
-        assert f"- <{snapshot.format(every)}>" in snapshots
+        assert f"- [Unified Snapshot (REST, {every})]({snapshot.format(every)})\n" in snapshots
 
 
 def test_every_page_line_is_clean() -> None:
@@ -921,3 +931,54 @@ def test_the_merge_recipe_and_the_grid_are_on_the_index() -> None:
     assert "To merge them" in pages[INDEX]
     assert "| `bars` | [✓](stocks.bars.md) | [✓](options.bars.md) |" in pages[INDEX]
     assert "To merge them" not in pages["stocks.trades.md"]
+
+
+def test_the_real_index_lists_each_shared_column_whose_type_differs() -> None:
+    # Massive declares a snapshot's or a mover's trade size a whole number for stocks and a
+    # decimal for crypto, so the index names the column and the cast that merges them.
+    index = rendered()[INDEX]
+    assert "\n- `movers`: `LastTradeSize` is long for stocks, double for crypto\n" in index
+    assert "`LastTradeSize` is long for stocks, options and futures, double for crypto" in index
+    assert '`a.update("LastTradeSize = (double) LastTradeSize")`' in index
+    # The test catalog's stock and crypto trades agree on every shared column's type.
+    assert "Cast one table's column" not in _rendered()[INDEX]
+
+
+def test_the_index_says_what_every_type_holds() -> None:
+    index = _rendered()[INDEX]
+    legend = next(line for line in index.splitlines() if "Deephaven type is one of" in line)
+    for column_type in ColumnType:
+        assert f"`{column_type.value}`, " in legend
+    assert "`long[]`, an array of `long`" in legend
+
+
+def test_each_vendor_link_is_labeled_and_opens_the_web_page() -> None:
+    # Pages of one title name the class their URL names; a `.md` inside the path stays.
+    urls = [
+        "https://docs.example/rest/crypto/ratios.md",
+        "https://docs.example/rest/stocks/ratios.md",
+        "https://docs.example/rest/ratios.md",
+        "https://docs.example/rest/more/ratios.md",
+        "https://massive.com/docs/rest/x.md/summary.md",
+    ]
+    titles = dict.fromkeys(urls[:4], "Ratios") | {urls[4]: "Summary"}
+    linked = Provenance(fetched=dt.date(2026, 10, 27), urls={(R, "/ratios"): urls}, titles=titles)
+    page = render(_CATALOG, linked, _CALLS)["stocks.financials.ratios.md"]
+    assert (
+        "Massive's documentation of this dataset:\n\n"
+        "- [Ratios (Massive, crypto)](https://docs.example/rest/crypto/ratios)\n"
+        "- [Ratios (Massive)](https://docs.example/rest/more/ratios)\n"
+        "- [Ratios (Massive)](https://docs.example/rest/ratios)\n"
+        "- [Ratios (Massive, stocks)](https://docs.example/rest/stocks/ratios)\n"
+        "- [Summary (REST)](https://massive.com/docs/rest/x.md/summary)\n"
+    ) in page
+
+
+def test_a_real_key_column_names_the_path_of_each_differing_quote() -> None:
+    # Custom bars stamp `t` at the window's start, the grouped daily bars at its end.
+    bars = rendered()["stocks.bars.md"]
+    start = next(line for line in bars.splitlines() if line.startswith("| `TimestampStart`"))
+    custom = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+    grouped = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
+    assert f'REST `{custom}` `t`: "The Unix millisecond timestamp for the start' in start
+    assert f'REST `{grouped}` `t`: "The Unix millisecond timestamp for the end' in start

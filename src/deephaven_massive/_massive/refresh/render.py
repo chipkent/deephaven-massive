@@ -175,6 +175,7 @@ def render_descriptions(
     fetched: dt.date,
     urls: Mapping[Transport, Mapping[str, Sequence[str]]],
     plans: Mapping[str, PlanAccess],
+    titles: Mapping[str, str],
 ) -> str:
     """Return the canonical text of `descriptions.json`.
 
@@ -192,14 +193,15 @@ def render_descriptions(
             such as `/v3/reference/tickers`, has one page per asset class).
         plans: What each documenting page says about Massive's plans, by the page's URL;
             written sorted by URL, each page's plans in their table order.
+        titles: Each documenting page's title, by the page's URL; written sorted by URL.
 
     Returns:
         The file's text: `{"generated_by", "fetched", "urls": {<transport>: {<source key>:
         [<url>, ...]}}, "descriptions": {<transport>: {<source key>: {<wire key>: <text>}}},
         "class_descriptions": {<transport>: {<source key>: {<wire key>: {<asset class>:
-        <text>}}}}, "plans": {<page url>: {"title", "access", "recency", "history", "plans":
-        [{"plan", "access", "recency", "history"}, ...]}}}`, one line per URL and per
-        description, ending in a newline.
+        <text>}}}}, "plans": {<page url>: {"access", "recency", "history", "plans": [{"plan",
+        "access", "recency", "history"}, ...]}}, "titles": {<page url>: <title>}}`, one line
+        per URL, per description, and per title, ending in a newline.
     """
     texts: dict[str, dict[str, dict[str, str]]] = {}
     by_class: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
@@ -225,7 +227,6 @@ def render_descriptions(
         "class_descriptions": by_class,
         "plans": {
             url: {
-                "title": page.title,
                 "access": page.access,
                 "recency": page.recency,
                 "history": page.history,
@@ -233,6 +234,7 @@ def render_descriptions(
             }
             for url, page in sorted(plans.items())
         },
+        "titles": dict(sorted(titles.items())),
     }
     return json.dumps(document, indent=1, ensure_ascii=False) + "\n"
 

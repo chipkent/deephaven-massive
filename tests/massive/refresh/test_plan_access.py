@@ -62,7 +62,6 @@ def test_a_page_without_plan_sections_has_none() -> None:
 
 def test_the_three_sections_merge_by_plan() -> None:
     assert plan_access(_PAGE) == PlanAccess(
-        title="Custom Bars (OHLC)",
         access="Included in select Stocks plans",
         recency="15-minute delayed or real-time",
         history="Not applicable to websockets",
@@ -97,7 +96,6 @@ def test_a_page_with_summaries_only_has_no_plans() -> None:
 @pytest.mark.parametrize(
     ("page", "message"),
     [
-        pytest.param(_PAGE.replace("### Custom Bars (OHLC)", ""), "no ### title", id="no title"),
         pytest.param(
             _PAGE.replace("## Plan History", "## Plan Other"),
             "plan sections \\['Access', 'Recency'\\]",

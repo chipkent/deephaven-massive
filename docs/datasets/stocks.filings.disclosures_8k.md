@@ -69,7 +69,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/stocks/filings/8-k-disclosures.md>
+- [Material Event Disclosures (8-K) (REST)](https://massive.com/docs/rest/stocks/filings/8-k-disclosures)
 
 ---
 

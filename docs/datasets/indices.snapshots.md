@@ -81,7 +81,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 Massive's documentation of this dataset:
 
-- <https://massive.com/docs/rest/indices/snapshots/indices-snapshot.md>
+- [Indices Snapshot (REST)](https://massive.com/docs/rest/indices/snapshots/indices-snapshot)
 
 ---
 
