@@ -315,7 +315,9 @@ evidence:
 
 - **The options cap** (`test_the_options_cap_counts_contracts_or_topics`, a limit test, so only
   in the first `integration_limits` command above; it needs Options Advanced): whether Massive's
-  1,000-contract cap per connection counts contracts or topics. The library counts topics.
+  1,000-contract cap per connection counts contracts or topics. The library counts topics. It
+  skips as inconclusive when Massive refuses topics for the plan, or when the socket reconnects
+  with no status saying why, which a network drop causes too: run it again.
 - **The index minute file's day** (`test_an_index_minute_file_holds_its_own_new_york_day`, in
   the main run; it needs Indices Starter and `s3`): whether `us_indices/minute_aggs_v1` holds
   only its own New York day. `history()` trims each index file to that day before joining REST

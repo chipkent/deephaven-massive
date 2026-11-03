@@ -1413,7 +1413,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     # Another connection with the key (another process, here the fake's reply) holds the slot.
     monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
-    ws_session = make_ws_session(backoff=3.0)  # long enough to change the watchlist during the wait
+    ws_session = make_ws_session()
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
@@ -1421,7 +1421,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     ws_session.subscribed("T.O:SPY251219C00600000")
     cap = "over capacity: 2/1; 1 deferred"
     wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == cap)
-    fake_ws_server.auth_replies.append("max_connections")
+    fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
 
@@ -1446,6 +1446,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
         return deferred == [2, 0] and stalled(more, STALL)
 
     wait_for(counted)
+    fake_ws_server.hold_slot(held=False)
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
     cap = "over capacity: 3/1; 2 deferred"
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
@@ -1469,7 +1470,7 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
 ) -> None:
     monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
-    ws_session = make_ws_session(backoff=1.0)
+    ws_session = make_ws_session()
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "spy"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
@@ -1481,7 +1482,7 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
 
     cap = "over capacity: 2/1; 1 deferred"
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
-    fake_ws_server.auth_replies.append("max_connections")
+    fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
     skipped = f"; {re.escape(SKIPPED_SPY)}"
@@ -1495,6 +1496,7 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     wait_for(lambda: stalled(""))  # fixing the row keeps the stall
     watchlist.add(new_table([string_col("Symbol", ["spy"])]))
     wait_for(lambda: stalled(skipped))
+    fake_ws_server.hold_slot(held=False)
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     del capped
