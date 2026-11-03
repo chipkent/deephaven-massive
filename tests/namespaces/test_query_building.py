@@ -1022,9 +1022,8 @@ def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:
 
 
 def _caps_each_symbol(spec: DatasetSpec) -> bool:
-    # Whether `limit` caps each symbol's (or each request's) rows when symbols are named: the
-    # reader caps each request that names one symbol, and each request of a dataset whose
-    # symbols overlap.
+    # Whether `limit` caps each symbol's rows when symbols are named: the reader caps each
+    # request that names one symbol.
     named = ("AAA", "BBB")
     calls = [
         call
@@ -1037,7 +1036,7 @@ def _caps_each_symbol(spec: DatasetSpec) -> bool:
             split=lambda symbol: (symbol, "USD"),
         )
     ]
-    return spec.symbols_overlap or any(call.symbol is not None for call in calls)
+    return any(call.symbol is not None for call in calls)
 
 
 def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> None:

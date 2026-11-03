@@ -15,7 +15,7 @@ m.stocks.financials.income_statements(symbols=None, *, timeframe=None, start=Non
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `period_end.gte` and `period_end.lte` |
-| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Cik`, `PeriodEnd` and `Timeframe` |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Cik`, `PeriodEnd`, `Timeframe` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `filing_date`, `filing_date_gt`, `filing_date_gte`, `filing_date_lt`, `filing_date_lte`, `fiscal_quarter`, `fiscal_quarter_gt`, `fiscal_quarter_gte`, `fiscal_quarter_lt`, `fiscal_quarter_lte`, `fiscal_year`, `fiscal_year_gt`, `fiscal_year_gte`, `fiscal_year_lt`, `fiscal_year_lte` |
 
@@ -37,6 +37,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `BasicEarningsPerShare` | double | Earnings per share calculated using the weighted average number of basic shares outstanding. For TTM records, recalculated as TTM net income divided by average basic shares outstanding over the four quarters. | REST |
 | `BasicSharesOutstanding` | double | Weighted average number of common shares outstanding during the period, used in basic EPS calculation. For TTM records, represents the average over the four most recent quarters. | REST |
 | `Cik` | String | The company's Central Index Key (CIK), a unique identifier assigned by the U.S. Securities and Exchange Commission (SEC). You can look up a company’s CIK using the SEC CIK Lookup tool (https://www.sec.gov/search-filings/cik-lookup). | REST |
@@ -79,6 +80,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `BasicEarningsPerShare` | `basic_earnings_per_share` |
 | `BasicSharesOutstanding` | `basic_shares_outstanding` |
 | `Cik` | `cik` |

@@ -15,7 +15,7 @@ m.stocks.filings.insider_holdings(symbols=None, *, issuer_cik=None, owner_cik=No
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `last_filing_date.gte` and `last_filing_date.lte` |
-| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `IssuerCik` and `OwnerCik` |
+| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `IssuerCik`, `OwnerCik` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | none |
 
@@ -35,6 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `FilingCount` | long | Number of Form 3, 4, and 5 filings by the owner for this issuer. | REST |
 | `FirstFilingDate` | String | Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003. | REST |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST |
@@ -59,6 +60,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `FilingCount` | `filing_count` |
 | `FirstFilingDate` | `first_filing_date` |
 | `IssuerCik` | `issuer_cik` |

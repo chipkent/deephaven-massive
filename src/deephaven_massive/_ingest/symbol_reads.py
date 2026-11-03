@@ -7,9 +7,10 @@ to one symbol must fail only that symbol, never the table. The transports' reads
 failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they share:
 
 - **Planning** (`fetch_units`, `history_units`): the requests `fetch()` or `history()` makes
-  for the symbols, each with its path. A dataset whose rows several symbols' requests may
-  return (`DatasetSpec.symbols_overlap`), or whose rows carry no `Symbol` column, reads each
-  symbol in a request of its own, so every row belongs to the one request that returned it. A
+  for the symbols, each with its path. A dataset whose rows carry no `Symbol` column reads
+  each symbol in a request of its own, so every row belongs to the one request that returned
+  it; a dataset whose rows list their tickers gets its `Symbol` from them, so its requests are
+  grouped as `fetch()` groups them. A
   crypto pair Massive's ticker list does not hold, and a parameter a path does not take, fail
   their own symbols here, before any request.
 - **Attribution** (`read_rest_by_symbol`): a request of one symbol gives all its rows to that
@@ -218,8 +219,8 @@ def fetch_units(
     """Plan the requests of `fetch()` for the symbols, path by path, for a read by symbol.
 
     The paths are those `fetch()` reads (`fetch_paths`), and their requests those it makes
-    (`plan_calls`), except that a dataset whose symbols overlap, or whose rows carry no
-    `Symbol` column, plans each symbol alone. Makes no request, except that the first crypto
+    (`plan_calls`), except that a dataset whose rows carry no `Symbol` column plans each
+    symbol alone. Makes no request, except that the first crypto
     pair a path takes as two currencies reads the session's crypto ticker list.
 
     Args:
@@ -237,7 +238,7 @@ def fetch_units(
         (`UnsupportedParameterError`).
     """
     asked = tuple(sorted(_ordered(symbols)))
-    alone = spec.symbols_overlap or _SYMBOL not in columns
+    alone = _SYMBOL not in columns
     # Explicit symbols give each path a tuple of them.
     groups = [(path, cast("tuple[str, ...]", own)) for path, own in fetch_paths(spec, asked)]
     if alone:

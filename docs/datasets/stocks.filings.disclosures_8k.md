@@ -15,7 +15,7 @@ m.stocks.filings.disclosures_8k(symbols=None, *, start=None, end=None, sort=None
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `PrimaryCategory`, `SecondaryCategory`, `TertiaryCategory` and `SupportingText` |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `PrimaryCategory`, `SecondaryCategory`, `TertiaryCategory`, `SupportingText` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `cik`, `cik_any_of`, `tertiary_category` |
 
@@ -35,6 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0000320193-25-000010'). | REST |
 | `Cik` | String | SEC Central Index Key of the filer (10 digits, zero-padded). | REST |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST |
@@ -52,6 +53,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `AccessionNumber` | `accession_number` |
 | `Cik` | `cik` |
 | `FilingDate` | `filing_date` |

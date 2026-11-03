@@ -15,7 +15,7 @@ m.stocks.filings.initial_insider_ownership(symbols=None, *, issuer_cik=None, own
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
-| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `ExercisePrice` and `ExerciseDate` |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `ExercisePrice`, `ExerciseDate` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `form_type` |
 
@@ -35,6 +35,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0001209191-25-012345'). | REST |
 | `Aff10b5One` | boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. | REST |
 | `DateOfOriginalSubmission` | String | Date of the original filing submission for amendment filings (3/A). Null for initial filings (formatted as YYYY-MM-DD). | REST |
@@ -73,6 +74,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `AccessionNumber` | `accession_number` |
 | `Aff10b5One` | `aff_10b5_one` |
 | `DateOfOriginalSubmission` | `date_of_original_submission` |

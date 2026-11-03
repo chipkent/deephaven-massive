@@ -828,10 +828,8 @@ def _symbols_per_read(spec: DatasetSpec) -> int:
 
     A dataset whose list parameter (`ticker.any_of`) names many symbols in one request reads
     up to `DatasetSpec.symbols_per_request` symbols at once, as a static `fetch()` groups
-    them, and a `limit` is sent once on that request, as Massive's cap on its rows. A dataset
-    whose rows list their tickers (`DatasetSpec.symbols_overlap`) reads each symbol in a
-    request of its own, as `RestTransport.fetch_by_symbol` does, and every other dataset one
-    symbol a request anyway, so they read one.
+    them, and a `limit` is sent once on that request, as Massive's cap on its rows. Every
+    other dataset reads one symbol a read.
 
     Args:
         spec: The dataset.
@@ -839,9 +837,7 @@ def _symbols_per_read(spec: DatasetSpec) -> int:
     Returns:
         The most symbols one read takes, at least 1.
     """
-    if spec.symbols_overlap or spec.symbols_per_request is None:
-        return 1
-    return spec.symbols_per_request
+    return spec.symbols_per_request or 1
 
 
 class Query(QueryBase):

@@ -15,7 +15,7 @@ m.partners.benzinga.news(symbols=None, *, start=None, end=None, sort=None, order
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published.gte` and `published.lt` |
-| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `BenzingaId` |
+| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `BenzingaId` and `Symbol` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `author`, `author_any_of`, `author_gt`, `author_gte`, `author_lt`, `author_lte`, `channels`, `channels_all_of`, `channels_any_of`, `stocks`, `stocks_all_of`, `stocks_any_of`, `tags`, `tags_all_of`, `tags_any_of` |
 
@@ -32,6 +32,7 @@ Which of Massive's plans include this dataset, how recent its data is on each, a
 
 | Column | Deephaven type | Description | Supplied by |
 | --- | --- | --- | --- |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. | REST |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." | REST |
 | `Author` | String | The name of the journalist or entity that authored the news article. | REST |
 | `BenzingaId` | long | The identifier used by Benzinga for this record. | REST |
@@ -52,6 +53,7 @@ The Massive field behind each column, per transport (`request` for a value the l
 
 | Column | REST field |
 | --- | --- |
+| `Symbol` |  |
 | `Timestamp` | `published` |
 | `Author` | `author` |
 | `BenzingaId` | `benzinga_id` |

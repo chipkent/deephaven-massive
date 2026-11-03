@@ -121,8 +121,8 @@ def test_the_real_pages_state_each_poll_mode() -> None:
     replace = "`dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`"
     assert f"| `poll()` | {replace} |" in pages["options.contracts.md"]
     assert (
-        "| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` |"
-        in pages["reference.news.md"]
+        "| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` and "
+        "`Symbol` |" in pages["reference.news.md"]
     )
     assert (
         "| `poll()` | `dm.PollMode.UPSERT`: adds and updates rows, never deletes, keyed by "

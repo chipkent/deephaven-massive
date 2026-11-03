@@ -1995,11 +1995,12 @@ it.`).
 - **Per-symbol paths** (one symbol in the path): one read per symbol.
 - **`ticker.any_of` and `tickers` batches:** the waiting symbols are batched as today, and each
   row is assigned to its symbol by its `Symbol` column, which the filter matches exactly.
-- **List-column datasets** (rows with a `Tickers` list and no `Symbol`: the financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, `partners.benzinga.news`):
-  one request per symbol, each row belonging to the request that returned it. A row Massive
-  returns for two symbols' requests is listed under each symbol: it is the data listed by
-  symbol, and nothing removes a copy across requests (decision 90).
+- **List-column datasets** (rows with a `Tickers` list: the financial statements, Forms 3 and
+  4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+  `partners.benzinga.news`): requested as a static `fetch()` requests them, and each row is
+  listed under each named ticker it lists, with that ticker in `Symbol`, as a static
+  `fetch()` lists it ([section 10](#10-symbols-and-all), decision 90). Nothing removes a
+  copy across requests.
 
 **`limit`** is sent on each request of a followed read as Massive's own cap on that request's
 rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decision 90).
@@ -2120,9 +2121,10 @@ Notation:
   `limit` samples and a read without one is complete (decision 87). The exception is where
   each request names one symbol: a per-symbol path
   (the indicators) or a symbol parameter that takes one ticker
-  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
+  (`reference.tickers`, `stocks.ipos`, `reference.news`). There it caps each symbol's
+  request, so one ticker's rows never crowd out another's (owner decision 74). On a dataset
+  whose rows list their tickers, the cap is on the rows Massive returns, before each is listed
+  under its named tickers, so the table can hold more rows than `limit` (decision 90). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is the path's documented maximum (or
   `DatasetSpec.page_size` where the dataset sets one), or `Request.limit` when that is smaller
@@ -2158,8 +2160,9 @@ Notation:
   an article, not one instrument: the three financial statements,
   `filings.initial_insider_ownership` and `filings.insider_transactions` (Forms 3 and 4),
   `filings.insider_activity` and `filings.insider_holdings`, `filings.disclosures_8k`,
-  `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
-  column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
+  `reference.news`, and `partners.benzinga.news` keep their `Tickers` column, and their
+  `Symbol` is the library's: each ticker the request named that a row lists, one row per
+  such ticker ([section 10](#10-symbols-and-all)).
 
 ### 8.1 `m.stocks`
 
@@ -2311,7 +2314,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is listed under each, with that ticker in `Symbol` (decision 90); a `poll()` table is keyed by `Id` and `Symbol`, and fails on an article without an `Id`. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -2866,11 +2869,17 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   as a path parameter, as `/v3/trades/{t}` and `/v2/aggs/ticker/{t}/…` do, or holds it outside
   the result key, as `/v1/last/crypto` and `/v1/last_quote` do), `Symbol` is filled from the
   request ([section 19.4](#194-generated-schemas)). A dataset whose rows describe no instrument
-  (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
-  each list several tickers, because no single instrument is the row's: the three financial
-  statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
-  `partners.benzinga.news` keep their `Tickers` column (`String[]`), and `symbols` there only
-  filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
+  (`reference.exchanges`, `economy.*`) has no `Symbol` column. A dataset whose rows each list
+  several tickers (the three financial statements, Forms 3 and 4, insider activity and
+  holdings, the 8-K disclosures, `reference.news`, and `partners.benzinga.news`) keeps its
+  `Tickers` column (`String[]`) and gets a `Symbol` the library fills
+  (`DatasetSpec.ticker_list`, decision 90): each ticker the request named that the row
+  lists, the row repeated once per such ticker. An article about AAPL and MSFT read for both
+  is two rows, `Symbol` AAPL and `Symbol` MSFT. A request that named one ticker gives it to
+  every row; a row that lists none of a request's several named tickers keeps a null
+  `Symbol`, never dropped, with one WARNING per dataset a session; `symbols=None` leaves it
+  null. Requests stay batched (`tickers.any_of`). The datasets' `poll()` keys add `Symbol`,
+  which may be null. `Symbol` is never a list.
 
 ## 11. Enums and types
 
@@ -6319,8 +6328,8 @@ per source in a
   dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
   filled from the request, or a `symbol_param` that filters a single-ticker field. A
   `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
-  article is `string-array`) does not make one: those rows have no `Symbol`
-  ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
+  article is `string-array`) does not make one: those rows' `Symbol` is the library's,
+  filled from the request ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
   name, singular or plural, read from the generated path, never from a hand list. Its asset
   class alone does not make a dataset one either: `futures.exchanges` and
   `futures.schedules` keep `FUTURES` for the session-day rule and take no symbols;
@@ -7757,8 +7766,8 @@ document already reflects them.
     and only authentication, a closed session, a failed symbol table, `RAISE`, or a library
     bug fails the table. `wait=True` raises only when every call-time symbol fails. The
     single-value inputs `underlying=` and `product_code=` follow tables too. Within it:
-    - **`limit` caps each symbol's rows** in a followed read, on every dataset, extending
-      decision 74 there.
+    - **`limit`** in a followed read is sent as on any read, once on each request; decision
+      90 replaces the per-symbol cap this first said.
     - **`reread=dm.Reread.ALWAYS`** on `history()` (owner decision D-1, 2026-11-02: `ALWAYS`
       the default, `NEVER` opt-in): `ALWAYS` downloads a returning symbol again, and `NEVER`
       reuses its earlier download for the life of the table. There is no automatic member,
@@ -7802,15 +7811,24 @@ document already reflects them.
     (D3(a), the same day) sent one request per named symbol under a `limit`, which made a read
     of many symbols take minutes on a 5-requests-a-minute plan; the data is small enough to
     read whole ([section 8](#8-namespace-tree)).
-90. **A followed `fetch()` lists a shared row under each symbol, and an unlisted crypto pair
-    follows `unlisted_symbols` in every REST verb** (2026-11-02, owner). A followed `fetch()`
-    of a dataset whose rows list their tickers (news, financial statements, filings) reads
-    each symbol in requests of its own, and a row Massive returns for two symbols' requests is
-    listed under each symbol: it is the data listed by symbol, so no copy is removed across
-    requests. `limit` is sent as Massive's own cap on each request: once on a per-symbol
-    request, and once on a `ticker.any_of` batch. Rule 24 covers an unlisted crypto pair of a
-    symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and `IGNORE` leave it
-    out, and `RAISE` fails; before, both verbs always failed ([section 5](#5-massiveconfig)).
+90. **A row that lists several tickers is listed under each named one, and an unlisted crypto
+    pair follows `unlisted_symbols` in every REST verb** (owner decision 2026-11-02, option
+    (a)). A row returned for two symbols "is the data listed by symbol", not a duplicate. The
+    ten datasets whose rows list their tickers (the three financial statements, Forms 3 and
+    4, insider activity and holdings, the 8-K disclosures, `reference.news`,
+    `partners.benzinga.news`) gain a `Symbol` column: each ticker the request named that the
+    row lists, one row per such ticker, so an article about AAPL and MSFT read for both is
+    listed under AAPL and under MSFT. A request that named one ticker gives it to every row;
+    a row listing none of the named tickers keeps a null `Symbol`, with one WARNING per
+    dataset, and is never dropped; `symbols=None` gives a null `Symbol`. Requests stay
+    batched, with no extra request. `limit` caps the rows Massive returns before the split,
+    so the split can give more table rows than `limit`. A static `fetch()` and a followed one
+    list rows the same way, and nothing merges copies by `Id`. Each dataset's `poll()` keys
+    add `Symbol` (news: `Id` and `Symbol`). In a followed read, `limit` is sent as on any
+    read, once on a per-symbol request and once on a batch. Rule 24 covers an unlisted
+    crypto pair of a symbol table in `fetch()` and `poll()` as it does in streams: `LOG` and
+    `IGNORE` leave it out, and `RAISE` fails; before, both verbs always failed
+    ([section 5](#5-massiveconfig)).
 
 ## 23. Open verification items
 

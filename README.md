@@ -909,6 +909,11 @@ once. To accept other spellings, convert first: `dm.canonical_symbol_forex("EUR/
 `dm.canonicalize_symbols(table, dm.AssetClass.FOREX)` converts a whole table as rows arrive.
 The converters also work inside query strings; `help(dm.canonical_symbol)` lists them.
 
+**Rows that list several tickers.** News, filings, and financial statements list the tickers
+each row concerns, in `Tickers`, and their `Symbol` is each ticker you named that the row lists.
+An article about AAPL and MSFT, read with `symbols=["AAPL", "MSFT"]`, is two rows: one with
+`Symbol` AAPL and one with `Symbol` MSFT. Read without `symbols`, `Symbol` is null.
+
 **A live table is followed.** Add a row and a stream subscribes to it; delete one and it
 unsubscribes. `poll()` reads the table at every cycle. `fetch()` and `history()` return a live
 table: an added symbol's rows appear whole once they are read, and a deleted symbol's rows leave
@@ -963,9 +968,8 @@ closed session, a failed watchlist, or a library bug fails the whole table. With
 default, the call returns once the watchlist's current symbols are read, and raises only if every
 one of them failed. A symbol that comes back after you deleted it is downloaded again, unless you
 choose otherwise (`reread`, in [verb arguments](#verb-arguments)). `limit` is sent on each request,
-as Massive's cap on its rows. News, filings, and financial statements list their tickers, so one
-article can answer two symbols: it is listed under each symbol whose request Massive returned it
-for. The same holds for `underlying=` of `m.options.chain` and `m.options.contracts`, which take a
+as Massive's cap on its rows. As in every
+read, a news article, filing, or financial statement is listed under each named ticker it lists. The same holds for `underlying=` of `m.options.chain` and `m.options.contracts`, which take a
 table with a `Symbol` column, and for futures `product_code=`, which takes one with a `ProductCode`
 column.
 
@@ -1074,8 +1078,10 @@ sample; for complete data on each symbol, read without it (the data is small). S
 cap each request instead, because each request names one symbol: the indicators, `reference.tickers` and `stocks.ipos` when tickers are named, and
 `reference.news`, whose `sort` and `order` apply to each ticker's request too. On
 `options.contracts` with explicit symbols, each contract is one row, so `limit` has no effect.
+On news, filings, and financial statements, `limit` caps the rows Massive returns; each is then
+listed under every named ticker it lists, so the table can hold more rows than `limit`.
 Each dataset's `help()` says when its `limit` is per symbol. A `fetch()` that follows a live
-symbol table caps each symbol's rows on every dataset. `limit` keeps the first rows in
+symbol table sends `limit` the same way, once on each request. `limit` keeps the first rows in
 Massive's order, so ask for newest first when you want the latest:
 `m.reference.news("AAPL", sort="published_utc", order=dm.Order.DESC, limit=50).poll(60)`. A news
 or filings poll needs a `start` or a `limit`: without either, every cycle would re-read the whole

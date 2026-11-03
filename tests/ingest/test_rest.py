@@ -274,6 +274,17 @@ NEWS = DatasetSpec(
     time_axis=("published_utc.gte", "published_utc.lt"),
     keys={(R, NEWS_PATH): SourceKeys()},
 )
+LISTED_PATH = "/benzinga/v2/news"
+# Rows that list their tickers: the library fills Symbol from the named tickers they list.
+LISTED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.benzinga.news",
+    fetch_path=LISTED_PATH,
+    symbol_param="tickers.any_of",
+    ticker_list="Tickers",
+    poll_keys=("BenzingaId", "Symbol"),
+    nullable_poll_keys={"Symbol": "no ticker named"},
+)
 RATINGS_PATH = "/benzinga/v1/ratings"
 RATINGS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -327,6 +338,7 @@ UNIFIED = DatasetSpec(
 )
 SPECS = (
     UNIFIED,
+    LISTED,
     DIVIDENDS,
     MIXED,
     CRYPTO_LAST,
@@ -4537,3 +4549,55 @@ def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
             "the row is delayed and serves it"
         )
     ]
+
+
+# --- Rows that list their tickers ------------------------------------------------------------
+
+
+def _listed(*rows: tuple[int, list[str]]) -> Reply:
+    # A page of articles, each with its id and the tickers it lists.
+    return Reply(envelope([{"benzinga_id": i, "tickers": t} for i, t in rows]))
+
+
+def test_a_row_is_listed_under_each_named_ticker_it_lists(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One request names both tickers; a row listing both is each one's, in its list's order,
+    # and a row listing neither keeps a null Symbol, with one WARNING a session.
+    page = _listed((1, ["MSFT", "AAPL"]), (2, ["AAPL"]), (3, ["TSLA"]))
+    fake_rest.reply(LISTED_PATH, page, page)
+    with caplog.at_level(logging.WARNING, LOGGER):
+        for _ in range(2):
+            out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+            assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [
+                (1, "MSFT"),
+                (1, "AAPL"),
+                (2, "AAPL"),
+                (3, None),
+            ]
+    assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
+    assert [m for m in caplog.messages if "list none" in m] == [
+        (
+            "partners.benzinga.news: 1 rows Massive returned from /benzinga/v2/news list none "
+            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so their Symbol is null"
+        )
+    ]
+
+
+def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    page = _listed((4, ["TSLA"]))
+    fake_rest.reply(LISTED_PATH, page, page)
+    assert [r["Symbol"] for r in fetch(session, LISTED, symbols=["AAPL"])] == ["AAPL"]
+    assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
+
+
+def test_listing_a_row_under_each_ticker_can_pass_the_limit(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # `limit` caps the rows Massive returns; each is then listed under its named tickers.
+    fake_rest.reply(LISTED_PATH, _listed((1, ["AAPL", "MSFT"])))
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"], limit=1)
+    assert [r["Symbol"] for r in out] == ["AAPL", "MSFT"]
+    assert fake_rest.get_queries()[0][1]["limit"] == ["1"]

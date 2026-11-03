@@ -2446,6 +2446,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(dh_to_pylist(result)) == 3)
     assert "follow-read" in rest.fetched[1][2]
+    _until(lambda: symbol_reads(massive_session, drain, dh_to_pylist)["MSFT"]["State"] == "DONE")
     reads = symbol_reads(massive_session, drain, dh_to_pylist)
     # Each symbol's rows are Massive's answer as of its own read.
     assert reads["MSFT"]["ReadAt"] > reads["AAPL"]["ReadAt"]
@@ -2557,8 +2558,6 @@ def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> No
     batched = dataclasses.replace(LAST_TRADE_SPEC, symbols_per_request=250)
     assert _symbols_per_read(batched) == 250
     assert _symbols_per_read(LAST_TRADE_SPEC) == 1
-    # Rows that list their tickers: each symbol is read in a request of its own.
-    assert _symbols_per_read(dataclasses.replace(batched, symbols_overlap=True)) == 1
 
 
 def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_rows(

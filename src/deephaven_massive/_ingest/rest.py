@@ -21,9 +21,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   ascending direction (`_ascending`).
   `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
   sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
-  indicator) it caps each symbol's rows instead, and for a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, the news of a watchlist) each request's rows, keeping a row
-  several requests return once (`_first_copies`).
+  indicator, or the news of one ticker) it caps each symbol's rows instead.
+- **Listed tickers.** A dataset whose rows list their tickers (`DatasetSpec.ticker_list`: news,
+  financial statements, insider and 8-K filings) gets its `Symbol` from the request: each
+  ticker the request named that a row lists, the row repeated once per such ticker
+  (`_listed_rows`), so the split comes after `limit`, which caps what Massive returns.
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -223,9 +225,8 @@ _Item = TypeVar("_Item")
 _Done = TypeVar("_Done")
 """What one task of a fan-out returns."""
 
-_ROW_NUMBER: Final = "__row_number"
-"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
-
+_SYMBOL: Final = "Symbol"
+"""The column of a row's instrument, which `_listed_rows` fills on a dataset with a ticker list."""
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists crypto tickers with their base and quote currencies."""
@@ -296,26 +297,47 @@ def _bare_index(request: Request, call: Call) -> str | None:
     return None
 
 
-def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
-    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+def _listed_rows(
+    batch: pa.RecordBatch, named: Sequence[str], *, column: str
+) -> tuple[pa.RecordBatch, int]:
+    """Fill a page's `Symbol` from the tickers its request named and each row lists.
 
-    A row is identified by `keys` alone. A row with a null key is never merged with another:
-    a null cannot tell two rows apart, so every such row is kept, in place.
+    A request that named one ticker gives it to every row. A request that named several gives
+    each row every one of them its list holds, the row repeated once per such ticker, in the
+    order of its list; a row that lists none of them keeps a null `Symbol`, never dropped. A
+    request that named none leaves `Symbol` null.
 
     Args:
-        rows: The rows of every request, in request order.
-        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
+        batch: One page's rows in the dataset's schema, with a null `Symbol`.
+        named: The tickers the request named (`own_symbols`).
+        column: The column of each row's tickers (`DatasetSpec.ticker_list`).
 
     Returns:
-        The rows, each identity once, in the order of their first copies.
+        The rows with their `Symbol`, and how many rows listed none of several named tickers.
     """
-    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
-    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in keys))
-    identified = numbered.filter(keyed)
-    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
-    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
-    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
-    return rows.take(kept.sort())
+    if not named:
+        return batch, 0
+    if len(named) == 1:
+        taken = batch
+        symbols: list[str | None] = [named[0]] * batch.num_rows
+        unmatched = 0
+    else:
+        wanted = set(named)
+        rows: list[int] = []
+        symbols = []
+        unmatched = 0
+        for index, listed in enumerate(batch.column(column).to_pylist()):
+            hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
+            if not hits:
+                unmatched += 1
+                hits = [None]
+            rows.extend([index] * len(hits))
+            symbols.extend(hits)
+        taken = batch.take(pa.array(rows, pa.int64()))
+    position = taken.schema.get_field_index(_SYMBOL)
+    arrays = list(taken.columns)
+    arrays[position] = pa.array(symbols, taken.schema.field(position).type)
+    return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unmatched
 
 
 def _cut(text: str) -> str:
@@ -1134,6 +1156,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
+                if spec.ticker_list is not None:
+                    batches = self._listed(spec, batches, own, template=template)
                 if bare_index is not None:
                     self._check_index_rows(spec, batches, bare_index, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
@@ -1192,6 +1216,48 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
             raise self._dataset_error(spec, bucket, error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _listed(
+        self,
+        spec: DatasetSpec,
+        batches: Sequence[pa.RecordBatch],
+        named: Sequence[str],
+        *,
+        template: str,
+    ) -> list[pa.RecordBatch]:
+        """Fill the `Symbol` of a dataset whose rows list their tickers (`_listed_rows`).
+
+        Logs one WARNING per dataset a session, then DEBUG, when a row lists none of the
+        request's several named tickers: it keeps a null `Symbol`.
+
+        Args:
+            spec: The dataset, with a `ticker_list`.
+            batches: One page's rows in the dataset's schema.
+            named: The tickers the request named.
+            template: The path, for the message.
+
+        Returns:
+            The rows with their `Symbol`.
+        """
+        listed: list[pa.RecordBatch] = []
+        unmatched = 0
+        for batch in batches:
+            rows, missed = _listed_rows(batch, named, column=cast("str", spec.ticker_list))
+            listed.append(rows)
+            unmatched += missed
+        if unmatched:
+            first = self.state.first("unlisted rows", spec.name)
+            logger.log(
+                logging.WARNING if first else logging.DEBUG,
+                "%s: %d rows Massive returned from %s list none of the request's tickers "
+                "(%s) in %s, so their Symbol is null",
+                spec.name,
+                unmatched,
+                template,
+                bounded_list(named),
+                spec.ticker_list,
+            )
+        return listed
 
     def _check_index_rows(
         self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, template: str
@@ -2050,10 +2116,9 @@ class RestReader:
 
         The cap is on the total rows, except where each request names one symbol
         (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few symbols
-        with many rows never crowd out the rest. For a dataset whose symbols overlap
-        (`DatasetSpec.symbols_overlap`), such as the news of a watchlist, each request is
-        capped too, and a row several requests returned is kept once, at its first copy
-        (`_first_copies`).
+        with many rows never crowd out the rest. A dataset whose rows list their tickers may
+        hold more rows than the cap: each row is repeated once per named ticker it lists
+        (`_listed_rows`) after Massive capped it.
 
         Args:
             spec: The dataset.
@@ -2101,20 +2166,6 @@ class RestReader:
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
-        if spec.symbols_overlap:
-            # Each request was capped on its own, so one symbol's rows never crowd out another's.
-            kept = _first_copies(rows, spec.poll_keys)
-            logger.debug(
-                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
-                "request",
-                spec.name,
-                kept.num_rows,
-                rows.num_rows,
-                requests,
-                ", ".join(spec.poll_keys),
-                request.limit,
-            )
-            return kept, requests
         per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
         if request.limit is not None and per_symbol:
             # Each request named one symbol and was capped on its own.
@@ -2123,6 +2174,16 @@ class RestReader:
                 spec.name,
                 rows.num_rows,
                 requests,
+                request.limit,
+            )
+        elif request.limit is not None and spec.ticker_list is not None:
+            # Massive capped the rows; listing each under every named ticker it lists can
+            # give more, all of which are kept.
+            logger.debug(
+                "%s: kept %d rows, each listed under its named tickers, from rows Massive "
+                "capped at limit=%d",
+                spec.name,
+                rows.num_rows,
                 request.limit,
             )
         elif request.limit is not None:
