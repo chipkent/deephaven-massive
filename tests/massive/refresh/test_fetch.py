@@ -301,8 +301,9 @@ def test_a_429_waits_the_retry_after_seconds(
     ):
         assert getter(f"{server.url}/x") == b"ok"
     assert waits == [3.0]
+    trust = http.trust_description()
     assert caplog.messages == [
-        "downloads from 127.0.0.1 connect directly, through no proxy",
+        f"downloads from 127.0.0.1 connect directly, through no proxy, trusting {trust}",
         (
             f"GET {server.url}/x answered HTTP 429; Retry-After asks 3.0 s, the cap is 60.0 s; "
             "waiting 3.0 s"
@@ -417,7 +418,7 @@ def test_a_tunnel_the_proxy_refuses_names_https_proxy_never_the_password(
     assert caplog.messages == [
         (
             f"downloads from massive.invalid go through the proxy http://127.0.0.1:{port} "
-            "(credentials sent: True)"
+            f"(credentials sent: True), trusting {http.trust_description()}"
         )
     ]
 

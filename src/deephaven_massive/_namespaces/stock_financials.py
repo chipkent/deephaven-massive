@@ -41,7 +41,7 @@ __all__ = [
     "_StockFinancials",
 ]
 
-_R: Final = Transport.REST
+_REST: Final = Transport.REST
 _STOCKS: Final = AssetClass.STOCKS
 
 
@@ -101,7 +101,7 @@ RATIOS: Final = DatasetSpec(
     summary="Daily valuation, profitability, liquidity, and leverage ratios of US stocks.",
     asset_class=_STOCKS,
     fetch_path=_RATIOS,
-    keys={(_R, _RATIOS): ticker_key()},
+    keys={(_REST, _RATIOS): ticker_key()},
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
 )

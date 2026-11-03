@@ -256,11 +256,12 @@ class _Body:
     raises as its `SSLError`); this stream raises all of them as `OSError` (chained to the
     original), the error every other stream
     raises for a failed read. It holds one of the client's connection slots, and the boto3
-    client of that slot, until it is closed. Used by one reader thread; `close()` is safe from
-    any thread.
+    client of that slot, until it is closed. Not thread-safe: one reader thread reads it and
+    closes it, as the library's flat-file readers do. A second `close()` on that thread does
+    nothing.
     """
 
-    __slots__ = ("_body", "_give_back", "_lock")
+    __slots__ = ("_body", "_give_back")
 
     def __init__(self, body: StreamingBody, give_back: Callable[[], None]) -> None:
         """Wrap a response body.
@@ -272,7 +273,6 @@ class _Body:
         """
         self._body = body
         self._give_back: Callable[[], None] | None = give_back
-        self._lock = threading.Lock()
 
     def read(self, size: int = -1, /) -> bytes:
         """Read up to `size` bytes, or the rest of the body when `size` is negative.
@@ -300,8 +300,7 @@ class _Body:
         try:
             self._body.close()
         finally:
-            with self._lock:
-                give_back, self._give_back = self._give_back, None
+            give_back, self._give_back = self._give_back, None
             if give_back is not None:
                 give_back()
 
@@ -414,6 +413,9 @@ class FlatFileClient:
         # built: there are never more clients than slots. Guarded by `_lock`.
         self._idle: list[S3Client] = []
         # The proxy the clients are built with, without its user and password, for messages.
+        # Written once, under `_lock`, before the first client is built, and never again, so
+        # a request holding a client reads it without the lock: it took the lock to get that
+        # client after the write.
         self._proxy: str | None = None
         self._closed = Cancel()
         # One per connection: a request takes one, with that slot's own boto3 client, before
@@ -688,9 +690,10 @@ class FlatFileClient:
         Raises:
             WireError: When the failure is not retryable; see `open`.
         """
-        with self._lock:
-            self._refuse_if_closed(key)  # a retry after `close()` is never sent
-            proxy = self._proxy
+        # Neither needs the lock, which a client being built holds: `_closed` is an event, and
+        # `_proxy` was set before the caller's client was built.
+        self._refuse_if_closed(key)  # a retry after `close()` is never sent
+        proxy = self._proxy
         try:
             return call(client)
         except ClientError as error:
@@ -885,7 +888,7 @@ class FlatFileClient:
         return redact(str(error), *self._userinfo)
 
     def _refuse_if_closed(self, key: str) -> None:
-        """Raise if `close()` has run; the caller holds the client's lock.
+        """Raise if `close()` has run; safe with or without the client's lock.
 
         Args:
             key: The key about to be requested, for the error's `path`.

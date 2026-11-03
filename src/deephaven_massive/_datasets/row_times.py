@@ -645,7 +645,9 @@ class TimeRule:
         open-close date where the source sends one (else null), and its `TimestampEnd`
         Massive's WebSocket bar end where the source sends one (else null). This computes the
         rest by the table of the module docstring and sets every row's `TimestampInsert` to
-        `received`.
+        `received`. A daily summary whose `IsUtc` is false (the crypto open-close) gets the
+        widest window its date has in any time zone and logs one WARNING per dataset per
+        session (`_daily`).
 
         Args:
             rows: The batch, a `pyarrow.RecordBatch` or `pyarrow.Table` of the dataset's schema.
@@ -658,9 +660,6 @@ class TimeRule:
         Returns:
             The rows, of the same type and schema, with `Date`, `TimestampStart`,
             `TimestampEnd`, and `TimestampInsert` filled as the dataset has them.
-
-        A daily summary whose `IsUtc` is false (the crypto open-close) gets the widest window
-        its date has in any time zone and logs one WARNING per dataset per session (`_daily`).
         """
         arrived = (
             pa.repeat(pa.scalar(received, _INSTANT), rows.num_rows)

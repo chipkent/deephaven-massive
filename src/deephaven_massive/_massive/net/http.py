@@ -59,6 +59,7 @@ __all__ = [
     "new_ssl_context",
     "proxy_credentials",
     "ssl_context",
+    "trust_description",
 ]
 
 _log = logging.getLogger(__name__)
@@ -184,26 +185,40 @@ def new_ssl_context() -> ssl.SSLContext:
     connection it opens, which is safe only while no other thread opens a connection on the
     same context (the module docstring says why). The caller must never let two threads open
     connections on it at once. Building one reads and parses the certificate bundle, a few
-    milliseconds of CPU, and reads the certificate variables then; it logs them at DEBUG.
+    milliseconds of CPU, and reads the certificate variables then. It logs nothing, since one
+    client may build many: the client logs `trust_description()` once instead.
 
     Returns:
         A context built exactly as `ssl_context()` builds the shared one, which no other
         caller holds. It reads the certificate files as they are now, so a bundle created,
         replaced, or edited since an earlier call is trusted as it now reads.
     """
-    cert_file = os.environ.get("SSL_CERT_FILE", "")
-    cert_dir = os.environ.get("SSL_CERT_DIR", "")
-    uses_openssl = bool(cert_file or cert_dir)
-    context = _build(uses_openssl=uses_openssl)
-    _log.debug(
-        "built a TLS context of its own trusting %s (SSL_CERT_FILE=%r, SSL_CERT_DIR=%r, "
-        "SSLKEYLOGFILE=%r)",
-        "the OpenSSL locations" if uses_openssl else "certifi's bundle",
-        cert_file,
-        cert_dir,
+    return _build(uses_openssl=_uses_openssl())
+
+
+def trust_description() -> str:
+    """Describe what a `new_ssl_context()` built now trusts, for its owner's DEBUG log line.
+
+    Returns:
+        `certifi's bundle` or `the OpenSSL locations`, then the values of `SSL_CERT_FILE`,
+        `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, as in
+        `certifi's bundle (SSL_CERT_FILE='', SSL_CERT_DIR='', SSLKEYLOGFILE='')`.
+    """
+    return "{} (SSL_CERT_FILE={!r}, SSL_CERT_DIR={!r}, SSLKEYLOGFILE={!r})".format(
+        "the OpenSSL locations" if _uses_openssl() else "certifi's bundle",
+        os.environ.get("SSL_CERT_FILE", ""),
+        os.environ.get("SSL_CERT_DIR", ""),
         os.environ.get("SSLKEYLOGFILE", ""),
     )
-    return context
+
+
+def _uses_openssl() -> bool:
+    """Tell whether a context built now trusts OpenSSL's locations instead of `certifi`'s bundle.
+
+    Returns:
+        True when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set to a non-empty value.
+    """
+    return bool(os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"))
 
 
 def check_certificate_directories() -> None:

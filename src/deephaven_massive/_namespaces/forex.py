@@ -55,7 +55,7 @@ __all__ = ["DATASETS", "_Forex"]
 
 _REST: Final = Transport.REST
 _WS: Final = Transport.WS
-_FILES: Final = Transport.FLAT_FILES
+_FLAT_FILES: Final = Transport.FLAT_FILES
 
 _AGGREGATES_PAGE: Final = 50_000
 """The aggregates range endpoint's largest `limit`, which counts the base aggregates
@@ -80,7 +80,7 @@ QUOTES: Final = DatasetSpec(
         (_WS, "forex/C"): SourceKeys(
             symbol=KeySpec("Ticker"), time=KeySpec("ParticipantTimestamp")
         ),
-        (_FILES, _QUOTE_FILES): SourceKeys(
+        (_FLAT_FILES, _QUOTE_FILES): SourceKeys(
             symbol=KeySpec("Ticker"), time=KeySpec("ParticipantTimestamp")
         ),
     },
@@ -134,8 +134,8 @@ BARS: Final = DatasetSpec(
         (_REST, _GROUPED): _BAR_KEYS,
         (_WS, "forex/CAS"): _STREAM_BAR_KEYS,
         (_WS, "forex/CA"): _STREAM_BAR_KEYS,
-        (_FILES, _MINUTE_FILES): _BAR_KEYS,
-        (_FILES, _DAY_FILES): _BAR_KEYS,
+        (_FLAT_FILES, _MINUTE_FILES): _BAR_KEYS,
+        (_FLAT_FILES, _DAY_FILES): _BAR_KEYS,
     },
     page_size=_AGGREGATES_PAGE,
 )

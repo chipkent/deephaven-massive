@@ -65,6 +65,7 @@ from __future__ import annotations
 import functools
 import logging
 import time
+from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -140,7 +141,7 @@ from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
@@ -1584,7 +1585,7 @@ class StreamQuery(QueryBase):
         keys: tuple[object, ...]
         if isinstance(by, str):
             keys = (by,)
-        elif isinstance(by, list | tuple):
+        elif isinstance(by, Sequence):
             keys = tuple(by)
         else:
             raise TypeError(f"by must be a str or a sequence of str, not {type(by).__name__}")

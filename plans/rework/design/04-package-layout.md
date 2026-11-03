@@ -121,7 +121,7 @@ _tables/                 the Deephaven side: tables, liveness, library threads
   liveness.py            result and stream scopes, ResultRegistry, records, Reaper,
                          QueueWorker (section 6.1)
   diagnostics.py         connections(), streams() with SchemaDrift, and rate_limits();
-                         DriftRegistry, pascal_case (section 17)
+                         DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe(),
                          column_table() (section 7.4)
   publisher.py           blink_publisher(), BlinkPublisher: the publisher of every blink

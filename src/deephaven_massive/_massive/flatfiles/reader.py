@@ -212,10 +212,10 @@ class ReadPlan:
 class FlatFile:
     """One flat file being read: the open body of an S3 object and how to decode it.
 
-    `FlatFileClient.open` creates one per existing key, around the object's body. A single
-    reader thread iterates `batches()`; `close()` releases the body and may be called from any
-    thread, any number of times. Use it as a context manager so the body is closed however the
-    read ends.
+    `FlatFileClient.open` creates one per existing key, around the object's body. Not
+    thread-safe: a single reader thread iterates `batches()` and calls `close()`, which
+    releases the body and may be called any number of times. Use it as a context manager so
+    the body is closed however the read ends.
 
     Example:
         ::
@@ -323,8 +323,7 @@ class FlatFile:
     def close(self) -> None:
         """Close the body, which returns or drops its connection.
 
-        Idempotent and safe from any thread. The library closes a file on its reader thread,
-        once the read has ended.
+        Idempotent. Call it on the reader thread, once the read has ended, as the library does.
         """
         self._body.close()
 
