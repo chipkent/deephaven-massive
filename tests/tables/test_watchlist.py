@@ -23,7 +23,7 @@ from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
-    _CURRENT_STEP,
+    CURRENT_STEP,
     CurrentSymbols,
     SymbolRowRule,
     SymbolWatch,
@@ -781,8 +781,8 @@ def test_latest_rows_since_added_stamps_the_cycle_on_parallel_update_threads(
         )
         with update_graph.shared_lock(dh_exec_ctx.update_graph):
             built = update_cycle(dh_exec_ctx)
-            added = watchlist.select_distinct("Symbol").update(f"Step = {_CURRENT_STEP}")
-            rows = blink.update(f"Step = {_CURRENT_STEP}").last_by("Symbol")
+            added = watchlist.select_distinct("Symbol").update(f"Step = {CURRENT_STEP}")
+            rows = blink.update(f"Step = {CURRENT_STEP}").last_by("Symbol")
         kept = latest_rows_since_added(blink, watchlist, ("Symbol",))
     publisher.add(stamped("A", 1))
     wait_for(lambda: len(dh_to_pylist(kept)) == 1)

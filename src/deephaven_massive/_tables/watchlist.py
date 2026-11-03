@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ValueTable
 
 __all__ = [
+    "CURRENT_STEP",
     "CurrentSymbols",
     "SymbolRowRule",
     "SymbolWatch",
@@ -100,7 +101,7 @@ symbol last joined the watchlist."""
 _ROW_STEP: Final = "__MassiveRowStep"
 """The hidden column `latest_rows_since_added` stamps and drops: the update cycle in which a row
 reached the blink table."""
-_CURRENT_STEP: Final = (
+CURRENT_STEP: Final = (
     "io.deephaven.engine.context.ExecutionContext.getContext().getUpdateGraph().clock()"
     ".currentStep()"
 )
@@ -743,11 +744,11 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
         # keeps every cycle out until both sides exist, so the symbols and rows present now get
         # equal steps. `update`, never `update_view`, on both sides: a view would compute the
         # step when a row is read, not in the cycle the row changed.
-        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {_CURRENT_STEP}")
+        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
         # Stamped before the aggregation: a formula that reads no column is not computed again
         # when a row is modified, so after `last_by` it would keep the step of each key's first
         # row.
-        latest = blink.update(f"{_ROW_STEP} = {_CURRENT_STEP}").last_by(list(keys))
+        latest = blink.update(f"{_ROW_STEP} = {CURRENT_STEP}").last_by(list(keys))
     finally:
         lock.unlock()
     joined = latest.natural_join(added, on=_SYMBOL, joins=_ADDED_STEP)

@@ -1232,7 +1232,9 @@ The members are `CME`, `CBOT`, `NYMEX`, and `COMEX`. Streams and REST reads igno
   cost of keeping every symbol the table ever held in memory. A symbol that failed is always
   read again. Massive corrects past data (late cancellations, backfills, splits), so no rule can
   tell when an earlier download is still right: choose `NEVER` only when stale rows are
-  acceptable. Each symbol's rows are as of its `ReadAt` in `m.symbol_reads()`.
+  acceptable. Each symbol's rows are as of its `ReadAt` in `m.symbol_reads()`. With `wait=True`,
+  the rows of the symbols in the table at the call stay in memory until you release the result,
+  under either setting.
 - `fetch(*, wait=True)`: `wait` as for `history()`. A `fetch()` that follows a live symbol
   table reads a returning symbol again, as Massive answers at that moment.
 

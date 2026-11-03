@@ -768,6 +768,45 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
     massive_session.release(result)
 
 
+def test_always_reads_a_seeded_symbol_that_left_and_returned_while_the_result_was_made(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another thread deletes and re-adds the seeded symbol between the build and the watch's
+    # start. Were a cycle to run in that gap, its seed row would be hidden as older than its
+    # return, and the watch, starting after both, would see no change to read it again for.
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+    exec_ctx = massive_session._core.exec_ctx
+    lock = exec_ctx.update_graph.j_update_graph.sharedLock()
+    hand_over = follow_coordinator.FollowCoordinator.follow
+    editors: list[threading.Thread] = []
+
+    def edit() -> None:
+        with entered(exec_ctx):
+            delete(wl, "AAPL")
+            add(wl, "AAPL")
+
+    def edits_meanwhile(coordinator: follow_coordinator.FollowCoordinator, *handed: object) -> None:
+        editor = threading.Thread(target=edit)
+        editor.start()
+        editors.append(editor)
+        if not lock.isHeldByCurrentThread():  # cycles may run: the edits land in the gap
+            editor.join(TIMEOUT)
+        hand_over(coordinator, *cast("tuple[Any, Any]", handed))
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "follow", edits_meanwhile)
+    result = follow(massive_session, wl, script, first=first_read(massive_session, AAPL=3))
+    (editor,) = editors
+    editor.join(TIMEOUT)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})  # read again, as a returning symbol
+    until(lambda: script.calls == [("AAPL",)])
+    massive_session.release(result)
+
+
 def test_never_shows_its_kept_download_in_the_cycle_the_symbol_returns(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
@@ -876,6 +915,40 @@ def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSes
     coordinator.wake()
     assert coordinator.thread is None
     assert coordinator.following == 0
+
+
+def test_a_newer_partition_row_replaces_a_seeded_symbol_s_rows(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The symbol stays in the table, so only the seed's mask keeps its seed row from making a
+    # second partition beside the newer one.
+    handed: list[followed_read.FollowedRead] = []
+    hand_over = follow_coordinator.FollowCoordinator.follow
+
+    def keeps(coordinator: follow_coordinator.FollowCoordinator, *args: object) -> None:
+        read, first = cast("tuple[Any, Any]", args)
+        handed.append(read)
+        hand_over(coordinator, read, first)
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "follow", keeps)
+    result = follow(
+        massive_session,
+        watchlist("AAPL"),
+        Script(massive_session),
+        first=first_read(massive_session, AAPL=3),
+    )
+    assert counts(dh_to_pylist(result)) == {"AAPL": 3}
+    (read,) = handed
+    exec_ctx = massive_session._core.exec_ctx
+    step = int(exec_ctx.update_graph.j_update_graph.clock().currentStep())
+    with entered(exec_ctx):
+        read.publish("AAPL", 1, rows_of(massive_session, "AAPL", 5), decided_at_step=step)
+    wait_rows(dh_to_pylist, result, {"AAPL": 5})
+    massive_session.release(result)
 
 
 def test_never_shows_a_seeded_symbol_until_it_leaves(
