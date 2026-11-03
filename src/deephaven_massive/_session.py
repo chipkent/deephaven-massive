@@ -456,8 +456,7 @@ class MassiveSession:
             with a value that does not fit, read as null, `channel:field?`, or held as a whole
             number beyond 2**53, read rounded, `channel:field~`; and the rows dropped because
             their symbol or time could not be read, `channel:<n> rows dropped`, which counts
-            every read of such a row and comes before the fields). Each column's
-            tooltip says what it holds.
+            every read of such a row and comes before the fields).
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -501,7 +500,7 @@ class MassiveSession:
             `Gaps` (`<start> to <end>` in UTC, the latest five), `CreatedAt`, and `SchemaDrift`
             (`transport:field+`, `transport:field-`, `transport:field?`, `transport:field~`, and
             `transport:<n> rows dropped`, as in `connections()`; a `poll()` that reads the same
-            bad row every cycle counts it every cycle). Each column's tooltip says what it holds.
+            bad row every cycle counts it every cycle).
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -525,8 +524,7 @@ class MassiveSession:
             `RequestsPerMinute` and `LimitSource` (`DECLARED` in
             `MassiveConfig.rest_basic_subscriptions` or `LEARNED` from a refusal), `InFlight`,
             `Waiting`, `RecentRequests` (within the last 61 seconds), `Attempts`, `Refusals`,
-            `PausedUntil`, `LastRefusal`, and `UpdatedAt`. Each column's tooltip says what it
-            holds.
+            `PausedUntil`, `LastRefusal`, and `UpdatedAt`.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
