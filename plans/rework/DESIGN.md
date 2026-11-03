@@ -1124,12 +1124,13 @@ return result
      and leaves the connection's users, so no later row replaces it.
   5. It has the writer add the final rows, release the diagnostics scope under the shared
      update-graph lock, and end, and waits for it. The rows reach the tables on the next update
-     cycle, so while a diagnostics view is held `close()` then waits for a cycle that started
-     after the writer ended (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then
-     a WARNING), and a held `m.streams()` view shows them when it returns. A held view keeps
-     its table, the blink table under it, and the publisher alive, so the release does not
-     drop the pending rows; with no view held nothing could show them, and `close()` does not
-     wait. On a thread that holds the UG lock it waits for neither: the writer's release
+     cycle, so `close()` then waits for a cycle that started after the writer ended
+     (`wait_for_update_cycle`, at most `CLOSE_SHOWN_TIMEOUT`, 30 s, then a WARNING), and a held
+     `m.streams()` view, or a table derived from one, shows them when it returns. A held view
+     keeps its table, the blink table under it, and the publisher alive, so the release does
+     not drop the pending rows. `close()` waits even when it counts no view held: in
+     `x = m.streams().where(...)` the view's wrapper is collected at once while `x` keeps the
+     table, and the wait is usually shorter than one cycle. On a thread that holds the UG lock it waits for neither: the writer's release
      cannot take the lock until the caller lets it go, so `close()` asks the writer to add the
      rows, release the scope, and end, and returns at once; the rows, and a held view, follow
      once the console command is over.

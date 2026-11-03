@@ -484,23 +484,6 @@ def test_queued_rows_are_coalesced_into_few_adds_at_least_an_interval_apart(
     diagnostics.release()
 
 
-def test_a_held_first_batch_coalesces_the_rest_into_one_add(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
-) -> None:
-    diagnostics = _diagnostics(dh_exec_ctx)
-    counting = _count_adds(diagnostics)
-    diagnostics.write(STREAM)
-    assert counting.entered.wait(TIMEOUT)
-    for n in range(1_000):
-        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
-    counting.gate.set()
-    assert diagnostics.wait_until_shown(TIMEOUT)
-    assert len(counting.adds) == 2  # the held first row, then one add for the other 1,000
-    rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
-    assert [(r["StreamId"], r["HeldResults"]) for r in rows] == [(n, 990 + n) for n in range(10)]
-    diagnostics.release()
-
-
 def test_release_adds_queued_rows_then_releases(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:

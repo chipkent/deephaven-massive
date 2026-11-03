@@ -14,9 +14,9 @@ for that step: a table registered with the update graph while a cycle runs can b
 that same cycle, and a first change delivered in the same step is fatal (Deephaven's
 fatal-error handler ends the process). Keyed input tables were seen to fail this way; a
 publisher's blink table is registered with the update graph the same way, so it is created
-under the lock too, as a precaution. A cycle holds the exclusive lock from its start until its
-sources are listed, so a table created under the shared lock is never one of a running cycle's
-sources.
+under the lock too, as a precaution. A cycle holds the exclusive lock for its whole run, so no
+cycle runs while a table is created under the shared lock, and the table is never one of a
+running cycle's sources.
 
 **Why the wrapper exists.** `TablePublisher.publish_failure` only queues the failure: on its next
 update cycle, Deephaven's `StreamToBlinkTableAdapter` fails the blink table and then closes

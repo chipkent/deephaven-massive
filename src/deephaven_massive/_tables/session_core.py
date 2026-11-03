@@ -173,8 +173,9 @@ _FINAL: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.D
 landed. `close()` and a dying thread fail only the tables in none of them."""
 
 CLOSE_SHOWN_TIMEOUT: Final = 30.0
-"""The most seconds `close()` waits, while a diagnostics view is held, for the update cycle that
-shows the final diagnostics rows; past it, `close()` returns after a WARNING."""
+"""The most seconds `close()` waits, on a thread that does not hold the update graph's lock, for
+the update cycle that shows the final diagnostics rows; past it, `close()` returns after a
+WARNING."""
 
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
@@ -1594,19 +1595,20 @@ class SessionCore:
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop; a
         background read's thread stops with its table's failure, and its requests with the session's
-        REST client); the final rows are added and the diagnostics scope released, and, while a
-        diagnostics view is held, `close()` returns once an update cycle has taken the rows in, so
-        the view shows them (after `CLOSE_SHOWN_TIMEOUT` seconds it returns anyway, after a
-        WARNING). On a thread that holds the update graph's lock, such as a console command's, no
-        cycle can run until the lock is released, so `close()` waits for neither the writer nor the
-        cycle: the writer adds the rows and releases the scope, and a held view shows them, once the
-        caller releases the lock. There the closers join no thread either (`WsConnections.close`):
-        while they would wait no live table updates, and the threads, daemons that never need the
-        lock, end on their own. Results stay tracked, so garbage collection and `release()` still
-        free them. Logs "MassiveSession #1 closed; N live tables failed, streams [...]", with the
-        stream ids of the failed tables (`bounded_list`): a WARNING when N > 0, INFO otherwise. On
-        an update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even when
-        the session is already closed.
+        REST client); the final rows are added and the diagnostics scope released, and `close()`
+        returns once an update cycle has taken the rows in, so every diagnostics view, and every
+        table derived from one, shows them (after `CLOSE_SHOWN_TIMEOUT` seconds it returns
+        anyway, after a WARNING). On a thread that holds the update graph's lock, such as a
+        console command's, no cycle can run until the lock is released, so `close()` waits for
+        neither the writer nor the cycle: the writer adds the rows and releases the scope, and a
+        held view shows them, once the caller releases the lock. There the closers join no thread
+        either (`WsConnections.close`): while they would wait no live table updates, and the
+        threads, daemons that never need the lock, end on their own. Results stay tracked, so
+        garbage collection and `release()` still free them. Logs "MassiveSession #1 closed; N
+        live tables failed, streams [...]", with the stream ids of the failed tables
+        (`bounded_list`): a WARNING when N > 0, INFO otherwise. On an update-graph thread it
+        raises the `ValueError` of `refuse_update_graph_thread`, even when the session is
+        already closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
@@ -1640,14 +1642,12 @@ class SessionCore:
         # it cannot take while this thread holds the lock: waiting for it there would never end.
         self.diagnostics.release(wait=not locked)
         if not locked:
-            with self.registry_lock:
-                views = self._views
-            # The final rows are added, but they reach the tables, and a held view of them,
+            # The final rows are added, but they reach the tables, and every view of them,
             # only on the next update cycle: wait for it, so a view read right after close()
-            # shows them. With no view held nothing could show them, and the release destroyed
-            # the tables.
-            if views:
-                wait_for_update_cycle(self.exec_ctx, CLOSE_SHOWN_TIMEOUT)
+            # shows them. Wait even when no view is counted as held: a table derived from a
+            # view (`m.streams().where(...)`) outlives the view's wrapper, which is collected
+            # at once, and must show the final rows too.
+            wait_for_update_cycle(self.exec_ctx, CLOSE_SHOWN_TIMEOUT)
         level = logging.WARNING if failed else logging.INFO
         logger.log(
             level,
