@@ -2875,6 +2875,9 @@ def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
     blink_creations: list[bool],
 ) -> None:
     before = len(blink_creations)
+    # The first cycle's rows, so its read returns at once: a read with none waits for TIMEOUT,
+    # and the poller, and through it the session's reaper, outlives the test until then.
+    script.rows(("AAPL", 0.25))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     assert blink_creations[before:] == [True]
     massive_session.release(table)
