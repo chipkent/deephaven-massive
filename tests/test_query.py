@@ -42,6 +42,8 @@ from deephaven_massive._errors import LIBRARY_BUG, UnlistedPairError
 from deephaven_massive._ingest import history_reads
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience, Transport
+from deephaven_massive._namespaces import futures
+from deephaven_massive._namespaces.options import CHAIN
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import (
     HistoryQuery,
@@ -207,6 +209,8 @@ class Recorder:
         self.turns: dict[str, list[SymbolOutcome]] = {}
         # The unlisted_symbols setting each static fetch() passed.
         self.unlisted: list[OnError] = []
+        # Each read of a value table's values: the values, the request, and the thread.
+        self.valued: list[tuple[tuple[str, ...], Request, str]] = []
         # Raised by every read by symbol, when set: a failure of every symbol alike.
         self.raises: BaseException | None = None
         self._catalog = catalog
@@ -252,6 +256,21 @@ class Recorder:
             turns = self.turns.get(name, [])
             found[name] = turns.pop(0) if turns else self.outcomes.get(name, SymbolRows(empty))
         return found
+
+    def fetch_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> dict[str, SymbolOutcome]:
+        del stop
+        self.call_ids.append(call)
+        self.valued.append((tuple(values), request, threading.current_thread().name))
+        empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
+        return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
 
     def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         self.checks.append(("fetch", spec, request))
@@ -2707,3 +2726,157 @@ def test_a_followed_range_no_row_can_lie_in_checks_nothing(
     assert rest.checks == []  # nothing can be asked: no request, no parameter to check
     massive_session.release(result)
     follows(massive_session)
+
+
+# --- fetch() and poll() of a table passed where a dataset takes one value ---------------------
+
+
+@pytest.fixture
+def live_codes(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+    # Makes a refreshing, keyed table of futures product codes, as `m.futures.products()` rows
+    # carry them.
+    def make(*codes: str) -> Table:
+        table = dh_input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
+        if codes:
+            table.add(new_table([string_col("ProductCode", list(codes))]))
+        return table
+
+    return make
+
+
+def test_a_static_table_of_underlyings_reads_each_chain_once(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    rest.outcomes = {
+        "AAPL": rows_of(massive_session, CHAIN, 2),
+        "MSFT": rows_of(massive_session, CHAIN, 1),
+    }
+    underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL", "MSFT"])])
+    q = massive_session.options.chain(underlyings)
+    assert repr(q) == "m.options.chain(<table>)"
+    result = q.fetch()
+    assert not result.is_refreshing
+    assert result.size == 3
+    [(values, request, _)] = rest.valued
+    assert values == ("AAPL", "MSFT")
+    assert request.value_table is not None
+    assert request.for_value("AAPL").params == (("underlyingAsset", "AAPL"),)
+
+
+def test_a_static_table_of_values_fails_when_one_value_fails(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    refusal = dm.EntitlementError("HTTP 403: not in the plan")
+    rest.outcomes = {"NQ": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
+    with pytest.raises(dm.EntitlementError, match="not in the plan"):
+        massive_session.futures.products(product_code=codes).fetch()
+    rest.outcomes = {}  # the raised error's traceback holds the session
+
+
+def test_a_static_table_of_values_reads_in_the_background_with_wait_false(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    codes = new_table([string_col("ProductCode", ["ES"])])
+    result = massive_session.futures.products(product_code=codes).fetch(wait=False)
+    assert result.is_refreshing
+    [(_, _, checked)] = rest.checks  # checked at the call, with the table's first value
+    assert ("product_code", "ES") in checked.params
+    _until(lambda: len(rest.valued) == 1)
+    massive_session.release(result)
+
+
+def test_a_table_of_values_with_no_value_it_takes_is_refused(
+    *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    empty = new_table([string_col("ProductCode", [None])])
+    with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
+        massive_session.futures.products(product_code=empty).fetch()
+    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
+    q = massive_session.options.chain(options)
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+        q.fetch()
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+        q.poll(5)
+    assert rest.valued == []
+
+
+def test_fetch_follows_a_refreshing_table_of_product_codes(
+    *,
+    live_codes: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    rest.outcomes = {"ES": rows_of(massive_session, futures.PRODUCTS, 1)}
+    codes = live_codes("ES")
+    result = massive_session.futures.products(product_code=codes).fetch()
+    assert result.is_refreshing
+    assert result.size == 1  # the call-time code is in the result when the call returns
+    assert result.attributes()["TableDescription"].endswith(
+        "Follows its table of product_code values: each value's rows are Massive's answer as of "
+        "its read."
+    )
+    rest.outcomes["NQ"] = rows_of(massive_session, futures.PRODUCTS, 2)
+    cast("Any", codes).add(new_table([string_col("ProductCode", ["NQ"])]))
+    _until(lambda: len(dh_to_pylist(result)) == 3)
+    assert [values for values, _, _ in rest.valued] == [("ES",), ("NQ",)]
+    assert "follow-read" in rest.valued[1][2]
+    assert set(symbol_reads(massive_session, drain, dh_to_pylist)) == {"ES", "NQ"}
+    cast("Any", codes).delete(new_table([string_col("ProductCode", ["ES"])]))
+    _until(lambda: len(dh_to_pylist(result)) == 2)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_fetch_follows_a_refreshing_table_of_underlyings_with_wait_false(
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    result = massive_session.options.chain(live()).fetch(wait=False)
+    assert result.is_refreshing
+    assert (rest.valued, rest.checks) == ([], [])  # nothing to read or check yet
+    assert "Follows its table of underlying values" in result.attributes()["TableDescription"]
+    massive_session.release(result)
+    follows(massive_session)
+    result = massive_session.options.chain(live("AAPL")).fetch(wait=False)
+    _until(lambda: len(rest.valued) == 1)
+    [(_, _, checked)] = rest.checks
+    assert ("underlyingAsset", "AAPL") in checked.params
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_fetch_follows_one_refreshing_table_at_a_time(
+    *,
+    live: Callable[..., Table],
+    live_codes: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    q = massive_session.futures.snapshots(live("ESZ6"), product_code=live_codes("ES"))
+    with pytest.raises(
+        ValueError,
+        match=r"both symbols and product_code are refreshing tables\. Use poll\(interval\), "
+        r"which reads both at every cycle, or pass one of them as a static snapshot, such as "
+        r"product_code=table\.snapshot\(\)$",
+    ):
+        q.fetch()
+    # A static symbol table beside it is read once, and the codes are followed.
+    contracts = new_table([string_col("Symbol", ["ESZ6"])])
+    result = massive_session.futures.snapshots(contracts, product_code=live_codes("ES")).fetch()
+    [(_, request, _)] = rest.valued
+    assert request.symbols == ("ESZ6",)
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_poll_reads_a_table_of_values_at_its_call(
+    *, live_codes: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    codes = live_codes("ES")
+    massive_session.futures.market_status(product_code=codes).poll(5)
+    [(verb, _, request, _)] = rest.calls
+    assert verb == "poll"
+    assert request.value_table is not None
+    assert request.value_table.table is codes

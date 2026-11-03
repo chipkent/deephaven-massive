@@ -453,6 +453,32 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
     assert request_of(massive_session.options.chain("SPY"))["params"] == {"underlyingAsset": "SPY"}
 
 
+def test_chain_and_contracts_take_a_table_of_underlyings(
+    massive_session: dm.MassiveSession,
+) -> None:
+    underlyings = new_table([string_col("Symbol", ["AAPL", "I:SPX"])])
+    chain = massive_session.options.chain(underlyings, contract_type=dm.ContractType.PUT)
+    contracts = massive_session.options.contracts(underlying=underlyings)
+    for query, parameter in ((chain, "underlyingAsset"), (contracts, "underlying_ticker")):
+        values = query._request.value_table
+        assert values is not None
+        assert (values.parameter, values.column, values.table) == (
+            parameter,
+            "Symbol",
+            underlyings,
+        )
+        assert parameter not in request_of(query)["params"]  # each verb sends one at a time
+    assert request_of(chain)["params"] == {"contract_type": dm.ContractType.PUT}
+    tickers = new_table([string_col("Ticker", ["AAPL"])])
+    with pytest.raises(
+        ValueError,
+        match=r"^a table passed as underlying must have a Symbol column; this one has: Ticker\. ",
+    ):
+        massive_session.options.chain(tickers)
+    with pytest.raises(ValueError, match="must have a Symbol column"):
+        massive_session.options.contracts(underlying=tickers)
+
+
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
     with pytest.raises(
@@ -1043,6 +1069,42 @@ def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
         "options.contracts: 2 of 2 Underlying values from /v3/reference/options/contracts are "
         "indices by their CFI code and get the I: prefix, the first 'SPX'"
     ) in messages
+
+
+def test_a_table_of_index_underlyings_lists_each_one_s_contracts_by_its_bare_ticker(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Each value of the table is read as if passed alone, so an index is sent bare and its
+    # rows get their I: back, as for `underlying="I:SPX"`.
+    reply = Reply(body(load_fixture, "contracts_index.json"))
+    fake_rest.reply("/v3/reference/options/contracts", reply)
+    underlyings = new_table([string_col("Symbol", ["I:SPX"])])
+    listed = rows(rest_session.options.contracts(underlying=underlyings).fetch())
+    assert fake_rest.get_queries() == [
+        ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
+    ]
+    assert {r["Underlying"] for r in listed} == {"I:SPX"}
+
+
+def test_a_table_of_underlyings_reads_each_one_s_chain(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    for underlying in ("AAPL", "MSFT"):
+        reply = Reply(body(load_fixture, "chain.json"))
+        fake_rest.reply(f"/v3/snapshot/options/{underlying}", reply)
+    underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
+    out = rows(rest_session.options.chain(underlyings).fetch())
+    assert [path for path, _ in fake_rest.get_queries()] == [
+        "/v3/snapshot/options/AAPL",
+        "/v3/snapshot/options/MSFT",
+    ]
+    assert len(out) == 2  # each chain's one contract
 
 
 def contract_row(ticker: str, underlying: str, cfi: str | None) -> dict[str, object]:

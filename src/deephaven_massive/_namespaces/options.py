@@ -20,8 +20,9 @@ chain, the snapshots, and the contract reference data carry the instrument Massi
 contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
 of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
-too. The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes
-it bare (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
+too, or a table of them in a `Symbol` column (`value_table`), each read as if passed alone.
+The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
+(`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
 their CFI code (`wire_symbols.index_underlyings`).
 
@@ -34,9 +35,16 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
+from deephaven.table import Table
+
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._datasets.symbols import check_symbol, is_canonical, symbol_class
+from deephaven_massive._datasets.symbols import (
+    UNDERLYING_CLASSES,
+    check_symbol,
+    is_canonical,
+    symbol_class,
+)
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -57,6 +65,7 @@ from deephaven_massive._namespaces.query_building import (
     day_argument,
     list_params,
     require_bool,
+    value_table,
 )
 from deephaven_massive._types import ALL
 
@@ -83,9 +92,6 @@ _SNAPSHOT_TYPE: Final = "options"
 Tickers never travel with it: Massive answers `type` beside `ticker.any_of` with HTTP 400
 ("Cannot specify tickers and type."), and each contract's `O:` prefix already names its class.
 """
-
-_UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
-"""The classes whose tickers an option can be linked to, the ones `underlying` takes."""
 
 _LAST_TRADE: Final = "/v2/last/trade/{optionsTicker}"
 _TRADES: Final = "/v3/trades/{optionsTicker}"
@@ -325,7 +331,7 @@ def _underlying(value: object) -> str:
     if not isinstance(value, str):
         kind = "dm.ALL" if value is ALL else type(value).__name__
         raise TypeError(f"underlying must be one ticker, a str, not {kind}")
-    if symbol_class(value) not in _UNDERLYING_CLASSES:
+    if symbol_class(value) not in UNDERLYING_CLASSES:
         raise ValueError(
             f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
         )
@@ -623,10 +629,10 @@ class _Options(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
-    @raises_through(build_query, list_params, _contract_type, _underlying)
+    @raises_through(build_query, list_params, _contract_type, _underlying, value_table)
     def chain(
         self,
-        underlying: str,
+        underlying: str | Table,
         *,
         contract_type: ContractType | None = None,
         sort: str | None = None,
@@ -641,11 +647,14 @@ class _Options(Namespace):
         Massive links the contract to, not what it delivers: an adjusted contract (root `AAPL1`) is
         listed beside the standard ones. To keep standard contracts only, join `contracts()` on
         `Symbol` and keep `SharesPerContract == 100` with a null or `[]` `AdditionalUnderlyings`.
-        `snapshots(dm.ALL)` lists every contract of every underlying.
+        `snapshots(dm.ALL)` lists every contract of every underlying. A table of underlyings reads
+        each one's chain; a refreshing one is followed by `fetch()` and re-read by each `poll()`
+        cycle (README.md#option-chain).
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or
-                `"I:SPX"`; case is kept and nothing is converted.
+                `"I:SPX"`; case is kept and nothing is converted. Or a table of them in a
+                `Symbol` column, each read as if passed alone.
             contract_type: `dm.ContractType.CALL` or `PUT`; None, the default, for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`. See
                 README.md#sort-order-limit.
@@ -658,11 +667,12 @@ class _Options(Namespace):
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.chain.md.
 
         Raises:
-            TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
-                `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or
-                `filters` is not a mapping.
-            ValueError: If `underlying` is `dm.ALL` or not Massive's exact stock or index ticker,
-                `limit` is not positive, or a filter key or value does not fit the endpoint.
+            TypeError: If `underlying` is not a `str` or a table, `sort` is not a `str`,
+                `contract_type` is not a `dm.ContractType`, `order` is not a `dm.Order`, `limit`
+                is not an `int`, or `filters` is not a mapping.
+            ValueError: If `underlying` is `dm.ALL`, not Massive's exact stock or index ticker,
+                or a table without a `Symbol` column, `limit` is not positive, or a filter key
+                or value does not fit the endpoint.
 
         Example:
             ::
@@ -676,14 +686,22 @@ class _Options(Namespace):
                 "options.chain reads one underlying's chain and does not take dm.ALL; "
                 "m.options.snapshots(dm.ALL) lists every contract"
             )
+        values = (
+            value_table(
+                underlying, argument="underlying", parameter="underlyingAsset", underlying=True
+            )
+            if isinstance(underlying, Table)
+            else None
+        )
         params: dict[str, object] = {
-            "underlyingAsset": _underlying(underlying),
+            "underlyingAsset": None if values is not None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
         }
         params.update(list_params(sort=sort, order=order))
-        return cast(
-            "Query", build_query(self._core, CHAIN, params=params, filters=filters, limit=limit)
+        query = build_query(
+            self._core, CHAIN, params=params, filters=filters, limit=limit, values=values
         )
+        return cast("Query", query)
 
     @raises_through(build_query, list_params)
     def snapshots(
@@ -746,12 +764,14 @@ class _Options(Namespace):
             ),
         )
 
-    @raises_through(build_query, list_params, day_argument, _contract_type, _expired, _underlying)
+    @raises_through(
+        build_query, list_params, day_argument, _contract_type, _expired, _underlying, value_table
+    )
     def contracts(
         self,
         symbols: Symbols | None = None,
         *,
-        underlying: str | None = None,
+        underlying: str | Table | None = None,
         contract_type: ContractType | None = None,
         as_of: DateLike | None = None,
         expired: bool = False,
@@ -773,7 +793,10 @@ class _Options(Namespace):
             symbols: Contracts to describe, as Massive's tickers; None, the default, lists
                 contracts. `dm.ALL` is refused. See README.md#symbols.
             underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
-                the rows' `Underlying` is the same canonical ticker.
+                the rows' `Underlying` is the same canonical ticker. Or a table of them in a
+                `Symbol` column, each listed as if passed alone; a refreshing one is followed
+                by `fetch()` and re-read by each `poll()` cycle. See
+                README.md#option-chain.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
             as_of: The day whose contracts to list; None for today. See README.md#as-of.
             expired: True lists expired contracts only; False, the default, those still trading.
@@ -788,9 +811,9 @@ class _Options(Namespace):
             A query with `fetch()` and `poll()`. Columns: docs/datasets/options.contracts.md.
 
         Raises:
-            TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
-                `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit`
-                is not an `int`, or `filters` is not a mapping.
+            TypeError: If `underlying` is not a `str` or a table, `sort` is not a `str`,
+                `contract_type` is not a `dm.ContractType`, `expired` is not a `bool`, `order` is
+                not a `dm.Order`, `limit` is not an `int`, or `filters` is not a mapping.
             ValueError: If `symbols` is `dm.ALL`, empty, or a stock or index ticker (the message
                 names `underlying=`), a symbol is not an OCC option symbol, a table has no `Symbol`
                 column, `underlying` is not Massive's exact ticker, `as_of` is a `datetime` or not
@@ -803,7 +826,7 @@ class _Options(Namespace):
         """
         if (
             isinstance(symbols, str)
-            and symbol_class(symbols) in _UNDERLYING_CLASSES
+            and symbol_class(symbols) in UNDERLYING_CLASSES
             and is_canonical(ClassFromPrefix.ANY, symbols)
         ):
             # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
@@ -812,8 +835,17 @@ class _Options(Namespace):
                 f"{symbols!r} is an underlying, not an options contract: list its contracts "
                 f"with m.options.contracts(underlying={symbols!r})"
             )
+        values = (
+            value_table(
+                underlying, argument="underlying", parameter="underlying_ticker", underlying=True
+            )
+            if isinstance(underlying, Table)
+            else None
+        )
         params: dict[str, object] = {
-            "underlying_ticker": None if underlying is None else _underlying(underlying),
+            "underlying_ticker": None
+            if underlying is None or values is not None
+            else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
             "as_of": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             "expired": _expired(expired),
@@ -830,6 +862,7 @@ class _Options(Namespace):
                 params=params,
                 filters=filters,
                 limit=limit,
+                values=values,
             ),
         )
 

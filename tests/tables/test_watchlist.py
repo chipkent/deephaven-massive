@@ -15,14 +15,15 @@ from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.request import ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._namespaces import crypto, forex, partners
+from deephaven_massive._namespaces import crypto, forex, futures, options, partners
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
-    _CURRENT_STEP,
+    CURRENT_STEP,
     SymbolRowRule,
     SymbolRows,
     SymbolWatch,
@@ -194,7 +195,9 @@ def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
 Watching = tuple[SymbolWatch, list[Change], list[str], list[tuple[str, ...]]]
 
 
-def watching(table: Table, mode: OnError = OnError.RAISE) -> Watching:
+def watching(
+    table: Table, mode: OnError = OnError.RAISE, row_rule: SymbolRowRule | None = None
+) -> Watching:
     seen: list[Change] = []
     refused: list[str] = []
     skipped: list[tuple[str, ...]] = []
@@ -213,7 +216,12 @@ def watching(table: Table, mode: OnError = OnError.RAISE) -> Watching:
             skipped.append(values)
 
     watch = SymbolWatch(
-        rule(mode=mode), table, record, stream_id=7, on_invalid=refuse, on_skipped=skip
+        rule(mode=mode) if row_rule is None else row_rule,
+        table,
+        record,
+        stream_id=7,
+        on_invalid=refuse,
+        on_skipped=skip,
     )
     return watch, seen, refused, skipped
 
@@ -281,6 +289,72 @@ def test_a_watch_skips_a_late_row_that_is_not_canonical(
     watchlist.delete(new_table([int_col("Key", [1])]))  # the last bad row goes
     wait_for(lambda: len(skipped) == 4)
     assert skipped[3] == ()
+    assert refused == []
+
+
+def underlyings(mode: OnError = OnError.RAISE) -> SymbolRowRule:
+    # The rule of `m.options.chain(underlying=table)`: stock and index tickers in `Symbol`.
+    table = new_table([string_col("Symbol", ["AAPL"])])
+    values = ValueTable("underlying", "underlyingAsset", "Symbol", underlying=True, table=table)
+    return SymbolRowRule.for_values(options.CHAIN, values, mode)
+
+
+def product_codes(mode: OnError = OnError.RAISE) -> SymbolRowRule:
+    # The rule of a futures `product_code=table`: any code as written, in `ProductCode`.
+    table = new_table([string_col("ProductCode", ["ES"])])
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=table
+    )
+    return SymbolRowRule.for_values(futures.PRODUCTS, values, mode)
+
+
+def test_a_table_of_underlyings_takes_only_stock_and_index_tickers(dh_exec_ctx: object) -> None:
+    table = new_table([string_col("Symbol", ["I:SPX", "BRK.B", None, "AAPL"])])
+    assert read_symbols(underlyings(), table, stream_id=7).symbols == ("AAPL", "BRK.B", "I:SPX")
+    option = "O:AAPL250117C00150000"
+    for refused in (option, "X:BTCUSD", "aapl"):
+        assert not underlyings().accepts(refused)
+    with pytest.raises(
+        ValueError,
+        match=r"^options\.chain: a table of underlyings holds 'O:AAPL250117C00150000', which is "
+        r"not a stock or index ticker such as 'AAPL' or 'I:SPX'\. Fix the row, or convert it with "
+        r"dm\.canonical_symbol\(text, asset_class\)$",
+    ):
+        read_symbols(underlyings(), new_table([string_col("Symbol", [option])]), stream_id=7)
+
+
+def test_a_skipped_underlying_is_logged_with_its_reason(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad = "X:ETHUSD"  # a value of its own: each value is logged once per dataset and process
+    table = new_table([string_col("Symbol", [bad, "AAPL"])])
+    with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
+        rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)
+    assert rows == SymbolRows(("AAPL",), (bad,))
+    [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
+    assert record.startswith(f"options.chain a call's read: a table of underlyings holds {bad!r}")
+
+
+def test_a_table_of_product_codes_is_read_from_its_product_code_column(
+    dh_exec_ctx: object,
+) -> None:
+    table = new_table([string_col("ProductCode", ["NQ", "6E", None, "ES"])])
+    assert read_symbols(product_codes(), table, stream_id=7).symbols == ("6E", "ES", "NQ")
+    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+        read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
+
+
+def test_a_watch_of_product_codes_reports_changes_of_its_codes(
+    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+) -> None:
+    codes = dh_input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
+    codes.add(new_table([string_col("ProductCode", ["ES"])]))
+    watch, seen, refused, _ = watching(codes, row_rule=product_codes())
+    watch.start()
+    assert seen == [(frozenset({"ES"}), frozenset())]
+    codes.add(new_table([string_col("ProductCode", ["NQ"])]))
+    wait_for(lambda: len(seen) == 2)
+    assert seen[1] == (frozenset({"NQ"}), frozenset())
     assert refused == []
 
 
@@ -707,8 +781,8 @@ def test_latest_rows_since_added_stamps_the_cycle_on_parallel_update_threads(
         )
         with update_graph.shared_lock(dh_exec_ctx.update_graph):
             built = update_cycle(dh_exec_ctx)
-            added = watchlist.select_distinct("Symbol").update(f"Step = {_CURRENT_STEP}")
-            rows = blink.update(f"Step = {_CURRENT_STEP}").last_by("Symbol")
+            added = watchlist.select_distinct("Symbol").update(f"Step = {CURRENT_STEP}")
+            rows = blink.update(f"Step = {CURRENT_STEP}").last_by("Symbol")
         kept = latest_rows_since_added(blink, watchlist, ("Symbol",))
     publisher.add(stamped("A", 1))
     wait_for(lambda: len(dh_to_pylist(kept)) == 1)

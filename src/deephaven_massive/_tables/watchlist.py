@@ -1,9 +1,12 @@
 """Symbol tables: the check of their rows, and the watch that follows them.
 
 A user may pass a Deephaven `Table` with a `Symbol` column as a dataset's symbols, and edit it
-while results are live. A row should hold Massive's exact ticker, as `symbols=` must
-(`check_symbol` in `_datasets/symbols.py`): the library never rewrites a watchlist, so what the
-table says is what the stream subscribes and what `last_by()` matches. A null row is ignored.
+while results are live. A table passed where a dataset takes one value (`ValueTable`: an option
+chain's underlyings in `Symbol`, futures product codes in `ProductCode`) is read and watched the
+same way, through a rule made by `SymbolRowRule.for_values`. A row should hold Massive's exact
+ticker, as `symbols=` must (`check_symbol` in `_datasets/symbols.py`): the library never rewrites
+a watchlist, so what the table says is what the stream subscribes and what `last_by()` matches. A
+null row is ignored.
 A row that is not canonical is never subscribed or requested; what else it does follows the
 session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
 
@@ -53,12 +56,13 @@ from deephaven.table_listener import TableListener, TableListenerHandle
 
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
+    UNDERLYING_CLASSES,
     canonical_symbol,
     check_symbol,
     is_canonical,
     symbol_class,
 )
-from deephaven_massive._enums import ClassFromPrefix, OnError
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._types import override
 
@@ -69,9 +73,10 @@ if TYPE_CHECKING:
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._enums import AssetClass
+    from deephaven_massive._datasets.request import ValueTable
 
 __all__ = [
+    "CURRENT_STEP",
     "SymbolRowRule",
     "SymbolRows",
     "SymbolWatch",
@@ -96,7 +101,7 @@ symbol last joined the watchlist."""
 _ROW_STEP: Final = "__MassiveRowStep"
 """The hidden column `latest_rows_since_added` stamps and drops: the update cycle in which a row
 reached the blink table."""
-_CURRENT_STEP: Final = (
+CURRENT_STEP: Final = (
     "io.deephaven.engine.context.ExecutionContext.getContext().getUpdateGraph().clock()"
     ".currentStep()"
 )
@@ -227,12 +232,18 @@ class SymbolRowRule:
             for a dataset that spans classes (each symbol's prefix selects its class).
         as_written: True for a dataset whose symbols are kept as Massive writes them.
         noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+        column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
+            table of futures product codes.
+        underlying: True when each value must be a stock or index ticker, the underlying of
+            an option chain; False for any value of the grammar.
     """
 
     dataset: str
     asset_class: AssetClass | ClassFromPrefix
     as_written: bool
     noncanonical: OnError
+    column: str = _SYMBOL
+    underlying: bool = False
 
     @classmethod
     def of(cls, spec: DatasetSpec, noncanonical: OnError) -> SymbolRowRule:
@@ -247,28 +258,85 @@ class SymbolRowRule:
         """
         return cls(spec.name, spec.asset_class, spec.symbols_as_written, noncanonical)
 
-    def accepts(self, symbol: str) -> bool:
-        """Tell whether a row's symbol is Massive's exact ticker of the dataset's class.
+    @classmethod
+    def for_values(
+        cls, spec: DatasetSpec, values: ValueTable, noncanonical: OnError
+    ) -> SymbolRowRule:
+        """Return the rule of a table passed where a dataset takes one value.
+
+        An underlying must be Massive's exact stock or index ticker, as `underlying=` takes
+        it in code. A product code is kept as written: any text without surrounding
+        whitespace or a class prefix (`AS_WRITTEN`), since Massive publishes no grammar for
+        product codes. A value the rule refuses follows `noncanonical`, as a symbol table's
+        row does.
 
         Args:
-            symbol: The row's symbol, never null.
+            spec: The dataset.
+            values: The table and the argument it stands for.
+            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
 
         Returns:
-            True for a canonical ticker.
+            The rule, reading the table's `values.column`.
         """
+        if values.underlying:
+            return cls(
+                spec.name,
+                ClassFromPrefix.ANY,
+                as_written=False,
+                noncanonical=noncanonical,
+                column=values.column,
+                underlying=True,
+            )
+        return cls(
+            spec.name,
+            AssetClass.FUTURES,
+            as_written=True,
+            noncanonical=noncanonical,
+            column=values.column,
+        )
+
+    def accepts(self, symbol: str) -> bool:
+        """Tell whether a row's value is one the dataset takes.
+
+        Args:
+            symbol: The row's value, never null.
+
+        Returns:
+            True for Massive's exact ticker of the dataset's class; for a rule of
+            underlyings, a stock or index ticker only.
+        """
+        if self.underlying and symbol_class(symbol) not in UNDERLYING_CLASSES:
+            return False
         return is_canonical(self.asset_class, symbol, as_written=self.as_written)
 
     def refusal(self, symbol: str) -> str:
         """Say why a row is refused and how to fix it (`invalid_row_message`).
 
         Args:
-            symbol: The row's symbol, which `accepts` refuses.
+            symbol: The row's value, which `accepts` refuses.
 
         Returns:
             The message, prefixed with the dataset's name.
         """
-        reason = invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
-        return f"{self.dataset}: {reason}"
+        return f"{self.dataset}: {self._reason(symbol)}"
+
+    def _reason(self, symbol: str) -> str:
+        """Say why a row is refused, without the dataset's name.
+
+        Args:
+            symbol: The row's value, which `accepts` refuses.
+
+        Returns:
+            For a rule of underlyings, that an underlying is a stock or index ticker; else
+            the reason of `invalid_row_message`.
+        """
+        if self.underlying:
+            return (
+                f"a table of underlyings holds {symbol!r}, which is not a stock or index ticker "
+                "such as 'AAPL' or 'I:SPX'. Fix the row, or convert it with "
+                "dm.canonical_symbol(text, asset_class)"
+            )
+        return invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
 
     def skip(self, symbol: str, *, stream_id: int | None) -> None:
         """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.
@@ -292,7 +360,7 @@ class SymbolRowRule:
             "%s %s: %s; the row is skipped until it is fixed or deleted",
             self.dataset,
             reader,
-            invalid_row_message(self.asset_class, symbol, as_written=self.as_written),
+            self._reason(symbol),
         )
 
 
@@ -320,7 +388,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
 
     Args:
         rule: The dataset's rule: its grammar and the session's `noncanonical_symbols`.
-        table: The user's table with a `Symbol` column.
+        table: The user's table with the rule's column (`Symbol`, or `ProductCode`).
         stream_id: The stream or `poll()` table the read is for, named in a skipped row's
             record; None for a verb's read before any stream exists.
 
@@ -336,7 +404,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     """
     if table.j_table.isFailed():
         raise ValueError(_FAILED_TABLE.format(dataset=rule.dataset, cause="it is failed"))
-    found = sorted({row[0] for row in table.iter_tuple(cols=_SYMBOL) if row[0] is not None})
+    found = sorted({row[0] for row in table.iter_tuple(cols=rule.column) if row[0] is not None})
     good: list[str] = []
     skipped: list[str] = []
     for symbol in found:
@@ -430,7 +498,8 @@ class SymbolWatch:
 
         Args:
             rule: The dataset's grammar and the session's `noncanonical_symbols`.
-            table: The user's refreshing table with a `Symbol` column.
+            table: The user's refreshing table with the rule's column (`Symbol`, or
+                `ProductCode`).
             on_change: Receives each change of the set of symbols; see the class documentation.
             stream_id: The stream that follows the table, named in the watch's log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
@@ -438,8 +507,10 @@ class SymbolWatch:
                 that set changes.
         """
         # Without its null rows: `TableUpdate` hands a String column over as NumPy text, in
-        # which a null reads as the text "None".
-        self._view = table.view([_SYMBOL]).where(f"!isNull({_SYMBOL})")
+        # which a null reads as the text "None". A column of another name is watched as
+        # `Symbol`, the name the counter reads.
+        values = _SYMBOL if rule.column == _SYMBOL else f"{_SYMBOL} = {rule.column}"
+        self._view = table.view([values]).where(f"!isNull({_SYMBOL})")
         self._handle = TableListenerHandle(
             self._view,
             _SymbolCounter(
@@ -673,11 +744,11 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
         # keeps every cycle out until both sides exist, so the symbols and rows present now get
         # equal steps. `update`, never `update_view`, on both sides: a view would compute the
         # step when a row is read, not in the cycle the row changed.
-        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {_CURRENT_STEP}")
+        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
         # Stamped before the aggregation: a formula that reads no column is not computed again
         # when a row is modified, so after `last_by` it would keep the step of each key's first
         # row.
-        latest = blink.update(f"{_ROW_STEP} = {_CURRENT_STEP}").last_by(list(keys))
+        latest = blink.update(f"{_ROW_STEP} = {CURRENT_STEP}").last_by(list(keys))
     finally:
         lock.unlock()
     joined = latest.natural_join(added, on=_SYMBOL, joins=_ADDED_STEP)

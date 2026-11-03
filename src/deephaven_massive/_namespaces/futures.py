@@ -24,6 +24,10 @@ Futures differ from the other asset classes in three ways that show here:
 - **Bars.** The aggregates endpoint has a `session` unit and no `day` unit, so `bars` accepts
   `Timespan.SESSION` and rejects `Timespan.DAY`.
 
+Every `product_code=` takes one code, a list of codes (sent as `product_code.any_of`), or a table
+of codes in a `ProductCode` column (`value_table`), each code read as if passed alone; a
+refreshing table is followed by `fetch()` and re-read by each `poll()` cycle.
+
 The reference datasets keep the `FUTURES` asset class, which selects the session-day rule for
 their dates. `contracts` describes one contract per row, so its `Symbol` is the row's ticker
 and a contracts table feeds the market-data datasets directly; the others describe no single
@@ -34,6 +38,8 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+
+from deephaven.table import Table
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
@@ -46,12 +52,14 @@ from deephaven_massive._namespaces.query_building import (
     day_argument,
     list_params,
     one_or_any_of,
+    value_table,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
+    from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._enums import Order
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery
     from deephaven_massive._types import DateLike, FilterValue, FuturesSpan, StreamSpan, Symbols
@@ -100,25 +108,34 @@ _REFERENCE_ARGUMENTS: Final = {**_PRODUCT_CODE_ARGUMENT, "date": "as_of"}
 """The arguments of `contracts` and `products` named otherwise than their wire parameters."""
 
 
-@raises_through(one_or_any_of)
-def _product_codes(product_code: object) -> dict[str, object]:
-    """Return the wire parameters that carry a `product_code` argument.
+@raises_through(one_or_any_of, value_table)
+def _product_codes(product_code: object) -> tuple[dict[str, object], ValueTable | None]:
+    """Return the wire parameters that carry a `product_code` argument, or its table.
 
     Every futures path that takes a product code also takes `product_code.any_of`, so one
-    request serves several codes; `one_or_any_of` picks the form and checks the argument.
+    request serves several codes; `one_or_any_of` picks the form and checks the argument. A
+    table of codes, in a `ProductCode` column, is boxed instead (`value_table`) and read when a
+    verb runs: each code is sent as `product_code`, as if passed alone.
 
     Args:
-        product_code: The argument as passed: one code, a sequence of codes, or None.
+        product_code: The argument as passed: one code, a sequence of codes, a table, or None.
 
     Returns:
-        The two wire parameters, `product_code` and `product_code.any_of`, the unset one None.
+        The two wire parameters, `product_code` and `product_code.any_of`, the unset one None
+        (both None for a table), and the boxed table or None.
 
     Raises:
-        TypeError: If `product_code` is neither text, a sequence of text, nor None
+        TypeError: If `product_code` is neither text, a sequence of text, a table, nor None
             (`one_or_any_of`).
-        ValueError: If `product_code` is an empty sequence (`one_or_any_of`).
+        ValueError: If `product_code` is an empty sequence (`one_or_any_of`), or a table
+            without a `ProductCode` column (`value_table`).
     """
-    return one_or_any_of("product_code", product_code, every="every product")
+    if isinstance(product_code, Table):
+        values = value_table(
+            product_code, argument="product_code", parameter="product_code", underlying=False
+        )
+        return one_or_any_of("product_code", None, every="every product"), values
+    return one_or_any_of("product_code", product_code, every="every product"), None
 
 
 def _stream_keys(time: str, *, end: str | None = None) -> SourceKeys:
@@ -443,7 +460,7 @@ class _Futures(Namespace):
         self,
         symbols: Symbols,
         *,
-        product_code: str | Sequence[str] | None = None,
+        product_code: str | Sequence[str] | Table | None = None,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -459,7 +476,9 @@ class _Futures(Namespace):
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL`. See README.md#symbols.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
-                for every product.
+                for every product. A table of codes, in a `ProductCode` column, reads each code
+                as if passed alone; a refreshing one is followed by `fetch()` and re-read by each
+                `poll()` cycle. See README.md#symbols.
             sort: Such as `"ticker"`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
             limit: The most rows to return, in total. See README.md#sort-order-limit.
@@ -470,23 +489,26 @@ class _Futures(Namespace):
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is
-                neither a `str` nor a sequence of `str`.
+                neither a `str`, a sequence of `str`, nor a table.
             ValueError: If the symbols are invalid (None among them), a filter key or value does not
-                fit the endpoint, `order` is given without `sort`, or `product_code` is empty.
+                fit the endpoint, `order` is given without `sort`, or `product_code` is empty or a
+                table without a `ProductCode` column.
 
         Example:
             ::
 
                 es_curve = m.futures.snapshots(dm.ALL, product_code="ES").poll(5)
         """
+        codes, values = _product_codes(product_code)
         query = build_query(
             self._core,
             SNAPSHOTS,
             symbols=symbols,
-            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
+            params={**codes, **list_params(sort=sort, order=order)},
             filters=filters,
             arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
+            values=values,
         )
         return cast("Query", query)
 
@@ -495,7 +517,7 @@ class _Futures(Namespace):
         self,
         symbols: Symbols | None = None,
         *,
-        product_code: str | Sequence[str] | None = None,
+        product_code: str | Sequence[str] | Table | None = None,
         as_of: DateLike | None = None,
         sort: str | None = None,
         order: Order | None = None,
@@ -515,7 +537,9 @@ class _Futures(Namespace):
             symbols: Only these contracts; None, the default, lists every contract. `dm.ALL` is
                 refused. See README.md#symbols.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
-                for every product.
+                for every product. A table of codes, in a `ProductCode` column, reads each code
+                as if passed alone; a refreshing one is followed by `fetch()` and re-read by each
+                `poll()` cycle. See README.md#symbols.
             as_of: The day whose specifications to list; None for today. See README.md#as-of.
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`. See
                 README.md#sort-order-limit.
@@ -529,10 +553,12 @@ class _Futures(Namespace):
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
-                neither a `str` nor a sequence of `str`, or `symbols` or `as_of` is of another type.
+                neither a `str`, a sequence of `str`, nor a table, or `symbols` or `as_of` is of
+                another type.
             ValueError: If `symbols` is `dm.ALL` or holds an invalid ticker, `as_of` is a `datetime`
                 or not a date, a filter key or value does not fit the endpoint (`ticker_any_of` is
-                set through `symbols`), `order` is given without `sort`, or `product_code` is empty.
+                set through `symbols`), `order` is given without `sort`, or `product_code` is empty
+                or a table without a `ProductCode` column.
 
         Example:
             ::
@@ -540,8 +566,9 @@ class _Futures(Namespace):
                 active = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
                 es = m.futures.trades(active).last_by()
         """
+        codes, values = _product_codes(product_code)
         params = {
-            **_product_codes(product_code),
+            **codes,
             "date": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             **list_params(sort=sort, order=order),
         }
@@ -555,6 +582,7 @@ class _Futures(Namespace):
             filters=filters,
             arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
+            values=values,
         )
         return cast("Query", query)
 
@@ -562,7 +590,7 @@ class _Futures(Namespace):
     def products(
         self,
         *,
-        product_code: str | Sequence[str] | None = None,
+        product_code: str | Sequence[str] | Table | None = None,
         as_of: DateLike | None = None,
         sort: str | None = None,
         order: Order | None = None,
@@ -577,7 +605,9 @@ class _Futures(Namespace):
 
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
-                product.
+                product. A table of codes, in a `ProductCode` column, reads each code as if passed
+                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
+                cycle. See README.md#symbols.
             as_of: The day whose specifications to list; None for today. See README.md#as-of.
             sort: Such as `"name"`; the endpoint sorts by `date`. See README.md#sort-order-limit.
             order: Needs `sort`. See README.md#sort-order-limit.
@@ -590,17 +620,19 @@ class _Futures(Namespace):
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
-                neither a `str` nor a sequence of `str`, or `as_of` is of another type.
+                neither a `str`, a sequence of `str`, nor a table, or `as_of` is of another type.
             ValueError: If `as_of` is a `datetime` or not a date, a filter key or value does not fit
-                the endpoint, `order` is given without `sort`, or `product_code` is empty.
+                the endpoint, `order` is given without `sort`, or `product_code` is empty or a table
+                without a `ProductCode` column.
 
         Example:
             ::
 
                 energy = m.futures.products(filters={"asset_sub_class": "energy"}).fetch()
         """
+        codes, values = _product_codes(product_code)
         params = {
-            **_product_codes(product_code),
+            **codes,
             "date": None if as_of is None else day_argument(PRODUCTS, as_of, "as_of"),
             **list_params(sort=sort, order=order),
         }
@@ -611,6 +643,7 @@ class _Futures(Namespace):
             filters=filters,
             arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
+            values=values,
         )
         return cast("Query", query)
 
@@ -643,7 +676,7 @@ class _Futures(Namespace):
     def market_status(
         self,
         *,
-        product_code: str | Sequence[str] | None = None,
+        product_code: str | Sequence[str] | Table | None = None,
         limit: int | None = None,
     ) -> Query:
         """Futures market status: whether each futures product is trading right now.
@@ -655,32 +688,34 @@ class _Futures(Namespace):
 
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
-                product.
+                product. A table of codes, in a `ProductCode` column, reads each code as if passed
+                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
+                cycle. See README.md#symbols.
             limit: The most rows to return, in total. See README.md#sort-order-limit.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
 
         Raises:
-            TypeError: If `product_code` is not a `str` or a sequence of `str`, or `limit` is not an
-                `int`.
-            ValueError: If `product_code` is an empty sequence, or `limit` is not positive.
+            TypeError: If `product_code` is not a `str`, a sequence of `str`, or a table, or `limit`
+                is not an `int`.
+            ValueError: If `product_code` is an empty sequence or a table without a `ProductCode`
+                column, or `limit` is not positive.
 
         Example:
             ::
 
                 status = m.futures.market_status(product_code=["ES", "CL"]).poll(30)
         """
-        query = build_query(
-            self._core, MARKET_STATUS, params=_product_codes(product_code), limit=limit
-        )
+        codes, values = _product_codes(product_code)
+        query = build_query(self._core, MARKET_STATUS, params=codes, limit=limit, values=values)
         return cast("Query", query)
 
     @raises_through(build_query, list_params, _product_codes)
     def schedules(
         self,
         *,
-        product_code: str | Sequence[str] | None = None,
+        product_code: str | Sequence[str] | Table | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -697,7 +732,9 @@ class _Futures(Namespace):
 
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
-                product.
+                product. A table of codes, in a `ProductCode` column, reads each code as if passed
+                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()`
+                cycle. See README.md#symbols.
             start: The first session, by `SessionEndDate`, inclusive; a calendar date. See
                 README.md#start-and-end.
             end: The last session, inclusive; None also returns future sessions.
@@ -712,10 +749,10 @@ class _Futures(Namespace):
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is
-                neither a `str` nor a sequence of `str`.
+                neither a `str`, a sequence of `str`, nor a table.
             ValueError: If `end` is before `start`, a bound is a `datetime` or cannot be read, a
                 filter key or value does not fit the endpoint, `order` is given without `sort`, or
-                `product_code` is empty.
+                `product_code` is empty or a table without a `ProductCode` column.
 
         Example:
             ::
@@ -724,14 +761,16 @@ class _Futures(Namespace):
                     product_code="ES", start="2025-12-22", end="2025-12-26"
                 ).fetch()
         """
+        codes, values = _product_codes(product_code)
         query = build_query(
             self._core,
             SCHEDULES,
             start=start,
             end=end,
-            params={**_product_codes(product_code), **list_params(sort=sort, order=order)},
+            params={**codes, **list_params(sort=sort, order=order)},
             filters=filters,
             arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
+            values=values,
         )
         return cast("Query", query)

@@ -1,10 +1,12 @@
 """Followed reads: a `history()` or `fetch()` result that follows a refreshing symbol table.
 
-When `symbols` is a refreshing table, `history()` and `fetch()` follow it: a symbol added to the
-table is downloaded (by `history()` over the call's fixed window, by `fetch()` as Massive answers
-at that download) and its rows appear in the result all at once; a symbol removed from the table
-leaves the result in the update cycle its row leaves the table. This module builds that result;
-the session's follow coordinator (`_tables/follow_coordinator.py`) decides which symbol is
+When `symbols` is a refreshing table, `history()` and `fetch()` follow it, and `fetch()` follows
+a refreshing table passed where a dataset takes one value (an option chain's underlying, a
+futures product code), keyed by each value as by a symbol: a symbol added to the table is
+downloaded (by `history()` over the call's fixed window, by `fetch()` as Massive answers at that
+download) and its rows appear in the result all at once; a symbol removed from the table leaves
+the result in the update cycle its row leaves the table. This module builds that result; the
+session's follow coordinator (`_tables/follow_coordinator.py`) decides which symbol is
 downloaded when and hands each download to `FollowedRead.publish`.
 
 **The design: one partition per symbol.** The result is a `PartitionedTable` with one
@@ -53,8 +55,15 @@ it the symbol's table, for the life of the result; the watchlist filter only hid
 row and frees its data rows; the `!isNull(Constituent)` filter keeps it from making a
 partition. Without it, every symbol ever followed would keep its rows in memory. Under
 `Reread.NEVER` the old row is kept on purpose, so a re-added symbol shows its earlier download
-at once. The static seed keeps a call-time symbol's first download for the result's life,
-empty partition row or not.
+at once.
+
+The seed is the exception, on purpose: it keeps every call-time symbol's first download until
+the result is released, empty partition row or not, so with `wait=True` those rows stay in
+memory even under `Reread.ALWAYS`. Freeing them would take a seed whose rows can be removed,
+and Deephaven offers no such table that is also whole when the call returns: a static table's
+rows never change, a blink publisher's rows appear only on the next update cycle, which a
+console command holding the lock would never let run, and an input table is not for library
+code. The cost is bounded by what the call returned in the first place.
 
 **The `DecidedAtStep` check, under `Reread.ALWAYS`.** A re-added symbol must show nothing until
 its new download lands. Without a check, its old partition row, still the newest until the
@@ -119,7 +128,12 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import SymbolRows
-from deephaven_massive._tables.watchlist import SymbolWatch, skipped_rows_text, watched_rows
+from deephaven_massive._tables.watchlist import (
+    CURRENT_STEP,
+    SymbolWatch,
+    skipped_rows_text,
+    watched_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -162,12 +176,6 @@ had applied when it decided to publish the row (the result's build cycle for a s
 _JOINED_AT_STEP: Final = "__MassiveJoinedAtStep"
 """The hidden column of the update cycle a symbol's row last joined the symbol table."""
 
-_STEP: Final = (
-    "io.deephaven.engine.context.ExecutionContext.getContext().getUpdateGraph().clock()"
-    ".currentStep()"
-)
-"""The formula of the update cycle being run: its logical clock's step."""
-
 
 @dataclass(frozen=True, slots=True)
 class FollowPlan:
@@ -202,21 +210,25 @@ class FollowedRead:
 
     Created by `open_followed_read` on the caller thread, before its tables. The coordinator
     holds its per-symbol state elsewhere; this object holds only what other threads share, and
-    every method is safe from any thread. It refers to the session's core weakly; the core is
-    alive whenever a method runs, since the result's record keeps it in the live set until the
-    blink table has shut down.
+    every method is safe from any thread. It holds the session's core, so the core is alive
+    whenever a method runs. That matters on the coordinator thread: once a session that was
+    never closed has no result in use, the coordinator still handles the last result's stop
+    and writes its `m.symbol_reads()` rows, and only then lets go of the result and the core.
+    Nothing in Java holds this object strongly (the watch's router and the shutdown callback
+    hold it weakly), so it keeps the session alive no longer than the library's own threads
+    need it.
     """
 
     __slots__ = (
         "__weakref__",
         "_columns",
-        "_core",
         "_failed",
         "_publish_lock",
         "_publisher",
         "_watch",
         "built_step",
         "call",
+        "core",
         "dataset",
         "plan",
         "reread",
@@ -238,7 +250,7 @@ class FollowedRead:
         """Prepare the result's shared state; nothing is created yet.
 
         Args:
-            core: The session's core, held weakly.
+            core: The session's core.
             call: The call's id: the row's `StreamId` and the log's `call 7`.
             dataset: The dataset's name, such as `"stocks.bars"`.
             reread: Whether a returning symbol is read again.
@@ -247,7 +259,7 @@ class FollowedRead:
                 result, which each symbol's rows are viewed as before they are published.
             stop: The result's stop token; every read listens to it.
         """
-        self._core = weakref.ref(core)
+        self.core: Final = core
         self.call: Final = call
         self.dataset: Final = dataset
         self.reread: Final = reread
@@ -260,11 +272,6 @@ class FollowedRead:
         self._publisher: BlinkPublisher | None = None
         self._watch: SymbolWatch | None = None
         self.built_step = 0
-
-    @property
-    def core(self) -> SessionCore:
-        """The session's core."""
-        return cast("SessionCore", self._core())
 
     @property
     def shut_down(self) -> bool:
@@ -597,7 +604,7 @@ def _hide_stale_downloads(rows: Table, followed: Table) -> Table:
     Returns:
         The rows that are not stale, with the same columns.
     """
-    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED_AT_STEP} = {_STEP}")
+    joined = followed.select_distinct(SYMBOL).update(f"{_JOINED_AT_STEP} = {CURRENT_STEP}")
     return (
         rows.natural_join(joined, on=SYMBOL, joins=_JOINED_AT_STEP)
         .where(f"!isNull({_JOINED_AT_STEP}) && {DECIDED_AT_STEP} >= {_JOINED_AT_STEP}")
@@ -664,12 +671,14 @@ def _build(
 ) -> tuple[tuple[Table, BlinkPublisher, SymbolWatch, int], LivenessScope]:
     """Create a followed read's result and watch in a new result scope (`make_result`).
 
+    The caller holds the update graph's shared lock (`open_followed_read`).
+
     Args:
         core: The session's core.
         spec: The dataset.
         read: The result's shared state.
-        symbol_table: The user's refreshing symbol table.
-        rule: The dataset's rule for the table's rows.
+        symbol_table: The user's refreshing symbol table, or table of values.
+        rule: The dataset's rule for the table's rows, which names the column read.
         router: Receives the watch's reports.
         seeded: The call-time symbols' static rows (`wait=True`), or empty.
         note: The sentences the description adds after the dataset's summary.
@@ -708,7 +717,9 @@ def _build(
         built_step = int(blink.j_table.getUpdateGraph().clock().currentStep())
         seed = _seed(seeded, schema.column_names, built_step) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
-        partition_rows = _partition_rows(blink, seed, followed, reread=read.reread)
+        # A table of product codes is matched by its `ProductCode`, as by a partition's `Symbol`.
+        keyed = followed if rule.column == SYMBOL else followed.view([f"{SYMBOL} = {rule.column}"])
+        partition_rows = _partition_rows(blink, seed, keyed, reread=read.reread)
         parts = PartitionedTable.from_partitioned_table(
             partition_rows,
             key_cols=[SYMBOL],
@@ -731,15 +742,7 @@ def _build(
         built.append((publisher, watch, built_step))
         return result
 
-    # Under the update graph's shared lock: no cycle refreshes a new table in the step that
-    # stamped it, and the symbols' join cycles are read against a cycle that is not running.
-    # A thread that already holds the lock, as a console command does, takes it again at once.
-    lock = core.exec_ctx.update_graph.j_update_graph.sharedLock()
-    lock.lock()
-    try:
-        result, scope = make_result(core.exec_ctx, shape)
-    finally:
-        lock.unlock()
+    result, scope = make_result(core.exec_ctx, shape)
     publisher, watch, built_step = built[0]
     return (result, publisher, watch, built_step), scope
 
@@ -765,16 +768,20 @@ def open_followed_read(
     while the result is in use; the result is tracked, so releasing it marks the row released;
     the coordinator takes it over; and only then does the watch start, so every change of the
     table reaches the coordinator after the result. If any step raises, even
-    `KeyboardInterrupt`, every step already taken is undone and nothing keeps running. Nothing
-    here waits, so it works on a thread that holds the update graph's lock.
+    `KeyboardInterrupt`, every step already taken is undone and nothing keeps running. It holds
+    the update graph's shared lock from the build until the watch has started, so it waits for
+    an update cycle that is running; nothing else here waits, so it works on a thread that
+    holds the update graph's lock.
 
     Args:
         core: The session's core.
         spec: The dataset.
         call: The call's id (`SessionCore.next_stream_id`), the row's `StreamId`.
         query: The `repr` of the query, for the row's `Query`.
-        symbol_table: The user's refreshing table with a `Symbol` column.
-        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`).
+        symbol_table: The user's refreshing table with a `Symbol` column, or, for a table
+            passed where the dataset takes one value, with the rule's column.
+        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`, or
+            `SymbolRowRule.for_values`).
         reread: Whether a returning symbol is read again.
         plan: How the symbols are read.
         note: The sentences the table description adds after the dataset's summary.
@@ -811,57 +818,69 @@ def open_followed_read(
     router = _WatchRouter(
         core.follows, read, functools.partial(_current_step, core.exec_ctx.update_graph)
     )
-    with entered(core.exec_ctx):
-        (result, publisher, watch, built_step), scope = _build(
-            core,
-            spec,
-            read,
-            symbol_table=symbol_table,
-            rule=rule,
-            router=router,
-            seeded=seeded,
-            note=note,
-        )
-    read.attach(publisher, watch, built_step)
-    registered = False
+    # The update graph's shared lock is held from the build until the watch has started, so no
+    # update cycle runs between them. A symbol that left the table and came back in such a
+    # cycle would stay hidden for good: its seed row, decided at the build's cycle, is older
+    # than its return (`_hide_stale_downloads`), and the watch, started after both, would see
+    # no change, so the coordinator would never read it again. The lock also keeps a cycle from
+    # refreshing a new table in the step that stamped it. A thread that already holds the lock,
+    # as a console command does, takes it again at once, and nothing here waits on a thread.
+    lock = core.exec_ctx.update_graph.j_update_graph.sharedLock()
+    lock.lock()
     try:
-        core.register_worker(
-            StreamRow(
-                stream_id=call,
-                kind=StreamKind.READ,
-                dataset=spec.name,
-                query=shown_query(query),
-                symbol_count=0,
-                symbols="",
-                held_results=1,
-                transport=plan.transport,
-                state=StreamState.LOADING,
-                loading=0,
-                created_at=time.time_ns(),
-            ),
-            fail=read.fail,
-        )
-        registered = True
-        core.results.track(result, scope, read.release)
-    except BaseException:
-        try:
-            stop.set()
-            if registered:
-                core.release_worker(call)
-        finally:
-            release_scope(core.exec_ctx, scope)
-        raise
-    if core.closed:  # close() failed the table meanwhile; never start following
-        core.results.release(result)
-        raise MassiveError(f"{core.label} is closed")
-    try:
-        core.follows.follow(read, first)
         with entered(core.exec_ctx):
-            watch.start()
-        router.finish(read)
-    except BaseException:
-        core.results.release(result)
-        raise
+            (result, publisher, watch, built_step), scope = _build(
+                core,
+                spec,
+                read,
+                symbol_table=symbol_table,
+                rule=rule,
+                router=router,
+                seeded=seeded,
+                note=note,
+            )
+        read.attach(publisher, watch, built_step)
+        registered = False
+        try:
+            core.register_worker(
+                StreamRow(
+                    stream_id=call,
+                    kind=StreamKind.READ,
+                    dataset=spec.name,
+                    query=shown_query(query),
+                    symbol_count=0,
+                    symbols="",
+                    held_results=1,
+                    transport=plan.transport,
+                    state=StreamState.LOADING,
+                    loading=0,
+                    created_at=time.time_ns(),
+                ),
+                fail=read.fail,
+            )
+            registered = True
+            core.results.track(result, scope, read.release)
+        except BaseException:
+            try:
+                stop.set()
+                if registered:
+                    core.release_worker(call)
+            finally:
+                release_scope(core.exec_ctx, scope)
+            raise
+        if core.closed:  # close() failed the table meanwhile; never start following
+            core.results.release(result)
+            raise MassiveError(f"{core.label} is closed")
+        try:
+            core.follows.follow(read, first)
+            with entered(core.exec_ctx):
+                watch.start()
+            router.finish(read)
+        except BaseException:
+            core.results.release(result)
+            raise
+    finally:
+        lock.unlock()
     logger.debug(
         "call %d follow: %s follows its symbol table (%d symbols seeded)",
         call,

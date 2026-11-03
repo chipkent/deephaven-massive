@@ -850,6 +850,7 @@ class _Statuses:
         self,
         *,
         symbols: object,
+        values: object,
         record: Callable[[object], None],
         on_recency: Callable[[object], None],
         executor: ThreadPoolExecutor,
