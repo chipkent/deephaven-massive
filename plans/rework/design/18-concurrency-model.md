@@ -62,11 +62,11 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
     a session opens its first stream and to drop it when its last session leaves;
   - the REST transport's host-decision cache, which holds one future per (class, family);
     callers wait on a future outside every lock (§ 13.2);
-  - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
-    boto3 S3 client (creation reads local AWS configuration but makes no request, since the
-    credentials are given); its closed flag is a `threading.Event`, read without the lock by
-    the reader threads. The only lock taken under it is the model-loader lock below, while the
-    client is built. The session's `SessionClients` creates the `FlatFileClient` on the
+  - `FlatFileClient`'s lock, one per session, which guards the creation and the close of its
+    boto3 S3 clients, one per connection slot, and the list of idle ones (creation reads local
+    AWS configuration but makes no request, since the credentials are given); its closed flag
+    is a `threading.Event`, read without the lock by the reader threads. The only lock taken
+    under it is the model-loader lock below, while a client is built. The session's `SessionClients` creates the `FlatFileClient` on the
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
   - the flat-file model-loader lock, one per process, held while an S3 client is built. Every
