@@ -164,6 +164,9 @@ def market(
         server.reply(f"/v2/aggs/ticker/{symbol}/prev", PREVIOUS_DAY)
     for path in ("/v2/last/trade/AAPL", "/v3/snapshot"):
         server.reply(path, REFUSED)
+    # Example 21's contracts of a futures product: one ES contract.
+    contract = {"ticker": "ESZ6", "product_code": "ES", "date": "2026-10-30"}
+    server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     # The first example turns the debug log on: give it a switch of its own, and take its
     # handler off again afterwards, so no later test inherits the log.
     monkeypatch.setattr(_debug_log, "_switch", _debug_log._Switch())
@@ -248,6 +251,7 @@ def test_every_example_runs_against_the_fake_market(
     assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (out / "tables" / "21_watchlist_poll" / "watched_bars.csv").exists()
+    assert (out / "tables" / "21_watchlist_poll" / "watched_contracts.csv").exists()
     assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",

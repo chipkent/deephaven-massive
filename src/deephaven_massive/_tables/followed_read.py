@@ -1,10 +1,12 @@
 """Followed reads: a `history()` or `fetch()` result that follows a refreshing symbol table.
 
-When `symbols` is a refreshing table, `history()` and `fetch()` follow it: a symbol added to the
-table is downloaded (by `history()` over the call's fixed window, by `fetch()` as Massive answers
-at that download) and its rows appear in the result all at once; a symbol removed from the table
-leaves the result in the update cycle its row leaves the table. This module builds that result;
-the session's follow coordinator (`_tables/follow_coordinator.py`) decides which symbol is
+When `symbols` is a refreshing table, `history()` and `fetch()` follow it, and `fetch()` follows
+a refreshing table passed where a dataset takes one value (an option chain's underlying, a
+futures product code), keyed by each value as by a symbol: a symbol added to the table is
+downloaded (by `history()` over the call's fixed window, by `fetch()` as Massive answers at that
+download) and its rows appear in the result all at once; a symbol removed from the table leaves
+the result in the update cycle its row leaves the table. This module builds that result; the
+session's follow coordinator (`_tables/follow_coordinator.py`) decides which symbol is
 downloaded when and hands each download to `FollowedRead.publish`.
 
 **The design: one partition per symbol.** The result is a `PartitionedTable` with one
@@ -668,8 +670,8 @@ def _build(
         core: The session's core.
         spec: The dataset.
         read: The result's shared state.
-        symbol_table: The user's refreshing symbol table.
-        rule: The dataset's rule for the table's rows.
+        symbol_table: The user's refreshing symbol table, or table of values.
+        rule: The dataset's rule for the table's rows, which names the column read.
         router: Receives the watch's reports.
         seeded: The call-time symbols' static rows (`wait=True`), or empty.
         note: The sentences the description adds after the dataset's summary.
@@ -708,7 +710,9 @@ def _build(
         built_step = int(blink.j_table.getUpdateGraph().clock().currentStep())
         seed = _seed(seeded, schema.column_names, built_step) if seeded else None
         followed = blink_to_append_only(symbol_table) if symbol_table.is_blink else symbol_table
-        partition_rows = _partition_rows(blink, seed, followed, reread=read.reread)
+        # A table of product codes is matched by its `ProductCode`, as by a partition's `Symbol`.
+        keyed = followed if rule.column == SYMBOL else followed.view([f"{SYMBOL} = {rule.column}"])
+        partition_rows = _partition_rows(blink, seed, keyed, reread=read.reread)
         parts = PartitionedTable.from_partitioned_table(
             partition_rows,
             key_cols=[SYMBOL],
@@ -773,8 +777,10 @@ def open_followed_read(
         spec: The dataset.
         call: The call's id (`SessionCore.next_stream_id`), the row's `StreamId`.
         query: The `repr` of the query, for the row's `Query`.
-        symbol_table: The user's refreshing table with a `Symbol` column.
-        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`).
+        symbol_table: The user's refreshing table with a `Symbol` column, or, for a table
+            passed where the dataset takes one value, with the rule's column.
+        rule: The dataset's rule for the table's rows (`SymbolRowRule.of`, or
+            `SymbolRowRule.for_values`).
         reread: Whether a returning symbol is read again.
         plan: How the symbols are read.
         note: The sentences the table description adds after the dataset's summary.

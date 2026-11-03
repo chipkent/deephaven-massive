@@ -2037,6 +2037,22 @@ rows: once on a per-symbol request, and once on a `ticker.any_of` batch (decisio
 refreshing one is followed with the same machinery, keyed by that value; `poll()` of such a
 query re-reads it each cycle, as for `symbols`.
 
+- **Each value is read as if passed alone**, with the requests that one value's call makes:
+  one request series per value, `limit` sent on each, and an index underlying sent bare to
+  the contracts list as `underlying="I:SPX"` is. Values are never batched into one request,
+  so every row a value's requests return goes with that value, whatever its `Symbol`. The `m.symbol_reads()` rows of a followed `fetch()` are keyed by the value.
+- **A static table** is a fixed list, read once: the result joins each value's rows, and a
+  value that fails fails the call, as a failed request of a list call does.
+- **A value the dataset does not take** follows `noncanonical_symbols`, as a symbol table's
+  row does: an underlying must be Massive's exact stock or index ticker; a product code is
+  kept as written (no surrounding whitespace, no class prefix), since Massive publishes no
+  grammar for product codes.
+- **`poll()`** reads the table's values each cycle and each value as if passed alone; a value
+  Massive answers with HTTP 404 follows `unavailable_symbols`, as a symbol does.
+- **One followed table a result.** A `fetch()` whose `symbols` and `product_code=` are both
+  refreshing tables raises `ValueError` at the call; a static `symbols` table beside a
+  followed one is read once.
+
 **`wait`.**
 
 - **`wait=True`** blocks while the call-time symbols get their first attempt, read as one call
@@ -2232,9 +2248,9 @@ Notation:
 | `bars(symbols, timespan, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | range | `us_options_opra/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{o}/prev` per contract | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
-| `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
+| `chain(underlying: str \| Table, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
 | `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request. `ALL` sends `type=options` in place of tickers, so it lists only options contracts; tickers are sent without `type`, which Massive refuses beside them (HTTP 400, "Cannot specify tickers and type."). `type` is rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
-| `contracts(symbols=None, *, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool = False, …F)` (`expired=False`, Massive's default, lists contracts still trading and is not sent, so the per-contract path accepts it; `True` lists expired ones and is sent); `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
+| `contracts(symbols=None, *, underlying: str \| Table \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool = False, …F)` (`expired=False`, Massive's default, lists contracts still trading and is not sent, so the per-contract path accepts it; `True` lists expired ones and is sent); `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
 | `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
 Every options dataset has `OptionRoot`, the OCC root read from `Symbol` (`SPXW`, `AAPL1`;
@@ -2273,9 +2289,9 @@ but a set of `FuturesVenue` raises `TypeError`.
 | `trades(symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (dates: one request series per weekday session, `session_end_date=<date>`; datetimes: the exact `timestamp` range; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
 | `bars(symbols, timespan, *, multiplier=1, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: to 18:00 CT on the last date, from the first session's open less 4 days for intraday and 1-session bars and from 00:00 UTC on the first bucket that can start in the range for longer ones, kept when their whole window lies in the range; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
-| `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the contract's `details.ticker`, where the OpenAPI schema and the live wire nest it, though both vendor samples send it at the top level ([section 23](#23-open-verification-items) item 23) | Query | | `/futures/v1/snapshot` | |
-| `contracts(symbols=None, *, product_code: str \| Sequence[str] \| None = None, as_of: DateLike \| None = None, …F)`: `Symbol` and `RawSymbol` are the row's `ticker`, as on the market data, so a contracts table feeds `trades()`, `quotes()`, `bars()`, and `snapshots()` directly; explicit `symbols` are sent as `ticker.any_of`, 250 a request (the size of the stock, option, index, forex, and crypto snapshots), so `ticker.any_of` is no filter; None lists every contract and `ALL` is refused (leave `symbols` out); the `poll()` key is `Symbol` and `Date`. `products(*, product_code: str \| Sequence[str] \| None = None, as_of: DateLike \| None = None, …F)`. On both, `as_of` is sent as `date`, the day whose point-in-time specifications are listed; None for Massive's default, today. `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
-| `schedules(*, product_code: str \| Sequence[str] \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
+| `snapshots(symbols, *, product_code: str \| Sequence[str] \| Table \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the contract's `details.ticker`, where the OpenAPI schema and the live wire nest it, though both vendor samples send it at the top level ([section 23](#23-open-verification-items) item 23) | Query | | `/futures/v1/snapshot` | |
+| `contracts(symbols=None, *, product_code: str \| Sequence[str] \| Table \| None = None, as_of: DateLike \| None = None, …F)`: `Symbol` and `RawSymbol` are the row's `ticker`, as on the market data, so a contracts table feeds `trades()`, `quotes()`, `bars()`, and `snapshots()` directly; explicit `symbols` are sent as `ticker.any_of`, 250 a request (the size of the stock, option, index, forex, and crypto snapshots), so `ticker.any_of` is no filter; None lists every contract and `ALL` is refused (leave `symbols` out); the `poll()` key is `Symbol` and `Date`. `products(*, product_code: str \| Sequence[str] \| Table \| None = None, as_of: DateLike \| None = None, …F)`. On both, `as_of` is sent as `date`, the day whose point-in-time specifications are listed; None for Massive's default, today. `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| Table \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
+| `schedules(*, product_code: str \| Sequence[str] \| Table \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
 
 `product_code` is typed on every futures dataset whose path takes it (`snapshots`,
 `contracts`, `products`, `market_status`, `schedules`), so none of its forms is a

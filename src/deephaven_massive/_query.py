@@ -40,7 +40,11 @@ library thread of its own fills in one update when the download completes (`open
 symbols are a refreshing table follows it instead: the result is always refreshing, each symbol
 added to the table is read (by `history()` over the call's fixed window, by `fetch()` as Massive
 answers then) and lands whole, and each symbol removed leaves it (`open_followed_read` in
-`_tables/followed_read.py`, run by the session's follow coordinator). Live stream results are shaped
+`_tables/followed_read.py`, run by the session's follow coordinator). A table passed where a
+dataset takes one value (`Request.value_table`: an option chain's underlying, a futures product
+code) is read value by value, each as if passed alone (`RestTransport.fetch_by_value`): a static
+one once, a refreshing one followed by `fetch()` the same way, keyed by the value, and re-read by
+each `poll()` cycle. Live stream results are shaped
 and tracked by the session (`SessionCore.stream_result`), so every stream verb shares one stream per
 (dataset, channel, symbol set).
 
@@ -69,7 +73,9 @@ from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar, cast
 
 import numpy as np
 from deephaven import arrow as dh_arrow
+from deephaven import merge
 from deephaven.stream import blink_to_append_only
+from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
@@ -134,13 +140,12 @@ from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Callable, Sequence
-
-    from deephaven.table import Table
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
-    from deephaven_massive._datasets.request import Request
+    from deephaven_massive._datasets.request import Request, ValueTable
+    from deephaven_massive._tables.transports import SymbolOutcome
     from deephaven_massive._types import DateLike
 
 __all__ = [
@@ -335,6 +340,68 @@ def _read_symbol_table(
     return rows.symbols
 
 
+def _read_value_table(
+    core: SessionCore, spec: DatasetSpec, values: ValueTable, *, query: str, live: bool = False
+) -> tuple[str, ...]:
+    """Read a table passed where the dataset takes one value, once, as `_read_symbol_table` does.
+
+    A row that is not a value the dataset takes (an underlying that is not a stock or index
+    ticker) follows `MassiveConfig.noncanonical_symbols` (`SymbolRowRule.for_values`).
+
+    Args:
+        core: The session core, for its execution context and its `noncanonical_symbols`.
+        spec: The dataset.
+        values: The boxed table and the argument it stands for.
+        query: The `repr` of the query whose verb reads it, which the messages name.
+        live: True for a verb that follows the table or re-reads it, which may start on a
+            table with no row yet.
+
+    Returns:
+        The table's values, sorted and de-duplicated; null and skipped rows are left out.
+
+    Raises:
+        ValueError: If the table has rows and none of them is a value the dataset takes, or,
+            for a static read, if it holds no value at all; under `RAISE`, the `ValueError` of
+            `read_symbols` for a bad row.
+    """
+    rule = SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols)
+    with entered(core.exec_ctx):
+        rows = read_symbols(rule, values.table, stream_id=None)
+    if rows.skipped and not rows.symbols:
+        raise ValueError(
+            f"{query}: no row of the {values.argument} table is a value this dataset takes, so "
+            f"the result would read nothing: {skipped_rows_text(rows.skipped)}"
+        )
+    if not rows.symbols and not live:
+        raise ValueError(f"{query}: the {values.argument} table holds no values")
+    return rows.symbols
+
+
+def _merged(core: SessionCore, outcomes: Mapping[str, SymbolOutcome]) -> Table:
+    """Join the values' tables of a static read of a value table, or raise its first failure.
+
+    A static table of values is a fixed list in code: like a list call, it fails when any of
+    its values does.
+
+    Args:
+        core: The session core, for its execution context.
+        outcomes: Each value's outcome, in the order read.
+
+    Returns:
+        One static table of every value's rows, in value order.
+
+    Raises:
+        MassiveError: The first failed value's error.
+    """
+    tables = []
+    for outcome in outcomes.values():
+        if isinstance(outcome, SymbolFailure):
+            raise outcome.error
+        tables.append(outcome.table)
+    with entered(core.exec_ctx):
+        return merge(tables)
+
+
 def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
     """Log a failed static call: a defect at ERROR, anything else at DEBUG.
 
@@ -390,7 +457,7 @@ def _shown(value: object) -> str:
         `dm.<Enum>.<MEMBER>` for an enum member; a date or time, Python, Java, or numpy, as
         quoted ISO-8601 text (`_shown_time`); a set as braces, enum members in their enum's
         order and other items sorted by their text; a list or tuple as a list; and anything
-        else as its `repr`.
+        else as its `repr`; a Deephaven table, such as a table of underlyings, as `<table>`.
     """
     if isinstance(value, Enum):
         return f"dm.{type(value).__name__}.{value.name}"
@@ -403,7 +470,7 @@ def _shown(value: object) -> str:
         return "{" + ", ".join(map(_shown, items)) + "}"
     if isinstance(value, list | tuple):
         return "[" + ", ".join(map(_shown, value)) + "]"
-    return repr(value)
+    return "<table>" if isinstance(value, Table) else repr(value)
 
 
 def _shown_time(value: object) -> str:
@@ -860,8 +927,11 @@ class Query(QueryBase):
         SessionCore.run_verb,
         refuse_update_graph_thread,
         _read_symbol_table,
+        _read_value_table,
+        _merged,
         RestTransport.fetch,
         RestTransport.fetch_by_symbol,
+        RestTransport.fetch_by_value,
         open_followed_read,
         _wait,
     )
@@ -876,12 +946,14 @@ class Query(QueryBase):
         rows of its latest read, each Massive's answer as of that read; a symbol removed from the
         table leaves the result in the same update, and one that returns is read again. A failure of
         one symbol leaves the others, and `m.symbol_reads()` shows each symbol's state
-        (README.md#symbols). A symbol with no data (HTTP 404 on its first request) returns no rows,
-        with a WARNING; HTTP 404 on a later page raises `MassiveError`, since its data was cut
-        short. Current data of a subscription not in `MassiveConfig.delayed_subscriptions` must be
-        real-time: a response Massive labels `DELAYED` raises; a listed subscription's data is
-        returned as the plan serves it, and the table's description says so
-        (README.md#real-time-or-delayed).
+        (README.md#symbols). A table passed as `underlying=` or `product_code=` is read value by
+        value, each as if passed alone: a static one once (a failed value fails the call), a
+        refreshing one followed in the same way, keyed by the value. A symbol with no data (HTTP
+        404 on its first request) returns no rows, with a WARNING; HTTP 404 on a later page raises
+        `MassiveError`, since its data was cut short. Current data of a subscription not in
+        `MassiveConfig.delayed_subscriptions` must be real-time: a response Massive labels
+        `DELAYED` raises; a listed subscription's data is returned as the plan serves it, and the
+        table's description says so (README.md#real-time-or-delayed).
 
         Args:
             wait: True (the default) blocks and returns a static table; False returns at once a
@@ -899,8 +971,9 @@ class Query(QueryBase):
             TypeError: If `wait` is not a `bool`.
             ValueError: Before any request: on a Deephaven update-graph thread (inside a table
                 listener, say); if a path the call reads does not take a parameter or filter the
-                query set; or if a symbol table holds no symbol, only rows that are not
-                Massive's exact tickers, or any such row under `noncanonical_symbols=RAISE`.
+                query set; if a symbol table, or a table of values, holds no value, only rows
+                the dataset does not take, or any such row under `noncanonical_symbols=RAISE`;
+                or if both `symbols` and a table of values are refreshing tables.
             AuthenticationError: If Massive rejects the API key (HTTP 401). With `wait=False`
                 this and every other request failure fails the table instead; a followed table
                 fails on it too.
@@ -944,6 +1017,8 @@ class Query(QueryBase):
         """
         spec = self._spec
         symbols = self._request.symbols
+        if self._request.value_table is not None:
+            return self._value_fetch(call, self._request.value_table, wait=wait)
         if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
             return self._followed_fetch(call, symbols, wait=wait)
         unlisted = (
@@ -1013,6 +1088,103 @@ class Query(QueryBase):
             first=loaded,
         )
 
+    def _value_fetch(self, call: int, values: ValueTable, *, wait: bool) -> Table:
+        """Run a `fetch()` call whose one-value argument is a table (`Request.value_table`).
+
+        Each value is read with the requests `fetch()` makes when it is passed alone
+        (`RestTransport.fetch_by_value`). A static table is read once, as a fixed list: the
+        result joins every value's rows, and a failed value fails the call. A refreshing one is
+        followed (`_followed_value_fetch`). A symbol table passed beside it is read once.
+
+        Args:
+            call: The call id.
+            values: The boxed table of values.
+            wait: As `fetch` takes it.
+
+        Returns:
+            The static table, or the refreshing one a background read fills, or the one that
+            follows a refreshing table of values.
+        """
+        if values.table.is_refreshing:
+            return self._followed_value_fetch(call, values, wait=wait)
+        spec, core = self._spec, self._core
+        names = _read_value_table(core, spec, values, query=repr(self))
+        request = self._static_request()
+        rest = core.rest_transport()
+        if not wait:  # a parameter error raises now, as it would before the first request
+            rest.check_fetch(spec, request.for_value(names[0]))
+        return self._result(
+            call,
+            request,
+            wait=wait,
+            transport=Transport.REST,
+            note=rest_recency_note(spec, core.config.delayed_subscriptions),
+            run=lambda stop: _merged(
+                core, rest.fetch_by_value(spec, request, values=names, call=call, stop=stop)
+            ),
+        )
+
+    def _followed_value_fetch(self, call: int, values: ValueTable, *, wait: bool) -> Table:
+        """Run a `fetch()` call that follows a refreshing table of values.
+
+        As `_followed_fetch` follows a symbol table, keyed by each value: a value added to the
+        table is read, as Massive answers then, and lands whole; a value removed leaves the
+        result in the same update; a returning value is read again. Each value is one read.
+
+        Args:
+            call: The call id.
+            values: The boxed refreshing table.
+            wait: As `fetch` takes it.
+
+        Returns:
+            The refreshing result (`open_followed_read`).
+
+        Raises:
+            ValueError: If `symbols` is a refreshing table too: one result follows one table.
+        """
+        spec, core = self._spec, self._core
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
+            logger.debug("%r fetch() refused: two refreshing tables to follow", self)
+            raise ValueError(
+                f"{self!r}.fetch() follows one refreshing table, and both symbols and "
+                f"{values.argument} are refreshing tables. Use poll(interval), which reads "
+                f"both at every cycle, or pass one of them as a static snapshot, such as "
+                f"{values.argument}=table.snapshot()"
+            )
+        call_time = _read_value_table(core, spec, values, query=repr(self), live=True)
+        request = self._static_request()
+        rest = core.rest_transport()
+        if call_time:  # a parameter error raises now; with none, each read checks them
+            rest.check_fetch(spec, request.for_value(call_time[0]))
+        plan = FollowPlan(
+            Transport.REST,
+            one_scan=False,
+            symbols_per_read=1,
+            read=lambda names, stop: rest.fetch_by_value(
+                spec, request, values=names, call=call, stop=stop
+            ),
+        )
+        recency = rest_recency_note(spec, core.config.delayed_subscriptions)
+        note = (
+            f"Follows its table of {values.argument} values: each value's rows are Massive's "
+            "answer as of its read."
+        )
+        logger.info("%s fetch: follows its table of %s values", spec.name, values.argument)
+        loaded = self._first_read(plan, call_time, verb="fetch") if wait and call_time else None
+        return open_followed_read(
+            core,
+            spec=spec,
+            call=call,
+            query=repr(self),
+            symbol_table=values.table,
+            rule=SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols),
+            reread=Reread.ALWAYS,
+            plan=plan,
+            note=note if recency is None else f"{note} {recency}",
+            first=loaded,
+        )
+
     @_verb
     @raises_through(
         SessionCore.run_verb,
@@ -1020,12 +1192,14 @@ class Query(QueryBase):
         _interval,
         _require_enum,
         read_symbols,
+        _read_value_table,
         RestTransport.poll,
     )
     def poll(self, interval: float | timedelta, *, mode: PollMode = PollMode.AUTO) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
 
-        Each cycle reads the whole query again; a symbol table is re-read each cycle, and a row
+        Each cycle reads the whole query again; a symbol table, or a table passed as `underlying=`
+        or `product_code=` (each value read as if passed alone), is re-read each cycle, and a row
         that is not Massive's exact ticker is skipped and listed in `m.streams()` (or fails the
         table under `noncanonical_symbols=RAISE`); a crypto pair of a symbol table that Massive's
         crypto ticker list does not hold is left out of the cycle and listed the same way (or
@@ -1084,6 +1258,10 @@ class Query(QueryBase):
         if isinstance(self._request.symbols, SymbolTable):
             _read_symbol_table(
                 self._core, self._spec, self._request.symbols, query=repr(self), live=True
+            )
+        if self._request.value_table is not None:
+            _read_value_table(
+                self._core, self._spec, self._request.value_table, query=repr(self), live=True
             )
         logger.debug(
             "%s poll(): every %.3f s, mode %s -> %s",

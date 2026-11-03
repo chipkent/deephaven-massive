@@ -26,7 +26,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
@@ -83,6 +83,7 @@ class Script:
         self.schema = m._core.catalog.dataset_schema(DIVIDENDS).arrow_schema()
         self.outcomes: queue.SimpleQueue[object] = queue.SimpleQueue()
         self.symbols: list[NormalizedSymbols | None] = []
+        self.values: list[tuple[str, ...] | None] = []
         self.drift: DriftReport | None = None
         # What each cycle's pages show about their recency, as the REST transport reports it.
         self.recency: tuple[Recency, ...] = ()
@@ -108,12 +109,14 @@ class Script:
         self,
         *,
         symbols: NormalizedSymbols | None,
+        values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
     ) -> poll.CycleRows:
         self.symbols.append(symbols)
+        self.values.append(values)
         self.cancel = cancel
         if self.keep_record:  # a test calls it to deliver a page while the cycle runs
             self.record = record
@@ -168,11 +171,12 @@ def start(
     symbols: NormalizedSymbols | None = ("AAPL", "MSFT"),
     stop: threading.Event | None = None,
     interval: float = 60.0,
+    values: ValueTable | None = None,
 ) -> Table:
     return open_poll(
         m._core,
         spec=DIVIDENDS,
-        request=Request(symbols=symbols),
+        request=Request(symbols=symbols, value_table=values),
         interval=timedelta(seconds=interval),
         mode=mode,
         query="<Query test>",
@@ -1074,6 +1078,76 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     assert script.symbols[-1] == ("AAPL", "IBM", "MSFT")
     assert stream_rows()[0]["SchemaDrift"] == "REST:ticker-"
     del table
+
+
+def product_codes(
+    dh_input_table: Callable[..., InputTable], *codes: str
+) -> tuple[InputTable, ValueTable]:
+    # A refreshing table of futures product codes, and its box.
+    table = dh_input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
+    table.add(new_table([string_col("ProductCode", list(codes))]))
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=table
+    )
+    return table, values
+
+
+def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
+    *,
+    dh_input_table: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    codes, values = product_codes(dh_input_table, "NQ", "ES", " CL")
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    assert script.values == [("ES", "NQ")]  # the code with a leading space is never requested
+    (row,) = stream_rows()
+    assert row["Error"].startswith(
+        "skipping 1 symbol-table value this dataset does not take: ' CL'"
+    )
+    codes.add(new_table([string_col("ProductCode", ["6E"])]))
+    until(lambda: codes.size == 4)
+    script.rows()
+    next_cycle(clock)
+    assert script.values[-1] == ("6E", "ES", "NQ")
+    del table
+
+
+def test_a_bad_value_fails_the_poll_under_raise(
+    *,
+    dh_input_table: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = massive_session._core
+    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(core, "config", strict)
+    codes, values = product_codes(dh_input_table, "ES")
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    codes.add(new_table([string_col("ProductCode", [" CL"])]))
+    until(lambda: codes.size == 2)
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("stocks.dividends: a symbol table holds ' CL'")
+    assert script.values == [("ES",)]
 
 
 def test_a_failing_upstream_watchlist_fails_the_poll(

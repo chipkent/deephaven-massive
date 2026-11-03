@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
@@ -19,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from deephaven import dtypes, new_table
+from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import (
@@ -37,6 +40,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from tests._live.futures_bar_buckets import Bar
     from tests._live.ticker_lists import SpreadRead
@@ -966,3 +970,61 @@ def test_futures_bar_buckets_against_the_bars_inside_them(
             evidence(f"VERDICT {contract} {line}")
     empty = [contract for contract, (_, complete) in found.items() if not complete]
     assert not empty, f"no 1-session or minute bars for {empty}"
+
+
+_FOLLOW_WAIT = 90.0
+"""Seconds a followed read's step may take: a request may wait for the Basic plan's slot."""
+
+
+def _codes_until(
+    table_rows: TableRows, result: Table, done: Callable[[set[str]], bool]
+) -> set[str]:
+    """Read a result's product codes until `done` holds, failing after `_FOLLOW_WAIT` seconds.
+
+    Returns:
+        The distinct `ProductCode` values that satisfied it.
+    """
+    pause = threading.Event()  # never set; only paces the loop
+    deadline = time.monotonic() + _FOLLOW_WAIT
+    while True:
+        codes = {str(row["ProductCode"]) for row in table_rows(result)}
+        if done(codes):
+            return codes
+        assert time.monotonic() < deadline, f"the followed result never got there: {codes}"
+        pause.wait(0.25)
+
+
+@pytest.mark.needs("futures:basic")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(300)
+def test_contracts_follow_a_live_table_of_product_codes(
+    live_session: dm.MassiveSession,
+    *,
+    recent_monday: date,
+    table_rows: TableRows,
+    evidence: Evidence,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    """Whether `fetch()` of futures contracts follows a live table of product codes.
+
+    Follows an input table holding `ES` with `m.futures.contracts(product_code=codes,
+    as_of=<the most recent published Monday>, limit=10).fetch()`, adds `NQ` (one request), and
+    deletes it. Passes when the result holds only ES rows at the call, gains NQ rows once NQ is
+    read, and loses them once NQ's row is deleted, while the ES rows stay. Each step waits at
+    most 90 s.
+    """
+    m = live_session
+    codes = dh_input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
+    codes.add(new_table([string_col("ProductCode", ["ES"])]))
+    result = m.futures.contracts(product_code=codes, as_of=recent_monday, limit=10).fetch()
+    try:
+        first = _codes_until(table_rows, result, lambda seen: seen == {"ES"})
+        evidence(f"at the call: {sorted(first)}, {result.size} rows")
+        codes.add(new_table([string_col("ProductCode", ["NQ"])]))
+        added = _codes_until(table_rows, result, lambda seen: seen == {"ES", "NQ"})
+        evidence(f"after adding NQ: {sorted(added)}, {result.size} rows")
+        codes.delete(new_table([string_col("ProductCode", ["NQ"])]))
+        left = _codes_until(table_rows, result, lambda seen: seen == {"ES"})
+        evidence(f"after deleting NQ: {sorted(left)}, {result.size} rows")
+    finally:
+        m.release(result)

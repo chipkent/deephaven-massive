@@ -314,6 +314,7 @@ class CycleReader(Protocol):
         self,
         *,
         symbols: NormalizedSymbols | None,
+        values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
@@ -323,6 +324,8 @@ class CycleReader(Protocol):
 
         Args:
             symbols: The cycle's static symbols: a sorted tuple, `ALL`, or None.
+            values: The values a value table holds now (`Request.value_table`: underlyings
+                or product codes), each read as if passed alone; None without one.
             record: Receives each page's drift, for the table's `SchemaDrift`.
             on_recency: Receives what a page's recency labels show (`REALTIME` or `DELAYED`),
                 from any of the cycle's threads, for the table's `Recency`.
@@ -561,6 +564,7 @@ class Poller:
         "_succeeded",
         "_thread",
         "_thread_name",
+        "_value_rule",
         "_watch_lock",
         "_watch_name",
         "_watched",
@@ -611,6 +615,13 @@ class Poller:
         self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
         self._rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+        self._value_rule = (
+            None
+            if request.value_table is None
+            else SymbolRowRule.for_values(
+                spec, request.value_table, core.config.noncanonical_symbols
+            )
+        )
         self._interval = interval.total_seconds()
         self._mode = mode
         self._stream_id = stream_id
@@ -921,6 +932,29 @@ class Poller:
             raise SymbolRowError(str(error)) from None
         return rows.symbols, rows.skipped
 
+    def _values(self) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+        """Return the values a value table holds now, read once for the cycle.
+
+        A row that is not a value the dataset takes (an underlying that is not a stock or index
+        ticker) follows `MassiveConfig.noncanonical_symbols`, as a symbol table's row does.
+
+        Returns:
+            None and no skipped value for a request without a value table; else the table's
+            values, sorted (null rows are ignored), and the values skipped this cycle.
+
+        Raises:
+            SymbolRowError: If a row is refused under `RAISE`, or the table has failed; the
+                poll's table fails with it.
+        """
+        values = self._request.value_table
+        if values is None or self._value_rule is None:
+            return None, ()
+        try:
+            rows = read_symbols(self._value_rule, values.table, stream_id=self._stream_id)
+        except ValueError as error:
+            raise SymbolRowError(str(error)) from None
+        return rows.symbols, rows.skipped
+
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
 
@@ -969,11 +1003,18 @@ class Poller:
         Returns:
             False if the poller was stopped while it read, so nothing was published.
         """
-        symbols, skipped = self._symbols()
+        symbols, skipped_symbols = self._symbols()
+        values, skipped_values = self._values()
+        skipped = (*skipped_symbols, *skipped_values)
         record = functools.partial(self._page_received, core)
         seen = _RecencySeen()
         read = self._read(
-            symbols=symbols, record=record, on_recency=seen.add, executor=pool, cancel=self._stop
+            symbols=symbols,
+            values=values,
+            record=record,
+            on_recency=seen.add,
+            executor=pool,
+            cancel=self._stop,
         )
         self._watch_end()  # before the row's update, so no late mark can follow it
         if self._stop.is_set():
