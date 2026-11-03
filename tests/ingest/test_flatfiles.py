@@ -2925,7 +2925,7 @@ def test_the_client_comes_from_the_config_and_is_shared(
                 "access_key": "AKIDFLATFILES",
                 "secret_key": "flat-file-secret",
                 "signature_version": "s3v4",
-                "max_pool_connections": 3,
+                "max_pool_connections": 1,  # one client per connection slot
             }
         ]
         assert {bucket for bucket, _ in fake_s3.requests} == {"other"}

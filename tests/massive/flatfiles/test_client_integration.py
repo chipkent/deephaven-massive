@@ -9,6 +9,7 @@ published rather than whether it exists now. How to run these tests is in
 
 from __future__ import annotations
 
+import contextlib
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -17,10 +18,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 from deephaven_massive._massive import FlatFileClient, WireError, object_key
+from deephaven_massive._massive.net.cancel import Cancel
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from typing import TypeAlias
+
+    from types_boto3_s3.client import S3Client
 
     from deephaven_massive import MassiveConfig
 
@@ -50,6 +54,24 @@ def _weekdays_before(day: date, count: int) -> list[date]:
     return found
 
 
+@contextlib.contextmanager
+def _raw_client(client: FlatFileClient, key: str) -> Iterator[S3Client]:
+    """Lend one of the client's boto3 clients, with its connection slot, for a raw request.
+
+    Args:
+        client: The live flat-file client.
+        key: The key about to be requested, for the errors' `path`.
+
+    Yields:
+        The boto3 client, given back with its slot when the block ends.
+    """
+    s3 = client._take(Cancel(), key)
+    try:
+        yield s3
+    finally:
+        client._give_back(s3)
+
+
 @pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.settles("14")
 def test_when_each_days_file_was_published(
@@ -70,19 +92,19 @@ def test_when_each_days_file_was_published(
     """
     if not flat_files_reached(_DAY_FILE):
         pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")
-    s3, _proxy = live_flat_files._client_for(_DAY_FILE)
     today = datetime.now(_NEW_YORK).date()
     seen = 0
-    for day in _weekdays_before(today, _DAYS):
-        key = object_key(_DAY_FILE, day)
-        try:
-            head = s3.head_object(Bucket=live_s3_config.s3_bucket, Key=key)
-        except ClientError as error:
-            evidence(f"{day} {day:%a}: no LastModified ({error.response.get('Error', {})})")
-            continue
-        seen += 1
-        published = head["LastModified"].astimezone(_NEW_YORK)
-        evidence(f"{day} {day:%a}: published {published:%Y-%m-%d %H:%M:%S %Z}")
+    with _raw_client(live_flat_files, _DAY_FILE) as s3:
+        for day in _weekdays_before(today, _DAYS):
+            key = object_key(_DAY_FILE, day)
+            try:
+                head = s3.head_object(Bucket=live_s3_config.s3_bucket, Key=key)
+            except ClientError as error:
+                evidence(f"{day} {day:%a}: no LastModified ({error.response.get('Error', {})})")
+                continue
+            seen += 1
+            published = head["LastModified"].astimezone(_NEW_YORK)
+            evidence(f"{day} {day:%a}: published {published:%Y-%m-%d %H:%M:%S %Z}")
     assert seen
 
 
@@ -121,10 +143,10 @@ def test_a_weekend_key_is_missing_not_refused(
     )
     control.close()
     key = object_key(_DAY_FILE, (recent_monday - timedelta(days=1)))
-    s3, _proxy = live_flat_files._client_for(key)
     answer, code = "exists", None
     try:
-        s3.get_object(Bucket=live_s3_config.s3_bucket, Key=key)["Body"].close()
+        with _raw_client(live_flat_files, key) as s3:
+            s3.get_object(Bucket=live_s3_config.s3_bucket, Key=key)["Body"].close()
     except ClientError as error:
         metadata = error.response.get("ResponseMetadata", {})
         code = error.response.get("Error", {}).get("Code")
