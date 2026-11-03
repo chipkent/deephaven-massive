@@ -143,6 +143,7 @@ CONDITIONS: Final = DatasetSpec(
         "SipMappingCta",
         "SipMappingOpra",
         "SipMappingUtp",
+        "SipMappingFinraTdds",
         *_UPDATE_RULES,
     ),
     nullable_poll_keys={
@@ -152,7 +153,7 @@ CONDITIONS: Final = DatasetSpec(
         ),
         "Exchange": "present only for a condition whose data comes from one exchange alone",
         **dict.fromkeys(
-            ("SipMappingCta", "SipMappingOpra", "SipMappingUtp"),
+            ("SipMappingCta", "SipMappingOpra", "SipMappingUtp", "SipMappingFinraTdds"),
             "empty for a SIP that has no code for the condition",
         ),
     },

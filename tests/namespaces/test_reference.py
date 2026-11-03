@@ -64,6 +64,7 @@ CONDITION_COLUMNS = (
     "SipMappingCta",
     "SipMappingOpra",
     "SipMappingUtp",
+    "SipMappingFinraTdds",
     "UpdateRulesConsolidatedUpdatesHighLow",
     "UpdateRulesConsolidatedUpdatesOpenClose",
     "UpdateRulesConsolidatedUpdatesVolume",
