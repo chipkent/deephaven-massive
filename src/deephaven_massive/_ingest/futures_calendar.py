@@ -76,7 +76,8 @@ from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, failure_text
 from deephaven_massive._ingest.rate_limits import bucket_of
-from deephaven_massive._massive import Cancel
+from deephaven_massive._ingest.rest_requests import largest_page
+from deephaven_massive._massive import Cancel, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -132,8 +133,6 @@ _DAYS_BACK: Final = timedelta(days=7)
 _DAYS_AHEAD: Final = timedelta(days=10)
 _TICKERS_PER_REQUEST: Final = 100
 """The most tickers one contracts lookup sends in `ticker.any_of`."""
-_PAGE: Final = 1000
-"""The largest page both paths serve (their documented `limit` maximum)."""
 _JOIN_TIMEOUT: Final = 5.0
 _STOP: Final = object()
 
@@ -236,6 +235,9 @@ class FuturesCalendar:
         self._fetch = fetch
         self._contracts_path = contracts_path
         self._schedules_path = schedules_path
+        # Each lookup asks for the largest page its path documents.
+        self._contracts_page = largest_page(source(Transport.REST, contracts_path))
+        self._schedules_page = largest_page(source(Transport.REST, schedules_path))
         self._label = label
         self._clock = clock
         self._lock = threading.Lock()
@@ -608,7 +610,7 @@ class FuturesCalendar:
             with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
                 for start in range(0, len(ordered), _TICKERS_PER_REQUEST):
                     chunk = ordered[start : start + _TICKERS_PER_REQUEST]
-                    query = {"ticker.any_of": tuple(chunk), "limit": _PAGE}
+                    query = {"ticker.any_of": tuple(chunk), "limit": self._contracts_page}
                     for row in self._fetch(
                         self._contracts_path, query, bucket=_BUCKET, cancel=lane
                     ):
@@ -639,7 +641,7 @@ class FuturesCalendar:
             "product_code.any_of": tuple(sorted(products)),
             "session_end_date.gte": today - _DAYS_BACK,
             "session_end_date.lte": today + _DAYS_AHEAD,
-            "limit": _PAGE,
+            "limit": self._schedules_page,
         }
         try:
             with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket

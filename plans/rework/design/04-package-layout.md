@@ -152,6 +152,8 @@ _ingest/                 the only holder of wire clients
   shared_lookup.py       SharedLookup: a session's lookups one caller makes while the others
                          wait, each within its own patience (the host decisions, the crypto
                          ticker list)
+  crypto_tickers.py      CryptoTickerList: Massive's crypto ticker list, read once per session,
+                         which splits each crypto pair into its two currencies
   recency_labels.py      the DELAYED and REAL-TIME labels of a REST response (envelope status,
                          timeframe fields) and the refusal of delayed data not asked for
                          (sections 13.2 and 13.4)

@@ -17,6 +17,8 @@
 - `recency_labels`: the real-time or delayed labels Massive puts on REST responses, and the
   refusal a delayed one causes;
 - `shared_lookup`: a session's lookups that one caller makes while the others wait for it;
+- `crypto_tickers`: Massive's crypto ticker list, which splits each crypto pair into its two
+  currencies;
 - `host_decision`: which WebSocket host serves an asset class and channel family, and the
   session's cache of those decisions;
 - `ws`: the WebSocket transport, a session's registry of streams on shared connections;

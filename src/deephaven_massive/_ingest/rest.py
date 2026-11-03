@@ -91,10 +91,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
-- **Shared lookups.** The host decisions and the session's crypto ticker list are each made by
-  one caller while the others wait (`SharedLookup.claim_or_wait`). A waiting caller charges the
-  lookup's pauses to its own patience and gives up when they outlast it; if the caller making
-  the lookup gives up or is interrupted, each waiting caller tries again with what it has left.
+- **Shared lookups.** The host decisions and the session's crypto ticker list
+  (`_ingest/crypto_tickers.py`) are each made by one caller while the others wait
+  (`SharedLookup.claim_or_wait`). A waiting caller charges the lookup's pauses to its own
+  patience and gives up when they outlast it; if the caller making the lookup gives up or is
+  interrupted, each waiting caller tries again with what it has left.
 
 `RestState` is the part a session shares (the client, the host decisions, the live pollers,
 the once-per-session warnings); `SessionClients` creates it on first use and registers its
@@ -105,8 +106,8 @@ The requests of a call are planned by `rest_requests.py`, and its pages become b
 public errors.
 
 The module is one subject although it runs past 1,000 lines: it is one transport, and the
-reads, the fan-out, the crypto ticker list, the host decisions, and the failures all act on
-the same session state (`RestState`) and the same read (`RestReader`).
+reads, the fan-out, the host decisions, and the failures all act on the same session state
+(`RestState`) and the same read (`RestReader`).
 """
 
 from __future__ import annotations
@@ -120,7 +121,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeVar, cast
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -134,7 +135,6 @@ from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
-    LIBRARY_BUG,
     AuthenticationError,
     CutShortError,
     EntitlementError,
@@ -142,12 +142,12 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
     UnlistedPairError,
-    cause_of,
     failure_text,
     from_wire,
     library_bug,
 )
 from deephaven_massive._ingest import host_decision
+from deephaven_massive._ingest.crypto_tickers import CryptoTickerList, recording_split
 from deephaven_massive._ingest.rate_limits import (
     OTHER,
     PaceCheck,
@@ -229,20 +229,6 @@ _Done = TypeVar("_Done")
 _SYMBOL: Final = "Symbol"
 """The column of a row's instrument, which `_listed_rows` fills on a dataset with a ticker list."""
 
-_TICKERS_PATH: Final = "/v3/reference/tickers"
-"""The reference path that lists crypto tickers with their base and quote currencies."""
-_TICKERS_PAGE: Final = 1000
-"""The rows per page of the crypto ticker list: the endpoint's largest page."""
-_CRYPTO_KEY: Final = "crypto tickers"
-"""The key of the session's one crypto ticker list in `RestState.crypto`."""
-_TICKERS_REREAD: Final = 3600.0
-"""The seconds after which a ticker the crypto list does not hold makes the session read the list
-again, so a pair Massive lists later is found without a restart, at most once an hour."""
-
-
-CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
-"""Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
-
 _FACTS_LIMIT: Final = 10_000
 """The most facts a session remembers having warned about (`RestState.first`); past it, it
 forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
@@ -251,25 +237,6 @@ at the cost of warning about an old fact once more."""
 _ANSWER_SHOWN: Final = 200
 """The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
 line shows it whole."""
-
-
-def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
-    """Read one row of Massive's crypto ticker list.
-
-    Args:
-        ticker: The row's ticker, such as `X:DOTUSD`.
-        row: The row, with `base_currency_symbol` and `currency_symbol`.
-
-    Returns:
-        `(base, quote)` when the two currencies join to the ticker; otherwise why not.
-    """
-    base, quote = row.get("base_currency_symbol"), row.get("currency_symbol")
-    if isinstance(base, str) and isinstance(quote, str) and f"X:{base}{quote}" == ticker:
-        return base, quote
-    return (
-        f"Massive's reference data gives the currencies {base!r} and {quote!r}, which do not "
-        "join to it"
-    )
 
 
 class UnavailableSymbolError(PermanentError):
@@ -422,9 +389,9 @@ class RestState:
         pollers: The session's live `poll()` tables.
         hosts: The WebSocket host decisions, by (asset class, channel family)
             (`RestEndpoints.resolve_host`).
-        crypto: Massive's list of crypto tickers with their two currencies, under
-            `_CRYPTO_KEY` (`RestReader.crypto_pair`): read on first need, and read again when
-            a ticker it does not hold is asked for and it is an hour old or more.
+        crypto: Massive's list of crypto tickers with their two currencies
+            (`RestReader.crypto_pair`): read on first need, and read again when a ticker it
+            does not hold is asked for and it is an hour old or more.
     """
 
     __slots__ = ("_client", "_lock", "_once", "crypto", "hosts", "label", "pollers")
@@ -443,7 +410,7 @@ class RestState:
         self.hosts: Final[SharedLookup[tuple[AssetClass, ChannelFamily], HostDecision]] = (
             SharedLookup(label, client.governor)
         )
-        self.crypto: Final[SharedLookup[str, CryptoTickers]] = SharedLookup(label, client.governor)
+        self.crypto: Final = CryptoTickerList(client, label)
         self._once: set[tuple[str, ...]] = set()
 
     @property
@@ -560,190 +527,27 @@ class RestReader:
         return self.catalog.rest_path(template)
 
     def crypto_pair(self, symbol: str, *, cancel: Cancel | None = None) -> tuple[str, str]:
-        """Return a crypto ticker's base and quote currencies, with no guess.
+        """Return a crypto ticker's base and quote currencies, from the session's ticker list.
 
-        A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
-        `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in `WBTC`), so every split comes from
-        Massive's reference data: the session reads Massive's whole list of crypto tickers
-        once, on first need (`/v3/reference/tickers?market=crypto`, every page, first with
-        `active=true` and then with `active=false`, so a delisted pair splits too), keeping
-        each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
-        ticker. Its requests count against Massive's limit on reference data, so on a
-        Basic subscription they wait their turn. Blocks the calling thread for that read, or
-        while another thread makes it, sharing that read rather than starting a second one; a
-        caller that shares it still waits out no more of its pauses than its own patience
-        covers (`SharedLookup.claim_or_wait`). Holds no lock meanwhile. A failed read is not
-        kept, so the next call tries again. A read that succeeds is kept, even when it lists
-        no pair; a ticker it does not hold makes the session read the list again before
-        refusing it, when the list is an hour old or more (`SharedLookup.retire`), so a pair
-        Massive lists later is found without a restart, and the list is read at most once an
-        hour.
+        The session's `CryptoTickerList.pair` (`_ingest/crypto_tickers.py`), read through this
+        reader: it may read Massive's whole crypto ticker list, once per session, blocking the
+        calling thread meanwhile.
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
-            cancel: A background read's stop token: once it is set, the list's pages and the
-                wait for another caller's read of it stop, and the call raises. None when only
-                the session's close should stop them.
+            cancel: A background read's stop token, which the list's read listens to; None
+                when only the session's close should stop it.
 
         Returns:
             `(base, quote)`, such as `("DOT", "USD")`.
 
         Raises:
             UnlistedPairError: If the list does not hold the ticker, or its currencies do not
-                join to the ticker; a `poll()` table fails with it.
+                join to the ticker.
 
-        A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
-        `MassiveError`), and so does a stopped one (`"... cancelled"`). Every message names the
-        ticker; nothing falls back to a guessed split.
+        A failed read of the list raises its public `MassiveError`, naming the ticker.
         """
-        where = f"{symbol!r} cannot be split into its two currencies"
-        tickers = self._listed_crypto(where, cancel)
-        entry = tickers.get(symbol)
-        if entry is None and self.state.crypto.retire(_CRYPTO_KEY, tickers, _TICKERS_REREAD):
-            logger.info(
-                "%s: Massive's crypto ticker list does not hold %s; reading the list again, "
-                "since it is an hour old or more",
-                self.state.label,
-                symbol,
-            )
-            tickers = self._listed_crypto(where, cancel)
-            entry = tickers.get(symbol)
-        if entry is None:
-            raise UnlistedPairError(f"{where}: Massive's reference data does not list it")
-        if isinstance(entry, str):
-            raise UnlistedPairError(f"{where}: {entry}")
-        return entry
-
-    def _listed_crypto(self, where: str, cancel: Cancel | None) -> CryptoTickers:
-        """Return the session's crypto ticker list for `crypto_pair`, naming the ticker on failure.
-
-        Args:
-            where: The start of every message: which ticker cannot be split.
-            cancel: The caller's stop token, or None.
-
-        Returns:
-            The list (`_crypto_tickers`).
-
-        Raises:
-            MassiveError: The failed read's public error, of the same type, status, and
-                request id, its message prefixed with `where`.
-        """
-        try:
-            return self._crypto_tickers(cancel)
-        except MassiveError as public:
-            raise type(public)(
-                f"{where}: reading Massive's crypto tickers failed: {public}",
-                status=public.status,
-                request_id=public.request_id,
-                cause=public.cause,
-            ) from public
-
-    def _crypto_tickers(self, cancel: Cancel | None) -> CryptoTickers:
-        """Return the session's crypto ticker list, reading it on first need.
-
-        The first caller reads the list; a caller that arrives meanwhile waits for that read
-        within its own patience (`SharedLookup.claim_or_wait`). If the caller reading it stops
-        for a reason of its own (it gave up on a pause, was interrupted, or its read was
-        stopped), each waiting caller tries again with the patience it has left: one of them
-        reads the list, and the others wait on it.
-
-        Args:
-            cancel: The caller's stop token, which its pages and its wait listen to; None for
-                none.
-
-        Returns:
-            Each crypto ticker Massive lists: its `(base, quote)`, or why its currencies
-            cannot be used.
-
-        A failed read raises its public `MassiveError` (`AuthenticationError`,
-        `EntitlementError`), and every caller that waited on it a copy of it; an unexpected
-        error of the reader, a defect, is logged at ERROR with how to report it and propagates
-        to it, and its waiters get a `MassiveError` naming it.
-        A waiting caller that gives up raises the error `SharedLookup.claim_or_wait` describes.
-        """
-        known = self.state.crypto.known(_CRYPTO_KEY)
-        if known is not None:
-            return known  # a list already read needs no patience (a Java call)
-        # Taken before claiming the read: a claim is ended only by the block that reads.
-        patience = self.patience()
-        claim = self.state.crypto.claim_or_wait(
-            _CRYPTO_KEY,
-            bucket=OTHER,
-            patience=patience,
-            what="the crypto ticker list",
-            public=self.public_error,
-            cancel=cancel,
-        )
-        if not isinstance(claim, Claim):
-            return claim
-        # The claim is ended whatever stops the read, an interrupt (as by Ctrl-C) as it
-        # starts included: a claim left open would hang every later caller.
-        try:
-            tickers = self._read_crypto_tickers(patience, cancel)
-        except WireError as error:
-            public = self.public_error(error)
-            # A stop ends a request with an error of no status; one with a status is Massive's
-            # answer, a refusal the waiters copy even when the stop came at the same moment.
-            stopped = cancel is not None and cancel.is_set() and error.status is None
-            logger.debug(
-                "%s: reading the crypto ticker list failed (status %s, stop set %s); its "
-                "waiters %s: %s",
-                self.state.label,
-                error.status,
-                cancel is not None and cancel.is_set(),
-                "try again" if stopped else "get a copy of the error",
-                public,
-            )
-            self.state.crypto.fail(claim, public, "the read failed", stopped=stopped)
-            raise public from error
-        except BaseException as error:
-            # The reader's own unexpected error propagates; its waiters get a MassiveError.
-            self.state.crypto.fail(claim, error, "the read failed")
-            if cause_of(error) is ErrorCause.LIBRARY_DEFECT:
-                logger.exception(
-                    "%s: reading Massive's crypto tickers failed. %s", self.state.label, LIBRARY_BUG
-                )
-            raise
-        self.state.crypto.complete(claim, tickers)
-        return tickers
-
-    def _read_crypto_tickers(self, patience: Patience, cancel: Cancel | None) -> CryptoTickers:
-        """Read Massive's whole crypto ticker list, every page of both lists.
-
-        Args:
-            patience: The reading caller's patience, for every page.
-            cancel: The reading caller's stop token, which every page listens to; None for
-                none.
-
-        Returns:
-            The list.
-
-        A failed request raises its `WireError`; `_crypto_tickers` completes the shared
-        claim either way.
-        """
-        tickers: dict[str, tuple[str, str] | str] = {}
-        # The list is reference data, which Massive counts in a bucket of its own. Its pages
-        # share one lane of their own, so they wait their turn with other reads instead of
-        # queueing behind them; closing the client, or setting the caller's stop token, still
-        # ends their waits.
-        with Cancel(*(() if cancel is None else (cancel,))) as lane:
-            # Listed pairs first, then delisted ones, so that a past date of a delisted pair
-            # still splits; a ticker in both keeps its listed entry.
-            for active in (True, False):
-                query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
-                for page in self.state.client.pages(
-                    self.rest_path(_TICKERS_PATH),
-                    {},
-                    query,
-                    bucket=OTHER,
-                    cancel=lane,
-                    patience=patience,
-                ):
-                    for row in page.rows:
-                        ticker = row.get("ticker")
-                        if isinstance(ticker, str):
-                            tickers.setdefault(ticker, _crypto_entry(ticker, row))
-        return tickers
+        return self.state.crypto.pair(symbol, reader=self, cancel=cancel)
 
     def read(
         self,
@@ -1907,7 +1711,7 @@ class RestReader:
         skips = (
             isinstance(request.symbols, SymbolTable) and self.unlisted_symbols is not OnError.RAISE
         )
-        split = self._listed_split(unlisted, cancel) if skips else None
+        split = self._unlisted_recorder(unlisted, cancel) if skips else None
         for template, own in fetch_paths(spec, symbols):
             try:
                 path = self._plan_path(
@@ -1930,7 +1734,7 @@ class RestReader:
             )
         return planned, left_out
 
-    def _listed_split(
+    def _unlisted_recorder(
         self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
     ) -> CryptoSplit:
         """Return a crypto split that records a pair Massive does not list instead of raising.
@@ -1943,17 +1747,10 @@ class RestReader:
             cancel: The read's stop token, which the list's read listens to.
 
         Returns:
-            A split that returns `("", "")` for a pair it recorded.
+            A split that returns `("", "")` for a pair it recorded (`recording_split`).
         """
-
-        def split(symbol: str) -> tuple[str, str]:
-            try:
-                return self.crypto_pair(symbol, cancel=cancel)
-            except UnlistedPairError as error:
-                unlisted.setdefault(symbol, error)
-                return "", ""
-
-        return split
+        pair = functools.partial(self.crypto_pair, cancel=cancel)
+        return recording_split(pair, unlisted, catching=UnlistedPairError)
 
     def _skip_unlisted(
         self,
@@ -2145,7 +1942,7 @@ class RestReader:
         """
         found: dict[str, UnlistedPairError] = {}
         skips = unlisted is not OnError.RAISE
-        split = self._listed_split(found, cancel) if skips else None
+        split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
             asked = cast("tuple[str, ...]", symbols)  # only named pairs are split
@@ -3089,7 +2886,7 @@ def _without(
 
     Args:
         path: A path and its planned calls.
-        unlisted: The pairs left out (`RestReader._listed_split`).
+        unlisted: The pairs left out (`RestReader._unlisted_recorder`).
 
     Returns:
         The path with only the calls of the other symbols.

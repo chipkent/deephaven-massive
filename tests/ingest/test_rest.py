@@ -46,7 +46,15 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._errors import LIBRARY_BUG, RowDataError, UnlistedPairError
-from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests, shared_lookup
+from deephaven_massive._ingest import (
+    crypto_tickers,
+    host_decision,
+    rate_limits,
+    rest,
+    rest_requests,
+    shared_lookup,
+)
+from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
@@ -799,175 +807,6 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
     ]
 
 
-def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # A past date of a delisted pair still needs its split; a ticker in both lists keeps the
-    # listed pair's currencies.
-    fake_rest.reply(
-        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
-        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
-    )
-    fake_rest.reply(
-        "/v3/reference/tickers?market=crypto&active=false&limit=1000",
-        Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
-    )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
-    assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
-    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
-    assert fake_rest.get_queries() == [
-        ("/v3/reference/tickers", LIST_QUERY),
-        ("/v3/reference/tickers", DELISTED_QUERY),
-    ]
-
-
-def test_the_crypto_ticker_list_is_charged_to_other_in_one_lane_of_its_own(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The list is reference data, which Massive counts in a bucket of its own (`other`),
-    # and its pages take one turn at a time among the bucket's other reads, as one read does.
-    admitted: list[tuple[str, object]] = []
-    admission = _massive.RequestGovernor.admission
-
-    def recording(
-        governor: _massive.RequestGovernor,
-        bucket: str,
-        *,
-        lane: object,
-        patience: _massive.Patience,
-    ) -> object:
-        admitted.append((bucket, lane))
-        return admission(governor, bucket, lane=lane, patience=patience)
-
-    monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
-    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
-    first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
-    fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
-    fake_rest.reply("/v3/reference/tickers?cursor=two", Reply(envelope([])))
-    fake_rest.reply(
-        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
-    )
-    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
-    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
-    assert requests_by_bucket(session) == {"other": 3}
-    assert [bucket for bucket, _ in admitted] == ["other"] * 3
-    lanes = {id(lane) for _, lane in admitted}
-    assert len(lanes) == 1  # every page, listed and delisted, in the read's one lane
-    assert isinstance(admitted[0][1], _massive.Cancel)  # the read's own token
-
-
-@pytest.mark.parametrize(
-    ("rows", "message"),
-    [
-        ([], "Massive's reference data does not list it"),
-        (
-            [_ticker("X:DOTUSD", "DOT", "USDT")],
-            "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not",
-        ),
-        (
-            # Another ticker's row comes first and its currencies join to X:DOTUSD as well.
-            [_ticker("X:OTHER", "DOT", "USD"), _ticker("X:DOTUSD", "DO", "TUSD")],
-            None,
-        ),
-        ([{"market": "crypto", "base_currency_symbol": "DOT"}], "Massive's reference data does"),
-    ],
-)
-def test_a_crypto_pair_lookup_never_guesses(
-    *,
-    session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    rows: list[dict[str, object]],
-    message: str | None,
-) -> None:
-    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
-    if message is None:  # the row of the ticker itself decides
-        assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
-        return
-    with pytest.raises(UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
-        reader.crypto_pair("X:DOTUSD")
-
-
-def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A pair Massive lists after the session read the list is found without a restart; a
-    # ticker the list never holds costs no more than one read an hour.
-    clock = [1000.0]
-    monkeypatch.setattr(shared_lookup, "_monotonic", lambda: clock[0])
-    fake_rest.reply(
-        "/v3/reference/tickers",
-        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
-        Reply(envelope([])),
-        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD"), _ticker("X:DOTUSD", "DOT", "USD")])),
-        Reply(envelope([])),
-    )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
-    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
-    clock[0] += 3599
-    with pytest.raises(UnlistedPairError, match="does not list it"):
-        reader.crypto_pair("X:DOTUSD")  # the list is not an hour old: no read
-    assert len(fake_rest.get_queries()) == 2
-    clock[0] += 1
-    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # read again, and listed now
-    assert len(fake_rest.get_queries()) == 4
-    with pytest.raises(UnlistedPairError, match="does not list it"):
-        reader.crypto_pair("X:ABCUSD")  # the new list is recent: no read
-    assert len(fake_rest.get_queries()) == 4
-    # A caller holding a list another caller has since replaced reads the current one.
-    assert reader.state.crypto.retire(rest._CRYPTO_KEY, {}, rest._TICKERS_REREAD) is True
-
-
-def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    fake_rest.reply(
-        "/v3/reference/tickers",
-        Reply({"status": "ERROR"}, status=403),
-        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
-        Reply(envelope([])),
-    )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
-    with pytest.raises(
-        dm.EntitlementError,
-        match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
-    ) as raised:
-        reader.crypto_pair("X:DOTUSD")
-    assert raised.value.status == 403
-    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
-    assert len(fake_rest.get_queries()) == 3  # the failed read, then both lists
-
-
-def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
-    claimed: list[Future[Any]] = []
-
-    def pages(*_: object, **__: object) -> Iterator[Any]:
-        future, created = reader.state.crypto._claim(rest._CRYPTO_KEY)  # what a waiter gets
-        assert not created
-        claimed.append(future)
-        raise RuntimeError("the reader broke")
-
-    monkeypatch.setattr(reader.state.client, "pages", pages)
-    with (
-        caplog.at_level(logging.WARNING, LOGGER),
-        pytest.raises(RuntimeError, match="the reader broke"),  # the reader's own error
-    ):
-        reader.crypto_pair("X:DOTUSD")
-    # A defect of the library: one ERROR, with its trace and how to report it.
-    [record] = caplog.records
-    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
-    assert record.getMessage().endswith(f"reading Massive's crypto tickers failed. {LIBRARY_BUG}")
-    (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
-        future.result()  # the waiters get a MassiveError
-    assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
-    assert str(waited.value).endswith(LIBRARY_BUG)
-    assert reader.state.crypto._claim(rest._CRYPTO_KEY)[1]  # and the failure is forgotten
-
-
 def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -987,14 +826,14 @@ def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
     )
 
 
-class _WatchedFuture(Future[rest.CryptoTickers]):
+class _WatchedFuture(Future[CryptoTickers]):
     # A future that says when a caller starts waiting on it.
     def __init__(self) -> None:
         super().__init__()
         self.waiting = threading.Event()
 
     @override
-    def add_done_callback(self, fn: Callable[[Future[rest.CryptoTickers]], object]) -> None:
+    def add_done_callback(self, fn: Callable[[Future[CryptoTickers]], object]) -> None:
         # A caller that joins the list asks to hear when it completes, then waits.
         super().add_done_callback(fn)
         self.waiting.set()
@@ -1005,8 +844,8 @@ def _wait_for_pair(
 ) -> tuple[list[object], threading.Thread]:
     # Call crypto_pair on another thread while `future` is the list being read: the thread
     # waits on it, and puts what the call returned or raised in the list once it completes.
-    reader.state.crypto._futures[rest._CRYPTO_KEY] = future  # another thread claimed it
-    reader.state.crypto._claimed[rest._CRYPTO_KEY] = 0.0
+    reader.state.crypto._lookup._futures[LIST_KEY] = future  # another thread claimed it
+    reader.state.crypto._lookup._claimed[LIST_KEY] = 0.0
     results: list[object] = []
 
     def wait() -> None:
@@ -1433,7 +1272,7 @@ def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
     # Claim the shared lookup of `kind`, as a caller does before making or joining it.
     state = cast("rest.RestEndpoints", m._core.rest_transport())._state
     if kind == "crypto":
-        return state.crypto._claim(rest._CRYPTO_KEY)
+        return state.crypto._lookup._claim(LIST_KEY)
     return state.hosts._claim((AssetClass.STOCKS, ChannelFamily.TICK))
 
 
@@ -1458,7 +1297,7 @@ def test_a_failed_lookup_is_never_returned_as_known(
     future.set_exception(failure)  # failed, and not yet forgotten: what the late reader sees
     state = cast("rest.RestEndpoints", session._core.rest_transport())._state
     if kind == "crypto":
-        assert state.crypto.known(rest._CRYPTO_KEY) is None
+        assert state.crypto._lookup.known(LIST_KEY) is None
     else:
         assert state.hosts.known((AssetClass.STOCKS, ChannelFamily.TICK)) is None
 
@@ -1489,8 +1328,10 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
     claimed, created = _claim(session, kind)
     assert created
     succeeded = shared_lookup._succeeded_result
-    lookup = cast("SharedLookup[Any, Any]", state.crypto if kind == "crypto" else state.hosts)
-    claimed_key: Any = rest._CRYPTO_KEY if kind == "crypto" else key
+    lookup = cast(
+        "SharedLookup[Any, Any]", state.crypto._lookup if kind == "crypto" else state.hosts
+    )
+    claimed_key: Any = LIST_KEY if kind == "crypto" else key
 
     def maker_fails_meanwhile(future: Future[Any] | None) -> object:
         if future is claimed and not claimed.done():
@@ -1558,7 +1399,7 @@ def test_an_interrupt_as_the_crypto_read_starts_leaves_nothing_claimed(
     def interrupted(*_: object) -> NoReturn:  # Ctrl-C as the claimed read begins
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(rest.RestReader, "_read_crypto_tickers", interrupted)
+    monkeypatch.setattr(crypto_tickers.CryptoTickerList, "_read", interrupted)
     with pytest.raises(KeyboardInterrupt):
         _split_dot(session)()
     assert _claim(session, "crypto")[1]  # the claim was given up, so a new one is made
