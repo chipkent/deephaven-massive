@@ -149,6 +149,9 @@ recommendation.
 - **Never forward a question from a subagent or reviewer as written.** Rewrite it to this
   standard. Answer it yourself only when section 1 lets you decide it, and list the answer
   under **Decided**.
+- **None of the banned patterns of `docs/dev/user-docs.md`**: meta-commentary, filler negation,
+  coined jargon, precision theater, so-chains, defensive justification, hype words, the
+  tricolon formula, colon reveals. The owner reads them as machine-written padding.
 
 ## 5. Status reports
 
