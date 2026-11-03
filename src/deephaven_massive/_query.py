@@ -211,6 +211,14 @@ def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q,
     return verb
 
 
+MINIMUM_POLL_INTERVAL: Final = timedelta(seconds=1)
+"""The shortest interval `poll()` accepts.
+
+A shorter one is almost always a typo, such as `poll(0.01)` for `poll(10)`, and on a plan that
+Massive does not pace it would send requests back to back; a stream serves anything faster.
+"""
+
+
 @raises_through(require_positive_number)
 def _interval(value: object) -> timedelta:
     """Validate a `poll()` interval.
@@ -223,8 +231,8 @@ def _interval(value: object) -> timedelta:
 
     Raises:
         TypeError: If the value is neither a number nor a `timedelta`.
-        ValueError: If the number is not finite and positive, or the interval overflows
-            `timedelta`, or is not positive once rounded to microseconds.
+        ValueError: If the number is not finite and positive, if the interval overflows
+            `timedelta`, or if it is shorter than `MINIMUM_POLL_INTERVAL`.
     """
     if isinstance(value, timedelta):
         period = value
@@ -234,8 +242,11 @@ def _interval(value: object) -> timedelta:
             period = timedelta(seconds=seconds)
         except OverflowError:  # beyond timedelta's range
             raise ValueError(f"interval must be a positive, finite time, got {value!r}") from None
-    if period <= timedelta(0):  # also an interval that rounds to zero microseconds
-        raise ValueError(f"interval must be a positive, finite time, got {value!r}")
+    if period < MINIMUM_POLL_INTERVAL:
+        raise ValueError(
+            f"interval must be at least {MINIMUM_POLL_INTERVAL.total_seconds():g} second, got "
+            f"{value!r}: each poll() cycle sends a request; use a stream for faster updates"
+        )
     return period
 
 
@@ -1247,7 +1258,9 @@ class Query(QueryBase):
         cycle runs. `TimestampInsert` is the latest cycle's time.
 
         Args:
-            interval: Seconds between cycles, or a `timedelta`; must be positive.
+            interval: Seconds between cycles, or a `timedelta`; at least 1 second, so a typo
+                such as `poll(0.01)` for `poll(10)` cannot send requests back to back. Use a
+                stream for anything faster.
             mode: How cycles combine. `AUTO` (the default) is the dataset's own mode, which its
                 page in `docs/datasets` names: `REPLACE` keeps the latest cycle by key,
                 `UPSERT` keeps every key ever seen at its latest row, `APPEND` adds only rows
@@ -1264,10 +1277,10 @@ class Query(QueryBase):
             TypeError: If `interval` is not a number or a `timedelta`, or `mode` is not a
                 `dm.PollMode`.
             ValueError: Before the table exists: on a Deephaven update-graph thread; if
-                `interval` is not positive; if a feed's query has neither `start` nor `limit`;
-                if a symbol table holds only rows that are not Massive's exact tickers, or any
-                under `noncanonical_symbols=RAISE`; or if a path does not take a parameter or
-                filter the query set.
+                `interval` is not finite or is shorter than 1 second; if a feed's query has
+                neither `start` nor `limit`; if a symbol table holds only rows that are not
+                Massive's exact tickers, or any under `noncanonical_symbols=RAISE`; or if a path
+                does not take a parameter or filter the query set.
             AuthenticationError: If Massive rejects the API key while the call reads its
                 crypto ticker list, to split a crypto ticker a path takes as two currencies.
             EntitlementError: If the plan does not include that list.

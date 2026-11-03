@@ -850,3 +850,10 @@ document already reflects them.
     a later bad row of a refreshing table fails the table and every result that follows it.
     The refusal of a bad symbol-table row now suggests `dm.canonicalize_symbols(table,
     dm.AssetClass.<CLASS>)` without an `on_error` argument.
+94. **`poll()` refuses an interval shorter than 1 second** (owner decision, 2026-11-03, in the
+    final review before the user test). A `float` or `timedelta` interval under 1 second
+    raises `ValueError` at the call, naming the minimum and the value given. A shorter interval
+    is almost always a typo, such as `poll(0.01)` for `poll(10)`, which on a plan Massive does
+    not pace would send requests back to back; a stream serves anything faster. The check is
+    on the public verb only; the poller itself takes any positive interval
+    ([section 7](07-query-classes-and-verbs.md#7-query-classes-and-verbs)).
