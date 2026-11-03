@@ -4,7 +4,7 @@ Every symbol the library takes or shows is Massive's exact REST ticker, case kep
 `BRK.B`, `KIMpL`, `O:BRKB250117C00400000`, `ESZ5`, `I:SPX`, `C:EURUSD`, `X:BTCUSD`. This module
 owns that grammar and two things built on it:
 
-- **The checks.** `normalize` and `check_symbol` accept only canonical text when a query is
+- **The checks.** `check_symbols` and `check_symbol` accept only canonical text when a query is
   built (`symbols=`, `underlying=`, the rows of a symbol table); anything else raises
   `ValueError`, and the message names the canonical form when the class's converter gives one.
   `is_canonical` is the test itself.
@@ -94,11 +94,11 @@ __all__ = [
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",
     "check_symbol",
+    "check_symbols",
     "forex_codes",
     "is_canonical",
     "is_forex_currency",
     "is_futures_contract",
-    "normalize",
     "option_roots",
     "read_crypto_pair",
     "read_forex_pair",
@@ -201,7 +201,7 @@ class SymbolTable:
 
 
 NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
-"""A `Symbols` argument after `normalize`: a sorted tuple of canonical symbols, `ALL`, or a
+"""A `Symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
 boxed symbol table."""
 
 
@@ -345,7 +345,7 @@ def is_forex_currency(code: str) -> bool:
 # --- the converters ------------------------------------------------------------------------------
 
 
-def _function(asset_class: AssetClass) -> str:
+def _converter_name(asset_class: AssetClass) -> str:
     """Return the name of a class's public converter, for messages.
 
     Args:
@@ -405,7 +405,7 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
         found, wanted = _class_noun_with_article(other), _class_noun_with_article(asset_class)
         raise ValueError(
             f"{text!r} is {found} ticker (prefix {prefix}), not {wanted} one; "
-            f"call {_function(other)}"
+            f"call {_converter_name(other)}"
         )
 
 
@@ -1204,11 +1204,11 @@ def check_symbol(
         raise ValueError(f"{error}; symbols must be Massive's exact tickers") from None
     raise ValueError(
         f"{text!r} is not Massive's ticker; use {fixed!r} (symbols must be Massive's exact "
-        f"tickers, and {_function(resolved)} converts)"
+        f"tickers, and {_converter_name(resolved)} converts)"
     )
 
 
-def normalize(
+def check_symbols(
     asset_class: AssetClass | ClassFromPrefix,
     symbols: str | Iterable[str] | _All,
     *,

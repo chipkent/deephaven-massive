@@ -641,7 +641,7 @@ class FrameDecoder:
         spec = self._channels[channel]
         self._scan(channel, item, into=into)
         row: list[object] = []
-        odd: list[tuple[str, object, str]] = []
+        unfit: list[tuple[str, object, str]] = []
         for key, _, required, convert, f, _ in spec.steps:
             value = item.get(key)
             problem = None
@@ -655,10 +655,10 @@ class FrameDecoder:
                 self._drop(channel, item, problem or missing_key_message(f), into=into)
                 return
             if problem is not None:
-                odd.append((key, value, problem))
+                unfit.append((key, value, problem))
             row.append(None)
-        if odd:
-            self._odd(channel, item, odd, into=into)
+        if unfit:
+            self._record_unfit(channel, item, unfit, into=into)
         into.rows.append(tuple(row))
 
     def _scan(self, channel: str, item: dict[str, object], *, into: _Accumulator) -> None:
@@ -720,11 +720,11 @@ class FrameDecoder:
         symbol = self._symbol(channel, item)
         into.rejects.append(Reject(channel=channel, symbol=symbol, error=error, raw=raw))
 
-    def _odd(
+    def _record_unfit(
         self,
         channel: str,
         item: dict[str, object],
-        odd: list[tuple[str, object, str]],
+        unfit: list[tuple[str, object, str]],
         *,
         into: _Accumulator,
     ) -> None:
@@ -733,16 +733,16 @@ class FrameDecoder:
         Args:
             channel: The row's channel.
             item: The row's object.
-            odd: Each value that does not fit: its wire key, the value, and the clause naming
+            unfit: Each value that does not fit: its wire key, the value, and the clause naming
                 the field, the expected type, and the value.
             into: The channel's accumulator for this frame.
         """
-        for key, value, _ in odd:
+        for key, value, _ in unfit:
             if key not in into.unconvertible:
                 into.unconvertible.add(key)
                 into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(value))
         if logger.isEnabledFor(logging.DEBUG):
-            problems = "; ".join(problem for _, _, problem in odd)
+            problems = "; ".join(problem for _, _, problem in unfit)
             reason = self._about(channel, item, problems)
             logger.debug("read as null in %s; the row: %s", reason, row_excerpt(item))
 

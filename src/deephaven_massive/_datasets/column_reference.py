@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Final
 from deephaven_massive._datasets.column_descriptions import (
     TRANSPORT_LABELS,
     TRANSPORT_ORDER,
+    joined_with_and,
 )
 from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
@@ -456,24 +457,22 @@ def _poll_text(spec: DatasetSpec) -> str:
     """
     text = f"`dm.PollMode.{spec.poll_mode.name}`: {_POLL_MODES[spec.poll_mode]}"
     if spec.poll_keys:
-        text = f"{text}, keyed by {_and(spec.poll_keys)}"
+        text = f"{text}, keyed by {_column_list(spec.poll_keys)}"
     if spec.revision_keys:
-        text = f"{text}; `mode=dm.PollMode.APPEND` also keys by {_and(spec.revision_keys)}"
+        text = f"{text}; `mode=dm.PollMode.APPEND` also keys by {_column_list(spec.revision_keys)}"
     return text
 
 
-def _and(names: Sequence[str]) -> str:
-    """Join column names for a sentence.
+def _column_list(names: Sequence[str]) -> str:
+    """Join column names for a sentence, each in backticks.
 
     Args:
         names: The names; at least one.
 
     Returns:
-        Each name in backticks, the last two joined by "and" and the rest by commas, such as
-        "`Symbol` and `IssuerName`".
+        The names joined by `joined_with_and`, such as "`Symbol` and `IssuerName`".
     """
-    quoted = [f"`{name}`" for name in names]
-    return ", ".join(quoted[:-1]) + (" and " if quoted[1:] else "") + quoted[-1]
+    return joined_with_and([f"`{name}`" for name in names])
 
 
 def _sort_text(spec: DatasetSpec, catalog: Catalog) -> str:

@@ -159,7 +159,7 @@ FMV: Final = DatasetSpec(
     asset_class=AssetClass.FOREX,
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
-    family=ChannelFamily.FMV,
+    channel_family=ChannelFamily.FMV,
     keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
 )
 """`m.forex.fmv`: the `FMV` stream of the Business feed."""

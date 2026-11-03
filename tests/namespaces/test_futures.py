@@ -43,17 +43,12 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._datasets.request import Request
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
 OWNER = "namespaces/futures"
 
 Loader = Callable[[str, str], bytes]
-
-
-def request(query: QueryBase) -> Request:
-    return query._request
 
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
@@ -99,14 +94,14 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
     for factory in (massive_session.futures.trades, massive_session.futures.quotes):
         q = factory(["NQZ5", "ESZ5", "ESZ5"])
         assert type(q) is StreamHistoryQuery
-        assert request(q).symbols == ("ESZ5", "NQZ5")
+        assert q._request.symbols == ("ESZ5", "NQZ5")
         # Every venue by default, in FuturesVenue order.
-        assert request(q).venues == tuple(dm.FuturesVenue)
+        assert q._request.venues == tuple(dm.FuturesVenue)
         cme = factory("ESZ5", venues={dm.FuturesVenue.CME})
-        assert request(cme).venues == (dm.FuturesVenue.CME,)
+        assert cme._request.venues == (dm.FuturesVenue.CME,)
         two = factory("ESZ5", venues={dm.FuturesVenue.COMEX, dm.FuturesVenue.CBOT})
-        assert request(two).venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
-        assert request(factory(dm.ALL)).symbols is dm.ALL
+        assert two._request.venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
+        assert factory(dm.ALL)._request.symbols is dm.ALL
         assert "venues={dm.FuturesVenue.CME}" in repr(cme)
 
 
@@ -170,15 +165,15 @@ def test_bars_pick_their_class_from_the_timespan(
     timespan, multiplier = bar
     q = massive_session.futures.bars("ESZ5", timespan, multiplier=multiplier)
     assert type(q) is expected
-    assert request(q).timespan is timespan
-    assert request(q).multiplier == multiplier
+    assert q._request.timespan is timespan
+    assert q._request.multiplier == multiplier
 
 
 def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues={dm.FuturesVenue.NYMEX})
     assert type(q) is StreamHistoryQuery
-    assert request(q).timespan is dm.Timespan.MINUTE
-    assert request(q).venues == (dm.FuturesVenue.NYMEX,)
+    assert q._request.timespan is dm.Timespan.MINUTE
+    assert q._request.venues == (dm.FuturesVenue.NYMEX,)
     with pytest.raises(ValueError, match="venues is empty; leave it out to read every venue"):
         massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
 
@@ -197,13 +192,13 @@ def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> No
         ["ESZ5"], sort="ticker", order=dm.Order.DESC, limit=10, filters={"ticker_gte": "E"}
     )
     assert type(q) is Query
-    assert request(q).symbols == ("ESZ5",)
-    assert request(q).params == (("order", dm.Order.DESC), ("sort", "ticker"))
-    assert request(q).filters == (("ticker_gte", "E"),)
-    assert request(q).limit == 10
+    assert q._request.symbols == ("ESZ5",)
+    assert q._request.params == (("order", dm.Order.DESC), ("sort", "ticker"))
+    assert q._request.filters == (("ticker_gte", "E"),)
+    assert q._request.limit == 10
     every_es = massive_session.futures.snapshots(dm.ALL, product_code="ES")
-    assert request(every_es).symbols is dm.ALL
-    assert request(every_es).params == (("product_code", "ES"),)
+    assert every_es._request.symbols is dm.ALL
+    assert every_es._request.params == (("product_code", "ES"),)
 
 
 def test_snapshot_symbols_are_set_only_through_symbols(massive_session: dm.MassiveSession) -> None:
@@ -216,9 +211,9 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
         product_code="ES", filters={"active": True, "last_trade_date_gte": date(2026, 1, 1)}
     )
     assert type(q) is Query
-    assert request(q).symbols is None
-    assert request(q).params == (("product_code", "ES"),)
-    assert dict(request(q).filters) == {"active": True, "last_trade_date_gte": date(2026, 1, 1)}
+    assert q._request.symbols is None
+    assert q._request.params == (("product_code", "ES"),)
+    assert dict(q._request.filters) == {"active": True, "last_trade_date_gte": date(2026, 1, 1)}
     with pytest.raises(ValueError, match="filter 'active' takes a bool, not 'yes'"):
         massive_session.futures.contracts(filters={"active": "yes"})
     with pytest.raises(TypeError, match="sort must be a str"):
@@ -228,8 +223,8 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
 def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.futures.contracts
     q = contracts(["ESZ5", "NQZ5"], as_of="2025-06-02")
-    assert request(q).symbols == ("ESZ5", "NQZ5")
-    assert request(q).params == (("date", date(2025, 6, 2)),)
+    assert q._request.symbols == ("ESZ5", "NQZ5")
+    assert q._request.params == (("date", date(2025, 6, 2)),)
     with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
         contracts(dm.ALL)
     with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
@@ -242,7 +237,7 @@ def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) ->
 
 def test_products_take_a_day(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(as_of=date(2025, 6, 2))
-    assert request(q).params == (("date", date(2025, 6, 2)),)
+    assert q._request.params == (("date", date(2025, 6, 2)),)
     with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
         massive_session.futures.products(filters={"date": "2025-06-02"})
 
@@ -252,8 +247,8 @@ def test_products(massive_session: dm.MassiveSession) -> None:
         product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
     )
     assert type(q) is Query
-    assert request(q).params == (("product_code", "GC"), ("sort", "name"))
-    assert request(q).limit == 5
+    assert q._request.params == (("product_code", "GC"), ("sort", "name"))
+    assert q._request.limit == 5
     with pytest.raises(ValueError, match="filter 'sector' takes"):
         massive_session.futures.products(filters={"sector": "nonsense"})
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
@@ -263,9 +258,9 @@ def test_products(massive_session: dm.MassiveSession) -> None:
 def test_exchanges(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.exchanges()
     assert type(q) is Query
-    assert request(q) == type(request(q))()
+    assert q._request == type(q._request)()
     assert repr(q) == "m.futures.exchanges()"
-    assert request(massive_session.futures.exchanges(limit=2)).limit == 2
+    assert massive_session.futures.exchanges(limit=2)._request.limit == 2
 
 
 def rest_params(name: str) -> set[str]:
@@ -285,8 +280,8 @@ def test_a_path_without_filters_or_sort_offers_none(name: str) -> None:
 def test_market_status(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.market_status(product_code="ES", limit=3)
     assert type(q) is Query
-    assert request(q).params == (("product_code", "ES"),)
-    assert request(q).limit == 3
+    assert q._request.params == (("product_code", "ES"),)
+    assert q._request.limit == 3
 
 
 @pytest.mark.parametrize(
@@ -327,15 +322,15 @@ def test_every_product_code_path_takes_a_list_of_codes(name: str) -> None:
 @pytest.mark.parametrize("name", _PRODUCT_DATASETS)
 def test_product_code_is_one_code_or_several(massive_session: dm.MassiveSession, name: str) -> None:
     f = massive_session.futures
-    one = request(_with_product_code(f, name, "ES")).params
-    several = request(_with_product_code(f, name, ["ES", "NQ"])).params
+    one = _with_product_code(f, name, "ES")._request.params
+    several = _with_product_code(f, name, ["ES", "NQ"])._request.params
     assert ("product_code", "ES") in one
     assert not any(key == "product_code.any_of" for key, _ in one)
     assert ("product_code.any_of", ("ES", "NQ")) in several
     assert not any(key == "product_code" for key, _ in several)
     assert not any(
         key.startswith("product_code")
-        for key, _ in request(_with_product_code(f, name, None)).params
+        for key, _ in _with_product_code(f, name, None)._request.params
     )
     with pytest.raises(ValueError, match="product_code is empty; pass None for every product"):
         _with_product_code(f, name, [])
@@ -353,7 +348,7 @@ def test_product_code_takes_a_table_of_codes(massive_session: dm.MassiveSession,
     values = query._request.value_table
     assert values is not None
     assert (values.parameter, values.column, values.table) == ("product_code", "ProductCode", codes)
-    assert not any(key.startswith("product_code") for key, _ in request(query).params)
+    assert not any(key.startswith("product_code") for key, _ in query._request.params)
     with pytest.raises(
         ValueError, match=r"^a table passed as product_code must have a ProductCode column"
     ):
@@ -368,10 +363,10 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
         filters={"trading_venue": "XCME"},
     )
     assert type(q) is Query
-    assert request(q).params == (("product_code", "ES"),)
-    assert request(q).start == date(2025, 12, 22)
-    assert request(q).end == date(2025, 12, 26)
-    assert request(massive_session.futures.schedules()).start is None
+    assert q._request.params == (("product_code", "ES"),)
+    assert q._request.start == date(2025, 12, 22)
+    assert q._request.end == date(2025, 12, 26)
+    assert massive_session.futures.schedules()._request.start is None
     with pytest.raises(ValueError, match="must not be after end"):
         massive_session.futures.schedules(start="2025-12-26", end="2025-12-22")
     # The axis is a calendar date of sessions, so a datetime bound is refused.

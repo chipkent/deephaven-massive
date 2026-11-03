@@ -400,7 +400,7 @@ class WsConnections:
             elif isinstance(symbols, tuple):  # a list in code, or a table read and checked
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
-        decision = self._resolve(asset_class, spec.family)
+        decision = self._resolve(asset_class, spec.channel_family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
             # Started before the schedule wait, so a failure or interrupt during that wait
@@ -557,8 +557,8 @@ class WsConnections:
                         connection = group.connections[url] = cast("Connection", candidate)
                         candidate = None
                     if connection is not None:
-                        connection.families.add(spec.family)
-                        self._row_owners[asset_class, spec.family] = connection
+                        connection.families.add(spec.channel_family)
+                        self._row_owners[asset_class, spec.channel_family] = connection
                         if asset_class is AssetClass.OPTIONS:
                             connection.cap_pending[stream_id] = topics
                         connection.take(self)
@@ -572,7 +572,7 @@ class WsConnections:
                     exec_ctx=core.exec_ctx,
                     url=url,
                     asset_class=asset_class,
-                    family=spec.family,
+                    family=spec.channel_family,
                     decision=decision,
                     sessions=self.futures_calendar() if futures else None,
                 )

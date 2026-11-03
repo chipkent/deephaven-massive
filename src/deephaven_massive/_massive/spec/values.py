@@ -39,7 +39,12 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive.spec.types import ParamKind, WireUnit
+from deephaven_massive._massive.spec.types import (
+    NANOS_PER_SECOND,
+    SECONDS_PER_DAY,
+    ParamKind,
+    WireUnit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,9 +55,13 @@ __all__ = ["encode_value"]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICROS_PER_SECOND = 1_000_000
-_SECONDS_PER_DAY = 86_400
 # How many nanoseconds make one of each unit.
-_NANOS_PER = {WireUnit.NS: 1, WireUnit.US: 1000, WireUnit.MS: 1_000_000, WireUnit.S: 1_000_000_000}
+_NANOS_PER = {
+    WireUnit.NS: 1,
+    WireUnit.US: 1000,
+    WireUnit.MS: 1_000_000,
+    WireUnit.S: NANOS_PER_SECOND,
+}
 
 
 def _instant_count(label: str, value: datetime, unit: WireUnit) -> int:
@@ -72,7 +81,7 @@ def _instant_count(label: str, value: datetime, unit: WireUnit) -> int:
         ValueError: If the instant is not a whole number of `unit`.
     """
     delta = value - _EPOCH
-    micros = (delta.days * _SECONDS_PER_DAY + delta.seconds) * _MICROS_PER_SECOND
+    micros = (delta.days * SECONDS_PER_DAY + delta.seconds) * _MICROS_PER_SECOND
     nanos = (micros + delta.microseconds) * 1000 + getattr(value, "nanosecond", 0)
     count, rest = divmod(nanos, _NANOS_PER[unit])
     if rest:

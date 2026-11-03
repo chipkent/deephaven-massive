@@ -62,7 +62,7 @@ FOREX_FMV = DatasetSpec(
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
     channels={NotBars.ANY: "FMV"},
-    family=ChannelFamily.FMV,
+    channel_family=ChannelFamily.FMV,
     keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
 )
 

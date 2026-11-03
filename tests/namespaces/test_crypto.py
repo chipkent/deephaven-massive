@@ -158,8 +158,8 @@ def test_the_wire_details_of_the_specs() -> None:
     assert set(crypto.BARS.flat_file_prefixes) == {dm.Timespan.MINUTE, dm.Timespan.DAY}
     trades, bars = (CATALOG.rest_path(spec.rest_paths[0]) for spec in (crypto.TRADES, crypto.BARS))
     assert (page_size(crypto.TRADES, trades), page_size(crypto.BARS, bars)) == (50_000, 50_000)
-    assert crypto.FMV.family is ChannelFamily.FMV
-    assert crypto.QUOTES.family is ChannelFamily.TICK
+    assert crypto.FMV.channel_family is ChannelFamily.FMV
+    assert crypto.QUOTES.channel_family is ChannelFamily.TICK
     assert crypto.SNAPSHOTS.symbol_param == "tickers"
     assert crypto.DAILY_OPEN_CLOSE.per_symbol
     assert not crypto.SNAPSHOTS.per_symbol

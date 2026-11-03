@@ -89,7 +89,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          name: Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
   symbols.py             the canonical ticker grammar and its checks (check_symbol(),
-                         normalize()), the public scalar converters, option_roots(),
+                         check_symbols()), the public scalar converters, option_roots(),
                          symbol_class() (section 10)
   wire_symbols.py        a symbol's transport spellings, both ways: canonical_from_wire(),
                          wire_spellings(), ws_symbol(), WireSymbols, ReadSymbols,

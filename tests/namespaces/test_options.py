@@ -166,7 +166,7 @@ def test_each_dataset_reads_its_sources() -> None:
         (Transport.FLAT_FILES, "us_options_opra/day_aggs_v1"),
     )
     assert options.FMV.sources == ((Transport.WS, "options/FMV"),)
-    assert options.FMV.family is dm._enums.ChannelFamily.FMV
+    assert options.FMV.channel_family is dm._enums.ChannelFamily.FMV
     assert options.CHAIN.sources == ((R, "/v3/snapshot/options/{underlyingAsset}"),)
     assert options.SNAPSHOTS.sources == ((R, "/v3/snapshot"),)
     assert options.CONTRACTS.sources == (

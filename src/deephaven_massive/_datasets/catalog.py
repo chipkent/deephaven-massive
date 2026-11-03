@@ -314,7 +314,7 @@ class DatasetSpec:
             datasets that are not bars, such as `{NotBars.ANY: "T"}` or
             `{Timespan.SECOND: "A", Timespan.MINUTE: "AM"}`. Its source is
             `"<asset class>/<channel>"`.
-        family: The channel family, which decides the WebSocket host.
+        channel_family: The channel family, which decides the WebSocket host.
         flat_file_prefixes: The S3 key prefix per bar timespan, or under the key `NotBars.ANY`
             for datasets that are not bars, such as `{NotBars.ANY: "us_stocks_sip/trades_v1"}`.
             A futures prefix contains the placeholder `{venue}`. `timespan_key` gives a
@@ -423,7 +423,7 @@ class DatasetSpec:
     detail_path: str | None = None
     extra_paths: tuple[str, ...] = ()
     channels: Mapping[Timespan | NotBars, str] = field(default_factory=dict)
-    family: ChannelFamily = ChannelFamily.TICK
+    channel_family: ChannelFamily = ChannelFamily.TICK
     flat_file_prefixes: Mapping[Timespan | NotBars, str] = field(default_factory=dict)
     keys: Mapping[tuple[Transport, str], SourceKeys] = field(default_factory=dict)
     time_axis: tuple[str, str] | None = None

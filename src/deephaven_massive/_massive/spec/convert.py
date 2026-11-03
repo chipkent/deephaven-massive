@@ -93,7 +93,12 @@ from types import MappingProxyType, NoneType
 from typing import TYPE_CHECKING, Final, TypeVar, cast
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._massive.spec.types import Conversion, WireType
+from deephaven_massive._massive.spec.types import (
+    NANOS_PER_SECOND,
+    SECONDS_PER_DAY,
+    Conversion,
+    WireType,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -139,8 +144,6 @@ _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 _EXCERPT = 200
 # How many characters of a whole row's JSON text a DEBUG line quotes.
 _ROW_EXCERPT = 2000
-_SECONDS_PER_DAY = 86_400
-_NANOS_PER_SECOND = 1_000_000_000
 
 
 class UnconvertibleError(ValueError):
@@ -258,8 +261,8 @@ def _instant(value: object) -> int:
     offset = (int(match["oh"] or 0) * 60 + int(match["om"] or 0)) * 60
     if match["sign"] == "-":
         offset = -offset
-    total = day * _SECONDS_PER_DAY + clock - offset
-    return _long(total * _NANOS_PER_SECOND + int((match["fraction"] or "").ljust(9, "0")))
+    total = day * SECONDS_PER_DAY + clock - offset
+    return _long(total * NANOS_PER_SECOND + int((match["fraction"] or "").ljust(9, "0")))
 
 
 def _long_array(value: object) -> list[int | None]:
@@ -463,7 +466,7 @@ def _chicago_midnight_date(value: object) -> date:
     """
     if isinstance(value, str):
         return _date(value)
-    seconds, rest = divmod(_long(value), _NANOS_PER_SECOND)
+    seconds, rest = divmod(_long(value), NANOS_PER_SECOND)
     if rest:
         raise UnconvertibleError
     # Every signed 64-bit count of nanoseconds lies in the years 1677 to 2262, which a

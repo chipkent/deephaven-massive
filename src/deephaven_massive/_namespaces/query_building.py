@@ -7,7 +7,7 @@ module does the work they share when a dataset method is called:
   each factory method passes to `build_query`, and wraps each factory in `shows_call`.
 - `shows_call` records on each query the call that built it (`QueryCall`), which is the
   query's `repr`: the method's path and the arguments that differ from their defaults.
-- `build_query` checks symbols (`normalize` in `_datasets/symbols.py`, which takes only
+- `build_query` checks symbols (`check_symbols` in `_datasets/symbols.py`, which takes only
   Massive's exact tickers; a reactive
   `Table` is checked for its `Symbol` column and boxed in a `SymbolTable` here), rejects
   `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
@@ -62,7 +62,7 @@ from deephaven_massive._datasets.filters import (
     takes_instants,
 )
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.symbols import SymbolTable, normalize
+from deephaven_massive._datasets.symbols import SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._query import Query, QueryBase, QueryCall, bar_query_class, query_class
@@ -801,7 +801,7 @@ def build_query(
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
-    raise the `TypeError` or `ValueError` of the helper that checks them (`normalize` in
+    raise the `TypeError` or `ValueError` of the helper that checks them (`check_symbols` in
     `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
     `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
     calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
@@ -832,7 +832,7 @@ def build_query(
             )
         normalized = SymbolTable(symbols)
     elif symbols is not None:
-        normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
+        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, _All) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     if adjusted is not None and not isinstance(adjusted, bool):

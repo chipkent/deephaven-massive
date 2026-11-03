@@ -54,6 +54,7 @@ __all__ = [
     "TRANSPORT_ORDER",
     "Contribution",
     "column_description",
+    "joined_with_and",
     "with_sentence",
 ]
 
@@ -442,16 +443,16 @@ def with_sentence(text: str, sentence: str) -> str:
     return f"{text}{stop} {sentence}"
 
 
-def _listed(labels: Sequence[str]) -> str:
-    """Join transport labels for a sentence.
+def joined_with_and(items: Sequence[str]) -> str:
+    """Join words for a sentence, such as transport labels or column names.
 
     Args:
-        labels: At least one label.
+        items: At least one item, each as the sentence shows it.
 
     Returns:
         The last two joined by "and" and the rest by commas, such as "REST and flat files".
     """
-    return ", ".join(labels[:-1]) + (" and " if labels[1:] else "") + labels[-1]
+    return ", ".join(items[:-1]) + (" and " if items[1:] else "") + items[-1]
 
 
 def _chosen(
@@ -484,7 +485,7 @@ def _chosen(
                 labels = sources.setdefault(rest, [])
                 if label not in labels:
                     labels.append(label)
-        parts = [f"{_listed(labels)}{rest}" for rest, labels in sources.items()]
+        parts = [f"{joined_with_and(labels)}{rest}" for rest, labels in sources.items()]
         sentence = _library_sentence(spec, name)
         if not parts:
             return sentence
