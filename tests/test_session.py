@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._tables.diagnostics import Diagnostics
     from deephaven_massive._tables.session_core import SessionCore
@@ -415,10 +416,12 @@ def test_stream_rows_follow_the_holds(
 
 @pytest.mark.usefixtures("fake_streams")
 def test_all_and_reactive_symbols_in_stream_rows(
-    massive_session: dm.MassiveSession, stream_rows: Callable[[], list[dict[str, Any]]]
+    massive_session: dm.MassiveSession,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     every = stream_query(massive_session, dm.ALL).blink()
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])  # refreshing
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])  # refreshing
     watch = stream_query(massive_session, watchlist).blink()
     fixed = stream_query(massive_session, new_table([string_col("Symbol", ["A"])])).blink()
     rows = stream_rows()
@@ -711,9 +714,10 @@ def test_stream_verbs_work_in_a_console_command(
     ws_session: WsSession,
     console_command: Callable[[Callable[[], None]], None],
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     m = ws_session.session
-    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     made: dict[str, Table] = {}
 

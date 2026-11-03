@@ -198,6 +198,12 @@ These prevent deadlocks and leaks.
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.
+- **A test that creates an input table to stand in for a user's watchlist creates it through
+  `dh_input_table`**, which holds the UG shared lock only for the creation; release it before
+  any blocking add or delete, which raise under the shared lock. Created while an update cycle
+  runs, a table can be refreshed in the step it was stamped with: the creation stamp counts as
+  the table's notification for that step, so a first change delivered in the same step is
+  fatal.
 - **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
   flush routing are released there, not when a result record is released. The callback only
   updates the registry, queues a failure's pin release on the reaper, and calls
