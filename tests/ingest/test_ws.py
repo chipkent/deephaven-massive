@@ -319,12 +319,13 @@ def test_publish_waits_for_every_channel_of_a_frame(
         channel: str,
         rows: list[tuple[object, ...]],
         *,
+        generation: int,
         rejects: list[_massive.Reject],
         drift: _massive.DriftReport,
     ) -> None:
         if channel == "Q":
             pause.wait(0.3)
-        deliver(channel, rows, rejects=rejects, drift=drift)
+        deliver(channel, rows, generation=generation, rejects=rejects, drift=drift)
 
     monkeypatch.setattr(connection, "_on_data", slow_quotes)
     quote = {"ev": "Q", "sym": "AAPL", "bx": 4, "bp": 1.0, "bs": 100, "ax": 7, "ap": 1.1}

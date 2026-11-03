@@ -1474,10 +1474,9 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     assert all(re.fullmatch(f"{_DOWN}; {_NO_ACK}", e) for e in errors)
 
     def data_for(symbol: str) -> None:
-        custom_session.send(trade(symbol))
-        custom_session.flush()
-        # The next check, at a data frame or the summary, sees the rows the flush published.
-        custom_session.on_loop(connection, connection._check_recovered)
+        # The flush that gives the stream its first rows of the new socket checks recovery
+        # at once, without waiting for the next data frame or the summary.
+        custom_session.publish(trade(symbol))
 
     data_for("AAPL")  # AAPL's data flows again; MSFT's does not
     assert _down(custom_session, connection) == {2}
@@ -1491,6 +1490,43 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
     assert _down_since(custom_session, connection) is None
     custom_session.session.release(result)
     custom_session.session.release(other)
+
+
+def test_rows_of_the_dropped_socket_flushed_late_never_recover_a_stream(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+) -> None:
+    # A stalled flush publishes rows from the dropped socket after the reconnect. They prove
+    # nothing about the new socket, which never acknowledges AAPL, so the stream stays down.
+    custom_session = make_ws_session(ack_timeout=0.05)
+    result = custom_session.query(TRADES, ["AAPL"]).blink()
+    custom_session.subscribed("T.AAPL")
+    custom_session.publish(trade("AAPL"))  # rows that could look current
+    connection = custom_session.connection()
+    custom_session.send(trade("AAPL"))  # received on the first socket, not flushed yet
+    fake_ws_server.silent = {"T.AAPL"}
+    fake_ws_server.close(1011)
+
+    def no_ack_after_reconnect() -> bool:
+        return bool(
+            custom_session.on_loop(
+                connection,
+                lambda: (
+                    connection._state is ConnectionState.CONNECTED
+                    and connection.subscriptions.counts()[3] == 1
+                ),
+            )
+        )
+
+    custom_session.wait(lambda s: s.opens == 2)
+    wait_for(no_ack_after_reconnect)
+    custom_session.flush()  # the late rows of the first socket
+    custom_session.on_loop(connection, connection._check_recovered)
+    assert _down(custom_session, connection) == {1}
+    custom_session.publish(trade("AAPL"))  # a row of the new socket
+    assert _down(custom_session, connection) == set()
+    custom_session.session.release(result)
 
 
 def test_a_topic_never_acknowledged_holds_down_only_its_stream(

@@ -737,6 +737,11 @@ class StreamSink:
         stream_id: The stream's id.
         plan: How the stream's dataset reads its channel.
         publisher: The stream's publisher.
+        rows_published: The rows published to it so far, held ones included.
+        rows_generation: The generation of the socket its newest rows arrived on
+            (`Flusher.rows`), 0 before its first row. Only the flush thread writes it; the
+            connection's loop reads it to tell rows of a reconnected socket from rows of the
+            dropped one that a slow flush published late.
     """
 
     __slots__ = (
@@ -752,6 +757,7 @@ class StreamSink:
         "failed",
         "plan",
         "publisher",
+        "rows_generation",
         "rows_published",
         "stream_id",
     )
@@ -789,6 +795,8 @@ class StreamSink:
         # The rows routed before the first result was built; None once `publish_held` ran.
         self._held: list[Table] | None = []
         self.rows_published = 0
+        # Written only by the flush thread (`Flusher._publish_batch`).
+        self.rows_generation = 0
         self.failed = False
 
     def core(self) -> SessionCore | None:
@@ -992,8 +1000,9 @@ class StreamSink:
             core.defer(fail)
 
 
-_Frame = tuple[int, list[tuple[object, ...]]]
-"""One frame's rows of one channel, with the instant it arrived (epoch nanoseconds)."""
+_Frame = tuple[int, int, list[tuple[object, ...]]]
+"""One frame's rows of one channel, with the instant it arrived (epoch nanoseconds) and the
+generation of the socket it arrived on."""
 
 
 class _Routes:
@@ -1116,12 +1125,16 @@ class _Batch:
         lost: The rows the client dropped from the channel's frames since the last flush,
             because a key could not be read, as the frames' drift merged (`dropped_rows`).
         lost_symbols: How many of those rows each canonical symbol had.
+        generation: The generation of the socket every row arrived on (`Flusher.rows`); a
+            flush whose frames span two sockets publishes one batch per socket. 0 for a batch
+            of no rows.
     """
 
     rows: list[tuple[object, ...]]
     arrived: list[int]
     lost: DriftReport
     lost_symbols: Mapping[str, int]
+    generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,6 +1153,10 @@ class _Drift:
     drift: DriftReport
     where: str
     dropped: Mapping[str, int]
+
+
+def _do_nothing() -> None:
+    """Do nothing: the default `on_new_generation` of a `Flusher`."""
 
 
 class Flusher:
@@ -1181,7 +1198,9 @@ class Flusher:
         "_final",
         "_flush_lock",
         "_interval",
+        "_new_generation",
         "_noted",
+        "_on_new_generation",
         "_runs",
         "_sessions",
         "_stale",
@@ -1199,6 +1218,7 @@ class Flusher:
         *,
         interval: float,
         sessions: FuturesSessionDates | None = None,
+        on_new_generation: Callable[[], object] = _do_nothing,
     ) -> None:
         """Create the flusher; nothing runs until `start()`.
 
@@ -1209,8 +1229,14 @@ class Flusher:
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
             sessions: For a futures connection, the schedule calendar that corrects its rows'
                 session dates; None otherwise.
+            on_new_generation: Called after a flush in which a stream got its first rows of a
+                newer socket generation (`StreamSink.rows_generation`), on the flush thread
+                with no lock held; it must not block. The connection posts its recovery check
+                to its loop with it, so a stream an outage held down recovers as soon as rows
+                of the new socket reach it. Does nothing by default.
         """
         self._exec_ctx = exec_ctx
+        self._on_new_generation = on_new_generation
         self._interval = interval
         self._sessions = sessions
         self.routes: Final = _Routes()
@@ -1233,6 +1259,8 @@ class Flusher:
         # Flush-lock state: the drift a flush found, merged per (streams, where), which the
         # flush reports once it has released the flush lock (`_report_found`).
         self._drift: dict[tuple[tuple[StreamSink, ...], str], DriftReport] = {}
+        # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
+        self._new_generation = False
         # Guarded by the backlog lock, a leaf lock.
         self._backlog_lock = threading.Lock()
         self._backlog = 0
@@ -1275,7 +1303,7 @@ class Flusher:
             self._thread.join(timeout)
         return not self._thread.is_alive()
 
-    def rows(self, channel: str, rows: list[tuple[object, ...]]) -> None:
+    def rows(self, channel: str, rows: list[tuple[object, ...]], *, generation: int) -> None:
         """Buffer one frame's rows of a channel, with the instant they arrived. Never blocks.
 
         The instant, `time.time_ns()` now, on the connection's loop thread as the frame is
@@ -1288,6 +1316,8 @@ class Flusher:
             channel: The channel.
             rows: The decoded rows, each a tuple of the source's fields; the flusher keeps the
                 list.
+            generation: The generation of the socket the frame arrived on, which each stream
+                the rows reach records (`StreamSink.rows_generation`).
         """
         buffer = self.routes.buffer(channel)
         if buffer is None:
@@ -1297,7 +1327,7 @@ class Flusher:
             backlog = self._backlog
             warn = backlog > BACKLOG_WARNING_ROWS and not self._backlog_warned
             self._backlog_warned |= warn
-        buffer.put((time.time_ns(), rows))
+        buffer.put((time.time_ns(), generation, rows))
         if warn:
             logger.warning(
                 "%s: %d rows are waiting to be published, more than %d; the flushes are "
@@ -1386,13 +1416,15 @@ class Flusher:
         then each session with a stream that published once (`update_streams`). The drift the
         flush found, its frames' and its rows' timestamps', is merged per channel and dataset
         (`_found`) and reported once the flush lock is released (`_report_found`), so the
-        session's `DriftRegistry` logs once per flush, not once per frame.
+        session's `DriftRegistry` logs once per flush, not once per frame. A channel's frames
+        from two sockets publish as one batch per socket (`_batches`), and a flush that gave a
+        stream its first rows of a newer socket calls `on_new_generation` last.
         """
         with self._flush_lock, entered(self._exec_ctx):
             controls = _drain(self._control)
             drained = {channel: _drain(buffer) for channel, buffer in self.routes.buffers()}
-            # Each frame is `(arrived, rows)`: the backlog counts the rows, not the pairs.
-            self._drained(sum(len(rows) for frames in drained.values() for _, rows in frames))
+            # Each frame is `(arrived, generation, rows)`: the backlog counts the rows.
+            self._drained(sum(len(rows) for frames in drained.values() for *_, rows in frames))
             # Routes after the rows: a stream routed meanwhile gets the rows that reached it.
             routes = self.routes.current()
             lost: dict[str, DriftReport] = {}  # the rows the client dropped, by channel
@@ -1408,22 +1440,18 @@ class Flusher:
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
                 if sinks and (frames or channel in lost):
-                    rows = [row for _, frame in frames for row in frame]
-                    arrived = [at for at, frame in frames for _ in frame]
-                    batch = _Batch(
-                        rows,
-                        arrived,
-                        lost.get(channel, DriftReport()),
-                        lost_symbols.get(channel, Counter()),
-                    )
-                    self._publish(batch, sinks, updates=updates)
+                    for batch in _batches(frames, lost, lost_symbols, channel=channel):
+                        self._publish(batch, sinks, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
                     self._found(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
             self._forget([sink for sinks in routes.values() for sink in sinks])
             found, self._drift = self._drift, {}
+            new_generation, self._new_generation = self._new_generation, False
         self._report_found(found)
+        if new_generation:
+            self._on_new_generation()
 
     def _found(self, sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str) -> None:
         """Add drift a flush found to what it reports once the flush lock is released.
@@ -1579,7 +1607,9 @@ class Flusher:
             return
         self._counted_symbols(plan, converted, batch=batch, readers=readers)
         if converted.batch.num_rows:
-            self._publish_batch(plan, converted, readers=readers, updates=updates)
+            self._publish_batch(
+                plan, converted, readers=readers, updates=updates, generation=batch.generation
+            )
         self._write_notes(readers, updates)
 
     def _publish_batch(
@@ -1589,14 +1619,20 @@ class Flusher:
         *,
         readers: list[StreamSink],
         updates: dict[StreamSink, StreamUpdate],
+        generation: int,
     ) -> None:
         """Add a converted batch to the dataset's streams, and record their row totals.
+
+        A stream that receives rows records the socket generation they arrived on
+        (`StreamSink.rows_generation`); the first rows of a newer generation make the flush
+        call `on_new_generation` once it ends.
 
         Args:
             plan: The dataset's plan for the channel.
             converted: The flush's conversion, with rows.
             readers: The dataset's streams on the channel.
             updates: Receives each stream's new published-row total.
+            generation: The socket generation of the batch's rows.
         """
         splits = (
             converted.batch.num_rows >= SPLIT_MIN_ROWS
@@ -1609,6 +1645,9 @@ class Flusher:
             if sink.publish(shared):
                 found = updates.get(sink, StreamUpdate())
                 updates[sink] = replace(found, rows_published=sink.rows_published)
+                if generation > sink.rows_generation:
+                    sink.rows_generation = generation
+                    self._new_generation = True
 
     def _write_notes(
         self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
@@ -1899,6 +1938,53 @@ def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) ->
     else:
         update = StreamUpdate(clear_skipped=True)
     core.update_streams({sink.stream_id: update})
+
+
+def _batches(
+    frames: list[_Frame],
+    lost: Mapping[str, DriftReport],
+    lost_symbols: Mapping[str, Counter[str]],
+    *,
+    channel: str,
+) -> list[_Batch]:
+    """Return a channel's batches of one flush: one per socket generation of its frames.
+
+    Frames arrive in order, so each generation's frames are consecutive. Almost every flush
+    holds one generation; one that spans a reconnect gets a batch per socket, so each stream
+    records the generation of the rows it actually received. The rows the client dropped go
+    with the last batch, and a flush of dropped rows only gets one batch of no rows.
+
+    Args:
+        frames: The channel's frames this flush drained, in arrival order.
+        lost: The rows the client dropped, by channel.
+        lost_symbols: How many of them each canonical symbol had, by channel.
+        channel: The channel.
+
+    Returns:
+        The batches, in arrival order.
+    """
+    runs: list[list[_Frame]] = []
+    for frame in frames:
+        if runs and runs[-1][0][1] == frame[1]:
+            runs[-1].append(frame)
+        else:
+            runs.append([frame])
+    batches = [
+        _Batch(
+            [row for *_, rows in run for row in rows],
+            [at for at, _, rows in run for _ in rows],
+            DriftReport(),
+            Counter(),
+            run[0][1],
+        )
+        for run in runs
+    ] or [_Batch([], [], DriftReport(), Counter(), 0)]
+    batches[-1] = replace(
+        batches[-1],
+        lost=lost.get(channel, DriftReport()),
+        lost_symbols=lost_symbols.get(channel, Counter()),
+    )
+    return batches
 
 
 def _drain(source: queue.SimpleQueue[_T]) -> list[_T]:

@@ -533,7 +533,7 @@ def test_a_flush_splits_its_batch_only_for_enough_streams_and_rows(
         return publish(sink, batch)
 
     monkeypatch.setattr(StreamSink, "publish", recorded)
-    flusher.rows("T", frame([trade(symbol) for symbol in symbols]))
+    flusher.rows("T", frame([trade(symbol) for symbol in symbols]), generation=1)
     flusher.flush()
     assert {batch.splits for batch in made} == {splits}
 
@@ -896,15 +896,16 @@ def test_every_row_takes_the_arrival_of_its_frame(
     shown = blink_to_append_only(blink)
     flusher.routes.add("T", sink)
     before = time.time_ns()
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     buffer = flusher.routes.buffer("T")
     assert buffer is not None
-    (stamped, rows) = buffer.get_nowait()  # the frame, with the instant it was handed over
+    (stamped, generation, rows) = buffer.get_nowait()  # the frame, its arrival and socket
     assert before <= stamped <= time.time_ns()
     assert rows == frame([trade("AAPL")])
+    assert generation == 1
     # Two frames of one flush: each row takes its own frame's arrival.
-    buffer.put((111, frame([trade("AAPL"), trade("MSFT")])))
-    buffer.put((222, frame([trade("IBM")])))
+    buffer.put((111, 1, frame([trade("AAPL"), trade("MSFT")])))
+    buffer.put((222, 1, frame([trade("IBM")])))
     flusher.flush()
     wait_for(lambda: shown.size == 3)
     inserted = to_arrow_column(shown, "TimestampInsert")
@@ -940,10 +941,10 @@ def test_a_session_miss_leaves_the_streams_error_alone_and_publishes_its_rows(
         flusher.routes.add("T", opened.sink)
         sinks.append(opened.sink)
     both = [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
-    flusher.rows("T", frame(both, "futures/T"))
+    flusher.rows("T", frame(both, "futures/T"), generation=1)
     flusher.flush()
     calendar.missing.clear()
-    flusher.rows("T", frame(both, "futures/T"))
+    flusher.rows("T", frame(both, "futures/T"), generation=1)
     flusher.flush()
     flusher.stop()
     # A miss only leaves its rows without a date: the stream is healthy, so its `Error` is
@@ -980,12 +981,41 @@ def test_a_flush_publishes_each_channel_once_to_every_stream(
     flusher.routes.add("T", aapl)
     flusher.routes.add("T", every)
     flusher.routes.add("T", idle)
-    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]))
-    flusher.rows("Q", frame([trade("AAPL")]))  # no stream ever read Q: dropped
+    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]), generation=1)
+    flusher.rows("Q", frame([trade("AAPL")]), generation=1)  # no stream ever read Q: dropped
     flusher.flush()
     rows_when(shown[0], lambda rows: len(rows) == 1)
     rows_when(shown[1], lambda rows: len(rows) == 2)
     assert (aapl.rows_published, every.rows_published, idle.rows_published) == (1, 2, 0)
+
+
+def test_each_stream_records_the_socket_its_newest_rows_came_from(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # One flush spans a reconnect: MSFT's only row came on the dropped socket, AAPL's newest
+    # on the new one. Only a stream's first rows of a newer socket call the connection back.
+    calls: list[None] = []
+    flusher = Flusher(
+        massive_session._core.exec_ctx,
+        "test-flush",
+        interval=3600.0,
+        on_new_generation=lambda: calls.append(None),
+    )
+    core = massive_session._core
+    aapl, _ = make_sink(core, ("AAPL",))
+    msft, _ = make_sink(core, ("MSFT",))
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]), generation=1)
+    flusher.rows("T", frame([trade("AAPL")]), generation=2)
+    flusher.flush()
+    assert (aapl.rows_generation, msft.rows_generation) == (2, 1)
+    assert (aapl.rows_published, msft.rows_published) == (2, 1)
+    assert len(calls) == 1
+    flusher.rows("T", frame([trade("AAPL")]), generation=2)
+    flusher.flush()
+    assert len(calls) == 1  # no stream got a newer socket's rows
+    flusher.stop()
 
 
 def test_a_stream_routed_while_rows_drain_gets_them(
@@ -1001,7 +1031,7 @@ def test_a_stream_routed_while_rows_drain_gets_them(
     late, late_blink = make_sink(core, ALL)
     shown = blink_to_append_only(late_blink)
     flusher.routes.add("T", first)
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     routes_type = type(flusher.routes)
     buffers = routes_type.buffers
 
@@ -1023,7 +1053,7 @@ def test_a_failure_fails_each_stream_once(
     flusher.routes.add("T", sink)
     flusher.fail([1], MassiveError("refused"))
     flusher.fail([1], MassiveError("again"))
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     flusher.flush()
     assert sink.failed
     assert sink.rows_published == 0  # a failed stream gets no rows
@@ -1037,7 +1067,7 @@ def test_a_batch_whose_every_row_was_dropped_publishes_nothing_and_fails_nothing
     msft, _ = make_sink(core, ("MSFT",))
     flusher.routes.add("T", aapl)
     flusher.routes.add("T", msft)
-    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)]))
+    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)]), generation=1)
     flusher.flush()
     assert not aapl.failed
     assert not msft.failed
@@ -1057,12 +1087,12 @@ def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
     flusher.routes.add("T", every)
     rows = [trade("AAPL"), trade("MSFT", SipTimestamp=5), trade("IBM", TrfTimestamp=2**62)]
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.diagnostics"):
-        flusher.rows("T", frame(rows))
+        flusher.rows("T", frame(rows), generation=1)
         # The client dropped a row it could not route and counted it in the frame's drift.
         lost = DriftReport(dropped_rows=1, dropped_reason="a T row from h/stocks: no Ticker")
         flusher.drift("T", lost, where="wss://h/stocks channel T")
         flusher.flush()
-        flusher.rows("T", frame([trade("NVDA")]))
+        flusher.rows("T", frame([trade("NVDA")]), generation=1)
         flusher.flush()
     assert not every.failed
     assert every.rows_published == 3
@@ -1097,11 +1127,11 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     flusher.routes.add("T", every)
     flusher.routes.add("T", aapl)
     half = stream.DROPPED_RUN_LIMIT // 2
-    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)] * half))
+    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)] * half), generation=1)
     flusher.flush()
-    flusher.rows("T", frame([trade("AAPL")]))  # a published row starts the run again
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)  # a published row starts the run again
     flusher.flush()
-    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)] * half))
+    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)] * half), generation=1)
     flusher.flush()
     assert (every.failed, aapl.failed) == (False, False)
     lost = DriftReport(dropped_rows=half, dropped_reason="a T row from h/stocks: no Ticker")
@@ -1132,16 +1162,16 @@ def test_a_symbol_whose_every_row_is_dropped_fails_its_streams_while_others_publ
     for sink in (every, illq, aapl):
         flusher.routes.add("T", sink)
     half = stream.DROPPED_RUN_LIMIT // 2
-    flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * half]))
+    flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * half]), generation=1)
     flusher.flush()
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     # The client dropped ILLQ rows too, counted by their canonical symbol.
     lost = DriftReport(dropped_rows=half - 1, dropped_reason="a T row for ILLQ: no Price")
     flusher.drift("T", lost, where="wss://h/stocks channel T", dropped={"ILLQ": half - 1})
     flusher.flush()
     assert (every.failed, illq.failed, aapl.failed) == (False, False, False)
     with caplog.at_level(logging.ERROR):
-        flusher.rows("T", frame([trade("AAPL"), trade("ILLQ", SipTimestamp=5)]))
+        flusher.rows("T", frame([trade("AAPL"), trade("ILLQ", SipTimestamp=5)]), generation=1)
         flusher.flush()
     assert (every.failed, illq.failed, aapl.failed) == (False, True, False)
     error = next(r.getMessage() for r in caplog.records if "rows of ILLQ" in r.getMessage())
@@ -1163,7 +1193,9 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
     reason = "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
     limit = stream.DROPPED_RUN_LIMIT
     for symbol in ("ILLQ", "AAA", "BBB", "CCC"):
-        flusher.rows("T", frame([trade("AAPL"), *[trade(symbol, SipTimestamp=5)] * limit]))
+        flusher.rows(
+            "T", frame([trade("AAPL"), *[trade(symbol, SipTimestamp=5)] * limit]), generation=1
+        )
         flusher.flush()
     assert not every.failed
 
@@ -1182,17 +1214,17 @@ def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
         ),
     ]
     written.clear()
-    flusher.rows("T", frame([trade(symbol) for symbol in ("ILLQ", "AAA", "BBB")]))
+    flusher.rows("T", frame([trade(symbol) for symbol in ("ILLQ", "AAA", "BBB")]), generation=1)
     flusher.flush()
     assert [stale(u) for u in written] == [
         f"rows for CCC are being dropped ({reason}); its last values may be stale"
     ]
     written.clear()
-    flusher.rows("T", frame([trade("CCC")]))
+    flusher.rows("T", frame([trade("CCC")]), generation=1)
     flusher.flush()
     assert [u.notes for u in written] == [{NotePart.STALE_SYMBOLS: None}]
     written.clear()
-    flusher.rows("T", frame([trade("CCC")]))
+    flusher.rows("T", frame([trade("CCC")]), generation=1)
     flusher.flush()
     assert [u.notes for u in written] == [None]  # nothing left to clear
     flusher.routes.remove(7)
@@ -1212,9 +1244,11 @@ def test_a_stale_symbol_warns_once_when_it_starves_and_logs_its_return_at_info(
     with caplog.at_level(logging.INFO, logger=stream.__name__):
         # Two runs of ILLQ: the second finds it stale already, so it warns once.
         for _ in range(2):
-            flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]))
+            flusher.rows(
+                "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), generation=1
+            )
             flusher.flush()
-        flusher.rows("T", frame([trade("ILLQ")]))
+        flusher.rows("T", frame([trade("ILLQ")]), generation=1)
         flusher.flush()
     mine = [r for r in caplog.records if r.name == stream.__name__]
     assert [(r.levelno, r.getMessage()) for r in mine] == [
@@ -1245,11 +1279,13 @@ def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
     every, _ = make_sink(core, ALL, plan)
     flusher.routes.add("T", every)
     limit = stream.DROPPED_RUN_LIMIT
-    flusher.rows("T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]))
+    flusher.rows(
+        "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), generation=1
+    )
     flusher.flush()
     with caplog.at_level(logging.INFO, logger=stream.__name__):
         # A spelling the library cannot read fails the stream before ILLQ's row could publish.
-        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]))
+        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]), generation=1)
         flusher.flush()
     assert every.failed
     assert "published again" not in caplog.text
@@ -1265,7 +1301,9 @@ def test_a_dataset_whose_every_row_is_dropped_fails_its_streams_without_a_stale_
     with caplog.at_level(logging.WARNING, logger=stream.__name__):
         # The symbol's run and the dataset's reach the limit in one flush: the stream fails,
         # so no WARNING says it keeps running.
-        flusher.rows("T", frame([trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT))
+        flusher.rows(
+            "T", frame([trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT), generation=1
+        )
         flusher.flush()
     assert every.failed
     assert "may be stale" not in caplog.text
@@ -1303,10 +1341,10 @@ def test_a_published_row_of_a_symbol_ends_its_run(
     core = massive_session._core
     illq, _ = make_sink(core, ("ILLQ",))
     flusher.routes.add("T", illq)
-    flusher.rows("T", frame([trade("ILLQ", SipTimestamp=5)] * 3))
+    flusher.rows("T", frame([trade("ILLQ", SipTimestamp=5)] * 3), generation=1)
     flusher.flush()
     assert flusher._symbol_runs[illq.plan]["ILLQ"][0] == 3
-    flusher.rows("T", frame([trade("ILLQ"), trade("ILLQ", SipTimestamp=5)]))
+    flusher.rows("T", frame([trade("ILLQ"), trade("ILLQ", SipTimestamp=5)]), generation=1)
     flusher.flush()
     assert flusher._symbol_runs[illq.plan] == {}
     flusher.routes.remove(1)
@@ -1320,7 +1358,9 @@ def test_one_flush_of_dropped_rows_at_the_limit_fails_the_streams_by_the_run_rul
     every, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", every)
     with caplog.at_level(logging.ERROR):
-        flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT))
+        flusher.rows(
+            "T", frame([trade("AAPL", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT), generation=1
+        )
         flusher.flush()
     assert every.failed
     assert "could not publish" not in caplog.text
@@ -1332,7 +1372,7 @@ def test_a_flush_forgets_the_run_of_a_dataset_no_longer_routed(
 ) -> None:
     sink, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", sink)
-    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)]))
+    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5)]), generation=1)
     flusher.flush()
     assert flusher._runs[sink.plan][0] == 1
     flusher.routes.remove(1)
@@ -1378,7 +1418,7 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
     monkeypatch.setattr(aapl, "publisher", types.SimpleNamespace(publish_failure=refused))
     flusher.routes.add("T", aapl)
     flusher.routes.add("T", msft)
-    flusher.rows("T", frame([trade("!!"), trade("MSFT")]))
+    flusher.rows("T", frame([trade("!!"), trade("MSFT")]), generation=1)
     flusher.flush()
     assert aapl.failed
     assert msft.failed
@@ -1414,8 +1454,8 @@ def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
     shown = blink_to_append_only(healthy_blink)
     flusher.routes.add("T", broken)
     flusher.routes.add("Q", healthy)  # the same plan, routed as another channel's reader
-    flusher.rows("T", frame([trade("AAPL", Price="not a number")]))
-    flusher.rows("Q", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL", Price="not a number")]), generation=1)
+    flusher.rows("Q", frame([trade("AAPL")]), generation=1)
     flusher.flush()
     assert broken.failed
     assert not healthy.failed
@@ -1447,7 +1487,7 @@ def test_a_flush_forgets_the_symbols_of_streams_no_longer_routed(
 ) -> None:
     sink, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", sink)
-    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]))
+    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]), generation=1)
     flusher.flush()
     assert flusher._symbols == {sink.plan: {"AAPL": "AAPL", "MSFT": "MSFT"}}
     flusher.routes.remove(1)
@@ -1468,18 +1508,18 @@ def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
     sink, blink = make_sink(massive_session._core, ALL)
     shown = blink_to_append_only(blink)
     flusher.routes.add("T", sink)
-    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]))
+    flusher.rows("T", frame([trade("AAPL"), trade("MSFT")]), generation=1)
     flusher.flush()
     assert flusher._symbols[sink.plan] == {"AAPL": "AAPL", "MSFT": "MSFT"}
     with caplog.at_level(logging.DEBUG, logger=stream.__name__):
-        flusher.rows("T", frame([trade("IBM")]))
+        flusher.rows("T", frame([trade("IBM")]), generation=1)
         flusher.flush()
     assert flusher._symbols[sink.plan] == {}
     assert (
         "test.trades: the T symbol cache holds 3 spellings, past its limit of 2; starts over"
         in caplog.text
     )
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     flusher.flush()
     assert flusher._symbols[sink.plan] == {"AAPL": "AAPL"}
     rows = rows_when(shown, lambda rows: len(rows) == 4)
@@ -1518,7 +1558,7 @@ def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
     flusher.routes.add("C", opened.sink)
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            flusher.rows("C", frame(FOREX_ROWS, "forex/C"))
+            flusher.rows("C", frame(FOREX_ROWS, "forex/C"), generation=1)
             flusher.flush()
             assert flusher._symbols[plan] == {}  # two spellings pass the limit of one
     assert not opened.sink.failed
@@ -1539,7 +1579,7 @@ def test_a_sink_whose_session_is_gone_reports_nothing(
     sink, _ = make_sink(massive_session._core, ALL)
     monkeypatch.setattr(sink, "_core", lambda: None)
     flusher.routes.add("T", sink)
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     flusher.drift(
         "T", DriftReport(extra=frozenset({"zz"})), where="wss://socket.test/stocks channel T"
     )
@@ -1561,7 +1601,7 @@ def test_one_flusher_reports_each_stream_to_its_own_session(
         theirs, _ = make_sink(other._core, ALL)
         flusher.routes.add("T", mine)
         flusher.routes.add("T", theirs)
-        flusher.rows("T", frame([trade("AAPL")]))
+        flusher.rows("T", frame([trade("AAPL")]), generation=1)
         flusher.flush()
         assert (mine.rows_published, theirs.rows_published) == (1, 1)
         assert (mine.core(), theirs.core()) == (massive_session._core, other._core)
@@ -1655,7 +1695,7 @@ def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     flusher.routes.add("Q", cast("StreamSink", recording))
     flusher.fail([2], MassiveError("refused"))
     flusher.fail([3], MassiveError("also refused"))
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     flusher.flush()
     assert [str(error) for error in recording.errors] == ["also refused"]
     rows_when(shown, lambda rows: len(rows) == 1)
@@ -1682,7 +1722,7 @@ def test_a_drift_report_that_raises_costs_the_flush_nothing(
 
     monkeypatch.setattr(Flusher, "_report_drift", staticmethod(broken))
     flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     flusher.flush()
     assert [update[1].rows_published for update in reported] == [1]
     assert "test-flush: could not report the drift of wss://h/stocks channel T" in (caplog.text)
@@ -1909,7 +1949,7 @@ def test_streamed_rows_of_one_day_share_one_stored_date(
     shown = blink_to_append_only(opened.handle.blink)
     opened.sink.publish_held()
     flusher.routes.add("T", opened.sink)
-    flusher.rows("T", frame([trade("AAPL"), trade("MSFT"), trade("IBM")]))
+    flusher.rows("T", frame([trade("AAPL"), trade("MSFT"), trade("IBM")]), generation=1)
     flusher.flush()
     flusher.stop()
     wait_for(lambda: shown.size == 3)
@@ -1931,16 +1971,18 @@ def test_the_backlog_counts_buffered_rows_and_warns_when_it_grows(
     def warnings() -> int:
         return sum("rows are waiting to be published" in r.getMessage() for r in caplog.records)
 
-    flusher.rows("Q", frame([trade("AAPL")]))  # no stream ever read Q: dropped, never buffered
-    flusher.rows("T", frame([trade("AAPL")] * 4))
+    flusher.rows(
+        "Q", frame([trade("AAPL")]), generation=1
+    )  # no stream ever read Q: dropped, never buffered
+    flusher.rows("T", frame([trade("AAPL")] * 4), generation=1)
     assert (flusher.backlog, warnings()) == (4, 0)  # at the level, not above it
-    flusher.rows("T", frame([trade("AAPL")]))
+    flusher.rows("T", frame([trade("AAPL")]), generation=1)
     # Each buffered frame holds its arrival time with its rows: the backlog counts the rows.
-    flusher.rows("T", frame([trade("AAPL")] * 3))
+    flusher.rows("T", frame([trade("AAPL")] * 3), generation=1)
     assert (flusher.backlog, warnings()) == (8, 1)  # logged once while it stays above
     flusher.flush()
     assert flusher.backlog == 0  # nothing was dropped: the flush took every row
-    flusher.rows("T", frame([trade("AAPL")] * 5))
+    flusher.rows("T", frame([trade("AAPL")] * 5), generation=1)
     assert warnings() == 2  # below half the level in between, so it is logged again
 
 
@@ -1950,7 +1992,7 @@ def test_the_backlog_warning_waits_until_the_backlog_falls_below_half(
     monkeypatch.setattr(stream, "BACKLOG_WARNING_ROWS", 4)
     sink, _ = make_sink(massive_session._core, ("AAPL",))
     flusher.routes.add("T", sink)
-    flusher.rows("T", frame([trade("AAPL")] * 5))
+    flusher.rows("T", frame([trade("AAPL")] * 5), generation=1)
     assert flusher._backlog_warned
     flusher._drained(3)  # as a flush that took three of the five would
     assert flusher._backlog_warned  # two rows are not below half of four
