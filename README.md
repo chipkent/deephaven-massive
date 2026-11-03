@@ -350,8 +350,11 @@ column of `m.streams()`, until room frees up.
 Pass a live watchlist to `history()` and the table follows it: each symbol you add is read over
 the same range, and each one you delete leaves (see [`symbols`](#symbols)). Two other ways fit
 other needs. To read the watchlist's symbols once, as they stand now, pass `snapshot()` of it.
-To follow it with no request per symbol, read every symbol once and filter by the watchlist:
-adding or deleting a symbol then costs nothing. That works where the dataset serves `dm.ALL`
+A followed `history()` served from flat files (see
+[where history comes from](#history-sources)) downloads every file of the range again
+for each symbol you add, since each file holds the whole market. To follow it with no request
+or download per symbol, read every symbol once and filter by the watchlist: adding or deleting
+a symbol then costs nothing. That works where the dataset serves `dm.ALL`
 and the whole market fits in memory: daily bars, reference lists, or one day of minute bars,
 but not a year of minute bars or any range of trades and quotes. A data index on `Symbol` keeps
 each change of the watchlist fast:
@@ -1001,11 +1004,11 @@ contracts = m.futures.contracts(product_code="ES", filters={"active": True}).fet
 es = m.futures.trades(contracts).last_by()
 ```
 
-**Stream a watchlist as one table.** Put many symbols in one stream rather than opening one
-stream per symbol. Each stream costs the server about 0.2 ms at every flush that brings it rows,
-whatever its size, and flushes come 20 times a second: 300 single-symbol streams of busy symbols
-need about 60 ms a flush, more than the 50 ms between flushes, so every table falls behind. One
-stream of the same 300 symbols pays that cost once. To see one symbol, filter the shared table:
+**Stream a watchlist as one table.** Put many symbols in one stream, through one watchlist or
+one list, rather than opening one stream per symbol. Each stream costs the server about 0.3 ms
+at every flush that brings it rows, whatever its size, and flushes come 20 times a second: 300
+single-symbol streams of busy symbols need about 90 ms a flush, more than the 50 ms between
+flushes, so every table falls behind. One stream of the same 300 symbols pays that cost once. To see one symbol, filter the shared table:
 
 ```python
 board = m.stocks.quotes(watchlist).last_by()
@@ -1078,7 +1081,9 @@ live_board = merge([seed, trades]).last_by("Symbol")
 The stream's rows come after the snapshot's in the merge, so `last_by("Symbol")` shows a
 symbol's latest trade once it has one, and its snapshot until then. A watchlist row that is not
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
-`m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
+`m.streams()`; fix the row and it subscribes. A static table read once, such as one from
+`new_table`, logs its bad rows with one WARNING each and skips them, but its stream's `Error`
+does not list them. A watchlist whose every row is bad is refused. To
 fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`.
 A crypto pair that Massive's list of crypto tickers does not hold, in the watchlist at the call
 or added later, is skipped and listed the same way, and the stream keeps its other pairs; a
