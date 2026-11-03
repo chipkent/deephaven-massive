@@ -126,7 +126,7 @@ Crypto trades around the clock, so it is the easiest market to watch at night or
 
 ## Terms
 
-Words this guide uses that neither Deephaven nor Massive explains in one place:
+Words the rest of this guide uses without defining them again:
 
 - **Console**: the **Console** panel of the Deephaven web IDE in your browser, where you type
   Python that runs inside the server. It is not a terminal.
@@ -711,8 +711,8 @@ kept = trades.snapshot()
 ```
 
 A script that only reads static tables can let a `with` block close the session:
-`with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own,
-with an INFO line in the log, with the debug log on.
+`with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own;
+with the debug log on, an INFO line in the log says so.
 
 **A long feed outage fails live tables.** When the connection to Massive drops, the library
 reconnects on its own. Meanwhile each live table keeps its last rows, and `m.streams()` notes
