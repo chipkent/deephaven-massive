@@ -147,20 +147,21 @@ definition the first time a page uses it.
 | console | terminal, REPL | The Console panel of the Deephaven IDE, where you run Python inside the server |
 | server | worker, JVM (in user text) | The Deephaven process you start; "worker" is a Deephaven Enterprise term |
 | static table | snapshot table | A table that never changes after it is made |
-| live table, ticking table | refreshing table (except quoting Deephaven), stream | A table that changes as new data arrives |
+| live table, ticking table | refreshing table (except when quoting Deephaven) | A table that changes as new data arrives |
 | update cycle | flush, tick | Deephaven applies a batch of changes to live tables during a cycle, about once a second by default; between cycles every table is consistent |
 | blink table | — | A live table that holds only the rows added in the current update cycle |
 | append-only table | — | A live table that only adds rows, keeping every one |
 | ring table | — | A live table that keeps the last N rows |
 | `last_by` | a table type, keyed table | An aggregation: one row per key, the latest value for each |
-| `snapshot()` | static copy (alone) | A static copy of a live table as it stands now |
+| `snapshot()` | — | A static copy of a live table as it stands now |
 | Massive | Polygon (except "formerly Polygon.io") | The market-data vendor |
-| plan | tier, subscription level | What a Massive account pays for, by Massive's names: Basic, Starter, Developer, Advanced, Business |
+| plan | tier | What a Massive account pays for, by Massive's names, such as Stocks Basic or Options Starter |
 | API key | token, PSK | The key Massive gives you; the PSK is Deephaven's login password, a different thing |
 | flat files, S3 keys | bulk files, S3 credentials | Massive's daily bulk files and the separate keys that read them |
 | REST, WebSocket | transports | Massive's request API and its streaming API |
-| symbol | ticker (except quoting Massive) | The argument name; Massive's exact ticker spelling |
-| watchlist | symbol table, followed table | A table of symbols that a live call follows as you edit it |
+| symbol | — | The library's word for a Massive ticker, spelled exactly as Massive spells it; say "ticker" when you mean Massive's own field |
+| symbol table | — | A Deephaven table with a column of symbols, passed as `symbols` |
+| watchlist | followed table | A live symbol table: a call given one reads or streams the symbols it holds, and keeps up as you add or delete rows |
 
 ## Accuracy
 
