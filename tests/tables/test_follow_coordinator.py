@@ -348,15 +348,30 @@ def test_a_retry_that_succeeds_clears_the_error(
 
 
 def test_a_retry_wakes_the_coordinator_by_itself(
+    *,
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
 ) -> None:
-    # On the real clock a due retry needs no event: the coordinator's wait ends at it.
+    # A due retry needs no event: the coordinator's wait ends at it. The retry falls due only
+    # once the coordinator waits for it, so no batch of events can find it due first.
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(500, "boom"), SymbolRows(rows_of(massive_session, "AAPL", 1))]
     monkeypatch.setattr(follow_coordinator, "RETRY_DELAYS", (0.05, 0.05, 0.05))
+    waiting = threading.Event()
+    next_due = follow_coordinator.FollowCoordinator._next_due
+
+    def next_due_noted(self: follow_coordinator.FollowCoordinator) -> float | None:
+        due = next_due(self)
+        if due is not None:  # the batch that set the retry is done; the timed wait starts
+            waiting.set()
+        return due
+
+    monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_next_due", next_due_noted)
     result = follow(massive_session, watchlist("AAPL"), script)
+    assert waiting.wait(TIMEOUT)
+    clock.advance(1)  # the wait, 0.05 s at most on the real clock, ends with the retry due
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
     massive_session.release(result)
 
