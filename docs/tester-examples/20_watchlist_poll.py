@@ -9,7 +9,7 @@ m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscript
 reads = m.symbol_reads()
 streams = m.streams()
 
-# Three Stocks requests a minute, within the free plan's five.
+# Three Stocks requests a minute, within Basic's five.
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
