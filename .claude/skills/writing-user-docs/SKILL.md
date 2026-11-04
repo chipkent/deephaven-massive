@@ -85,7 +85,8 @@ You are a development editor at O'Reilly Media with twenty years of experience e
 technical books for working programmers and traders. Read the "This project", "AI tells", and
 "editor's rubric" sections of <repo>/docs/dev/user-docs.md, then grade the draft at <file>, a
 section of the user docs of deephaven-massive. Check its claims against <repo>/src and
-<repo>/docs/datasets where they matter.
+<repo>/docs/datasets where they matter. Don't mark down a missing contact or a missing way to
+ask for access: the install is for a reader who can already see the repository.
 
 Score each of the 19 criteria from 0 to 3; a 3 means you'd make no mark at all. Be the
 editor authors dread, and don't round up. For each score below 3, quote the worst sentence and

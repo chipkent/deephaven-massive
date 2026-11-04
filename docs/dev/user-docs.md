@@ -193,8 +193,12 @@ pip install deephaven-server "deephaven-massive @ git+https://github.com/chipken
   version string shown in the docs is marked as an example.
 - The prerequisites are the Python version in `pyproject.toml`; the Java version on Deephaven's
   own install page, with `JAVA_HOME` set (Deephaven's server reads it first); a Massive API key
-  in `MASSIVE_API_KEY`; and, while the repository is private, git, the GitHub CLI, and access
-  from Chip Kent.
+  in `MASSIVE_API_KEY`; and, while the repository is private, git and the GitHub CLI, signed
+  in with `gh auth login` and set up for git with `gh auth setup-git`, so the install command
+  works.
+- The install gives functional instructions for a reader who can already see the repository.
+  It has no step for asking for access and no contact: someone who can't see a private
+  repository won't find its README.
 - `deephaven server` opens the Deephaven IDE in the browser, already signed in, and prints a
   line that starts `Deephaven is running at`.
 - The settings a new user needs, in Configuration, are `rest_basic_subscriptions` and
@@ -332,7 +336,7 @@ and "just".
 
 | Before | After |
 |---|---|
-| Outside testers get access and a version from the owner, and follow the tester guide. | If you're testing the library, ask Chip Kent for access. The tester guide then walks you through every step. |
+| Outside testers follow the tester guide, which walks through every step. | If you're testing the library, the tester guide walks you through every step. |
 | The library returns one row per trade to the user. | You get one row per trade. |
 
 ### Put the point first [3]
@@ -674,6 +678,8 @@ the quickstarts of Django, Stripe, and Prisma:
 - Give numbered steps with verb-first headings, one action each. Introduce each command with a
   sentence, and after it say what you should see.
 - Show one path. An alternative gets a short labeled block ("If you use uv, ...") or a link.
+- List only the prerequisites that make the commands work. Leave out how to request access
+  and whom to contact: the install is for a reader who can already see the repository.
 - Install with `pip` first, and give the `uv` commands as that alternative, written out in
   full. Many users don't have `uv`.
 - Never hard-code a release version; follow [the install decision](#install-decision).
@@ -704,8 +710,8 @@ The shape, with placeholders for this project's facts:
 |---|---|---|---|
 | <a prerequisite and its minimum version> | <why the reader needs it> | <a command that checks it> | <where to get it> |
 
-<Any one-time access setup becomes step 1, so no second list of numbered items sits before the
-steps.>
+<Any one-time setup the commands need, such as signing in to a tool, becomes step 1, so no
+second list of numbered items sits before the steps.>
 
 ### 1. <Verb-first heading for one action>
 
