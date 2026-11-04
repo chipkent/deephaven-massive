@@ -980,29 +980,31 @@ class Query(QueryBase):
 
         The requests run on the calling thread, or, for an endpoint that takes one symbol per
         request, on up to `max_concurrency` threads. A `limit` the query was built with caps the
-        rows (docs/guide/arguments.md#sort-order-limit). A static symbol table is read once, now; a
-        crypto pair in it that Massive does not list follows `MassiveConfig.unlisted_symbols`. A
-        refreshing one is
+        rows
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit).
+        A static symbol table is read once, now; a crypto pair in it that Massive does not list
+        follows `MassiveConfig.unlisted_symbols`. A refreshing one is
         followed: the result is a refreshing table that holds, for each symbol now in the table, the
         rows of its latest read, each Massive's answer as of that read; a symbol removed from the
         table leaves the result in the same update, and one that returns is read again. A failure of
         one symbol leaves the others, and `m.symbol_reads()` shows each symbol's state
-        (docs/guide/arguments.md#symbols). A table passed as `underlying=` or `product_code=` is
-        read value by value, each as if passed alone: a static one once (a failed value fails the
-        call), a refreshing one followed in the same way, keyed by the value. A symbol with no data
-        (HTTP 404 on its first request) follows `MassiveConfig.unavailable_symbols`: by default it
-        returns no rows, with a WARNING; HTTP 404 on a later page raises
-        `MassiveError`, since its data was cut short. Current data of a subscription not in
-        `MassiveConfig.delayed_subscriptions` must be real-time: a response Massive labels
-        `DELAYED` raises; a listed subscription's data is returned as the plan serves it, and the
-        table's description says so (docs/guide/plans.md#real-time-or-delayed).
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols). A
+        table passed as `underlying=` or `product_code=` is read value by value, each as if passed
+        alone: a static one once (a failed value fails the call), a refreshing one followed in the
+        same way, keyed by the value. A symbol with no data (HTTP 404 on its first request) follows
+        `MassiveConfig.unavailable_symbols`: by default it returns no rows, with a WARNING; HTTP 404
+        on a later page raises `MassiveError`, since its data was cut short. Current data of a
+        subscription not in `MassiveConfig.delayed_subscriptions` must be real-time: a response
+        Massive labels `DELAYED` raises; a listed subscription's data is returned as the plan serves
+        it, and the table's description says so
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
 
         Args:
             wait: True (the default) blocks and returns a static table; False returns at once a
                 refreshing table a background read fills in one update. For a refreshing
                 symbol table, True blocks until each symbol in it has had one read and False
                 returns at once; the result is refreshing either way. See
-                docs/guide/arguments.md#verb-arguments.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#verb-arguments.
 
         Returns:
             A static table in the dataset's schema; with `wait=False`, a refreshing table
@@ -1251,13 +1253,14 @@ class Query(QueryBase):
         it and listed the same way, or fails the table under `unavailable_symbols=RAISE`. A
         feed (a dataset whose default mode is `APPEND`: news and filings) needs a `start` or a
         `limit`. The poller runs while the table or anything derived from it is in use
-        (docs/guide/concepts.md#live-tables). Once the table
-        exists, an authentication, entitlement, or schema failure, a null or NaN poll key, or a
-        response Massive labels `DELAYED` for a subscription not in
-        `MassiveConfig.delayed_subscriptions` (docs/guide/plans.md#real-time-or-delayed), fails it
-        and ends the poller; the table's description and its `m.streams()` row name its recency;
-        any other failed cycle shows in `m.streams()`'s `Error`, logs a WARNING, and the next
-        cycle runs. `TimestampInsert` is the latest cycle's time.
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#live-tables).
+        Once the table exists, an authentication, entitlement, or schema failure, a null or NaN poll
+        key, or a response Massive labels `DELAYED` for a subscription not in
+        `MassiveConfig.delayed_subscriptions`
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed),
+        fails it and ends the poller; the table's description and its `m.streams()` row name its
+        recency; any other failed cycle shows in `m.streams()`'s `Error`, logs a WARNING, and the
+        next cycle runs. `TimestampInsert` is the latest cycle's time.
 
         Args:
             interval: Seconds between cycles, or a `timedelta`; at least 1 second, so a typo
@@ -1268,7 +1271,7 @@ class Query(QueryBase):
                 `UPSERT` keeps every key ever seen at its latest row, `APPEND` adds only rows
                 whose identity (the poll keys, plus the update time on snapshots and movers) is
                 new. See
-                docs/guide/arguments.md#verb-arguments.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#verb-arguments.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. Its
@@ -1476,7 +1479,7 @@ class StreamQuery(QueryBase):
             EntitlementError: If the dataset's subscription is not in
                 `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
                 delayed; the message names the line to add
-                (docs/guide/plans.md#real-time-or-delayed).
+                (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair of a list, or of a symbol table under
@@ -1517,7 +1520,7 @@ class StreamQuery(QueryBase):
             EntitlementError: If the dataset's subscription is not in
                 `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
                 delayed; the message names the line to add
-                (docs/guide/plans.md#real-time-or-delayed).
+                (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair of a list, or of a symbol table under
@@ -1562,7 +1565,7 @@ class StreamQuery(QueryBase):
             EntitlementError: If the dataset's subscription is not in
                 `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
                 delayed; the message names the line to add
-                (docs/guide/plans.md#real-time-or-delayed).
+                (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair of a list, or of a symbol table under
@@ -1632,8 +1635,9 @@ class StreamQuery(QueryBase):
         Massive's exact ticker is skipped, logged once, and, for a live table, listed in
         `m.streams()` (convert with `dm.canonicalize_symbols`). `last_by()` never seeds from
         REST: for current state, use `snapshots(symbols).poll(n)`, which needs a plan that
-        includes snapshots (docs/guide/plans.md#plans-and-errors). A static symbol table is read
-        once, now.
+        includes snapshots
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#plans-and-errors).
+        A static symbol table is read once, now.
 
         Args:
             by: The key column or columns, positionally or by keyword as in Deephaven's
@@ -1659,7 +1663,7 @@ class StreamQuery(QueryBase):
             EntitlementError: If the dataset's subscription is not in
                 `MassiveConfig.delayed_subscriptions` and Massive shows its plan's data is
                 delayed; the message names the line to add
-                (docs/guide/plans.md#real-time-or-delayed).
+                (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
             MassiveError: If the session is closed; if the stream fails while the verb opens
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair of a list, or of a symbol table under
@@ -1756,22 +1760,25 @@ class HistoryQuery(QueryBase):
 
         Dates (`"2025-03-03"`, a `date`, `dh_today()`) are whole days in the asset class's time
         zone, both ends included; aware datetimes and instants are exact, the end excluded
-        (docs/guide/arguments.md#start-and-end). A bar is returned only when its whole window lies
-        in the range and has ended (docs/guide/history.md#bars). Rows come from REST or the flat
-        files; under `AUTO`, the days whose flat files are missing, and files the plan lacks, are
-        read from REST, so the call fails only when no source can serve it
-        (docs/guide/history.md#history-sources). The table's description names the source and why. A
-        static symbol table is read once, now. A refreshing one is
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end).
+        A bar is returned only when its whole window lies in the range and has ended
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars). Rows
+        come from REST or the flat files; under `AUTO`, the days whose flat files are missing, and
+        files the plan lacks, are read from REST, so the call fails only when no source can serve it
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#history-sources).
+        The table's description names the source and why. A static symbol table is read once, now. A
+        refreshing one is
         followed: the result is a refreshing table that holds, for each symbol now in the table, the
         complete rows of its latest read over this call's range (fixed now, so `end=None` means
         through this instant), landing whole in one update; a symbol removed from the table leaves
         the result in the same update. `AUTO` then reads REST whenever REST can serve the request. A
         failure of one symbol leaves the others: a 404 gives it no rows, a failure that may pass is
         retried 1, 5, and 15 minutes later, and any other fails it; `m.symbol_reads()` shows each
-        symbol's state (README.md#history-of-a-watchlist). A bar with an unexpected stamp is served,
-        with a WARNING, never refused. History is past data, so
-        `MassiveConfig.delayed_subscriptions` does not affect it
-        (docs/guide/plans.md#real-time-or-delayed).
+        symbol's state
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#history-of-a-watchlist).
+        A bar with an unexpected stamp is served, with a WARNING, never refused. History is past
+        data, so `MassiveConfig.delayed_subscriptions` does not affect it
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed).
 
         Args:
             start: The first day, or the first instant included (`DateLike`).
@@ -1783,7 +1790,7 @@ class HistoryQuery(QueryBase):
             wait: True (the default) blocks; False returns a table a background read fills.
                 For a refreshing symbol table, True blocks until each symbol in it has had one
                 read and False returns at once; the result is refreshing either way. See
-                docs/guide/arguments.md#verb-arguments.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#verb-arguments.
 
         Returns:
             A static table in the dataset's schema, empty when no row lies in the range; with

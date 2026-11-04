@@ -58,8 +58,9 @@ would. Two passes help:
 - **Skim pass**: headings and first words only. Is every needed fact visible?
 - **Read-aloud pass**: read the Summary and Why aloud. Anything you would not say to a colleague
   (a hedge, a "Note that", a colon reveal, an internal name, a so-chain) gets rewritten. The
-  banned patterns of `docs/dev/pull-requests.md` and `docs/dev/user-docs.md` list the usual
-  offenders; the grep in the checklist finds the narration.
+  banned patterns of `docs/dev/pull-requests.md` and the AI tells in
+  `docs/dev/user-docs.md#ai-tells` list the usual offenders; the grep in the checklist finds
+  the narration.
 
 ## 4. Publish
 

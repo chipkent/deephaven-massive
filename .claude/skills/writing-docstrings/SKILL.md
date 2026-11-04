@@ -1,6 +1,6 @@
 ---
 name: writing-docstrings
-description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or verb, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link to README.md and docs/datasets/ instead of repeating them, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/guide/ pages (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or verb, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link to the user pages (by full GitHub URL) and docs/datasets/ instead of repeating them, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/guide/ pages (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing docstrings
@@ -31,14 +31,17 @@ arguments) and each concept (bars, history sources, split adjustment, live-table
 once. A dataset docstring:
 
 - gives a shared argument one line with only this dataset's difference and a citation of the
-  section that defines it: `See docs/guide/<page>.md#<anchor>.` for a section on a guide page,
-  `See README.md#<anchor>.` for one in the README. Both forms are valid while sections move
-  from the README to `docs/guide/`; cite the page the section is on now;
+  section that defines it, by its full GitHub URL so it opens from an IDE or the console:
+  `See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/<page>.md#<anchor>.` for a guide page, or
+  `See https://github.com/chipkent/deephaven-massive/blob/main/README.md#<anchor>.` for the README. Cite the page the
+  section is on now. A line that ends in the URL may run past 100 columns (ruff allows it);
+  keep "See" on that line;
 - names its columns page, `docs/datasets/<dataset>.md`, in its Returns line;
 - runs about 15 to 25 lines: the summary, what a row is and what is unusual, one Args line per
   argument, Returns, exact Raises, and one or two example lines.
 
-`tests/test_docs.py` fails on a cited anchor or page that does not exist.
+`tests/test_docs.py` fails on a cited anchor or page that does not exist, and on a section
+cited as a bare path (`docs/guide/<page>.md#<anchor>`) instead of a URL.
 
 ## Where documentation lives
 

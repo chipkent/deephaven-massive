@@ -12,12 +12,13 @@ be. Two sections, the first tables and split adjustment, also run alone against 
 replies (NVDA's 10-for-1 split of 2024-06-10), and the tests check that their tables hold what
 the pages say they hold.
 
-The docstrings link instead of repeating: a shared argument or concept cites a section as
-`README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`, and a dataset its generated page as
+The docstrings link instead of repeating. A shared argument or concept cites a section by its
+full GitHub URL, `DOCS_URL` followed by `README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`,
+so the link opens from an IDE or the console; a dataset cites its generated page as
 `docs/datasets/<dataset>.md`. Every anchor is an explicit `<a id>`, unique across the user
-pages. The tests check that every cited anchor and page exists, that every relative link of a
-user page (and of the tester guide) resolves, and that the README's namespace table lists
-exactly the catalog's namespaces.
+pages. The tests check that every section citation is a URL, that every cited anchor and page
+exists, that every relative link of a user page (and of the tester guide) resolves, and that
+the README's namespace table lists exactly the catalog's namespaces.
 """
 
 import json
@@ -75,8 +76,14 @@ own Deephaven server.
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _YAML_BLOCK = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
-_README_CITATION = re.compile(r"README\.md#([A-Za-z0-9_-]+)")
-_GUIDE_CITATION = re.compile(r"docs/guide/([a-z-]+\.md)#([A-Za-z0-9_-]+)")
+DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
+"""The prefix of every section citation in a docstring: the user pages on GitHub's main branch."""
+
+_README_CITATION = re.compile(re.escape(DOCS_URL) + r"README\.md#([A-Za-z0-9_-]+)")
+_GUIDE_CITATION = re.compile(re.escape(DOCS_URL) + r"docs/guide/([a-z-]+\.md)#([A-Za-z0-9_-]+)")
+_BARE_CITATION = re.compile(
+    r"(?<!/blob/main/)\b(?:README\.md|docs/guide/[a-z-]+\.md)#[A-Za-z0-9_-]+"
+)
 _PAGE_CITATION = re.compile(r"docs/datasets/([A-Za-z0-9_.]+?)\.md\b")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 
@@ -407,6 +414,17 @@ def test_every_anchor_is_unique_across_the_user_pages() -> None:
     assert {anchor: pages for anchor, pages in seen.items() if len(pages) > 1} == {}
 
 
+def test_every_section_citation_is_a_url() -> None:
+    # A bare path does not open from an IDE or the console, so a docstring cites a section by
+    # its full URL.
+    bare = [
+        f"{path}: {citation}"
+        for path, text in _sources().items()
+        for citation in _BARE_CITATION.findall(text)
+    ]
+    assert bare == []
+
+
 def test_every_readme_section_a_docstring_cites_exists() -> None:
     anchors = set(_anchors(README))
     missing = [
@@ -442,12 +460,14 @@ def test_every_dataset_page_a_docstring_cites_exists() -> None:
 def test_the_citations_are_found() -> None:
     # A guard on the patterns above: a typo in any would find nothing and pass.
     text = (
-        "See README.md#install. See docs/guide/arguments.md#symbols. "
-        "Columns: docs/datasets/stocks.financials.ratios.md."
+        f"See {DOCS_URL}README.md#install. See {DOCS_URL}docs/guide/arguments.md#symbols. "
+        "Columns: docs/datasets/stocks.financials.ratios.md. "
+        "Bare: README.md#install, docs/guide/arguments.md#symbols."
     )
     assert _README_CITATION.findall(text) == ["install"]
     assert _GUIDE_CITATION.findall(text) == [("arguments.md", "symbols")]
     assert _PAGE_CITATION.findall(text) == ["stocks.financials.ratios"]
+    assert _BARE_CITATION.findall(text) == ["README.md#install", "docs/guide/arguments.md#symbols"]
 
 
 @pytest.mark.parametrize("page", [*USER_PAGES, TESTER_GUIDE], ids=_name)

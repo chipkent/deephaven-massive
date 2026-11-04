@@ -73,7 +73,8 @@ a docs or config change has nothing to break.
   `writing-docstrings` skill).
 - For each behavior the diff changes (a default, a limit, an error, a column), find every page
   that describes it: `git grep -n '<name or message>' -- README.md docs/`. A diff that touches
-  a user page follows the `writing-user-docs` skill.
+  a user page follows step 5 of the `writing-user-docs` skill's "How to work" and its editor's
+  pass.
 - No decision or planning references in code (rule 21):
   `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*([Dd]ecision [0-9]|DESIGN|PLAN|§)'`.
 - The PR title and every commit subject meet the Title section of `docs/dev/pull-requests.md`;

@@ -289,27 +289,33 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See docs/guide/plans.md#real-time-or-delayed. `fetch()` and `poll()` include the current
-        period's value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed.
+        `fetch()` and `poll()` include the current period's value, which changes until the period
+        ends; keep finished values with `t.where("TimestampEnd <= TimestampInsert")`. A
+        `poll(mode=dm.PollMode.APPEND)` table keeps the first unfinished value it sees and never
+        receives the finished one, so the filter drops that period for good; `poll()` in its default
+        mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See docs/guide/arguments.md#symbols.
+                `dm.ALL` is refused.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             window: The number of bars averaged, a positive `int`; 50 by default.
             timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
             series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
             adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See docs/guide/arguments.md#adjusted.
-            start: The first bar start. See docs/guide/arguments.md#start-and-end.
+                so False fails the verb for a crypto symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
+            start: The first bar start.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range, of the same kind as `start`.
-                See docs/guide/arguments.md#start-and-end.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
-                docs/guide/arguments.md#sort-order-limit.
-            limit: The most rows for each symbol. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows for each symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/indicators.sma.md.
@@ -363,27 +369,33 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See docs/guide/plans.md#real-time-or-delayed. `fetch()` and `poll()` include the current
-        period's value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed.
+        `fetch()` and `poll()` include the current period's value, which changes until the period
+        ends; keep finished values with `t.where("TimestampEnd <= TimestampInsert")`. A
+        `poll(mode=dm.PollMode.APPEND)` table keeps the first unfinished value it sees and never
+        receives the finished one, so the filter drops that period for good; `poll()` in its default
+        mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See docs/guide/arguments.md#symbols.
+                `dm.ALL` is refused.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             window: The number of bars the average spans, a positive `int`; 50 by default.
             timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
             series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
             adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See docs/guide/arguments.md#adjusted.
-            start: The first bar start. See docs/guide/arguments.md#start-and-end.
+                so False fails the verb for a crypto symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
+            start: The first bar start.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range, of the same kind as `start`.
-                See docs/guide/arguments.md#start-and-end.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
-                docs/guide/arguments.md#sort-order-limit.
-            limit: The most rows for each symbol. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows for each symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/indicators.ema.md.
@@ -436,27 +448,33 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See docs/guide/plans.md#real-time-or-delayed. `fetch()` and `poll()` include the current
-        period's value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed.
+        `fetch()` and `poll()` include the current period's value, which changes until the period
+        ends; keep finished values with `t.where("TimestampEnd <= TimestampInsert")`. A
+        `poll(mode=dm.PollMode.APPEND)` table keeps the first unfinished value it sees and never
+        receives the finished one, so the filter drops that period for good; `poll()` in its default
+        mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See docs/guide/arguments.md#symbols.
+                `dm.ALL` is refused.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             window: The number of bars looked back over, a positive `int`; 14 by default.
             timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
             series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
             adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See docs/guide/arguments.md#adjusted.
-            start: The first bar start. See docs/guide/arguments.md#start-and-end.
+                so False fails the verb for a crypto symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
+            start: The first bar start.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range, of the same kind as `start`.
-                See docs/guide/arguments.md#start-and-end.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
-                docs/guide/arguments.md#sort-order-limit.
-            limit: The most rows for each symbol. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows for each symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/indicators.rsi.md.
@@ -513,29 +531,35 @@ class _Indicators(Namespace):
         with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
         today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
         subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See docs/guide/plans.md#real-time-or-delayed. `fetch()` and `poll()` include the current
-        period's value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed.
+        `fetch()` and `poll()` include the current period's value, which changes until the period
+        ends; keep finished values with `t.where("TimestampEnd <= TimestampInsert")`. A
+        `poll(mode=dm.PollMode.APPEND)` table keeps the first unfinished value it sees and never
+        receives the finished one, so the filter drops that period for good; `poll()` in its default
+        mode holds the updated value.
 
         Args:
             symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See docs/guide/arguments.md#symbols.
+                `dm.ALL` is refused.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             short_window: The bars of the fast exponential average; 12 by default.
             long_window: The bars of the slow exponential average; 26 by default.
             signal_window: The bars of the signal line's average; 9 by default.
             timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
             series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
             adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See docs/guide/arguments.md#adjusted.
-            start: The first bar start. See docs/guide/arguments.md#start-and-end.
+                so False fails the verb for a crypto symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
+            start: The first bar start.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range, of the same kind as `start`.
-                See docs/guide/arguments.md#start-and-end.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             order: The timestamp order (the endpoints have no `sort`). See
-                docs/guide/arguments.md#sort-order-limit.
-            limit: The most rows for each symbol. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The most rows for each symbol.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/indicators.macd.md.

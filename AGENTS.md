@@ -150,7 +150,9 @@ code: a one-line docstring on anything with behavior worth knowing is a defect. 
 three parts: `README.md`, the landing page from install to everyday use; `docs/guide/`, pages
 looked up for specific cases; and `docs/datasets/`, generated. Follow the `writing-user-docs`
 skill for any user page, or a change to behavior one describes, and the `writing-docstrings`
-skill for docstrings and other text in code.
+skill for docstrings and other text in code. A docstring cites a user-page section by its full
+GitHub URL, `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the
+link opens from an IDE or the console; `tests/test_docs.py` rejects a bare path.
 
 ## Deephaven invariants
 

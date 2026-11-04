@@ -157,15 +157,18 @@ class _Economy(Namespace):
         One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date; a calendar date only. See docs/guide/arguments.md#start-and-end.
+            start: The first date; a calendar date only.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last date, inclusive; None also returns rows dated in the future. See
-                docs/guide/arguments.md#start-and-end.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`.
-                See docs/guide/arguments.md#sort-order-limit.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See docs/guide/arguments.md#sort-order-limit.
-            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/economy.treasury_yields.md.
@@ -206,15 +209,18 @@ class _Economy(Namespace):
         One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date; a calendar date only. See docs/guide/arguments.md#start-and-end.
+            start: The first date; a calendar date only.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last date, inclusive; None also returns rows dated in the future. See
-                docs/guide/arguments.md#start-and-end.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`.
-                See docs/guide/arguments.md#sort-order-limit.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See docs/guide/arguments.md#sort-order-limit.
-            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/economy.inflation.md.
@@ -255,15 +261,18 @@ class _Economy(Namespace):
         One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date; a calendar date only. See docs/guide/arguments.md#start-and-end.
+            start: The first date; a calendar date only.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last date, inclusive; None also returns rows dated in the future. See
-                docs/guide/arguments.md#start-and-end.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`.
-                See docs/guide/arguments.md#sort-order-limit.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See docs/guide/arguments.md#sort-order-limit.
-            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/economy.inflation_expectations.md.
@@ -304,15 +313,18 @@ class _Economy(Namespace):
         One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date; a calendar date only. See docs/guide/arguments.md#start-and-end.
+            start: The first date; a calendar date only.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last date, inclusive; None also returns rows dated in the future. See
-                docs/guide/arguments.md#start-and-end.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`.
-                See docs/guide/arguments.md#sort-order-limit.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See docs/guide/arguments.md#sort-order-limit.
-            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/economy.labor_market.md.
@@ -353,15 +365,18 @@ class _Economy(Namespace):
         One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date; a calendar date only. See docs/guide/arguments.md#start-and-end.
+            start: The first date; a calendar date only.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last date, inclusive; None also returns rows dated in the future. See
-                docs/guide/arguments.md#start-and-end.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The wire field to sort by, such as `"date"`.
-                See docs/guide/arguments.md#sort-order-limit.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See docs/guide/arguments.md#sort-order-limit.
-            limit: The total-row cap. See docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters. See docs/guide/arguments.md#filters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            limit: The total-row cap.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            filters: Further endpoint parameters.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns: docs/datasets/economy.funding_conditions.md.

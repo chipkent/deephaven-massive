@@ -41,12 +41,16 @@ User documentation has three parts:
 - [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference. Never edit it by
   hand; regenerate it with `uv run python scripts/render_reference.py`.
 
-[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: who reads
-it, which page owns each fact, the voice, the banned patterns, and the terminology.
+[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: the project
+section (readers, owner requirements, install decision, page map), the rules, the AI tells, the
+section models, the terminology, and the rubric and pass bar.
 `tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
-Docstrings cite a section by its explicit anchor (`README.md#<anchor>` or
-`docs/guide/<page>.md#<anchor>`) and a dataset page as `docs/datasets/<dataset>.md`; the same
-test checks that every cited README anchor and dataset page exists.
+Docstrings cite a section by its full GitHub URL, so the link opens from an IDE or the
+console:
+`https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/<page>.md#<anchor>`, or
+`README.md#<anchor>` after the same prefix. They cite a dataset page as
+`docs/datasets/<dataset>.md`. The same test checks that every section citation is a URL and
+that every cited anchor and dataset page exists.
 
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.

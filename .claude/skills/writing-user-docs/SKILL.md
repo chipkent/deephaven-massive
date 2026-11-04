@@ -1,6 +1,6 @@
 ---
 name: writing-user-docs
-description: "Use this skill whenever you write, rewrite, edit, move, or review text a user of deephaven-massive reads: README.md (the hook, Install, Configuration, the teaching examples, recipes, troubleshooting), any page under docs/guide/, docs/tester-guide.md, or the hand-written intro of docs/datasets/. Use it for a whole page or a single paragraph, for 'write the Install section', 'add an example', 'fix this recipe', and 'this reads like AI' or 'this is slop'. Use it too when a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It drafts to the owner's requirements, section models, and sentence rules in docs/dev/user-docs.md, then runs cold editor passes that score the draft on the 19-criterion O'Reilly rubric and revise it to the owner's pass bar. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write, rewrite, edit, move, or review text a user of deephaven-massive reads: README.md (the hook, Install, Configuration, the teaching examples, recipes, troubleshooting), any page under docs/guide/, docs/tester-guide.md, or the hand-written intro of docs/datasets/. Use it for a whole page or a single paragraph, for 'write the Install section', 'add an example', 'fix this recipe', and 'this reads like AI' or 'this is slop'. Use it too when a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It drafts to the owner's requirements, section models, and sentence rules in docs/dev/user-docs.md, then runs cold editor passes that score the draft on the standard's O'Reilly rubric and revise it to the owner's pass bar. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing user docs
@@ -41,9 +41,10 @@ because it's the whole contract. This skill is how to work to it.
    section (first sentences only, subjects and verbs, every colon and semicolon, every
    contrast, every series of three, read aloud). Then get a cold editor's pass (below), and
    revise until the draft meets the standard's pass bar or you've used two revision rounds.
-5. Before it goes out: run `uv run pytest tests/test_docs.py -q` for a README change, check
-   that every original fact survives or has a named new home, and rewrite the citations of any
-   anchor you moved. Put the final score sheet in your report or PR description, and list what
+5. Before it goes out: run `uv run pytest tests/test_docs.py -q` for any change to `README.md`
+   or `docs/guide/`, check that every original fact survives or has a named new home, and
+   rewrite the citations of any anchor you moved, in `src/` docstrings (by full GitHub URL)
+   and on the other pages. Put the final score sheet in your report or PR description, and list what
    only a run with a Massive key can confirm, for the owner's test plan.
 
 ## Where drafts fail
@@ -88,7 +89,7 @@ section of the user docs of deephaven-massive. Check its claims against <repo>/s
 <repo>/docs/datasets where they matter. Don't mark down a missing contact or a missing way to
 ask for access: the install is for a reader who can already see the repository.
 
-Score each of the 19 criteria from 0 to 3; a 3 means you'd make no mark at all. Be the
+Score each criterion from 0 to 3; a 3 means you'd make no mark at all. Be the
 editor authors dread, and don't round up. For each score below 3, quote the worst sentence and
 give your rewrite. Then give one holistic score out of 10: how close this is to something
 you'd send to print as it stands. Apply the standard's pass bar and say PASS or FAIL. Say in
@@ -99,9 +100,8 @@ each fault it named is fixed, then grade the whole draft as you would have anywa
 Return the score sheet only.
 ```
 
-The pass bar is in the standard: a total of 52 or more, no criterion below 2, criteria 16 to
-19 all at 3, and a holistic score of 9 or more. A first-screen section passes only when both
-graders pass it.
+The pass bar, with its totals and per-criterion floors, is in the standard's rubric section.
+A first-screen section passes only when both graders pass it.
 
 Revise from the score sheets by fixing each fault's pattern everywhere it occurs, not just the
 quoted sentence. Where several faults sit in one paragraph, rewrite the paragraph rather than

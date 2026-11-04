@@ -55,9 +55,8 @@ Status:
 
 Read next:
     The README, https://github.com/chipkent/deephaven-massive; the user guide's reference
-    pages in `docs/guide/` (a docstring's `docs/guide/arguments.md#symbols` means the section of
-    that name on that page, in the repository); the dataset finder, `docs/datasets/README.md`;
-    and `help()` on any object.
+    pages in `docs/guide/`, which docstrings link to section by section; the dataset finder,
+    `docs/datasets/README.md`; and `help()` on any object.
 
 `import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
 `datasets()`, the `canonical_symbol*` converters, and `canonicalize_symbols` need a running
@@ -80,14 +79,15 @@ Public API:
       exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
       `C:EURUSD`, `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol`
       column, and a live one is followed as rows are added and deleted: see
-      docs/guide/arguments.md#symbols. The converters turn other spellings into Massive's:
-      `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function
-      per class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
+      https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols. The
+      converters turn other spellings into Massive's:
+      `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function per
+      class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
       `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,
       `canonical_symbol_forex`, `canonical_symbol_crypto`), one per stock convention
       (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
-      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query
-      string, import a converter by bare name for a `String` column
+      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query string,
+      import a converter by bare name for a `String` column
       (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
       `Object` column unless cast, `(String) dm.canonical_symbol_forex(Pair)`.
     - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the

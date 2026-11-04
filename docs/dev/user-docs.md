@@ -897,6 +897,10 @@ A page earns trust when every claim checks out and every link still lands.
 - Give every cited section an explicit anchor, `<a id="sort-order-limit"></a>`, on the line
   before its heading. Docstrings and other pages cite the anchor, never a heading's generated
   slug, so rewording a heading breaks nothing.
+- A docstring cites a section by its full GitHub URL, so the link opens from an IDE or the
+  console: `https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/<page>.md#<anchor>`, or
+  `README.md#<anchor>` after the same prefix. A user page links to another with a relative
+  path.
 - Keep an anchor's id when you reword its section.
 - When you move or rename an anchor, rewrite its citations in the same PR: in `src/`, in other
   user pages, and in the tester guide. `tests/test_docs.py` fails on a cited anchor or page
