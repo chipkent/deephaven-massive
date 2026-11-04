@@ -332,7 +332,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#venues.
 
         Returns:
-            A query with the stream verbs and `history()`. Columns: docs/datasets/futures.trades.md.
+            A query with the stream verbs and `history()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.trades.md.
 
         Raises:
             TypeError: If `symbols` is of another type or `venues` is not a set of
@@ -368,7 +369,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#venues.
 
         Returns:
-            A query with the stream verbs and `history()`. Columns: docs/datasets/futures.quotes.md.
+            A query with the stream verbs and `history()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.quotes.md.
 
         Raises:
             TypeError: If `symbols` is of another type or `venues` is not a set of
@@ -435,7 +437,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#venues.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/futures.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -496,7 +499,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.snapshots.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.snapshots.md.
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is
@@ -565,7 +569,8 @@ class _Futures(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.contracts.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.contracts.md.
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
@@ -637,7 +642,8 @@ class _Futures(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.products.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.products.md.
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, `product_code` is
@@ -681,7 +687,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.exchanges.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.exchanges.md.
 
         Raises:
             TypeError: If `limit` is not an `int`.
@@ -718,7 +725,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.market_status.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.market_status.md.
 
         Raises:
             TypeError: If `product_code` is not a `str`, a sequence of `str`, or a table, or `limit`
@@ -774,7 +782,8 @@ class _Futures(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/futures.schedules.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.schedules.md.
 
         Raises:
             TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or `product_code` is

@@ -29,7 +29,7 @@ empties the directory of everything it did not render, a renamed or removed data
 leaves an orphaned page. The parity test, `tests/datasets/test_column_reference.py`, fails on
 any page that differs from what `render` gives, so a catalog change or a refresh that moves a
 description or a plan table lands with its regenerated pages. Each dataset method's docstring
-names its page, `docs/datasets/<dataset>.md`, rather than listing columns.
+names its page by its web address, `PAGES_URL` and `<dataset>.md`, rather than listing columns.
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ class SyncResult:
 def page_name(spec: DatasetSpec) -> str:
     """Return the file name of a dataset's page.
 
-    Dataset docstrings name the page as `docs/datasets/<page name>`.
+    Dataset docstrings name the page by its web address, `page_url`.
 
     Args:
         spec: The dataset.

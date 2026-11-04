@@ -230,7 +230,8 @@ class _StockFinancials(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.financials.balance_sheets.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.balance_sheets.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
@@ -305,7 +306,8 @@ class _StockFinancials(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.financials.income_statements.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.income_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
@@ -374,7 +376,8 @@ class _StockFinancials(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.financials.cash_flow_statements.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.cash_flow_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
@@ -430,7 +433,8 @@ class _StockFinancials(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.financials.ratios.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.ratios.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

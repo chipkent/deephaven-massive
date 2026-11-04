@@ -14,11 +14,12 @@ the pages say they hold.
 
 The docstrings link instead of repeating. A shared argument or concept cites a section by its
 full GitHub URL, `DOCS_URL` followed by `README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`,
-so the link opens from an IDE or the console; a dataset cites its generated page as
-`docs/datasets/<dataset>.md`. Every anchor is an explicit `<a id>`, unique across the user
-pages. The tests check that every section citation is a URL, that every cited anchor and page
-exists, that every relative link of a user page (and of the tester guide) resolves, and that
-the README's namespace table lists exactly the catalog's namespaces.
+so the link opens from an IDE or the console, and a dataset cites its generated page the same
+way, as `DOCS_URL` followed by `docs/datasets/<dataset>.md`. Every anchor is an explicit
+`<a id>`, unique across the user pages. The tests check that every section and page citation
+is a URL, that every cited anchor and page exists, that every relative link of a user page (and
+of the tester guide) resolves, and that the README's namespace table lists exactly the
+catalog's namespaces.
 """
 
 import json
@@ -82,9 +83,10 @@ DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
 _README_CITATION = re.compile(re.escape(DOCS_URL) + r"README\.md#([A-Za-z0-9_-]+)")
 _GUIDE_CITATION = re.compile(re.escape(DOCS_URL) + r"docs/guide/([a-z-]+\.md)#([A-Za-z0-9_-]+)")
 _BARE_CITATION = re.compile(
-    r"(?<!/blob/main/)\b(?:README\.md|docs/guide/[a-z-]+\.md)#[A-Za-z0-9_-]+"
+    r"(?<!/blob/main/)\b(?:(?:README\.md|docs/guide/[a-z-]+\.md)#[A-Za-z0-9_-]+"
+    r"|docs/datasets/[A-Za-z0-9_.]+?\.md\b)"
 )
-_PAGE_CITATION = re.compile(r"docs/datasets/([A-Za-z0-9_.]+?)\.md\b")
+_PAGE_CITATION = re.compile(re.escape(DOCS_URL) + r"docs/datasets/([A-Za-z0-9_.]+?)\.md\b")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
@@ -415,8 +417,8 @@ def test_every_anchor_is_unique_across_the_user_pages() -> None:
 
 
 def test_every_section_citation_is_a_url() -> None:
-    # A bare path does not open from an IDE or the console, so a docstring cites a section by
-    # its full URL.
+    # A bare path does not open from an IDE or the console, so a docstring cites a section, or a
+    # dataset's page, by its full URL.
     bare = [
         f"{path}: {citation}"
         for path, text in _sources().items()
@@ -461,13 +463,17 @@ def test_the_citations_are_found() -> None:
     # A guard on the patterns above: a typo in any would find nothing and pass.
     text = (
         f"See {DOCS_URL}README.md#install. See {DOCS_URL}docs/guide/arguments.md#symbols. "
-        "Columns: docs/datasets/stocks.financials.ratios.md. "
-        "Bare: README.md#install, docs/guide/arguments.md#symbols."
+        f"Columns: {DOCS_URL}docs/datasets/stocks.financials.ratios.md. "
+        "Bare: README.md#install, docs/guide/arguments.md#symbols, docs/datasets/stocks.ipos.md."
     )
     assert _README_CITATION.findall(text) == ["install"]
     assert _GUIDE_CITATION.findall(text) == [("arguments.md", "symbols")]
     assert _PAGE_CITATION.findall(text) == ["stocks.financials.ratios"]
-    assert _BARE_CITATION.findall(text) == ["README.md#install", "docs/guide/arguments.md#symbols"]
+    assert _BARE_CITATION.findall(text) == [
+        "README.md#install",
+        "docs/guide/arguments.md#symbols",
+        "docs/datasets/stocks.ipos.md",
+    ]
 
 
 @pytest.mark.parametrize("page", [*USER_PAGES, TESTER_GUIDE], ids=_name)

@@ -413,7 +413,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.analysts.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.analysts.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -468,7 +469,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.analyst_insights.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.analyst_insights.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -524,7 +526,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.ratings.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.ratings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -568,7 +571,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.consensus_ratings.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.consensus_ratings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -621,7 +625,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.bulls_bears_say.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.bulls_bears_say.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -677,7 +682,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.guidance.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.guidance.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -733,7 +739,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.earnings.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.earnings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -784,7 +791,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.firms.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.firms.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -846,7 +854,8 @@ class _Benzinga(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.benzinga.news.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.news.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -933,7 +942,8 @@ class _EtfGlobal(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.etf_global.analytics.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.analytics.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -988,7 +998,8 @@ class _EtfGlobal(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.etf_global.constituents.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.constituents.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1044,7 +1055,8 @@ class _EtfGlobal(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.etf_global.fund_flows.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.fund_flows.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1099,7 +1111,8 @@ class _EtfGlobal(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.etf_global.profiles.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.profiles.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1153,7 +1166,8 @@ class _EtfGlobal(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.etf_global.taxonomies.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.taxonomies.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1241,7 +1255,8 @@ class _Tmx(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.tmx.corporate_events.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.tmx.corporate_events.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1332,7 +1347,8 @@ class _Fable(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.fable.merchant_aggregates.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.fable.merchant_aggregates.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1387,7 +1403,8 @@ class _Fable(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/partners.fable.merchant_hierarchy.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.fable.merchant_hierarchy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

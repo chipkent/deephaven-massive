@@ -320,7 +320,8 @@ class _Reference(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.tickers.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.tickers.md.
 
         Raises:
             TypeError: If `active` is not a `bool`, or another argument has the wrong type.
@@ -375,7 +376,8 @@ class _Reference(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#as-of.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.ticker_details.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_details.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
@@ -413,7 +415,8 @@ class _Reference(Namespace):
             locale: The locale whose types to list; None for both.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.ticker_types.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_types.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
@@ -444,7 +447,8 @@ class _Reference(Namespace):
                 type); None for every type.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.ticker_events.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_events.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
@@ -478,7 +482,8 @@ class _Reference(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.related_companies.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.related_companies.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
@@ -536,7 +541,8 @@ class _Reference(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.news.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.news.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -575,7 +581,8 @@ class _Reference(Namespace):
             locale: The locale whose exchanges to list; None for both.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.exchanges.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.exchanges.md.
 
         Raises:
             TypeError: For an argument of the wrong type.
@@ -627,7 +634,8 @@ class _Reference(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.conditions.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.conditions.md.
 
         Raises:
             TypeError: If `condition_id` is neither None nor an `int`, or another argument has the
@@ -669,7 +677,8 @@ class _Reference(Namespace):
         `poll()` keeps only the latest status in its one row.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.market_status.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_status.md.
 
         Example:
             ::
@@ -684,7 +693,8 @@ class _Reference(Namespace):
         `poll()` re-fetches them, keyed by `Exchange` and `Date`.
 
         Returns:
-            A `Query`. Columns: docs/datasets/reference.market_holidays.md.
+            A `Query`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_holidays.md.
 
         Example:
             ::

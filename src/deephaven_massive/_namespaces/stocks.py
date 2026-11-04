@@ -423,7 +423,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.trades.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.trades.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -453,7 +454,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.last_trade.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_trade.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -487,7 +489,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.quotes.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.quotes.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -516,7 +519,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.last_quote.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_quote.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -583,7 +587,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/stocks.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -625,7 +630,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.previous_day_bar.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.previous_day_bar.md.
 
         Raises:
             TypeError: If `adjusted` is not a `bool`, or `symbols` is not an accepted form.
@@ -662,7 +668,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.luld.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.luld.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -689,7 +696,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.imbalances.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.imbalances.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -715,7 +723,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.fmv.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md.
 
         Raises:
             TypeError: If `symbols` is not one of the accepted forms.
@@ -745,7 +754,8 @@ class _Stocks(Namespace):
             include_otc: True to include OTC securities; False, the default, leaves them out.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.snapshots.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.snapshots.md.
 
         Raises:
             TypeError: If `include_otc` is not a `bool`, or `symbols` is not an accepted form.
@@ -778,7 +788,8 @@ class _Stocks(Namespace):
             include_otc: True to include OTC securities; False, the default, leaves them out.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.movers.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.movers.md.
 
         Raises:
             TypeError: If `direction` is not a `dm.Direction` or `include_otc` is not a `bool`.
@@ -817,7 +828,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.daily_open_close.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.daily_open_close.md.
 
         Raises:
             TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.
@@ -879,7 +891,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.dividends.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -942,7 +955,8 @@ class _Stocks(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.splits.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.splits.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1004,7 +1018,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.ipos.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.ipos.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1065,7 +1080,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.short_interest.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.short_interest.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1126,7 +1142,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.short_volume.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.short_volume.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1181,7 +1198,8 @@ class _Stocks(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.share_float.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.share_float.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

@@ -409,7 +409,8 @@ class MassiveSession:
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/snapshots.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/snapshots.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

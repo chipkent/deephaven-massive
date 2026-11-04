@@ -274,7 +274,8 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.trades.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.trades.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -306,7 +307,8 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.last_trade.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.last_trade.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
@@ -340,7 +342,8 @@ class _Crypto(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.quotes.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.quotes.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -400,7 +403,8 @@ class _Crypto(Namespace):
             multiplier: Units per bar; only 1 streams.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/crypto.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -442,7 +446,8 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.previous_day_bar.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.previous_day_bar.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
@@ -482,7 +487,8 @@ class _Crypto(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.fmv.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.fmv.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -511,7 +517,8 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.snapshots.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.snapshots.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -538,7 +545,8 @@ class _Crypto(Namespace):
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.movers.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.movers.md.
 
         Raises:
             TypeError: If `direction` is not a `dm.Direction` (a plain string such as `"gainers"`
@@ -575,7 +583,8 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#time.
 
         Returns:
-            A query. Columns: docs/datasets/crypto.daily_open_close.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.daily_open_close.md.
 
         Raises:
             TypeError: If `date` is not a `DateLike`, or `symbols` has an unsupported type.
