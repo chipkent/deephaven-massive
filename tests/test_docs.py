@@ -58,12 +58,15 @@ TESTER_GUIDE = ROOT / "docs" / "tester-guide.md"
 SOURCE = ROOT / "src" / "deephaven_massive"
 
 SKIPPED_BLOCKS: frozenset[tuple[str, str]] = frozenset(
-    {("docs/guide/install.md", "from deephaven_server import Server")}
+    {
+        ("docs/guide/install.md", "from deephaven_server import Server"),
+        ("docs/guide/arguments.md", "# Futures trades from CME's flat files: needs your S3 keys."),
+    }
 )
 """The blocks allowed a `python skip-test` fence, by page path and the block's first line.
 
 A block belongs here only when it cannot run in the test process, such as one that starts its
-own Deephaven server.
+own Deephaven server, or one that reads flat files, which needs S3 keys the fake session lacks.
 """
 
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
