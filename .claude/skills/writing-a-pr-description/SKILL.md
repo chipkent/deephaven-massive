@@ -25,8 +25,8 @@ From the diff, the issue, and your notes, collect what the reader needs:
 Then select. Every fact must earn its place by changing what the reader understands or decides.
 A true fact the reader has no use for (an internal constant, a helper's name, a count of test
 cases, a step you took to get there) is noise, and noise is how a description starts to read as
-machine output. "Never cut a fact for length" means never drop one the reader needs; it does not
-mean include everything you know. Leave out how you got there: attempts, review rounds,
+machine output. The rule is every fact the reader needs to understand or decide, and nothing
+they don't. Leave out how you got there: attempts, review rounds,
 re-runs, earlier versions of the branch.
 
 Write only what you know. When a fact the reader needs is missing from your sources (what a

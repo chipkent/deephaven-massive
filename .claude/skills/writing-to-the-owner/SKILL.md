@@ -108,10 +108,12 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
 
 1. **Needs you now.** Each PR ready to merge: number, link, one plain sentence on what it does
    for a user, and a line confirming, just now, that CI is green, it is mergeable, every review
-   thread is answered, and its review is done; a PR missing any of these is not ready, so say
-   which. Each open decision (in full the first time; later its title, options in a line each,
-   and the recommendation). Any manual step only the owner can take. If nothing, say "Nothing
-   needs you" first.
+   thread is answered, and its review is done: the author's `pre-push-review` for every PR,
+   plus an independent blockers-only review with no blocker left unfixed for a risky one
+   (concurrency, connections, TLS, or a public-contract change). A PR missing any of these is
+   not ready, so say which. Each open decision (in full the first time; later its title, its
+   options in a line each, and the recommendation). Any manual step only the owner can take.
+   If nothing, say "Nothing needs you" first.
 2. **Decided**: one line each.
 3. **In progress**: one plain line each, including what is blocked and on what.
 4. **Remaining**, and **when you'll next be needed**.

@@ -47,12 +47,12 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
    how, or say why nothing changes. Never resolve a thread without a reply.
 7. **PR descriptions read as if an O'Reilly technical editor wrote them**, and a reader
    skimming the headings and bullets gets every fact that matters: no slop, no narration, no
-   padding, never a fact cut for length, and the context a reviewer new to the PR needs to
-   follow it, no more. Write them with the `writing-a-pr-description` skill
-   (`gh pr create --body-file` never shows the template); the sections, banned patterns, and
-   self-edit checklist of `docs/dev/pull-requests.md` all apply. Rewrite the description to the
-   final state on every push, and end it with `Closes #<issue>` on its own line. Issue bodies
-   and agents' reports meet the same bar.
+   padding; every fact the reader needs to understand or decide, and nothing they don't; and
+   the context a reviewer new to the PR needs to follow it, no more. Write them with the
+   `writing-a-pr-description` skill (`gh pr create --body-file` never shows the template); the
+   sections, banned patterns, and self-edit checklist of `docs/dev/pull-requests.md` all apply.
+   Rewrite the description to the final state on every push, and end it with `Closes #<issue>`
+   on its own line. Issue bodies and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
 9. **Contract changes are the owner's.** A change to a public signature, default, column, or
    failure behavior needs an owner decision: a new `docs/dev/decisions.md` entry, with the user

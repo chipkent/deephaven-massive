@@ -32,6 +32,9 @@ in one PR. Unrelated pieces stay separate, however small; never split or merge P
   merges `main` once when its turn comes.
 - When a PR renames a public name, tell every open agent the new name; the second PR to land
   merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
+  A brief that asks for a repository-wide grep to prove an old name is gone excludes
+  `docs/dev/decisions.md` and `docs/dev/verification-items.md`: both are append-only, so their
+  past entries keep the old name.
 - Agents never force-push or rebase a pushed branch. Conflicts are resolved by the owning agent
   with a written rationale; the coordinator never pushes or resolves one itself.
 
@@ -60,14 +63,16 @@ A brief says only what the agent cannot know:
 
 ## 6. Review and readiness
 
-1. When a PR's CI passes, run one independent review that reports blockers only: wrong
-   behavior, data loss, a crash, or a rule violation. The reviewer acts as a top-1% developer
-   who flags design smells first.
+1. Every PR gets its author's `pre-push-review`. A risky PR also gets one independent review,
+   once its CI passes: one that changes concurrency (threads, locks, listeners, liveness),
+   connections, TLS, or the public contract. That review reports blockers only (wrong
+   behavior, data loss, a crash, or a rule violation), and the reviewer acts as a top-1%
+   developer who flags design smells first. Other PRs get no independent review.
 2. Low findings go into one follow-up issue, which is worked right away, never into another
    push of the PR under review. Re-review only the fix to a blocker.
 3. A PR is ready when CI is green, GitHub reports it mergeable, every review thread (the
-   owner's included) has a reply, its issue is in `closingIssuesReferences`, and its blockers
-   are fixed. Check each live before saying so.
+   owner's included) has a reply, its issue is in `closingIssuesReferences`, and, for a risky
+   PR, its independent review found no blocker left unfixed. Check each live before saying so.
 4. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
    with the `writing-to-the-owner` skill.
 

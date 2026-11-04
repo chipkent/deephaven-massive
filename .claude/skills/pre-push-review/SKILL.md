@@ -41,7 +41,8 @@ one that pins the same property. Then look for:
   vendor value filled or corrected (23), one bad symbol or row that fails a table or skips
   silently (24), a hand edit to generated files (17), a widened `tests/test_layout.py` (16), a
   secret that can reach a message, `repr`, or log (22, 25), a new name that is an abbreviation
-  (18). After a rename, `git grep` the old name across code, docs, the PR body, and its issue.
+  (18). After a rename, `git grep` the old name across code, docs, the PR body, and its issue;
+  past entries in the append-only `docs/dev/decisions.md` and `verification-items.md` keep it.
 
 ## 2. Prove the tests catch a regression
 
