@@ -1,12 +1,12 @@
 """Massive.com market data as live and static Deephaven tables.
 
 `deephaven-massive` connects a Deephaven server to Massive.com (formerly Polygon.io). It turns
-Massive's three transports into ordinary Deephaven tables:
+the three ways Massive serves data into ordinary Deephaven tables:
 
 - **WebSocket streams** (trades, quotes, bars, fair market value, index values, and more)
-  become refreshing tables: blink, append-only, ring, or one row per symbol.
+  become live tables: blink, append-only, ring, or one row per symbol.
 - **REST endpoints** (snapshots, reference data, fundamentals, filings, economy, and partner
-  datasets) become static tables, or refreshing tables that re-poll on an interval.
+  datasets) become static tables, or live tables that poll again on an interval.
 - **S3 flat files** (full-day trades, quotes, and bars) become static historical tables.
 
 Every dataset is a method on a namespace grouped by asset class (`stocks`, `options`,
@@ -19,8 +19,8 @@ stream stocks, options, indices, and futures 15 minutes late (10 for futures), s
 list the subscription in `MassiveConfig(delayed_subscriptions=...)`, or its live tables and its
 current snapshots fail with a message that names that setting. A dataset your plan lacks fails
 with a message that says what was refused and, where the library has another way to read the
-data, names it. The library runs inside an existing Deephaven server (it needs an active
-`ExecutionContext`) and never starts one.
+data, names it. The library runs inside a Deephaven server you start, and never starts one
+itself.
 
 Example:
     In the Deephaven console, with your key in `MASSIVE_API_KEY`::
@@ -44,14 +44,14 @@ Example:
         latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 Status:
-    Every dataset is implemented over all three transports and tested against simulated Massive
-    servers built from Massive's documentation. The live tests have also run against Massive on
-    a mix of paid and free plans. Questions those plans cannot settle remain open (which host a
-    delayed plan streams from, how index daily bars and futures sessions are stamped, parts of
-    the flat files); there the library follows its best reading of the documentation. Where
-    Massive sends something unexpected, the library serves what it can: a value that doesn't
-    fit is null, a row missing its symbol or time is dropped, and each is logged once.
-    The library is not on PyPI yet.
+    Every dataset is implemented over REST, WebSocket, and flat files and tested against simulated
+    Massive servers built from Massive's documentation. The live tests have also run against Massive
+    on a mix of paid and free plans. Questions those plans cannot settle remain open (which host a
+    delayed plan streams from, how index daily bars and futures sessions are stamped, parts of the
+    flat files); there the library follows its best reading of the documentation. Where Massive
+    sends something unexpected, the library serves what it can: a value that doesn't fit is null, a
+    row missing its symbol or time is dropped, and each is logged once. The library is not on PyPI
+    yet.
 
 Read next:
     The README, https://github.com/chipkent/deephaven-massive; the dataset finder,
@@ -60,9 +60,10 @@ Read next:
     https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md; and
     `help()` on any object.
 
-`import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
-`datasets()`, the `canonical_symbol*` converters, and `canonicalize_symbols` need a running
-Deephaven JVM: use them inside a Deephaven server, or after starting `deephaven_server.Server`.
+`import deephaven_massive` is fast and needs no running server. `MassiveSession`,
+`MassiveConfig`, `ALL`, `datasets()`, the `canonical_symbol*` converters, and
+`canonicalize_symbols` need one: use them inside a Deephaven server, or after starting
+`deephaven_server.Server`.
 The exceptions, the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and
 `__version__` do not.
 
@@ -71,7 +72,7 @@ Public API:
       `connections()`, `streams()`, `rate_limits()`, `symbol_reads()`, `release(table)`,
       `close()`, and use as a context manager.
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
-    - `datasets()`: a static table of every dataset, with its summary, verbs, transports, and
+    - `datasets()`: a static table of every dataset, with its summary, verbs, data sources, and
       the link to its columns; it needs no session and no API key.
     - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions; each one's
       `cause`, an `ErrorCause`, says whose problem it is: expected, a defect in the user's code
@@ -109,9 +110,7 @@ Public API:
     `deephaven_massive.queries`, for type annotations; this package does not import it.
 
 Attributes:
-    __version__: The installed distribution's version string, such as `"0.1.0"`. It comes from
-        the package metadata (`importlib.metadata`), so it always matches what pip or uv
-        installed.
+    __version__: The installed version, such as `"0.1.0"`, as pip or uv installed it.
 """
 
 from importlib import import_module as _import_module

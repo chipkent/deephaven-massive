@@ -650,7 +650,7 @@ class _Options(Namespace):
         listed beside the standard ones. To keep standard contracts only, join `contracts()` on
         `Symbol` and keep `SharesPerContract == 100` with a null or `[]` `AdditionalUnderlyings`.
         `snapshots(dm.ALL)` lists every contract of every underlying. A table of underlyings reads
-        each one's chain; a refreshing one is followed by `fetch()` and re-read by each `poll()`
+        each one's chain; a live one is followed by `fetch()` and re-read by each `poll()`
         cycle (https://github.com/chipkent/deephaven-massive/blob/main/README.md#option-chain).
 
         Args:
@@ -795,7 +795,7 @@ class _Options(Namespace):
                 contracts. `dm.ALL` is refused.
             underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
                 the rows' `Underlying` is the same canonical ticker. Or a table of them in a
-                `Symbol` column, each listed as if passed alone; a refreshing one is followed
+                `Symbol` column, each listed as if passed alone; a live one is followed
                 by `fetch()` and re-read by each `poll()` cycle. See
                 https://github.com/chipkent/deephaven-massive/blob/main/README.md#option-chain.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.

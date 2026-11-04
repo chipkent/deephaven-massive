@@ -289,8 +289,8 @@ class _Futures(Namespace):
     so it is safe to use from any thread; each method builds a query and never blocks.
 
     Futures symbols are contract tickers, such as `"ESZ5"` (the December 2025 E-mini S&P 500)
-    or `"GCJ5"` (April 2025 gold). Every streamed dataset uses the `/futures` WebSocket cluster
-    path; `venues` only picks the exchanges whose flat files `history()` reads.
+    or `"GCJ5"` (April 2025 gold). A futures stream carries every venue; `venues` only picks
+    the exchanges whose flat files `history()` reads.
 
     A contract trades only until its last trade date, so a live call needs a current one:
     `contracts()` lists them. The tickers in the examples of this namespace's methods have
@@ -475,7 +475,7 @@ class _Futures(Namespace):
             symbols: Contract tickers, a contracts table, or `dm.ALL`.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
                 for every product. A table of codes, in a `ProductCode` column, reads each code as
-                if passed alone; a refreshing one is followed by `fetch()` and re-read by each
+                if passed alone; a live one is followed by `fetch()` and re-read by each
                 `poll()` cycle.
             sort: Such as `"ticker"`.
             order: Needs `sort`.
@@ -537,7 +537,7 @@ class _Futures(Namespace):
                 refused.
             product_code: Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None
                 for every product. A table of codes, in a `ProductCode` column, reads each code as
-                if passed alone; a refreshing one is followed by `fetch()` and re-read by each
+                if passed alone; a live one is followed by `fetch()` and re-read by each
                 `poll()` cycle.
             as_of: The day whose specifications to list; None for today.
             sort: Such as `"ticker"`; the endpoint sorts by `product_code`.
@@ -604,7 +604,7 @@ class _Futures(Namespace):
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
-                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle.
+                alone; a live one is followed by `fetch()` and re-read by each `poll()` cycle.
             as_of: The day whose specifications to list; None for today.
             sort: Such as `"name"`; the endpoint sorts by `date`.
             order: Needs `sort`.
@@ -687,7 +687,7 @@ class _Futures(Namespace):
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
-                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle.
+                alone; a live one is followed by `fetch()` and re-read by each `poll()` cycle.
             limit: The most rows to return, in total.
 
         Returns:
@@ -731,7 +731,7 @@ class _Futures(Namespace):
         Args:
             product_code: Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every
                 product. A table of codes, in a `ProductCode` column, reads each code as if passed
-                alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle.
+                alone; a live one is followed by `fetch()` and re-read by each `poll()` cycle.
             start: The first session, by `SessionEndDate`, inclusive; a calendar date.
             end: The last session, inclusive; None also returns future sessions.
             sort: The endpoint sorts by `product_code`.

@@ -159,7 +159,7 @@ class _Economy(Namespace):
         Args:
             start: The first date; a calendar date only.
             end: The last date, inclusive; None also returns rows dated in the future.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`; it needs `sort`.
             limit: The total-row cap.
             filters: Further endpoint parameters.
@@ -206,7 +206,7 @@ class _Economy(Namespace):
         Args:
             start: The first date; a calendar date only.
             end: The last date, inclusive; None also returns rows dated in the future.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`; it needs `sort`.
             limit: The total-row cap.
             filters: Further endpoint parameters.
@@ -253,7 +253,7 @@ class _Economy(Namespace):
         Args:
             start: The first date; a calendar date only.
             end: The last date, inclusive; None also returns rows dated in the future.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`; it needs `sort`.
             limit: The total-row cap.
             filters: Further endpoint parameters.
@@ -300,7 +300,7 @@ class _Economy(Namespace):
         Args:
             start: The first date; a calendar date only.
             end: The last date, inclusive; None also returns rows dated in the future.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`; it needs `sort`.
             limit: The total-row cap.
             filters: Further endpoint parameters.
@@ -347,7 +347,7 @@ class _Economy(Namespace):
         Args:
             start: The first date; a calendar date only.
             end: The last date, inclusive; None also returns rows dated in the future.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`; it needs `sort`.
             limit: The total-row cap.
             filters: Further endpoint parameters.

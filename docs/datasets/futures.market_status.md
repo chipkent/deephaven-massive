@@ -22,7 +22,7 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `product_code` | Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
+| `product_code` | Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a live one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
 | `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
 
 ## Plan access

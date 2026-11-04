@@ -74,18 +74,15 @@ def canonicalize_symbols(
     converted column keeps its name. Each row converts as `canonical_symbol(value, asset_class,
     convention=convention)` would; a null stays null.
 
-    The table's current rows are checked in Python first, one call per distinct value; every
-    table is then converted by a formula (`Table.update`), on every row of a static table and
-    every row that ticks in a refreshing one. Under `OnError.LOG`, the default, a bad row gets
-    a null symbol, which every dataset ignores, and each bad value is logged once at WARNING,
-    at most 20 per table, so the table and every table that follows it keep updating; under
+    The table's current rows are checked when you call, and on a live table every row added
+    later converts as it arrives. Under `OnError.LOG`, the default, a bad row gets a null
+    symbol, which every dataset ignores, and each bad value is logged once at WARNING, at most
+    20 per table, so the table and every table made from it keep updating. Under
     `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. Under
-    `OnError.RAISE` a current bad value raises a clean `ValueError` here, and a later bad row
-    of a refreshing table fails the table, and a dataset reading it as a watchlist fails too.
-    This function's `on_error` is its own: a session's `MassiveConfig.noncanonical_symbols` does
-    not apply to it. Call it on a thread with a Deephaven execution context, as any table
-    operation; the result belongs to the caller's liveness scope. The conversion is pure, so
-    Deephaven may run it on several threads at once.
+    `OnError.RAISE`, a current bad value raises `ValueError` here, and a bad row added later
+    fails the live table, along with any dataset that follows it as a watchlist. This
+    function's `on_error` is its own: a session's `MassiveConfig.noncanonical_symbols` doesn't
+    apply to it.
 
     Example:
         ::
@@ -115,7 +112,7 @@ def canonicalize_symbols(
 
     Returns:
         A table with the same rows and columns, whose `column` holds canonical tickers (or
-        nulls): static for a static table, refreshing for a refreshing one.
+        nulls): static for a static table, live for a live one.
 
     Raises:
         ValueError: Under `OnError.RAISE`, if a current value of the table does not convert

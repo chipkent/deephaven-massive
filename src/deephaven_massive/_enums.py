@@ -100,8 +100,8 @@ class ClassFromPrefix(Enum):
 class Timespan(StrEnum):
     """The unit of a bar or an indicator window.
 
-    For `bars()` the timespan also selects the transport: `SECOND` and `MINUTE` (with
-    `multiplier=1`) stream over WebSocket, and every other combination is history only. The
+    For `bars()` the timespan also decides whether the bars can stream: `SECOND` and `MINUTE`
+    (with `multiplier=1`) stream over WebSocket, and every other combination is history only. The
     previous session's 1-day bar is not a `bars()` call: each namespace that has one serves it
     as `previous_day_bar()`. `SESSION` exists only for futures, whose aggregates endpoint has a
     trading-session unit and no `DAY`.
@@ -178,7 +178,7 @@ class HistorySource(StrEnum):
     - `AUTO`: the library picks flat files or REST from the S3 credentials, the dataset, the bar
       shape and `adjusted`, and the number of symbols (`flat_file_symbol_threshold`). A day whose
       file is missing, or files the plan lacks, are read from REST when REST can serve them.
-    - `REST`: the REST history endpoint, paged internally.
+    - `REST`: Massive's REST API, every page of it.
     - `FLAT_FILES`: the gzip CSV files on S3 (`files.massive.com`); needs S3 credentials.
 
     Example:
@@ -197,12 +197,12 @@ class HistorySource(StrEnum):
 class Reread(StrEnum):
     """Whether `history()` of a live symbol table downloads a symbol again when it returns.
 
-    A `history()` whose `symbols` is a refreshing table follows it: each symbol added later is
-    downloaded over the call's range, and a removed symbol's rows leave the result. This
-    setting decides what happens when a removed symbol comes back. No date or time rule can
-    tell that Massive's past data is final (late cancellations, rewritten flat files,
-    backfills, splits applied overnight), so there is no automatic member. It has no effect
-    when `symbols` is not a refreshing table.
+    A `history()` whose `symbols` is a live table, a watchlist, follows it: each symbol added later
+    is downloaded over the call's range, and a removed symbol's rows leave the result. This setting
+    decides what happens when a removed symbol comes back. No date or time rule can tell that
+    Massive's past data is final (late cancellations, rewritten flat files, backfills, splits
+    applied overnight), so there is no automatic member. It has no effect when `symbols` is not a
+    live table.
 
     - `ALWAYS` (the default): the returning symbol is downloaded again and shows Massive's
       current answer. It has no rows until the new download lands.
@@ -354,7 +354,7 @@ class Market(StrEnum):
 class TickerType(StrEnum):
     """The type code of a ticker, which `m.reference.tickers` filters by.
 
-    The values are Massive's codes, upper case as on the wire; `m.reference.ticker_types()`
+    The values are Massive's codes, upper case as Massive spells them; `m.reference.ticker_types()`
     lists them with their descriptions.
 
     Example:
@@ -424,7 +424,7 @@ class ConditionDataType(StrEnum):
 class Sip(StrEnum):
     """The securities information processor a condition code belongs to.
 
-    The values are upper case because Massive's wire values are.
+    The values are upper case, as Massive spells them.
 
     Example:
         ::
@@ -526,15 +526,15 @@ class Subscription(StrEnum):
     """One of Massive's five subscriptions, each bought, and rate-limited, on its own.
 
     Massive sells market data as five subscriptions, one per asset class, with no bundle and
-    no account-wide plan; forex and crypto share one, `CURRENCIES`. Each is on a tier of its
-    own, and the tier sets its REST request limit: the free Basic tier allows 5 requests per
-    minute, and every paid tier has no request limit. All the API keys of an account share the
-    limits. Declare the subscriptions on Basic in `MassiveConfig.rest_basic_subscriptions` so
-    their requests are paced from the first one; otherwise the library learns it from
-    Massive's first refusal. `m.rate_limits()` shows each one's state. Reference data and the
-    other datasets Massive assigns to no subscription (economy, partner data, the unified
-    snapshot) are counted in a bucket of their own, `other`, which no setting declares but
-    which the library paces once Massive's refusal shows its limit.
+    no account-wide plan; forex and crypto share one, `CURRENCIES`. Each has a plan of its
+    own, such as Stocks Basic or Options Starter, and the plan sets its REST request limit: a
+    free Basic plan allows 5 requests per minute, and every paid plan has no request limit. All the
+    API keys of an account share the limits. Declare the subscriptions on Basic in
+    `MassiveConfig.rest_basic_subscriptions` so their requests are paced from the first one;
+    otherwise the library learns the limit from Massive's first refusal. `m.rate_limits()` shows
+    each one's state. Reference data and the other datasets Massive assigns to no subscription
+    (economy, partner data, the unified snapshot) are counted in a bucket of their own, `other`,
+    which no setting declares but which the library paces once Massive's refusal shows its limit.
 
     Example:
         ::

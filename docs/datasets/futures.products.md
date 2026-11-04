@@ -24,7 +24,7 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `product_code` | Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
+| `product_code` | Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a live one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
 | `as_of` | The day whose specifications to list; None for today. | The day to read the data as it stood on, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. Leave it out for today's state. How far back you can go depends on your plan; this page's plan table says how much history each plan holds. |
 | `sort` | Such as `"name"`; the endpoint sorts by `date`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
 | `order` | Needs `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
