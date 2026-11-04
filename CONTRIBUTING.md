@@ -46,8 +46,10 @@ User documentation has three parts:
   line for an argument from its method's docstring.
 
 [`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: the project
-section (readers, owner requirements, install decision, page map), the rules, the AI tells, the
-section models, the terminology, and the rubric and pass bar.
+section (readers and their pains, owner requirements, page map, install facts, teaching plan),
+the rules (sources for every fact, scope, the hook, headings, teaching, sentences, AI tells,
+terminology), the section models, and the pass bar the `writing-user-docs` skill's editor
+grades against.
 `tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
 Docstrings cite a page or section by its full GitHub URL, so the link opens from an IDE or
 the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page,

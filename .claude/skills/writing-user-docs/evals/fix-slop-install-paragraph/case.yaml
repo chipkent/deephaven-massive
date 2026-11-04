@@ -1,6 +1,8 @@
 schema_version: "1.1"
 name: fix-slop-install-paragraph
 expected_outcome: |
-  install-fixed.md keeps every fact of the original (or names where a moved fact went), turns the requirements into a list and the commands into numbered steps, puts the key warning in the step that sets the key, puts the password fallback under the server step, and passes the editor's rubric without reading as AI.
+  install-fixed.md turns the paragraph into prerequisites and numbered steps, one action each, keeps
+  every sourced fact an installing reader needs, drops the unsourced and forbidden ones and says so,
+  sets the key before the server starts, offers pip or uv up front, and passes the calibrated editor.
 context:
   scaffold_script: place-files.sh

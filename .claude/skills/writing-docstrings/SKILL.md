@@ -60,8 +60,9 @@ fails on a cited page or anchor that does not exist, and on a bare path instead 
 
 - Examples are real code that runs against the documented API.
 - Never restate the signature, use filler ("This function…"), or leave a term undefined.
-- Use the terminology table of `docs/dev/user-docs.md`: "server", never "worker", for the
-  Deephaven process; "Deephaven IDE", never "web UI"; `last_by` is an aggregation.
+- Pass the terminology test of `docs/dev/user-docs.md`: use the word of the community that
+  owns the concept, Massive's for its data and Deephaven's for its tables ("server", never
+  "worker"; "Deephaven IDE", never "web UI"; `last_by` is an aggregation).
 - Never cite a decision number or a planning document; state the behavior or the reason.
 - Describe the code as it is now, never how it used to be: a docstring is not a changelog.
 - Configuration text is documentation too: config comments, pytest marker descriptions

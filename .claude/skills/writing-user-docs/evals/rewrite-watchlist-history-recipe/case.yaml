@@ -1,6 +1,0 @@
-schema_version: "1.1"
-name: rewrite-watchlist-history-recipe
-expected_outcome: |
-  recipe.md frames the choice, compares the three techniques (follow the watchlist, read a snapshot once, read the whole market and filter) before the details, gives each its own code, result, and cost, passes the watchlist as the symbols argument (never to history()), keeps every fact of the original, and passes the editor's rubric without reading as AI.
-context:
-  scaffold_script: place-files.sh

@@ -131,8 +131,9 @@ from the message alone. Fix those before sending.
   ("yes, yes, no").
 - Never forward a subagent's or reviewer's question as written: rewrite it to this standard, or
   decide it under section 1 and list it under **Decided**.
-- None of the AI tells in `docs/dev/user-docs.md#ai-tells` (meta-commentary, filler negation,
-  coined jargon, precision theater, so-chains, hype words, colon reveals).
+- None of the AI tells in `docs/dev/user-docs.md#ai-tells` (asides, stacked "such as" and
+  "which" clauses, repetition, invented numbers, meta-commentary, false contrasts, hype words,
+  colon reveals).
 - When the owner must read a file, send it (SendUserFile) rather than citing a path.
 
 ## 6. Status reports

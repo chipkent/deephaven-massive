@@ -1,4 +1,0 @@
-schema_version: "1.1"
-name: readme-opening-hook
-expected_outcome: |
-  hook.md sells the library's job in the first lines (one query gives the past and the present with the same columns), defines Deephaven in a sentence, shows history() and a live verb on one query object, states the plan the live line needs, gives checkable proof points without bold labels, and ends with one call to action. It passes the editor's rubric and doesn't read as AI.

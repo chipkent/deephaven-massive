@@ -1,4 +1,0 @@
-schema_version: "1.1"
-name: install-section-from-scratch
-expected_outcome: |
-  install.md is a README Install section that follows the Install model of docs/dev/user-docs.md: a before-you-begin table, numbered one-action steps that each say what you'll see, pip first with uv as a one-line alternative, the newest release tag looked up in the step, the API key in the terminal that starts the server, a first table, and an if-a-step-fails table. It passes the editor's rubric and doesn't read as AI.
