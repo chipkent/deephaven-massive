@@ -191,9 +191,10 @@ pip install deephaven-server "deephaven-massive @ git+https://github.com/chipken
   `--pre` while only release candidates exist, and the GitHub prerequisites go.
 - Link to a release as `https://github.com/chipkent/deephaven-massive/releases/latest`. A
   version string shown in the docs is marked as an example.
-- The prerequisites are the Python and Java versions in `pyproject.toml` and Deephaven's own
-  install page, a Massive API key in `MASSIVE_API_KEY`, and, while the repository is private,
-  git, the GitHub CLI, and access from Chip Kent.
+- The prerequisites are the Python version in `pyproject.toml`; the Java version on Deephaven's
+  own install page, with `JAVA_HOME` set (Deephaven's server reads it first); a Massive API key
+  in `MASSIVE_API_KEY`; and, while the repository is private, git, the GitHub CLI, and access
+  from Chip Kent.
 - `deephaven server` opens the Deephaven IDE in the browser, already signed in, and prints a
   line that starts `Deephaven is running at`.
 - The settings a new user needs, in Configuration, are `rest_basic_subscriptions` and
