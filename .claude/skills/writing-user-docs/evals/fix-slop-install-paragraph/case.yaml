@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: fix-slop-install-paragraph
+expected_outcome: |
+  install-fixed.md keeps every fact of the original (or names where a moved fact went), turns the requirements into a list and the commands into numbered steps, puts the key warning in the step that sets the key, puts the password fallback under the server step, and passes the editor's rubric without reading as AI.
+context:
+  scaffold_script: place-files.sh
