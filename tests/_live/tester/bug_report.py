@@ -1,7 +1,7 @@
 """The tester's bug report bundle: the logs, the diagnostics, and the machine, in one clean zip.
 
 When something goes wrong, `docs/tester-guide.md` asks the tester to save the session's
-diagnostics tables (the example `25_save_diagnostics.py`), write the report from the guide's
+diagnostics tables (the example `24_save_diagnostics.py`), write the report from the guide's
 template into `bug-report.md`, and run `uv run python scripts/tester.py bug-report`. That
 command calls `build_bundle`, which collects from the tester's folder (`~/massive-test` by
 default):
