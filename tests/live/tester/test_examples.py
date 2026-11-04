@@ -361,6 +361,8 @@ def test_the_guide_shows_each_example_exactly_as_its_file() -> None:
     files = {
         int(p.name[:2]): p.read_text(encoding="utf-8") for p in examples.example_files(EXAMPLES)
     }
+    # Two files with one number would collapse into one key, so count the files too.
+    assert len(files) == len(examples.example_files(EXAMPLES))
     assert blocks == files
 
 

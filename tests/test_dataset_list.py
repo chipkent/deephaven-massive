@@ -166,6 +166,31 @@ def test_a_dataset_without_a_method_or_a_method_without_a_dataset_fails(
         dataset_calls()
 
 
+def test_every_argument_of_every_dataset_is_described() -> None:
+    undescribed = [
+        f"{name}: {argument}"
+        for name, call in dataset_calls().items()
+        for argument, text in zip(call.arguments, call.descriptions, strict=True)
+        if not text
+    ]
+    assert undescribed == []
+
+
+def test_an_args_section_that_ends_the_docstring_keeps_its_last_entry() -> None:
+    def documented(symbols: object, limit: object) -> None:
+        """Read rows.
+
+        Args:
+            symbols: The symbols.
+            limit: The most rows.
+        """
+
+    assert _dataset_list._argument_lines(documented) == {
+        "symbols": "The symbols.",
+        "limit": "The most rows.",
+    }
+
+
 def test_a_method_without_an_args_section_has_no_argument_lines() -> None:
     def undocumented(self: object, symbols: object) -> None:
         """Read nothing."""

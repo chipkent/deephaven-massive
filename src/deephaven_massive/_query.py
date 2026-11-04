@@ -1553,8 +1553,7 @@ class StreamQuery(QueryBase):
                 `noncanonical_symbols=OnError.RAISE`; if options contracts listed in code would put
                 more than 1,000 topics on the options connection; or for a fair-market-value
                 stream of a subscription in `MassiveConfig.delayed_subscriptions`, since FMV is
-                real-time only;
-                or if `capacity` is outside 1 to 2**31 - 1.
+                real-time only; or if `capacity` is outside 1 to 2**31 - 1.
             AuthenticationError: If Massive rejects your API key when the stream first opens.
             EntitlementError: If Massive shows that your plan's data for this dataset is delayed
                 and its subscription isn't in `MassiveConfig.delayed_subscriptions`; the message
@@ -1653,9 +1652,8 @@ class StreamQuery(QueryBase):
                 `noncanonical_symbols=OnError.RAISE`; if options contracts listed in code would put
                 more than 1,000 topics on the options connection; or for a fair-market-value
                 stream of a subscription in `MassiveConfig.delayed_subscriptions`, since FMV is
-                real-time only;
-                or if `by` is empty, repeats a column, or names a column the dataset doesn't
-                have.
+                real-time only; or if `by` is empty, repeats a column, or names a column the
+                dataset doesn't have.
             AuthenticationError: If Massive rejects your API key when the stream first opens.
             EntitlementError: If Massive shows that your plan's data for this dataset is delayed
                 and its subscription isn't in `MassiveConfig.delayed_subscriptions`; the message

@@ -17,7 +17,8 @@ applies them exactly as that step does, one changed path at a time:
 - A path that no rule covers runs everything, so a new kind of input fails closed.
 - A path the `test` pattern matches runs the whole suite.
 - A path the `docs` pattern matches (the user pages, `README.md` and
-  `docs/troubleshooting.md`, their images, and the tester guide) runs the documentation tests,
+  `docs/troubleshooting.md`, their images, the tester guide, and its examples) runs the
+  documentation tests,
   `tests/test_docs.py` and `tests/live/tester/test_examples.py`, as CI's `docs` job does.
 - Otherwise CI runs no tests, and the local check runs ruff, format, and mypy. CI runs ruff
   and mypy on every change it lints, and the local check runs them on every change, so it

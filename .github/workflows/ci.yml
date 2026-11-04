@@ -91,11 +91,12 @@ jobs:
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
           # The user pages (README.md and docs/troubleshooting.md, with the images under
-          # docs/assets/) and the tester guide: tests/test_docs.py runs the user pages' examples
-          # and checks their links, and tests/live/tester/test_examples.py checks the tester
-          # guide's code blocks. A change to these alone runs only those two tests, on one Python
+          # docs/assets/), the tester guide, and its examples under docs/tester-examples/:
+          # tests/test_docs.py runs the user pages' examples and checks their links, and
+          # tests/live/tester/test_examples.py runs the tester examples and checks that the guide
+          # shows each one. A change to these alone runs only those two tests, on one Python
           # version.
-          docs='^README\.md$|^docs/troubleshooting\.md$|^docs/assets/|^docs/tester-guide\.md$'
+          docs='^README\.md$|^docs/troubleshooting\.md$|^docs/assets/|^docs/tester-guide\.md$|^docs/tester-examples/'
           # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes

@@ -229,9 +229,9 @@ def disable_debug_logging() -> None:
     is off, removes the output either switch added, and sets the `deephaven_massive` logger's
     level back to `NOTSET`. WARNING and ERROR records then reach stderr through Python's
     last-resort handler, as they do at import, and lower levels are dropped. A handler you
-    added to the logger yourself stays, but its level is reset. A later first session doesn't
-    turn the log back on from the environment variables; `enable_debug_logging()` does. With
-    the log already off, it changes nothing.
+    added yourself stays, but the logger's level goes back to `NOTSET` even if you set it. A
+    later first session doesn't turn the log back on from the environment variables;
+    `enable_debug_logging()` does. With the log already off, it changes nothing.
 
     Example:
         ::

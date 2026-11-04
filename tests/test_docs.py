@@ -61,7 +61,6 @@ own Deephaven server, or one that reads flat files, which needs S3 keys the fake
 """
 
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
-_YAML_BLOCK = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
 """The prefix of every section citation in a docstring: the user pages on GitHub's main branch."""
@@ -362,6 +361,14 @@ def _anchors(page: Path) -> list[str]:
     return _ANCHOR.findall(page.read_text(encoding="utf-8"))
 
 
+def _heading_slugs(page: Path) -> set[str]:
+    """Return the anchors GitHub makes from a page's Markdown headings, such as `plan-access`."""
+    headings = re.findall(r"^#+ (.+)$", page.read_text(encoding="utf-8"), re.MULTILINE)
+    return {
+        re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-") for heading in headings
+    }
+
+
 def _sources() -> dict[str, str]:
     """Return the text of every library module, by its path from the repository root."""
     return {
@@ -421,8 +428,9 @@ def test_the_citations_are_found() -> None:
 
 @pytest.mark.parametrize("page", [*USER_PAGES, TESTER_GUIDE], ids=_name)
 def test_every_relative_link_resolves(page: Path) -> None:
-    # A link to a user page must name one of its explicit anchors, if any; a link to any other
-    # file must name a file that exists.
+    # A link to a user page must name one of its explicit anchors, if any; a link into another
+    # Markdown page, such as a generated dataset page, an explicit anchor or a heading's anchor;
+    # a link to any other file must name a file that exists.
     user_pages = {path.resolve() for path in USER_PAGES}
     broken = []
     for target in _LINK.findall(page.read_text(encoding="utf-8")):
@@ -430,7 +438,13 @@ def test_every_relative_link_resolves(page: Path) -> None:
             continue
         path, _, anchor = target.partition("#")
         file = (page.parent / path).resolve() if path else page.resolve()
-        if not file.exists() or (anchor and file in user_pages and anchor not in _anchors(file)):
+        if file in user_pages:
+            known = set(_anchors(file))
+        elif file.suffix == ".md" and file.exists():
+            known = {*_anchors(file), *_heading_slugs(file)}
+        else:
+            known = set()
+        if not file.exists() or (anchor and file.suffix == ".md" and anchor not in known):
             broken.append(target)
     assert broken == []
 
@@ -620,4 +634,9 @@ def test_the_split_recipe_adjusts_as_traded_bars_like_massive(
     assert [r["Factor"] for r in by_hand] == pytest.approx([1 / 15, 1.0])
     assert [r["AdjustedClose"] for r in by_hand] == pytest.approx([r["Close"] for r in massive])
     assert [r["AdjustedVolume"] for r in by_hand] == pytest.approx([15_000, 30_000])
+    # The first read asks Massive for adjusted bars, and the second for bars as traded.
+    assert [r.target.partition("?")[2] for r in readme_server.requests][:2] == [
+        "adjusted=true&limit=50000&sort=asc",
+        "adjusted=false&limit=50000&sort=asc",
+    ]
     names.clear()

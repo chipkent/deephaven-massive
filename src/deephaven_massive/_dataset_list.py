@@ -128,8 +128,9 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
 _AS_OF: Final = "as_of"
 """The shared argument for the day a reference list is read as of, which sets `date`."""
 
-_ARGS_SECTION: Final = re.compile(r"^Args:\n((?:[ \t].*\n|\n)*)", re.MULTILINE)
-"""A docstring's `Args` section: the `Args:` line and every indented or blank line after it."""
+_ARGS_SECTION: Final = re.compile(r"^Args:\n((?:[ \t].*(?:\n|$)|\n)*)", re.MULTILINE)
+"""A docstring's `Args` section: the `Args:` line and every indented or blank line after it,
+the docstring's last line included, which `inspect.getdoc` leaves without a newline."""
 
 _ARGS_ENTRY: Final = re.compile(r"^    (\w+): (.*)$")
 """One argument's first line in an `Args` section: its name, then the start of its text."""

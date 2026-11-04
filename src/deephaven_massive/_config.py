@@ -234,7 +234,7 @@ class MassiveConfig:
             cycles have kept failing, or a late cycle has received nothing, for this long. Until
             then, `m.streams()` says so in `Error`. Call the verb again for a new table. `0` fails
             at the first drop or failed cycle. Defaults to 300 seconds. See
-            https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
