@@ -7,9 +7,9 @@ fake REST and WebSocket servers, so nothing reaches Massive. Every block therefo
 own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
 the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
-be. Three README sections also run alone against scripted replies, and the tests check that
+be. Four README sections also run alone against scripted replies, and the tests check that
 their tables hold what the README says they hold: the whole-market day, the live board against
-yesterday's close, and the backfill of today's minutes.
+yesterday's close, the backfill of today's minutes, and the split adjustment.
 
 The docstrings link instead of repeating. A docstring cites a page, or a section of a user page,
 by its full GitHub URL, `DOCS_URL` followed by the page's path from the repository root and,
@@ -286,7 +286,16 @@ def _forget(namespaces: Sequence[dict[str, Any]]) -> None:
 
 #: Tables each page's examples promise, by page.
 _PROMISED: dict[str, tuple[str, ...]] = {
-    "README.md": ("week", "busiest", "since_start", "board", "spy", "near_quotes", "mine"),
+    "README.md": (
+        "week",
+        "busiest",
+        "since_start",
+        "board",
+        "spy",
+        "near_quotes",
+        "mine",
+        "by_hand",
+    ),
     "docs/troubleshooting.md": ("streams",),
 }
 
@@ -426,7 +435,7 @@ def test_every_relative_link_resolves(page: Path) -> None:
     assert broken == []
 
 
-# --- Three sections, against scripted data -----------------------------------------------------
+# --- Four sections, against scripted data ------------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
@@ -531,6 +540,12 @@ def test_the_live_board_example_compares_each_minute_with_yesterday(
     readme_server.reply_default(Reply(envelope([])))
     [block] = _section_blocks(README, "live-board")
     [names] = _run_blocks([block], tmp_path, "live_board", console_command=console_command)
+    # Each stock with a bar yesterday has its row before its first minute bar, with no close.
+    before = {r["Symbol"]: r for r in dh_to_pylist(names["board"])}
+    assert {s: (r["Close"], r["PrevClose"]) for s, r in before.items()} == {
+        "AAPL": (None, 200.0),
+        "MSFT": (None, 400.0),
+    }
     fake_ws_server.wait_for(
         lambda server: any(
             "AM.AAPL" in json.loads(frame).get("params", "")
@@ -559,4 +574,50 @@ def test_the_live_board_example_compares_each_minute_with_yesterday(
     }
     assert board["AAPL"]["ChangePct"] == pytest.approx(5.0)
     assert board["MSFT"]["ChangePct"] == pytest.approx(-5.0)
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_split_recipe_adjusts_as_traded_bars_like_massive(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # ORLY's last day before its 15-for-1 split, and its first day after; both reads ask for
+    # the same path, adjusted first, as the recipe reads them.
+    path = (
+        f"/v2/aggs/ticker/ORLY/range/1/day/{_ms('2025-06-03T04:00:00')}/"
+        f"{_ms('2025-06-14T04:00:00') - 1}"
+    )
+    adjusted = [_bar("2025-06-09", 1350.0 / 15, 15_000), _bar("2025-06-10", 91.0, 30_000)]
+    traded = [_bar("2025-06-09", 1350.0, 1_000), _bar("2025-06-10", 91.0, 30_000)]
+    readme_server.reply(
+        path,
+        Reply(envelope(adjusted, adjusted=True, ticker="ORLY")),
+        Reply(envelope(traded, adjusted=False, ticker="ORLY")),
+    )
+    split = {
+        "adjustment_type": "forward_split",
+        "execution_date": "2025-06-10",
+        "historical_adjustment_factor": 1 / 15,
+        "id": "orly-2025",
+        "split_from": 1,
+        "split_to": 15,
+        "ticker": "ORLY",
+    }
+    readme_server.reply("/stocks/v1/splits", Reply(envelope([split])))
+    [block] = _section_blocks(README, "split-adjustment")
+    [names] = _run_blocks([block], tmp_path, "split", console_command=console_command)
+
+    traded_closes = [(r["Date"], r["Close"]) for r in dh_to_pylist(names["traded"])]
+    assert traded_closes == [("2025-06-09", 1350.0), ("2025-06-10", 91.0)]
+    massive = dh_to_pylist(names["adjusted"])
+    by_hand = dh_to_pylist(names["by_hand"])
+    assert [r["Date"] for r in by_hand] == [r["Date"] for r in massive]
+    # The bar before the split takes its factor; the bar on the execution date keeps 1.
+    assert [r["Factor"] for r in by_hand] == pytest.approx([1 / 15, 1.0])
+    assert [r["AdjustedClose"] for r in by_hand] == pytest.approx([r["Close"] for r in massive])
+    assert [r["AdjustedVolume"] for r in by_hand] == pytest.approx([15_000, 30_000])
     names.clear()
