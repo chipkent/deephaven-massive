@@ -8,9 +8,10 @@ reaches Massive. A guide page opens with a line naming what its examples assume,
 the session, and that code runs first. `dm.MassiveSession()` builds a new session whose REST
 client talks to the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
-be. Three sections also run alone against scripted replies, and the tests check that their
-tables hold what the pages say they hold: the README's whole-market day and its live board
-against yesterday's close, and split adjustment (NVDA's 10-for-1 split of 2024-06-10).
+be. Four sections also run alone against scripted replies, and the tests check that their
+tables hold what the pages say they hold: the README's whole-market day, its live board
+against yesterday's close, and its backfill of today's minutes, and split adjustment (NVDA's
+10-for-1 split of 2024-06-10).
 
 The docstrings link instead of repeating. A shared argument or concept cites a section by its
 full GitHub URL, `DOCS_URL` followed by `README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`,
@@ -503,10 +504,8 @@ def test_every_relative_link_resolves(page: Path) -> None:
 def test_the_split_adjustment_examples_run(
     *,
     readme_server: FakeRestServer,
-    fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # The whole New York days of 2024-06-03 to 2024-06-14, as the range path's `{from}/{to}`.
@@ -549,14 +548,11 @@ def test_the_split_adjustment_examples_run(
             )
         ),
     )
-    # The backfill example also reads SPY's minutes of today, which answer an empty page.
-    readme_server.reply_default(Reply(envelope([])))
     blocks = _section_blocks(GUIDE / "history.md", "split-adjustment")
     assert len(blocks) == 2
-    [recipe] = _section_blocks(README, "backfill-then-live")
-    # The sections continue from the import and the session the guide's preamble names.
+    # The section continues from the import and the session the guide's preamble names.
     names = _run_blocks(
-        [PREAMBLE_CODE, *blocks, recipe],
+        [PREAMBLE_CODE, *blocks],
         tmp_path,
         "split_adjustment",
         console_command=console_command,
@@ -577,60 +573,59 @@ def test_the_split_adjustment_examples_run(
         "adjusted=true&limit=50000&sort=asc",
         "adjusted=false&limit=50000&sort=asc",
     ]
-    _history_and_live_merges_history_with_live_bars(
-        readme_server=readme_server,
-        fake_ws_server=fake_ws_server,
-        history_and_live=names["history_and_live"],
-        dh_to_pylist=dh_to_pylist,
-        monkeypatch=monkeypatch,
-    )
     _forget(names)
 
 
-def _history_and_live_merges_history_with_live_bars(
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_backfill_example_merges_history_with_live_bars(
     *,
     readme_server: FakeRestServer,
     fake_ws_server: FakeMassiveServer,
-    history_and_live: Callable[[str, str], Table],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # 2024-06-14 at 15:00 New York time: history reads that day's finished minutes over REST,
     # then the stream appends the live ones.
     now = datetime(2024, 6, 14, 19, tzinfo=UTC)
     monkeypatch.setattr(history_source, "_now", lambda: now)
+    monkeypatch.setattr("deephaven.time.dh_today", lambda *_: "2024-06-14")
     opened = _ms("2024-06-14T13:30:00")  # 09:30 New York time
     # An open end reads through the end of today; the bars not yet ended are dropped.
     path = (
-        f"/v2/aggs/ticker/NVDA/range/1/minute/{_ms('2024-06-14T04:00:00')}/"
+        f"/v2/aggs/ticker/SPY/range/1/minute/{_ms('2024-06-14T04:00:00')}/"
         f"{_ms('2024-06-15T04:00:00') - 1}"
     )
-    minute = {**_bar("2024-06-14", 131.0, 1_000), "t": opened}
-    readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="NVDA")))
-    table = history_and_live("NVDA", "2024-06-14")
+    minute = {**_bar("2024-06-14", 541.0, 1_000), "t": opened}
+    readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="SPY")))
+    [block] = _section_blocks(README, "backfill-then-live")
+    names = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
     fake_ws_server.wait_for(
         lambda server: any(
-            "AM.NVDA" in json.loads(frame).get("params", "")
+            "AM.SPY" in json.loads(frame).get("params", "")
             for connection in server.connections
             for frame in connection.frames
         )
     )
-    live = {"ev": "AM", "sym": "NVDA", "v": 5, "o": 132.0, "c": 132.0, "h": 132.0, "l": 132.0}
+    live = {"ev": "AM", "sym": "SPY", "v": 5, "o": 542.0, "c": 542.0, "h": 542.0, "l": 542.0}
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     # Bounded wait for the flush thread and an update-graph cycle to append the live bar.
     pace = threading.Event()  # never set; only paces the loop
-    rows = dh_to_pylist(table)
+    rows = dh_to_pylist(names["spy"])
     for _ in range(500):
         if len(rows) == 2:
             break
         pace.wait(0.02)
-        rows = dh_to_pylist(table)
-    assert [(r["Symbol"], r["Close"]) for r in rows] == [("NVDA", 131.0), ("NVDA", 132.0)]
+        rows = dh_to_pylist(names["spy"])
+    # Today's minute from history, then the live minute after it, oldest first.
+    assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
         datetime(2024, 6, 14, 19, tzinfo=UTC),
     ]
+    names.clear()
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
