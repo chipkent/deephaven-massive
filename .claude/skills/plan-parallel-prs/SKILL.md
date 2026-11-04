@@ -1,106 +1,80 @@
 ---
 name: plan-parallel-prs
-description: "Use this skill whenever you coordinate work split across several agents or PRs at once: planning which agent does what, writing their briefs, setting a merge order, running their reviews, or reporting to the owner which PRs are ready. That includes requests such as \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", and \"which PRs can merge?\". It maps where the pieces overlap, groups them into PRs, stacks overlapping PRs in a set merge order, reserves decision and verification-item numbers, gives every brief the same checklist, and runs one blockers-only review per PR. Not for an agent doing one PR (the working-in-parallel skill covers that), and not for writing a single PR description."
+description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks only what must stack, reserves decision and verification-item numbers, writes short briefs, and runs one blockers-only review per PR. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
 ---
 
 # Planning parallel PRs
 
-Parallel agents save time only when their PRs do not collide. On 2026-11-02, four PRs changed
-the same ingest module and the design and merged in no set order; one PR merged `main` four
-times, each a full check and a paid CI run; decision numbers collided again and
-again; and reviews found blockers that a line in the brief would have prevented. Plan before
-any agent starts.
+Parallel agents save time only when their PRs do not collide. When four PRs changed the same
+module and merged in no set order, one of them merged `main` four times, each a full check and a
+paid CI run, and decision numbers collided again and again. The owner also wants everything
+started at once, not staged: plan the collisions, then launch.
 
 ## 1. Map the overlap
 
-For each piece of work, list what it will change:
+For each piece of work, and each open PR already in flight (`gh pr list`,
+`gh pr diff <n> --name-only`), list the files, the user-doc pages and sections, and any new
+decision or verification item it adds. Open issues are not parked: each one gets an agent, a PR,
+a close reason, or a named owner question.
 
-| Piece | Files | User-doc pages and sections | New decisions or verification items |
-|---|---|---|---|
+## 2. Group into PRs by content
 
-Include the open PRs already in flight (`gh pr list`, `gh pr diff <n> --name-only`).
-
-## 2. Group by content
-
-- One PR holds related content; justify each piece by the change it serves.
-- Two changes to the same code path go in one PR, never two.
-- Unrelated pieces stay in separate PRs, even when they are small.
+One PR holds one coherent change and everything it needs. Two changes to the same code path go
+in one PR. Unrelated pieces stay separate, however small; never split or merge PRs only by size.
 
 ## 3. Set the merge order
 
-- For PRs that share a file or section, fix the order now and plan them as one GitHub native
-  stack. A stack is a single chain, so a PR that two others need sits below both.
-- Each later PR branches from the branch of the PR below it, opens against that branch, and
-  joins the stack with `gh stack link <every PR in the stack, bottom to top>`.
-- The owner merges from the bottom up. After each merge, GitHub re-targets the next PR and
-  rebases its branch; its agent pulls that branch. When a conflict stops GitHub's rebase, the
-  agent merges the PR's base branch, resolves the conflict, and explains the resolution in the
-  PR body. No agent force-pushes or rebases a pushed branch.
-- Tell the owner the order, with each PR's number, in one list.
+- PRs that share a file get a fixed merge order, told to the owner as one list ("merge #A, then
+  #B").
+- Stack a PR on another (GitHub native stacks, `gh stack link`, bottom to top) only when it
+  needs the other's content. A squash merge still leaves the upper PR conflicting, so a stack
+  costs one `main` merge per upper PR; a PR that merely shares a file branches from `main` and
+  merges `main` once when its turn comes.
+- When a PR renames a public name, tell every open agent the new name; the second PR to land
+  merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
+- Agents never force-push or rebase a pushed branch. Conflicts are resolved by the owning agent
+  with a written rationale; the coordinator never pushes or resolves one itself.
 
-## 4. Reserve decision and verification-item numbers
+## 4. Reserve numbers
 
-Decisions live in `docs/dev/decisions.md` and verification items in
-`docs/dev/verification-items.md`. Take the highest of each on `main` and in
-every open PR's diff, and give each PR that adds one its own next numbers, in merge order. Put
-them in the brief.
+Take the highest decision number in `docs/dev/decisions.md` and verification-item number in
+`docs/dev/verification-items.md`, on `main` and in every open PR's diff, and assign each PR that
+adds one its own next numbers, in merge order.
 
-## 5. Brief checklist
+## 5. Launch
 
-Every agent brief includes:
+Run at most about seven coding agents at once: each pre-push hook runs the full suite, and
+sixteen at once overloaded the machine until nothing merged. Read-only agents don't count.
+Prioritize what blocks the current goal.
 
-- **Rules most often missed**, from `AGENTS.md`:
-  - 9: a contract change is an owner decision, with a `decisions.md` entry and matching README,
-    docstring, and test changes;
-  - 19: an enum member selects a mode, never `None`;
-  - 22: log each decision and failure with its values, never a secret;
-  - 23: supply Massive's data, never repair it;
-  - 24: one bad symbol or row is logged and skipped under its own `OnError` setting, and never
-    fails the table.
-- **The Deephaven invariants** section of `AGENTS.md`, for any change that runs off the caller's
-  thread, takes a lock, or creates a live table.
-- **The skills to follow**: `working-in-parallel`, and `writing-tests` or `writing-docstrings`
-  when the work touches tests or documentation.
-- **The pre-push hook is the check**: never run `./scripts/check.sh` before a push.
-- **The base branch**: `origin/main`, or the branch of the PR below it in its stack, and the
-  stack's PR numbers, bottom to top.
-- **The reserved numbers**, or "none".
-- **The PR-description standard**: `docs/dev/pull-requests.md`, including the reserved number.
-- **Keep context small**: the rules of the next section, copied in.
+Each agent reads `AGENTS.md` and the project skills on its own, so a brief does not restate them.
+A brief says only what the agent cannot know:
 
-## 6. Keep context small
+- the goal, the issue it closes, and what is out of scope;
+- the base branch (`origin/main`, or the branch below it in its stack) and the stack's PR
+  numbers, bottom to top;
+- the reserved decision or verification-item numbers, or "none";
+- the files other agents are changing at the same time, and any rename in flight;
+- the owner decisions it must follow, quoted or linked, and anything only this task has learned;
+- whether to stop at a local commit and report, or open the PR (and when to push).
 
-Almost all of an agent's cost is context re-read on every turn: one analysis found 1.48 billion
-cached tokens re-read against 0.5 million of output. Put these rules into every brief:
+## 6. Review and readiness
 
-- **Read only what the task needs**: `grep -n`, then the exact section with an offset and limit,
-  never a whole large file.
-- **Quiet commands**: `pytest -q`, `| tail -n 40`, `git diff --stat` before a full diff, and
-  `gh pr checks` summarized. Write a large output to a scratch file; read only what you need.
-- **Never re-read a file you just edited.**
-- **A fresh agent for each new round**: after a review, start a new agent with a short brief
-  instead of resuming a long-running one. Resume only for a small follow-up.
-- **The coordinator** keeps its own turns short and starts a fresh session at each phase change,
-  with a handover note.
+1. When a PR's CI passes, run one independent review that reports blockers only: wrong
+   behavior, data loss, a crash, or a rule violation. The reviewer acts as a top-1% developer
+   who flags design smells first.
+2. Low findings go into one follow-up issue, which is worked right away, never into another
+   push of the PR under review. Re-review only the fix to a blocker.
+3. A PR is ready when CI is green, GitHub reports it mergeable, every review thread (the
+   owner's included) has a reply, its issue is in `closingIssuesReferences`, and its blockers
+   are fixed. Check each live before saying so.
+4. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
+   with the `writing-to-the-owner` skill.
 
-## 7. Review loop
+## 7. Keep cost down
 
-1. As soon as a PR's CI passes, run one review that reports blockers only.
-2. Minor findings go into one follow-up issue, never another push.
-3. After the blocker fixes are pushed, re-review only those fixes.
-4. A PR is ready only when CI is green, GitHub reports it mergeable, every review thread has a
-   reply, and every blocker is fixed.
-5. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it.
-
-## 8. Questions for the owner
-
-Follow the `writing-to-the-owner` skill. In short:
-
-- Check each question against the owner's recorded decisions (`docs/dev/decisions.md`) first;
-  ask only what they do not settle.
-- Ask about a change only when it changes what users see or the documented
-  contract. A fix that keeps the documented intent and changes only the mechanism records the
-  existing decision it follows, and the work proceeds.
-- Frame it in user terms, with a concrete example, every term defined, and one recommendation.
-- Research the facts and cite sources; never guess.
-- Never change a recommendation silently: say it changed and why.
+Most of an agent's cost is context re-read every turn. Start a fresh agent with a short brief
+for each new round of work instead of resuming a long one; resume only for a small follow-up.
+As coordinator, keep your own turns short and start a fresh session at each phase change, with
+a handover note. Settle minor choices yourself instead of running multi-agent debates, and don't
+re-run a broad review whose last pass found little.
