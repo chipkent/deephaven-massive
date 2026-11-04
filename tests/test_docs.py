@@ -295,7 +295,7 @@ _PROMISED: dict[str, tuple[str, ...]] = {
         "mine",
         "by_hand",
     ),
-    "docs/troubleshooting.md": ("streams",),
+    "docs/troubleshooting.md": ("kept", "streams"),
 }
 
 

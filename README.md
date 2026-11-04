@@ -13,23 +13,25 @@
 Read years of market history and watch the market live, from one Python query.
 
 Testing a trading idea often means two programs, one for the past and one for the live feed,
-each with its own columns. With deephaven-massive, one query does both jobs. A query names the
-data you want from [Massive](https://massive.com) (formerly Polygon.io), such as Apple's minute
-bars. Call `history()` on it for a date range in the past, or `last_by()` for a live table that
-keeps each stock's newest row. A live table updates as data arrives, and both tables have the
-same columns. You get the same pair of tables from every dataset Massive offers both as history
-and as a stream, such as trades and quotes.
+each with its own columns. With deephaven-massive, one query does both jobs.
+
+A query names the data you want from [Massive](https://massive.com) (formerly Polygon.io), such
+as the minute bars of Apple and Microsoft. Call `history()` on it for a date range in the past,
+or `last_by()` for a live table that keeps each stock's newest row. A live table updates as data
+arrives, and both tables have the same columns. You get the same pair of tables from every
+dataset Massive offers both as history and as a stream, such as trades and quotes.
 
 You work with the tables in [Deephaven](https://deephaven.io). Deephaven is a free real-time
 query engine that represents both static and streaming data as tables. It runs on your own
 computer, and you type Python into its console in your browser. A filtered view or a chart built
 on a live table updates with it.
 
-This example needs Massive's Stocks Advanced or Business plan, and once you've installed the
-library, it runs as pasted in the Deephaven console. Other Stocks plans stream late or not at all,
-so on the free plan, start with [Example 1](#whole-market-day) instead. The query `bars` names the
-minute bars of Apple and Microsoft. `history()` reads one week of them, and `last_by()` makes a live
-table:
+Once you've installed the library, this code runs as pasted in the Deephaven console on Massive's
+Stocks Advanced or Business plan. On Stocks Starter or Developer, which stream 15 minutes late,
+add the `delayed_subscriptions` setting that [settings in code](#settings-in-code) shows. The
+free Stocks Basic plan doesn't stream, so on it, start with [Example 1](#whole-market-day)
+instead. The code makes the query of Apple's and Microsoft's minute bars, then both of its
+tables:
 
 ```python
 import deephaven_massive as dm
@@ -45,20 +47,17 @@ latest = bars.last_by()
 per stock, and each row is replaced as the next minute ends. A stock's row appears with its
 first minute bar after you run the code. Bars arrive in pre-market and after-hours trading, too.
 
-Stock bars are one of the library's 112 datasets. They cover stocks, options, CME Group futures,
-indices, forex, and crypto. Beyond prices, they hold company financials, SEC filings, news, and
-economic data such as Treasury yields. The [dataset index](docs/datasets/README.md) links a page for
-each, with its columns and the plans that include it.
-
-Live tables follow your watchlist, and your Massive plan sets what you can read and how fresh it is:
-
-- Pass a table of symbols where a list would go, and the live table adds each symbol you add to the
-  watchlist and drops each one you delete.
+- Stock bars are one of the library's 112 datasets. They cover stocks, options, CME Group
+  futures, indices, forex, and crypto. Beyond prices, they hold company financials, SEC filings,
+  news, and economic data such as Treasury yields. The [dataset index](docs/datasets/README.md)
+  links a page for each, with its columns and the plans that include it.
+- Pass a watchlist, a table of symbols you edit, where a list would go. A `last_by()` table such
+  as `latest` adds each symbol you add and drops each one you delete.
 - On Massive's free Stocks Basic plan, you can read two years of daily and minute stock bars, plus
   news and economic data.
 - Live tables stream in real time on Advanced and Business plans, and on Currencies Starter. Other
   Starter and Developer plans stream 15 minutes late, or 10 minutes for futures. To read a delayed
-  stream, add the one setting that [settings in code](#settings-in-code) shows.
+  stream, add the `delayed_subscriptions` setting that [settings in code](#settings-in-code) shows.
 
 To begin, [install the library](#install), then work through [ten examples](#learn-by-example).
 
@@ -76,8 +75,7 @@ environment, give the server your API key, and make a first table in your browse
 The server runs on macOS, Linux, and Windows 10 or 11 through WSL 2, on a computer with at least 8
 GB of memory. Deephaven's [pip install
 guide](https://deephaven.io/core/docs/getting-started/pip-install/) covers each operating system,
-Java, and `JAVA_HOME`. Before you start, have Python, Java, Git with the GitHub CLI, and a Massive
-account ready:
+Java, and `JAVA_HOME`. Check each of these before you start:
 
 | What | Why | Check | Get it |
 |---|---|---|---|
@@ -100,6 +98,9 @@ To check, run `gh auth status`. It prints a line that says you're logged in to g
 
 ### 2. Create a Python environment
 
+If you already run Deephaven's server from an environment of your own, activate that one and
+skip to the next step.
+
 Install the server and the library into one Python environment, because the server imports the
 library from the environment it runs in. A virtual environment also keeps them apart from your
 other Python projects. Create one and activate it:
@@ -116,9 +117,6 @@ instead:
 uv venv --python ">=3.11" ~/dh-massive
 source ~/dh-massive/bin/activate
 ```
-
-If you already run Deephaven's server from an environment of your own, activate that one and
-skip to the next step.
 
 ### 3. Install Deephaven and the library
 
@@ -167,7 +165,8 @@ Start the server in the same terminal, with 4 GB of memory:
 deephaven server --jvm-args "-Xmx4g"
 ```
 
-The `-Xmx4g` argument sets that memory, enough for a day of minute bars of every US stock. After
+The `-Xmx4g` argument sets that memory. If a large read runs out of memory, start the server
+again with a larger value, such as `-Xmx8g` on a computer with 16 GB of memory. After
 about a minute, the terminal prints a line that starts with `Deephaven is running at`, followed
 by the server's address. Your browser opens the Deephaven IDE at that address, already signed
 in. Keep this terminal open, because closing it stops the server. To stop the server yourself,
@@ -176,8 +175,8 @@ press Control-C there.
 ### 6. Make your first table
 
 Your first table holds a week of Apple's daily bars, and it works on every Stocks plan, the free
-Stocks Basic plan included. Python runs inside the server, in the IDE's **Console** panel, so click
-in that panel, paste the code, and press Enter.
+Stocks Basic plan included. Click in the IDE's **Console** panel, paste the code, and press Enter.
+The code runs inside the server.
 
 A session is your connection to Massive, and it reads your key from `MASSIVE_API_KEY`. The code
 opens one with `dm.MassiveSession()`, then reads the bars:
@@ -241,7 +240,8 @@ start the server. To turn the log on in a console that's already running, call
 `dm.enable_debug_logging()` instead.
 
 If your plan includes flat files, set the two S3 keys. A `history()` of 50 or more symbols, or
-of `dm.ALL`, then downloads one file a day instead of sending a request for each symbol. Flat
+of `dm.ALL`, then downloads one file a day, which holds every symbol, instead of sending a
+request for each symbol. Flat
 files hold bars as they traded, before any split adjustment, so the library reads bars from them
 only when you pass `adjusted=False`. [Adjust prices for splits](#split-adjustment) explains the
 difference.
@@ -258,7 +258,7 @@ session to your plans:
 
 | Setting | Set it when | What changes | Example |
 |---|---|---|---|
-| `rest_basic_subscriptions` | A subscription is on a free Basic plan, which allows five requests a minute, and you read more than five symbols or pages at a time | The session sends at most five requests a minute for that subscription, from the first request on. Without the setting, it slows down only after Massive refuses a request. | `{dm.Subscription.STOCKS}` |
+| `rest_basic_subscriptions` | A subscription is on a free Basic plan (five requests a minute), and you read more than five symbols or pages at a time | The session sends at most five requests a minute for that subscription, from the first request on. Without the setting, it slows down only after Massive refuses a request. | `{dm.Subscription.STOCKS}` |
 | `delayed_subscriptions` | Your Starter or Developer plan streams a subscription late: 15 minutes, or 10 for futures | Live tables read Massive's delayed feed. Without the setting, opening a live table or fetching current data, such as a snapshot, raises `dm.EntitlementError`, and its message names the line to add. | `{dm.Subscription.STOCKS}` |
 
 Pass the settings to `dm.MassiveConfig`, and pass that to `dm.MassiveSession`. This session is
@@ -295,7 +295,8 @@ to fit the limit.
 
 ### 1. Rank every US stock by one day's trading
 
-One read returns the daily bar of every US-listed stock for October 30, 2026.
+One read returns the daily bar of every US-listed stock for October 30, 2026. It runs on every
+Stocks plan, the free Stocks Basic plan included, and needs no settings.
 
 After the read, the code ranks the stocks by dollars traded and by their gain from open to close:
 
@@ -323,7 +324,9 @@ risers = (
 
 Three tables open. `day` has one row per stock, and its columns include `Symbol`, `Date`, `Open`,
 `High`, `Low`, `Close`, `Volume`, and `Vwap`. `Vwap` is the volume-weighted average price, so
-`Vwap * Volume` is the dollars traded. `busiest` holds the 20 stocks with the most dollars traded,
+`Vwap * Volume` is the dollars traded.
+
+`busiest` holds the 20 stocks with the most dollars traded,
 largest first. `risers` holds the 20 stocks that rose most from open to close, among those that traded at
 least a million shares. The [stock bars page](docs/datasets/stocks.bars.md) lists every column. To
 rank another day, change both dates. Stocks Basic serves any trading day in the past two years.
@@ -400,7 +403,8 @@ Before you read any data, you can ask the library which dataset holds it, what a
 ticker is, and what each column means. `dm.datasets()` and `columns()` answer without a request
 to Massive, and the ticker search sends one.
 
-The code asks all three questions about dividends and Coca-Cola:
+The code asks all three questions about dividends and Coca-Cola. It runs on every Stocks plan,
+the free Stocks Basic plan included, and needs no settings:
 
 ```python
 import deephaven_massive as dm
@@ -417,7 +421,9 @@ dividend_columns = m.stocks.dividends("KO").columns()
 and `Documentation`. `Documentation` holds the link to each dataset's page. `about_dividends` keeps
 the datasets whose summary mentions dividends, and `stocks.dividends` is one of them. `coke` lists
 the active tickers whose symbol or name matches, with Coca-Cola's own `KO` among them. Its columns
-include `Symbol`, `Name`, and `PrimaryExchange`. `dividend_columns` has one row for each column of
+include `Symbol`, `Name`, and `PrimaryExchange`.
+
+`dividend_columns` has one row for each column of
 the dividends dataset. Its columns are `Name`, `Type`, `Description`, and `SuppliedBy`. `SuppliedBy`
 names every source that fills the column: `REST`, `flat files`, `WebSocket`, or several of them.
 
