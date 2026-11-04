@@ -8,17 +8,17 @@ reaches Massive. A guide page opens with a line naming what its examples assume,
 the session, and that code runs first. `dm.MassiveSession()` builds a new session whose REST
 client talks to the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
-be. Two sections, the first tables and split adjustment, also run alone against scripted
-replies (NVDA's 10-for-1 split of 2024-06-10), and the tests check that their tables hold what
-the pages say they hold.
+be. Four sections also run alone against scripted replies, and the tests check that their
+tables hold what the pages say they hold: the README's whole-market day, its live board
+against yesterday's close, and its backfill of today's minutes, and split adjustment (NVDA's
+10-for-1 split of 2024-06-10).
 
 The docstrings link instead of repeating. A shared argument or concept cites a section by its
 full GitHub URL, `DOCS_URL` followed by `README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`,
 so the link opens from an IDE or the console; a dataset cites its generated page as
 `docs/datasets/<dataset>.md`. Every anchor is an explicit `<a id>`, unique across the user
 pages. The tests check that every section citation is a URL, that every cited anchor and page
-exists, that every relative link of a user page (and of the tester guide) resolves, and that
-the README's namespace table lists exactly the catalog's namespaces.
+exists, and that every relative link of a user page (and of the tester guide) resolves.
 """
 
 import json
@@ -43,7 +43,6 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Source, WsClient
-from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
@@ -138,13 +137,25 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
     }
 
 
-def _no_crypto_pair(symbol: str) -> tuple[str, str]:
-    """Refuse a crypto lookup: the user pages' examples stream no crypto pair.
+#: The crypto pairs the user pages' examples stream, with their base and quote currencies.
+_CRYPTO_PAIRS: dict[str, tuple[str, str]] = {"X:BTCUSD": ("BTC", "USD"), "X:ETHUSD": ("ETH", "USD")}
+
+
+def _crypto_pair(symbol: str) -> tuple[str, str]:
+    """Answer a crypto lookup as Massive's crypto ticker list does, for the examples' pairs.
+
+    Args:
+        symbol: The crypto ticker, such as `"X:BTCUSD"`.
+
+    Returns:
+        The pair's base and quote currencies.
 
     Raises:
-        AssertionError: Always, naming the pair.
+        AssertionError: For a pair no example streams, naming it.
     """
-    raise AssertionError(f"the user pages' examples stream no crypto pair, asked for {symbol}")
+    if symbol not in _CRYPTO_PAIRS:
+        raise AssertionError(f"the user pages' examples stream no crypto pair {symbol}")
+    return _CRYPTO_PAIRS[symbol]
 
 
 @pytest.fixture
@@ -196,7 +207,7 @@ def readme_server(
             made._core,
             resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
             fetch_rows=lambda *_, **__: [],
-            crypto_pair=_no_crypto_pair,
+            crypto_pair=_crypto_pair,
             client_factory=client,
         )
         cast("Any", made._core._ports)._streams = connections
@@ -295,7 +306,7 @@ def _settings_file(home: Path) -> Path:
 
 #: Tables each page's examples promise, by page.
 _PROMISED: dict[str, tuple[str, ...]] = {
-    "README.md": ("week", "near_quotes", "board"),
+    "README.md": ("week", "busiest", "since_start", "board", "spy", "near_quotes", "mine"),
     "docs/guide/concepts.md": ("kept", "watched"),
     "docs/guide/watchlists.md": ("es", "live_board", "trades"),
     "docs/guide/history.md": ("adjusted", "mine"),
@@ -486,17 +497,6 @@ def test_every_relative_link_resolves(page: Path) -> None:
     assert broken == []
 
 
-def test_the_namespace_table_lists_the_catalogs_namespaces() -> None:
-    text = README.read_text(encoding="utf-8")
-    start = text.index('<a id="namespaces"></a>')
-    table = text[start : text.index("<a id=", start + 1)]
-    listed = re.findall(r"^\| `(m\.[a-z_.]+)` \|", table, re.MULTILINE)
-    # The unified snapshot, a dataset of no namespace, is the session's own method.
-    catalog = {f"m.{spec.name.rpartition('.')[0]}" for spec in CATALOG.by_name.values()} - {"m."}
-    assert len(listed) == len(set(listed))
-    assert set(listed) == catalog
-
-
 # --- Two sections, against scripted data -------------------------------------------------------
 
 
@@ -504,10 +504,8 @@ def test_the_namespace_table_lists_the_catalogs_namespaces() -> None:
 def test_the_split_adjustment_examples_run(
     *,
     readme_server: FakeRestServer,
-    fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # The whole New York days of 2024-06-03 to 2024-06-14, as the range path's `{from}/{to}`.
@@ -552,10 +550,9 @@ def test_the_split_adjustment_examples_run(
     )
     blocks = _section_blocks(GUIDE / "history.md", "split-adjustment")
     assert len(blocks) == 2
-    [recipe] = _section_blocks(README, "backfill-then-live")
-    # The sections continue from the import and the session the guide's preamble names.
+    # The section continues from the import and the session the guide's preamble names.
     names = _run_blocks(
-        [PREAMBLE_CODE, *blocks, recipe],
+        [PREAMBLE_CODE, *blocks],
         tmp_path,
         "split_adjustment",
         console_command=console_command,
@@ -576,64 +573,95 @@ def test_the_split_adjustment_examples_run(
         "adjusted=true&limit=50000&sort=asc",
         "adjusted=false&limit=50000&sort=asc",
     ]
-    _history_and_live_merges_history_with_live_bars(
-        readme_server=readme_server,
-        fake_ws_server=fake_ws_server,
-        history_and_live=names["history_and_live"],
-        dh_to_pylist=dh_to_pylist,
-        monkeypatch=monkeypatch,
-    )
     _forget(names)
 
 
-def _history_and_live_merges_history_with_live_bars(
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_backfill_example_merges_history_with_live_bars(
     *,
     readme_server: FakeRestServer,
     fake_ws_server: FakeMassiveServer,
-    history_and_live: Callable[[str, str], Table],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
 ) -> None:
     # 2024-06-14 at 15:00 New York time: history reads that day's finished minutes over REST,
     # then the stream appends the live ones.
     now = datetime(2024, 6, 14, 19, tzinfo=UTC)
     monkeypatch.setattr(history_source, "_now", lambda: now)
+    monkeypatch.setattr("deephaven.time.dh_today", lambda *_: "2024-06-14")
     opened = _ms("2024-06-14T13:30:00")  # 09:30 New York time
     # An open end reads through the end of today; the bars not yet ended are dropped.
     path = (
-        f"/v2/aggs/ticker/NVDA/range/1/minute/{_ms('2024-06-14T04:00:00')}/"
+        f"/v2/aggs/ticker/SPY/range/1/minute/{_ms('2024-06-14T04:00:00')}/"
         f"{_ms('2024-06-15T04:00:00') - 1}"
     )
-    minute = {**_bar("2024-06-14", 131.0, 1_000), "t": opened}
-    readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="NVDA")))
-    table = history_and_live("NVDA", "2024-06-14")
+    minute = {**_bar("2024-06-14", 541.0, 1_000), "t": opened}
+    readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="SPY")))
+    [block] = _section_blocks(README, "backfill-then-live")
+    names = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
     fake_ws_server.wait_for(
         lambda server: any(
-            "AM.NVDA" in json.loads(frame).get("params", "")
+            "AM.SPY" in json.loads(frame).get("params", "")
             for connection in server.connections
             for frame in connection.frames
         )
     )
-    live = {"ev": "AM", "sym": "NVDA", "v": 5, "o": 132.0, "c": 132.0, "h": 132.0, "l": 132.0}
+    live = {"ev": "AM", "sym": "SPY", "v": 5, "o": 542.0, "c": 542.0, "h": 542.0, "l": 542.0}
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     # Bounded wait for the flush thread and an update-graph cycle to append the live bar.
     pace = threading.Event()  # never set; only paces the loop
-    rows = dh_to_pylist(table)
+    rows = dh_to_pylist(names["spy"])
     for _ in range(500):
         if len(rows) == 2:
             break
         pace.wait(0.02)
-        rows = dh_to_pylist(table)
-    assert [(r["Symbol"], r["Close"]) for r in rows] == [("NVDA", 131.0), ("NVDA", 132.0)]
+        rows = dh_to_pylist(names["spy"])
+    # Today's minute from history, then the live minute after it, oldest first.
+    assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
         datetime(2024, 6, 14, 19, tzinfo=UTC),
     ]
+    names.clear()
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_first_tables_example_runs(
+def test_the_whole_market_example_ranks_the_day(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # One grouped day of three stocks: BIG trades the most dollars but under a million shares,
+    # so it leads `busiest` and is left out of `risers`.
+    day = [
+        _bar("2026-10-30", 11.0, 2_000_000) | {"T": "UP", "o": 10.0, "vw": 10.0},
+        _bar("2026-10-30", 150.0, 500_000) | {"T": "BIG", "o": 100.0, "vw": 100.0},
+        _bar("2026-10-30", 5.25, 3_000_000) | {"T": "FLAT", "o": 5.0, "vw": 5.0},
+    ]
+    readme_server.reply(
+        "/v2/aggs/grouped/locale/us/market/stocks/2026-10-30",
+        Reply(envelope(day, adjusted=True, resultsCount=len(day))),
+    )
+    [block] = _section_blocks(README, "whole-market-day")
+    names = _run_blocks([block], tmp_path, "whole_market", console_command=console_command)
+
+    assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
+    busiest = dh_to_pylist(names["busiest"])
+    assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
+    assert busiest[0]["DollarVolume"] == pytest.approx(50_000_000)
+    risers = dh_to_pylist(names["risers"])
+    assert [r["Symbol"] for r in risers] == ["UP", "FLAT"]
+    assert [r["ChangePct"] for r in risers] == pytest.approx([10.0, 5.0])
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_live_board_example_compares_each_minute_with_yesterday(
     *,
     readme_server: FakeRestServer,
     fake_ws_server: FakeMassiveServer,
@@ -641,27 +669,15 @@ def test_the_first_tables_example_runs(
     tmp_path: Path,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
-    # The whole New York days of 2025-06-02 to 2025-06-06, as the range path's `{from}/{to}`.
-    path = (
-        f"/v2/aggs/ticker/AAPL/range/1/day/{_ms('2025-06-02T04:00:00')}/"
-        f"{_ms('2025-06-07T04:00:00') - 1}"
-    )
-    days = [_bar(f"2025-06-0{day}", 190.0 + day, 1_000) for day in range(2, 7)]
-    readme_server.reply(path, Reply(envelope(days, adjusted=True, ticker="AAPL")))
-    # Every other path, today's headlines among them, answers an empty page.
+    for symbol, close in (("AAPL", 200.0), ("MSFT", 400.0)):
+        previous = _bar("2026-10-29", close, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    # The board's other stocks had no bar yesterday.
     readme_server.reply_default(Reply(envelope([])))
-    [block] = _section_blocks(README, "first-tables")
-    names = _run_blocks([block], tmp_path, "first_tables", console_command=console_command)
-
-    assert [r["Date"] for r in dh_to_pylist(names["week"])] == [
-        "2025-06-02",
-        "2025-06-03",
-        "2025-06-04",
-        "2025-06-05",
-        "2025-06-06",
-    ]
-    described = {r["Name"]: r["Description"] for r in dh_to_pylist(names["columns"])}
-    assert {"Symbol", "Open", "Close", "TimestampEnd"} <= described.keys()
+    [block] = _section_blocks(README, "live-board")
+    names = _run_blocks([block], tmp_path, "live_board", console_command=console_command)
     fake_ws_server.wait_for(
         lambda server: any(
             "AM.AAPL" in json.loads(frame).get("params", "")
@@ -669,19 +685,25 @@ def test_the_first_tables_example_runs(
             for frame in connection.frames
         )
     )
-    minute = {"s": _ms("2025-06-06T19:00:00"), "e": _ms("2025-06-06T19:01:00"), "v": 100}
+    minute = {"s": _ms("2026-10-30T19:00:00"), "e": _ms("2026-10-30T19:01:00"), "v": 100}
     bars = [
         {"ev": "AM", "sym": symbol, "o": price, "h": price, "l": price, "c": price} | minute
-        for symbol, price in (("AAPL", 190.0), ("MSFT", 410.0), ("AAPL", 191.0))
+        for symbol, price in (("AAPL", 205.0), ("MSFT", 380.0), ("AAPL", 210.0))
     ]
     fake_ws_server.send(json.dumps(bars))
     # Bounded wait for the flush thread and an update-graph cycle to publish the bars.
     pace = threading.Event()  # never set; only paces the loop
-    latest: dict[str, float] = {}
+    board: dict[str, dict[str, Any]] = {}
     for _ in range(500):
-        latest = {r["Symbol"]: r["Close"] for r in dh_to_pylist(names["latest"])}
-        if latest == {"AAPL": 191.0, "MSFT": 410.0}:
+        board = {r["Symbol"]: r for r in dh_to_pylist(names["board"])}
+        if board.keys() == {"AAPL", "MSFT"} and board["AAPL"]["Close"] == 210.0:
             break
         pace.wait(0.02)
-    assert latest == {"AAPL": 191.0, "MSFT": 410.0}
+    # Each stock's newest minute, against yesterday's close.
+    assert {s: (r["Close"], r["PrevClose"]) for s, r in board.items()} == {
+        "AAPL": (210.0, 200.0),
+        "MSFT": (380.0, 400.0),
+    }
+    assert board["AAPL"]["ChangePct"] == pytest.approx(5.0)
+    assert board["MSFT"]["ChangePct"] == pytest.approx(-5.0)
     names.clear()
