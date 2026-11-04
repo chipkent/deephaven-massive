@@ -274,13 +274,14 @@ def link_problems(session: type, specs: Iterable[DatasetSpec]) -> list[str]:
 
     Returns:
         One message per dataset whose call path names no method, or whose method's docstring
-        lacks `docs/datasets/<dataset>.md`; another dataset's page, even one whose name starts
-        or ends like it, does not count, since the prefix and `.md` bound the name.
+        lacks the page's web address, `page_url`; a bare `docs/datasets/<dataset>.md` path, or
+        another dataset's page, even one whose name starts or ends like it, does not count,
+        since the address's prefix and `.md` bound the name.
     """
     problems = []
     for spec in specs:
         method = factory(session, call_path(spec))
-        link = f"docs/datasets/{page_name(spec)}"
+        link = page_url(spec)
         if method is None:
             problems.append(f"{spec.name}: no method at {call_path(spec)}")
         elif link not in (method.__doc__ or ""):
@@ -296,11 +297,14 @@ class _Linked(Namespace):
     __slots__ = ()
 
     def dividends(self) -> Query:
-        """Cash dividends. Columns: docs/datasets/stocks.dividends.md."""
+        """Cash dividends. Columns: https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md."""
         raise NotImplementedError
 
     def splits(self) -> Query:
-        """Splits; the page named is another dataset's: docs/datasets/stocks.dividends.md."""
+        """Splits; the page named is another dataset's.
+
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md
+        """
         raise NotImplementedError
 
     def ipos(self) -> Query:
@@ -309,12 +313,15 @@ class _Linked(Namespace):
     def financials(self) -> Query:
         """Financials; the page named only starts like this one's.
 
-        docs/datasets/stocks.financials.ratios.md
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.ratios.md
         """
         raise NotImplementedError
 
     def news(self) -> Query:
-        """News; the page named only ends like this one's: docs/datasets/more.stocks.news.md."""
+        """News; the page named only ends like this one's.
+
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/more.stocks.news.md
+        """
         raise NotImplementedError
 
 
@@ -324,7 +331,7 @@ class _LinkedSession:
         raise NotImplementedError
 
     def news(self) -> Query:
-        """Any news: docs/datasets/reference.news.md."""
+        """Any news: https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.news.md."""
         raise NotImplementedError
 
 
@@ -347,10 +354,10 @@ def test_the_docstring_rule_reports_every_missing_link() -> None:
         )
     ]
     assert link_problems(_LinkedSession, specs) == [
-        "stocks.splits: the docstring must name docs/datasets/stocks.splits.md",
-        "stocks.ipos: the docstring must name docs/datasets/stocks.ipos.md",
-        "stocks.financials: the docstring must name docs/datasets/stocks.financials.md",
-        "stocks.news: the docstring must name docs/datasets/stocks.news.md",
+        f"stocks.splits: the docstring must name {PAGES_URL}stocks.splits.md",
+        f"stocks.ipos: the docstring must name {PAGES_URL}stocks.ipos.md",
+        f"stocks.financials: the docstring must name {PAGES_URL}stocks.financials.md",
+        f"stocks.news: the docstring must name {PAGES_URL}stocks.news.md",
         "stocks.missing: no method at m.stocks.missing",
         "reference.news: no method at m.reference.news",
         "stocks.dividends.more: no method at m.stocks.dividends.more",

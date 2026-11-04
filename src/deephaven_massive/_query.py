@@ -1253,7 +1253,7 @@ class Query(QueryBase):
         it and listed the same way, or fails the table under `unavailable_symbols=RAISE`. A
         feed (a dataset whose default mode is `APPEND`: news and filings) needs a `start` or a
         `limit`. The poller runs while the table or anything derived from it is in use
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#live-tables).
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables).
         Once the table exists, an authentication, entitlement, or schema failure, a null or NaN poll
         key, or a response Massive labels `DELAYED` for a subscription not in
         `MassiveConfig.delayed_subscriptions`

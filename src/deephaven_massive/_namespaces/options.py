@@ -409,7 +409,8 @@ class _Options(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with `history()` and the stream verbs. Columns: docs/datasets/options.trades.md.
+            A query with `history()` and the stream verbs. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.trades.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -443,7 +444,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.last_trade.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.last_trade.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -478,7 +480,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with `history()` and the stream verbs. Columns: docs/datasets/options.quotes.md.
+            A query with `history()` and the stream verbs. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.quotes.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -539,7 +542,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/options.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -581,7 +585,8 @@ class _Options(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.previous_day_bar.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.previous_day_bar.md.
 
         Raises:
             TypeError: If `adjusted` is not a `bool` or `symbols` is of another type.
@@ -620,7 +625,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with the stream verbs. Columns: docs/datasets/options.fmv.md.
+            A query with the stream verbs. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.fmv.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -672,7 +678,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.chain.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.chain.md.
 
         Raises:
             TypeError: If `underlying` is not a `str` or a table, `sort` is not a `str`,
@@ -743,7 +750,8 @@ class _Options(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.snapshots.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.snapshots.md.
 
         Raises:
             TypeError: If `symbols` is of another type, `sort` is not a `str`, `order` is not a
@@ -824,7 +832,8 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.contracts.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.contracts.md.
 
         Raises:
             TypeError: If `underlying` is not a `str` or a table, `sort` is not a `str`,
@@ -902,7 +911,8 @@ class _Options(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/options.daily_open_close.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.daily_open_close.md.
 
         Raises:
             TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.

@@ -318,7 +318,8 @@ class _Indicators(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.sma.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.sma.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -398,7 +399,8 @@ class _Indicators(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.ema.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.ema.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -477,7 +479,8 @@ class _Indicators(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.rsi.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.rsi.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -562,7 +565,8 @@ class _Indicators(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.macd.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.macd.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

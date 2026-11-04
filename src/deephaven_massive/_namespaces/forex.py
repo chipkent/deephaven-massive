@@ -279,7 +279,8 @@ class _Forex(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/forex.quotes.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.quotes.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -310,7 +311,8 @@ class _Forex(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/forex.last_quote.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.last_quote.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
@@ -373,7 +375,8 @@ class _Forex(Namespace):
             multiplier: Units per bar; only 1 streams.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/forex.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -413,7 +416,8 @@ class _Forex(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/forex.previous_day_bar.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.previous_day_bar.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
@@ -449,7 +453,8 @@ class _Forex(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/forex.fmv.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.fmv.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -476,7 +481,8 @@ class _Forex(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query. Columns: docs/datasets/forex.snapshots.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.snapshots.md.
 
         Raises:
             TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
@@ -502,7 +508,8 @@ class _Forex(Namespace):
             direction: `dm.Direction.GAINERS` for the largest increases, or `dm.Direction.LOSERS`.
 
         Returns:
-            A query. Columns: docs/datasets/forex.movers.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.movers.md.
 
         Raises:
             TypeError: If `direction` is not a `dm.Direction` (convert text with
@@ -532,7 +539,8 @@ class _Forex(Namespace):
             precision: The decimal places of the result, 0 to 4; 2 by default.
 
         Returns:
-            A query. Columns: docs/datasets/forex.conversion.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.conversion.md.
 
         Raises:
             TypeError: If a currency is not a `str`, `amount` is not a number, or `precision` is not

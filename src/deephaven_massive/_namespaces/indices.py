@@ -202,7 +202,8 @@ class _Indices(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with the stream verbs and `history()`. Columns: docs/datasets/indices.values.md.
+            A query with the stream verbs and `history()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -250,7 +251,8 @@ class _Indices(Namespace):
             multiplier: Units per bar; only 1 streams.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/indices.bars.md.
+            A query of the class the timespan picks. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -286,7 +288,8 @@ class _Indices(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.previous_day_bar.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.previous_day_bar.md.
 
         Raises:
             TypeError: If `symbols` is of another type.
@@ -342,7 +345,8 @@ class _Indices(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.snapshots.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.snapshots.md.
 
         Raises:
             TypeError: If `symbols` is of another type, `sort` is not a `str`, `order` is not a
@@ -384,7 +388,8 @@ class _Indices(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
 
         Returns:
-            A query with `fetch()` and `poll()`. Columns: docs/datasets/indices.daily_open_close.md.
+            A query with `fetch()` and `poll()`. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.daily_open_close.md.
 
         Raises:
             TypeError: If `date` is not a date type, or `symbols` is of another type.

@@ -213,8 +213,8 @@ class MassiveSession:
     (https://github.com/chipkent/deephaven-massive/blob/main/README.md#how-it-works). A live table
     keeps running, and keeps its session running, while it or a table derived from it is in use;
     release it with `m.release(table)`, and `m.close()` stops everything and fails every live table
-    (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#live-tables). As
-    a context manager the session closes on exit.
+    (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables).
+    As a context manager the session closes on exit.
 
     Sessions of one process with the same API key share their WebSocket connections when their
     connection settings are equal; otherwise a WARNING says they compete for the slot. The
@@ -409,7 +409,8 @@ class MassiveSession:
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/snapshots.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/snapshots.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -588,7 +589,7 @@ class MassiveSession:
         else holds it (a derived table, an open UI panel); once nothing does, its stream
         unsubscribes, its poller stops, or its background read stops. Releasing twice does
         nothing, and `release()` keeps working after `close()`. Static results are not tracked.
-        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#live-tables.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -623,7 +624,7 @@ class MassiveSession:
         uses are closed. After `close()`, verbs and the diagnostics methods raise
         `MassiveError("MassiveSession #1 is closed")`; building queries and `release()` keep
         working.
-        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#live-tables.
+        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables.
 
         Raises:
             ValueError: On a Deephaven update-graph thread, for example inside a table

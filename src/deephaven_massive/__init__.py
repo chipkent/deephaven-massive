@@ -56,7 +56,8 @@ Status:
 Read next:
     The README, https://github.com/chipkent/deephaven-massive; the user guide's reference
     pages in `docs/guide/`, which docstrings link to section by section; the dataset finder,
-    `docs/datasets/README.md`; and `help()` on any object.
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md; and
+    `help()` on any object.
 
 `import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
 `datasets()`, the `canonical_symbol*` converters, and `canonicalize_symbols` need a running

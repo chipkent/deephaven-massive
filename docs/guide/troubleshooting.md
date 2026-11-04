@@ -1,268 +1,324 @@
 # Troubleshooting
 
-Examples on this page assume `import deephaven_massive as dm` and `m = dm.MassiveSession()`.
-
-Find the message or symptom you see, then its fix. When nothing fits, look at the
-[diagnostics tables](#diagnostics), then turn on the [debug log](#the-log).
+When something goes wrong, find the message or symptom you see in the tables here, then follow
+its fix. If no row matches, look at the [diagnostics tables](#diagnostics), turn on the
+[debug log](#the-log), and [report the bug](#report-a-bug). Paste each example into the console
+of the Deephaven IDE.
 
 <a id="error-messages"></a>
 
 ## Messages and symptoms
 
+Where a message shows `...`, Massive's or the library's text has more words in that place. A
+verb is the call at the end of a query that returns a table, such as `fetch()`, `history()`,
+`poll()`, or `last_by()`. A subscription is what Massive sells for one asset class, such as
+Stocks or Options, and each subscription has its own plan.
+
 ### Setup and keys
 
-| Message or symptom | Cause and fix |
-|---|---|
-| `no Massive API key` | The server cannot see `MASSIVE_API_KEY`. Export it in the shell that starts the server, then restart the server. Don't type the key into the console. See [your API key](install.md#api-key). |
-| `MassiveSession must be created inside a Deephaven server` | The code ran in a plain Python process. Run it in the Deephaven console, in a script the server runs, or after starting an [embedded server](install.md#embedded). |
-| `flat files need both s3_access_key_id and s3_secret_access_key` | Only one of the two S3 keys is set. Set both, or neither: see [S3 keys](install.md#s3-keys). |
-| `S3 rejected the flat-file credentials` | The S3 keys are wrong. With `source=dm.HistorySource.AUTO`, the default, the read falls back to REST and this text arrives as a WARNING; it fails only with `source=dm.HistorySource.FLAT_FILES`, or when REST cannot serve the read. Set the keys from Massive's dashboard and restart the server. |
+| You see | Why | What to do |
+|---|---|---|
+| `no Massive API key` | The server can't see `MASSIVE_API_KEY`. | Set the key in the terminal that starts the server, then restart the server (see [give the server your API key](install.md#api-key)). |
+| `MassiveSession must be created inside a Deephaven server` | The code ran in a plain Python process. | Run it in the Deephaven console, or start an [embedded server](install.md#embedded) first. |
+| `flat files need both s3_access_key_id and s3_secret_access_key` | Only one of the two S3 keys is set. | Set both keys, or neither (see [S3 keys](install.md#s3-keys)). |
+| `S3 rejected the flat-file credentials` | Your S3 keys are wrong. With `source=dm.HistorySource.AUTO`, the read falls back to REST and this text arrives as a WARNING. | Copy both keys from Massive's dashboard again, then restart the server. |
 
 ### The settings file
 
-| Message or symptom | Cause and fix |
-|---|---|
-| `no settings file: pass its path ...` | `dm.MassiveConfig.from_file()` was called without a path, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` is not set where the server runs. Pass the path, or set the variable before you start the server. See [settings file](install.md#settings-file). |
-| `settings file ... does not exist` | The path is wrong, or, in Docker, the file is not mounted at the path the variable names. Check the `-v` and `-e DEEPHAVEN_MASSIVE_CONFIG_FILE` options. |
-| `Is a directory` from `from_file()` | The path is a folder: Docker created it because the file did not exist on your computer. Create the file first. |
-| `settings file ..., line ..., column ...: ...` | The file holds something the library refuses: an unknown setting (the message suggests the closest), a word in the wrong case, a key, or a YAML feature such as a tag or an anchor. Fix that line. |
+| You see | Why | What to do |
+|---|---|---|
+| `no settings file: pass its path ...` | `dm.MassiveConfig.from_file()` got no path, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` isn't set where the server runs. | Pass the path, or set the variable before you start the server (see [settings file](install.md#settings-file)). |
+| `settings file ... does not exist` | The path is wrong, or Docker didn't mount the file where the variable says. | Check the path, or the `-v` and `-e DEEPHAVEN_MASSIVE_CONFIG_FILE` options of `docker run`. |
+| `Is a directory` from `from_file()` | Docker created a folder at the path, because the file didn't exist on your computer. | Create the file, then start the container again. |
+| `settings file ..., line ..., column ...: ...` | The file holds something the library refuses, such as an unknown setting, a word in the wrong case, a key, or a YAML tag. | Fix that line. For an unknown setting, the message suggests the closest name. |
 
-### Calls
+### Arguments and queries
 
-| Message or symptom | Cause and fix |
-|---|---|
-| `timespan must be dm.Timespan` | Arguments that pick from a set take an enum member: `dm.Timespan.DAY`, not `"day"`. |
-| `ValueError` naming a symbol | The symbol is not spelled as Massive spells it. See [spelling and converters](arguments.md#symbols). |
-| `AttributeError` naming a verb | The dataset cannot serve that verb; the message names the dataset that can. |
-| `... poll() needs a start or a limit` | A news or filings poll would read the whole archive every cycle. Give the query a `start` or a `limit`. |
-| a symbol returns no rows | No data in that range, or the ticker changed: `m.reference.ticker_events("META").fetch()` lists a company's past tickers. |
+| You see | Why | What to do |
+|---|---|---|
+| `timespan must be dm.Timespan, e.g. ...` | An argument that picks from a fixed set takes an enum member, not text. | Write `dm.Timespan.DAY`, not `"day"`. |
+| `ValueError` that names a symbol | The symbol isn't spelled as Massive spells it. | Fix the spelling, or convert it (see [symbols](arguments.md#symbols)). |
+| `AttributeError` that names a verb | The dataset doesn't have that verb. The message lists the verbs it has, and often what to call instead. | Call what the message suggests: another verb of the same dataset, such as `history()` for intraday bars, or another dataset, such as `m.stocks.last_trade(...)`. |
+| `... poll() needs a start or a limit` | A news or filings poll without either would read the whole archive every cycle. | Give the query a `start` or a `limit`. |
+| A symbol returns no rows | Massive has no data for it in that range, or its ticker changed. | List a company's past tickers with `m.reference.ticker_events("META").fetch()`. When Massive answers `HTTP 404` for the symbol, `dm.MassiveConfig(unavailable_symbols=dm.OnError.RAISE)` makes a `fetch()`, `history()`, or `poll()` fail instead. An empty answer never fails. |
 
-### Your plan
+<a id="plan-messages"></a>
 
-| Message or symptom | Cause and fix |
-|---|---|
-| `... would be delayed (Massive reports ...)` | Your plan's data for that subscription is delayed, and the library serves real-time data unless you ask for delayed. Add the line the message shows, or upgrade the plan. See [real-time or delayed](plans.md#real-time-or-delayed). |
-| `... refused the subscription to ...` | Your plan does not stream this data: it may include other streams of the asset class, or REST only. Stream bars instead of trades, or read with `history()` or `poll()`; each dataset's [reference page](../datasets/README.md) has the plan table. When the message suggests `delayed_subscriptions`, your plan may be delayed: see [real-time or delayed](plans.md#real-time-or-delayed). |
-| `delayed_subscriptions cannot hold dm.Subscription.CURRENCIES` | Forex and crypto have no delayed feed. Remove `CURRENCIES` from the set. |
-| `AuthenticationError` on a live table, ending `can also mean the ... plan includes no WebSocket streams` | Massive's live connection gives the same answer for a wrong key and, possibly, for a plan without streams of that asset class. If `fetch()` or `history()` works with the same key, the key is right: read the data with `history()` or `poll()`, or check which streams your plan includes on the dataset's [reference page](../datasets/README.md). |
-| `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. See [what your plan allows](plans.md#plans-and-errors). |
-| `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins. Ask for a later start. |
-| `WAITING_SLOT` in `m.connections()` | Another program or computer is using your key's one connection for this asset class. Stop it; the library connects when the connection frees. |
-| `rate limited: ...; this read ran inside a Deephaven console command` | A Basic subscription's pace held a console read for more than 90 seconds. Pass `wait=False`, which waits up to ten minutes, and list your Basic subscriptions in `rest_basic_subscriptions` so the library paces from the start. |
-| a download is slow | Basic plans allow five requests a minute; `m.rate_limits()` shows the pace. Use flat files for many symbols, and `wait=False` for long reads. |
+### Plan limits and refusals
 
-### History
+Each dataset's page in the [dataset reference](../datasets/README.md) shows which plans include
+it and which of its streams each plan has. Massive's free plan is called Basic, and it allows
+five REST requests a minute for each subscription.
 
-| Message or symptom | Cause and fix |
-|---|---|
-| `the plan does not include these flat files` | Pass `source=dm.HistorySource.REST`, or leave `source` at `AUTO`, which reads REST when REST can serve the read. |
-| `the flat file for <date> is not published yet` | Massive usually publishes by about 11:00 New York time the next day, but the time varies. Retry later, or read with `source=dm.HistorySource.REST`. |
-| a WARNING that a read leaves some columns empty | Pass the `source=` it names. See [where history comes from](history.md#history-sources). |
-| `... which is not a stamp Massive is known to use` | Massive stamped a bar at an unexpected time. You get it at Massive's stamp with no `Date`. See [bars with unexpected stamps](history.md#odd-stamps), and please report it. |
-| prices jump at a split | Live bars are as traded; adjusted history is restated. See [split adjustment](history.md#split-adjustment). |
+| You see | Why | What to do |
+|---|---|---|
+| `... would be delayed (Massive reports ...)` | Your plan's data for that subscription is 15 minutes behind, and you didn't ask for delayed data. | Add the line the message shows, or upgrade the plan (see [real-time or delayed](plans.md#real-time-or-delayed)). |
+| `... refused the subscription to ...` | Your plan doesn't stream this data, though it can stream other data of the same asset class. | Stream bars instead of trades, or read with `history()` or `poll()`. When the message suggests `delayed_subscriptions`, add the subscription to it. |
+| `delayed_subscriptions cannot hold dm.Subscription.CURRENCIES` | Forex and crypto have no delayed feed. | Remove `CURRENCIES` from the set. |
+| `AuthenticationError` from a live table that mentions WebSocket streams | Massive's streaming API gives a wrong key and a plan without streams of that asset class the same answer. | Try `fetch()` with the same key. If it works, read the data with `history()` or `poll()`, because your plan doesn't stream it. |
+| `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan doesn't include this dataset. | Use the dataset the message names, where it names one (see [what your plan allows](plans.md#plans-and-errors)). |
+| `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins. | Ask for a later start. |
+| `WAITING_SLOT` in `m.connections()` | Another program or computer is using your key's one connection for this asset class. | Stop the other program. The library connects as soon as the connection frees. |
+| `rate limited: ...; this read ran inside a Deephaven console command` | A Basic plan's five requests a minute held a console read for more than 90 seconds. | Pass `wait=False`, and list each subscription you hold on Basic in `rest_basic_subscriptions`. |
+| A download is slow | Basic plans allow five requests a minute, and `m.rate_limits()` shows the pace. | On a paid plan with [S3 keys](install.md#s3-keys), `history()` of 50 or more symbols reads flat files. Pass `wait=False` to long reads. |
+
+### Reading history
+
+| You see | Why | What to do |
+|---|---|---|
+| `the plan does not include these flat files` | You asked for flat files your plan lacks. | Pass `source=dm.HistorySource.REST`, or leave `source` at `AUTO`. |
+| `the plan does not include ... futures flat files: ...`, naming an exchange such as CME | Your futures plan lacks one exchange's flat files. | Pass `venues=` with only the exchanges your plan includes (see [futures venues](arguments.md#venues)). |
+| `the flat file for <date> is not published yet` | Massive publishes a day's files the next day, often by about 11:00 New York time, and sometimes later. | Retry later, or read with `source=dm.HistorySource.REST`. |
+| A WARNING that a read leaves some columns empty | The source `AUTO` chose doesn't fill those columns. | Pass the `source=` the WARNING names (see [where history comes from](history.md#history-sources)). |
+| `... which is not a stamp Massive is known to use` | Massive stamped a bar at an unexpected time. | Use the bar at Massive's stamp, with no `Date`, and report it (see [bars with unexpected stamps](history.md#odd-stamps)). |
+| Prices jump at a split | Live bars and flat files are as traded, while adjusted history is restated in today's shares. | See [split adjustment](history.md#split-adjustment). |
+
+<a id="live-table-messages"></a>
 
 ### Live tables
 
-| Message or symptom | Cause and fix |
-|---|---|
-| a live table stays empty | The market is closed (`m.reference.market_status().fetch()`); a console command is still running; the table reads Massive's delayed feed (`Recency` `DELAYED` in `m.streams()`), which starts 15 minutes behind; or the stream failed (`m.streams()`). |
-| `MassiveSession #1 was closed; this table no longer updates` | The session was closed. Take `table.snapshot()` to keep the rows, and create a new session for new tables. See [stop everything](concepts.md#live-tables). |
-| `Can not listen to failed table` | Deephaven cannot build a live table on one that has failed. Work on `table.snapshot()`. |
-| `... inside a Deephaven console command, which holds the update graph's lock` | A long command paused every live table on the server. Pass `wait=False` to long reads: see [long reads in the console](concepts.md#live-tables). |
-| `connection down since <time>; no data`, `cycle running since <time>`, or `last good cycle at <time>` in `m.streams()` | The connection dropped, a poll cycle is running late (often paced by rate limits: see `m.rate_limits()`), or a poll cycle failed with the error before the note. The library reconnects and retries by itself. The note clears once data flows, and `Gaps` keeps the span whose rows may be missing. |
-| `... longer than MassiveConfig.max_outage`, from a stream or from `... poll(): ...` | The outage, or the failing or silent poll cycles, lasted longer than `max_outage`, so the table stopped. Fix any error it names, then call the verb again; raise `max_outage` to wait longer. See [when the connection drops](concepts.md#live-tables). |
-| `no data since <time> during ... trading hours` in `m.streams()` | The connection is up, but nothing arrived for 5 minutes while the market is open. A holiday or quiet symbols explain it; the table keeps running. |
-| `no rows this cycle for ...` in `m.streams()` | A poll left those symbols out: Massive has no data for them (`HTTP 404`), or their endpoint does not take an argument you passed (such as `adjusted=False` for a crypto pair). The other symbols keep polling. Fix or remove the symbols named. `dm.MassiveConfig(unavailable_symbols=dm.OnError.RAISE)` stops the table instead, and `IGNORE` leaves them out without a WARNING. |
-| `no acknowledgement from Massive for ...` in `m.streams()` | Massive has not confirmed the subscription; the library sends it again until Massive does. If the note stays, those symbols' rows may be missing: report it. |
-| `over capacity: <n>/1000; <k> deferred` in `m.streams()` | The options connection is full; the extra contracts subscribe when others leave. Watch fewer contracts. See [the options cap](arguments.md#symbols). |
-| `rows for ... are being dropped` in `m.streams()`, or `... the last 100 rows of channel ... were dropped` | Massive sent rows the library cannot read. A `dm.ALL` stream warns and keeps running; any other stream stops after 100 such rows in a row. Massive has most likely changed its format: report it with the log. |
-| memory keeps growing | `append_only()` keeps every row. Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |
-| a table keeps running after `del` | Call `m.release(table)`. See [stop one table](concepts.md#live-tables). |
+The `State`, `Recency`, `Error`, and `Gaps` columns named in these rows are columns of
+`m.streams()`, described in [streams](#streams-columns). A warning in `Error` leaves the table
+running, while a table that stops shows only why it stopped. A watchlist is a live table of
+symbols that a verb follows as you add and delete rows, and `dm.ALL` asks for every symbol in
+the market.
+
+| You see | Why | What to do |
+|---|---|---|
+| A live table stays empty | The market is closed, a console command is still running, the table reads Massive's delayed feed, or the stream failed. | Check `m.reference.market_status().fetch()`, then the table's `State`, `Recency`, and `Error` in `m.streams()`. |
+| `MassiveSession #1 was closed; this table no longer updates` | The session was closed. | Take `table.snapshot()` to keep the rows, and create a new session for new tables (see [stop everything](live-tables.md#stop-everything)). |
+| `MassiveSession #1 is closed` from a verb or `m.streams()` | You called the session after `m.close()`. | Create a new session. |
+| `Can not listen to failed table` | Deephaven can't build a live table on one that has failed. | Work on `table.snapshot()`. |
+| `... inside a Deephaven console command, which holds the update graph's lock` | A long command paused every live table on the server. | Pass `wait=False` to long reads (see [long reads in the console](live-tables.md#long-reads)). |
+| `connection down since <time>; no data` in `Error` | The connection to Massive dropped. | Wait for the library to reconnect. `Gaps` keeps the span whose rows may be missing. |
+| `... longer than MassiveConfig.max_outage` | An outage, or failing or silent poll cycles, lasted longer than `max_outage`, so the table stopped. | Fix any error the message names, then call the verb again. To wait longer, raise `max_outage` (see [when the connection drops](live-tables.md#connection-drops)). |
+| `no data since <time> during ... trading hours` in `Error` | Nothing arrived for 5 minutes while the market was open, on a holiday or for quiet symbols. | Nothing. The table keeps running. |
+| `cycle running since <time>; last good cycle at <time>` in `Error` | A poll cycle is running late, often because rate limits are pacing its requests. | Check `m.rate_limits()`. The note clears when the cycle ends. |
+| An error, then `last good cycle at <time>`, in `Error` | A poll cycle failed with that error. | Fix the error if it names your input. The next cycle runs on schedule. |
+| `no rows this cycle for ...` in `Error` | Massive has no data for those symbols (`HTTP 404`), or their endpoint doesn't take an argument you passed, such as `adjusted=False` for a crypto pair. | Fix or remove the symbols named. The other symbols keep polling. |
+| `skipping ... symbol-table values this dataset does not take: ...` in `Error` | Rows of your watchlist aren't spelled as Massive spells the ticker, or the dataset doesn't take them. | Fix or delete those rows. The stream subscribes to a row once you fix it. |
+| `skipped crypto pairs ...` in `Error` | Massive's list of crypto tickers doesn't hold those pairs, or the list couldn't be read. | Check the spelling, then delete each pair's row and add it back to try it again. |
+| `... symbols retrying after a failure that may pass: ...` in `Error` | Reads of those watchlist symbols failed for a reason that can clear, such as a rate limit. | Wait. The library reads each one again 1, 5, and 15 minutes later. |
+| `... symbols failed (delete and re-add a row to read one again): ...` in `Error` | Reads of those watchlist symbols failed for good, such as on a plan refusal. | Fix the cause, then delete each symbol's row and add it back. |
+| `no acknowledgement from Massive for ...` in `Error` | Massive hasn't confirmed the subscription, and the library is sending it again. | If the note stays, rows of those symbols may be missing, so [report it](#report-a-bug). |
+| `over capacity: <n>/1000; <k> deferred` in `Error` | Your option streams reached Massive's limit of 1,000 on one connection. Each contract's trades count as one, and its quotes as another. | Watch fewer contracts. The waiting ones subscribe as others leave (see [the option contract limit](arguments.md#option-contract-limit)). |
+| `rows for ... are being dropped` in `Error` | Massive sent rows of a `dm.ALL` stream that the library can't read. | Treat those symbols' last values as stale, and [report it](#report-a-bug) with the log. |
+| `... the last 100 rows of channel ... were dropped` | The library couldn't read 100 rows in a row, so it stopped the stream. Massive has most likely changed its format. | [Report it](#report-a-bug) with the log. |
+| Memory keeps growing | `append_only()` keeps every row. | Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |
+| A table keeps running after `del` | Python hasn't reclaimed the table yet. | Call `m.release(table)` (see [stop one table](live-tables.md#stop-one-table)). |
 
 <a id="diagnostics"></a>
 
 ## Diagnostics tables
 
-Four live tables show what the library is doing. Start with `m.streams()` when a table looks
-wrong.
+Four live tables show what a session is doing, and `m.streams()` is the place to start when a
+table looks wrong. Call them on the session whose tables you're checking. `m.streams()` and
+`m.symbol_reads()` show only that session's tables, while `m.connections()` and `m.rate_limits()`
+also show what it shares with other sessions that use the same API key. Each call returns a new live
+table, which keeps its final rows after `m.close()`. This example polls Apple's news, which works
+on every Stocks plan, and then makes all four tables:
 
 ```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+news = m.reference.news("AAPL", limit=10).poll(300)
 streams = m.streams()
 connections = m.connections()
 limits = m.rate_limits()
 reads = m.symbol_reads()
 ```
 
-| Table | One row per |
+`streams` has one row, for the news poll, and `limits` shows the pace of the REST requests it
+sends. `connections` and `reads` have no rows for it, because the poll opens no WebSocket
+connection and follows no watchlist. `m.streams()` tracks every table a verb returns, and the
+other three track what feeds those tables:
+
+| Table | It has one row for each |
 |---|---|
-| `m.streams()` | Stream, poll, background download, and `history()` or `fetch()` of a [watchlist](watchlists.md) |
-| `m.connections()` | WebSocket connection, plus one row per choice of which Massive host to stream from |
-| `m.rate_limits()` | REST subscription, plus `other` for reference data |
+| `m.streams()` | Stream, poll, background read (`wait=False`), and `history()` or `fetch()` of a [watchlist](watchlists.md) |
+| `m.connections()` | WebSocket connection, plus a `REST` row for each asset class and kind of data that records which Massive server the library chose to stream from, and why |
+| `m.rate_limits()` | Subscription whose REST requests the library paces, plus `other` for the datasets Massive assigns to no subscription |
 | `m.symbol_reads()` | Symbol of each `history()` or `fetch()` of a watchlist |
 
-Each call returns a new live view. After `m.close()`, each keeps its final rows.
+<a id="streams-columns"></a>
 
-### `m.streams()`
+### Read the streams table
 
-`State`:
+The `State` column of `m.streams()` shows where each table stands:
 
 | State | Meaning |
 |---|---|
-| `RUNNING` | Running. A `history()` or `fetch()` of a watchlist is `RUNNING` once every symbol has been read or has failed. |
-| `LOADING` | A background download is running, or a `history()` or `fetch()` of a watchlist is reading a symbol |
-| `DONE` | A background download finished |
-| `RELEASED` | You released the table, but a derived table or an open panel still uses it |
-| `FAILED` | It stopped; `Error` says why |
-| `CLOSED` | The session was closed |
+| `RUNNING` | The stream or poll is delivering rows. A `history()` or `fetch()` of a watchlist reaches `RUNNING` once every symbol has been read or has failed. |
+| `LOADING` | A background read is downloading, or a `history()` or `fetch()` of a watchlist has a symbol queued, being read, or waiting to retry. |
+| `DONE` | A background read finished. |
+| `RELEASED` | You released the table, but a derived table or an open panel still uses it. |
+| `FAILED` | The table stopped, and `Error` says why. |
+| `CLOSED` | The session was closed. |
 
-Other columns:
+These are the columns you'll read most:
 
 | Column | What it shows |
 |---|---|
-| `Query` | The call that opened it, such as `m.stocks.trades('AAPL')` |
-| `Symbols`, `SymbolCount` | The symbols it reads now. For a watchlist, updated as you add and delete rows; for a `poll()`, `SymbolCount` counts the symbols its latest cycle read. |
-| `Deferred` | Option contracts waiting for room under the [options cap](arguments.md#symbols) |
-| `Loading` | For a `history()` or `fetch()` of a watchlist: the symbols still to read |
-| `Recency` | `REALTIME`, `DELAYED`, or `UNKNOWN` (not yet shown to be either): see [real-time or delayed](plans.md#real-time-or-delayed) |
-| `RowsPublished` | Rows delivered so far |
-| `Error` | Why it stopped, or warnings that do not stop it, joined with `;` |
-| `Gaps` | Each span over which rows may be missing, such as a recovered outage or a run of failed poll cycles, kept after the `Error` note clears |
-| `SchemaDrift` | Differences between what Massive sent and what its documentation says; below |
+| `Query` | The call that opened it, such as `m.stocks.trades('AAPL')`. |
+| `Symbols`, `SymbolCount` | The symbols it reads now, updated as a watchlist changes. For a `poll()`, `SymbolCount` counts the symbols its latest cycle read. |
+| `Deferred` | How many option contracts are waiting under [the option contract limit](arguments.md#option-contract-limit). |
+| `Loading` | How many symbols a `history()` or `fetch()` of a watchlist still has to read. |
+| `Recency` | Whether its rows are real-time (`REALTIME`), delayed (`DELAYED`), or not yet known (`UNKNOWN`). [Real-time or delayed](plans.md#real-time-or-delayed) explains the difference. |
+| `RowsPublished` | How many rows it has delivered so far. |
+| `Error` | Why it stopped, or the warnings that leave it running, joined with `;`. Each warning has a row in [live tables](#live-table-messages). |
+| `Gaps` | Each span over which rows may be missing, such as a recovered outage. It stays after the `Error` note clears. |
+| `SchemaDrift` | Differences between what Massive sent and what Massive's documentation says. |
 
-Warnings in `Error` that do not stop the table:
-
-- a watchlist row not spelled as Massive spells it;
-- option contracts waiting for room: `over capacity: <n>/1000; <k> deferred`;
-- a subscription Massive has not confirmed: `no acknowledgement from Massive for ...` (the
-  library sends it again);
-- a `dm.ALL` stream's symbols whose rows are being dropped;
-- a connection that is down or quiet;
-- a poll's symbols left out of its latest cycle: `no rows this cycle for ...`.
-
-The messages are explained in [messages and symptoms](#error-messages).
-
-`SchemaDrift` entries, each prefixed with `WebSocket:` or `REST:`:
+Each `SchemaDrift` entry starts with its source, `WebSocket:`, `REST:`, or `flat files:`, then names
+a field with a mark:
 
 | Entry | Meaning |
 |---|---|
-| `zz+` | Massive sent a field its documentation does not list |
-| `size-` | Massive stopped sending a field |
-| `exchange?` | A value did not fit its column, so the cell is null |
-| `s~` | A whole number too large for its decimal column, kept rounded |
-| `3 rows dropped` | Rows dropped because their symbol or time could not be read. A `poll()` that reads the same bad row every cycle counts it every cycle. |
+| `zz+` | Massive sent a field its documentation doesn't list. |
+| `size-` | Massive stopped sending a field. |
+| `exchange?` | A value didn't fit its column, so the cell is null. |
+| `s~` | A whole number was too large for its decimal column, and is kept rounded. |
+| `3 rows dropped` | The library dropped rows whose symbol or time it couldn't read. A `poll()` that reads the same bad row every cycle counts it every cycle. |
 
-After 100 dropped streamed rows in a row, with none delivered, the stream stops: Massive has
-most likely changed its format.
+### Read the connections table
 
-### `m.connections()`
-
-`State`:
+The `State` column of `m.connections()` shows each WebSocket connection's state:
 
 | State | Meaning |
 |---|---|
-| `RESOLVING` | The library is choosing which Massive host to stream from |
-| `CONNECTING` | Opening the connection |
-| `CONNECTED` | Connected and streaming |
-| `WAITING_SLOT` | Another program is using your key's one connection; the library connects when it frees |
-| `RECONNECTING` | The connection dropped; the library is reconnecting |
-| `FAILED` | It stopped; `LastError` says why |
-| `CLOSED` | Closed, because no stream needs it or the session closed |
+| `RESOLVING` | The library is choosing which Massive server to stream from. |
+| `CONNECTING` | The connection is opening. |
+| `CONNECTED` | The connection is open and streaming. |
+| `WAITING_SLOT` | Another program is using your key's one connection, and the library connects when it frees. |
+| `RECONNECTING` | The connection dropped, and the library is reconnecting. |
+| `FAILED` | The connection stopped, and `LastError` says why. |
+| `CLOSED` | The connection closed, because no stream needs it or the session closed. |
 
-Each row also shows its `Host`, its `Recency`, the subscriptions Massive has confirmed and those
-pending, and `LastError`.
+A connection carries one topic for each symbol and kind of data it streams, such as AAPL's
+trades. These columns count topics:
 
-Massive's individual plans allow one connection per WebSocket cluster, such as stocks or
-crypto, per account. Sessions of one server with the same key and the same connection settings
-share their connections; sessions with different settings, such as another `max_outage`,
-compete for the one connection.
+| Column | What it shows |
+|---|---|
+| `Host` | The Massive server the connection streams from. |
+| `Recency` | Whether that server's data is real-time or delayed. |
+| `Topics` | How many topics the connection carries. |
+| `AckedTopics` | How many of them Massive has confirmed. |
+| `PendingTopics` | How many are waiting for Massive to confirm them. |
 
-### `m.rate_limits()`
+Give every session on a server the same key and the same connection settings, such as
+`max_outage`, so that they share their connections. Sessions with different settings compete
+for one connection. Massive's individual plans allow one connection per account for each group
+of streams, such as stocks or crypto.
+
+### Read the rate-limits table
+
+The `State` column of `m.rate_limits()` shows how each subscription's requests go out.
+Programs elsewhere that use your key count against the same limit, but they don't appear here.
 
 | State | Meaning |
 |---|---|
-| `READY` | Requests go out at once |
-| `PACED` | The library spaces requests to fit a Basic plan's five a minute |
-| `PAUSED` | Massive refused a request for coming too fast; requests wait until `PausedUntil` |
+| `READY` | Requests go out at once. |
+| `PACED` | The library spaces requests to fit a Basic plan's five a minute. |
+| `PAUSED` | Massive refused a request for coming too fast, and requests wait until `PausedUntil`. |
 
-Programs elsewhere that use your key count against the same limit without appearing here.
+### Read the symbol-reads table
 
-### `m.symbol_reads()`
+The `State` column of `m.symbol_reads()` shows where each symbol's read stands:
 
 | State | Meaning |
 |---|---|
-| `QUEUED` | Waiting to be read |
-| `LOADING` | Being read |
-| `RETRYING` | A passing failure; read again at `NextAttemptAt` |
-| `DONE` | Its rows are in the table |
-| `FAILED` | It failed; `Error` says why. Delete its row and add it back to read it again. |
-| `REMOVED` | Its row left the watchlist |
-| `STOPPED` | You released the table |
-| `CLOSED` | The session was closed |
+| `QUEUED` | The symbol is waiting to be read. |
+| `LOADING` | The symbol is being read. |
+| `RETRYING` | The read failed for a reason that can clear, and the library tries again at `NextAttemptAt`. |
+| `DONE` | The symbol's rows are in the table. |
+| `FAILED` | The read failed for good, and `Error` says why. Delete the symbol's row and add it back to read it again. |
+| `REMOVED` | The symbol's row left the watchlist. |
+| `STOPPED` | You released the table. |
+| `CLOSED` | The session was closed. |
 
 `ReadAt` is when the rows you see were downloaded, and `Rows` counts them. To list the symbols
-that failed:
+whose reads failed, filter the table of the session that follows the watchlist. In a fresh
+console, as pasted here, the session follows nothing, so the table is empty:
 
 ```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
 failed = m.symbol_reads().where("State == `FAILED`")
 ```
 
+On the session that follows the watchlist, `failed` has a row for each failed symbol, with the
+reason in `Error`.
+
 <a id="the-log"></a>
 
-## The debug log
+## Turn on the debug log
 
-The library writes to Deephaven's log, which the Deephaven IDE shows in its **Log** panel. By
-default only WARNING and ERROR lines appear there; INFO and DEBUG lines appear once you turn on
-the debug log.
+The library writes its warnings and errors to Deephaven's log, which the Deephaven IDE shows in
+its **Log** panel. The debug log adds INFO and DEBUG lines that say what the library decided
+and why. A WARNING or ERROR line asks something of you, and INFO lines need nothing:
 
 | Level | Meaning | What to do |
 |---|---|---|
-| INFO | A decision or progress | Nothing |
-| WARNING | A live table may be stale or wrong, or something needs you. Logged once when it starts; an INFO line says when it recovers. | Read the message |
-| ERROR | A defect in your code or input (the message names the fix), or in the library (the message ends "This is a bug in deephaven-massive") | Fix your code, or [report the bug](#report-a-bug) |
+| INFO | A decision, or progress. | Nothing. |
+| WARNING | A live table may be stale or wrong, or something needs you. It's logged once when it starts, and an INFO line says when it recovers. | Read the message. |
+| ERROR | A defect in your code or input, whose message names the fix, or a bug in the library, whose message says `This is a bug in deephaven-massive.` | Fix your code, or [report the bug](#report-a-bug). |
 
-To see everything the library does while code runs:
+To record everything the library does while some code runs, turn the debug log on around it.
+This example reads a week of Apple's daily bars, which works on every Stocks plan:
 
 ```python
-dm.enable_debug_logging()  # to the Log panel; pass a file path to write a file instead
-# ... run the code that fails ...
+import deephaven_massive as dm
+
+dm.enable_debug_logging()  # to the Log panel; pass a file path to write to a file instead
+m = dm.MassiveSession()
+week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
 dm.disable_debug_logging()
 ```
 
-To capture a problem from the moment the server starts, set one of these in the shell that
-starts the server:
+The **Log** panel then shows a line for the session's settings, each request the read sent, and
+what came back. To capture your own problem, replace the read with the code that fails.
 
-| Variable | Effect |
-|---|---|
-| `DEEPHAVEN_MASSIVE_LOG=DEBUG` | The debug log, from startup |
-| `DEEPHAVEN_MASSIVE_LOG=INFO` | Decisions and progress without a line per request: use it for long runs |
-| `DEEPHAVEN_MASSIVE_LOG_FILE=/path/to/massive.log` | The debug log, written to that file |
-
-The log never holds your API key or S3 secret.
+To capture a problem from the first session on, set `DEEPHAVEN_MASSIVE_LOG` to `DEBUG`, or to
+`INFO` for a long run. To write the log to a file, set `DEEPHAVEN_MASSIVE_LOG_FILE` to its path.
+Set them in the terminal that starts the server, as the README's
+[configuration](../../README.md#configuration) shows. The library reads them when you create the
+first session. The log never holds your API key or S3 secret.
 
 ### Keep the log small
 
-The debug log grows with the number of requests, not with the amount of market data:
+The debug log grows with the number of requests, not with the amount of market data. Each
+WebSocket connection adds about 60 KB an hour to the log, however busy the market is. Each REST
+request or flat-file read adds up to 1 KB, so a fast `poll()` of many symbols grows the log
+quickly. `poll(5)` of 100 requests a cycle adds about 35 MB an hour.
 
-- A live table writes about 60 KB an hour per connection, however busy the market.
-- Each REST request or flat-file read writes up to 1 KB, so a fast `poll()` of many symbols grows
-  quickly: `poll(5)` of 100 requests a cycle writes about 35 MB an hour.
-
-The log has no size limit and is never rotated, and a log file is added to, not replaced, each
-time you turn the log on. Turn it on right before the failing code and off after it, use
-`DEEPHAVEN_MASSIVE_LOG=INFO` for long runs, and delete the file between runs.
+The log has no size limit and is never rotated. A log file grows each time you turn the log on,
+because the library adds to it. Turn the log on right before the failing code and off after it,
+use `INFO` for long runs, and delete the file between runs.
 
 <a id="report-a-bug"></a>
 
 ## Report a bug
 
-Open an [issue](https://github.com/chipkent/deephaven-massive/issues) with:
+Open an [issue](https://github.com/chipkent/deephaven-massive/issues) with three things:
 
-1. what you ran, and what you expected;
-2. the debug log file (GitHub cuts an issue's text at 65,536 characters, so attach the file, and
-   zip a larger one);
-3. the diagnostics tables, printed after the failure:
+1. What you ran, and what you expected.
+2. The debug log file. GitHub cuts an issue's text at 65,536 characters, so attach the file,
+   and zip a larger one.
+3. The diagnostics tables of the session that failed, printed right after the failure.
+
+This function prints a session's four diagnostics tables, up to 1,000 rows each. Paste it into
+the console where the failure happened, and call it with the session that failed, such as
+`print_diagnostics(m)`:
 
 ```python
-for table in (m.streams(), m.connections(), m.rate_limits(), m.symbol_reads()):
-    print(table.to_string(num_rows=1000))
+def print_diagnostics(session):
+    for table in (
+        session.streams(),
+        session.connections(),
+        session.rate_limits(),
+        session.symbol_reads(),
+    ):
+        print(table.to_string(num_rows=1000))
 ```

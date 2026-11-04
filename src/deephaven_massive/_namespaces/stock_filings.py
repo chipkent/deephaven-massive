@@ -501,7 +501,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.index.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.index.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a non-`str` form type.
@@ -564,7 +565,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.sections_10k.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.sections_10k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -627,7 +629,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.text_8k.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.text_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -693,7 +696,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.disclosures_8k.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.disclosures_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -755,7 +759,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.risk_factors.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.risk_factors.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -818,7 +823,8 @@ class _StockFilings(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.institutional_holdings.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.institutional_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
@@ -890,7 +896,8 @@ class _StockFilings(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.initial_insider_ownership.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.initial_insider_ownership.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
@@ -963,7 +970,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.insider_transactions.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_transactions.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
@@ -1037,7 +1045,8 @@ class _StockFilings(Namespace):
                 raises `ValueError`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.insider_activity.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_activity.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
@@ -1115,7 +1124,8 @@ class _StockFilings(Namespace):
                 raises `ValueError`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.insider_holdings.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
@@ -1170,7 +1180,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.risk_factor_taxonomy.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.risk_factor_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -1219,7 +1230,8 @@ class _StockFilings(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.filings.disclosure_taxonomy.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.disclosure_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

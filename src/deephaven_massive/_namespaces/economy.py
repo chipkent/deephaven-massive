@@ -171,7 +171,8 @@ class _Economy(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.treasury_yields.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.treasury_yields.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -223,7 +224,8 @@ class _Economy(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.inflation.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.inflation.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -275,7 +277,8 @@ class _Economy(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.inflation_expectations.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.inflation_expectations.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -327,7 +330,8 @@ class _Economy(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.labor_market.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.labor_market.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
@@ -379,7 +383,8 @@ class _Economy(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.funding_conditions.md.
+            A query. Columns:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.funding_conditions.md.
 
         Raises:
             TypeError: If an argument has the wrong type.

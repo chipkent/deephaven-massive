@@ -1,24 +1,23 @@
 """Tests of the user docs: every page's examples run, and every link and citation resolves.
 
-The hand-written user documentation is `README.md` and the reference pages of the user guide,
-`docs/guide/*.md`: the *user pages*. Their Python examples are real code: every block of a page
-runs here, in document order, in one namespace of its own, as a reader would paste them into
-the Deephaven console one after another, against the fake REST and WebSocket servers, so nothing
-reaches Massive. A guide page opens with a line naming what its examples assume, the import and
-the session, and that code runs first. `dm.MassiveSession()` builds a new session whose REST
-client talks to the fake REST server and whose streams connect to the fake WebSocket server.
+The hand-written user documentation is `README.md` and `docs/troubleshooting.md`: the *user
+pages*. Their Python examples are real code: every block of a page runs here on its own, in a
+namespace of its own, as a reader would paste it into a fresh Deephaven console, against the
+fake REST and WebSocket servers, so nothing reaches Massive. Every block therefore carries its
+own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
+the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
-be. Four sections also run alone against scripted replies, and the tests check that their
-tables hold what the pages say they hold: the README's whole-market day, its live board
-against yesterday's close, and its backfill of today's minutes, and split adjustment (NVDA's
-10-for-1 split of 2024-06-10).
+be. Three README sections also run alone against scripted replies, and the tests check that
+their tables hold what the README says they hold: the whole-market day, the live board against
+yesterday's close, and the backfill of today's minutes.
 
-The docstrings link instead of repeating. A shared argument or concept cites a section by its
-full GitHub URL, `DOCS_URL` followed by `README.md#<anchor>` or `docs/guide/<page>.md#<anchor>`,
-so the link opens from an IDE or the console; a dataset cites its generated page as
-`docs/datasets/<dataset>.md`. Every anchor is an explicit `<a id>`, unique across the user
-pages. The tests check that every section citation is a URL, that every cited anchor and page
-exists, and that every relative link of a user page (and of the tester guide) resolves.
+The docstrings link instead of repeating. A docstring cites a page, or a section of a user page,
+by its full GitHub URL, `DOCS_URL` followed by the page's path from the repository root and,
+for a section, `#<anchor>`, so the link opens from an IDE or the console: a dataset's generated
+page as `docs/datasets/<dataset>.md`, a README section as `README.md#<anchor>`. Every anchor is
+an explicit `<a id>`, unique across the user pages. The tests check that every citation is a
+URL, that every cited page and anchor exists, and that every relative link of a user page (and
+of the tester guide) resolves.
 """
 
 import json
@@ -49,27 +48,16 @@ from tests._fakes.ws import FakeMassiveServer
 
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
-GUIDE = ROOT / "docs" / "guide"
-GUIDE_PAGES = sorted(GUIDE.glob("*.md"))
-USER_PAGES = [README, *GUIDE_PAGES]
+TROUBLESHOOTING = ROOT / "docs" / "troubleshooting.md"
+USER_PAGES = [README, TROUBLESHOOTING]
 TESTER_GUIDE = ROOT / "docs" / "tester-guide.md"
 SOURCE = ROOT / "src" / "deephaven_massive"
 
-PREAMBLE = (
-    "Examples on this page assume `import deephaven_massive as dm` and `m = dm.MassiveSession()`."
-)
-"""The line every guide page opens with, after its title: what its examples assume."""
-
-PREAMBLE_CODE = "import deephaven_massive as dm\n\nm = dm.MassiveSession()\n"
-"""The code the preamble names, which runs before a guide page's first block."""
-
-SKIPPED_BLOCKS: frozenset[tuple[str, str]] = frozenset(
-    {("docs/guide/install.md", "from deephaven_server import Server")}
-)
+SKIPPED_BLOCKS: frozenset[tuple[str, str]] = frozenset()
 """The blocks allowed a `python skip-test` fence, by page path and the block's first line.
 
 A block belongs here only when it cannot run in the test process, such as one that starts its
-own Deephaven server.
+own Deephaven server, or one that reads flat files, which needs S3 keys the fake session lacks.
 """
 
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
@@ -78,17 +66,16 @@ _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
 """The prefix of every section citation in a docstring: the user pages on GitHub's main branch."""
 
-_README_CITATION = re.compile(re.escape(DOCS_URL) + r"README\.md#([A-Za-z0-9_-]+)")
-_GUIDE_CITATION = re.compile(re.escape(DOCS_URL) + r"docs/guide/([a-z-]+\.md)#([A-Za-z0-9_-]+)")
+_CITATION = re.compile(re.escape(DOCS_URL) + r"([A-Za-z0-9_./-]+?\.md)\b(?:#([A-Za-z0-9_-]+))?")
 _BARE_CITATION = re.compile(
-    r"(?<!/blob/main/)\b(?:README\.md|docs/guide/[a-z-]+\.md)#[A-Za-z0-9_-]+"
+    r"(?<!/blob/main/)\b(?:(?:README|docs/troubleshooting)\.md#[A-Za-z0-9_-]+"
+    r"|docs/datasets/[A-Za-z0-9_.]+?\.md\b)"
 )
-_PAGE_CITATION = re.compile(r"docs/datasets/([A-Za-z0-9_.]+?)\.md\b")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
 def _name(page: Path) -> str:
-    """Return a page's path from the repository root, such as `docs/guide/history.md`."""
+    """Return a page's path from the repository root, such as `docs/troubleshooting.md`."""
     return page.relative_to(ROOT).as_posix()
 
 
@@ -233,8 +220,8 @@ def _run_blocks(
     name: str,
     *,
     console_command: Callable[[Callable[[], None]], None],
-) -> dict[str, Any]:
-    """Run code blocks as scripts, in order, each seeing what the blocks before it defined.
+) -> list[dict[str, Any]]:
+    """Run code blocks as scripts, in order, each on its own, as a fresh console runs it.
 
     Each block runs as one console command (the `console_command` fixture): under the update
     graph's exclusive lock, as a reader pasting it into the Deephaven console runs it. A block
@@ -249,75 +236,64 @@ def _run_blocks(
         console_command: Runs one block the way the console runs a command.
 
     Returns:
-        The names the blocks defined.
+        The names each block defined, one namespace per block, in order.
     """
-    names: dict[str, Any] = {}
+    namespaces: list[dict[str, Any]] = []
     for number, block in enumerate(blocks):
         script = tmp_path / f"{name}_{number}.py"
         script.write_text(block, encoding="utf-8")
 
         def run(script: Path = script) -> None:
-            nonlocal names
-            names = runpy.run_path(str(script), init_globals=names)
+            namespaces.append(runpy.run_path(str(script)))
 
         console_command(run)
-    return names
+    return namespaces
 
 
-def _forget(names: dict[str, Any]) -> None:
+def _merged(namespaces: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return the names of several blocks as one mapping, a later block's name winning.
+
+    Args:
+        namespaces: The names each block defined, as `_run_blocks` returns them.
+
+    Returns:
+        Every name, bound to the value its last defining block gave it.
+    """
+    merged: dict[str, Any] = {}
+    for names in namespaces:
+        merged.update(names)
+    return merged
+
+
+def _forget(namespaces: Sequence[dict[str, Any]]) -> None:
     """Break the cycle between the scripts' functions and their globals, then drop the names.
 
     A function a script defined holds its module globals, which hold the function and the
     session, so the session goes with the test only once those globals are cleared.
 
     Args:
-        names: The names the scripts defined.
+        namespaces: The names each script defined.
     """
-    for value in names.values():
-        if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
-            value.__globals__.clear()
-    names.clear()
+    for names in namespaces:
+        for value in names.values():
+            if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
+                value.__globals__.clear()
+        names.clear()
 
 
 # --- Every example runs ------------------------------------------------------------------------
 
 
-def _settings_file(home: Path) -> Path:
-    """Write the guide's example settings file where its examples read it, under `home`.
-
-    The file is the install page's own YAML example, so the test checks that the example is a
-    file `MassiveConfig.from_file` accepts.
-
-    Args:
-        home: The folder that stands in for the home folder.
-
-    Returns:
-        The file's path, `<home>/massive/settings.yaml`.
-    """
-    text = (GUIDE / "install.md").read_text(encoding="utf-8")
-    start = text.index('<a id="settings-file"></a>')
-    end = text.find("<a id=", start + 1)
-    [example] = _YAML_BLOCK.findall(text[start : end if end >= 0 else len(text)])
-    file = home / "massive" / "settings.yaml"
-    file.parent.mkdir()
-    file.write_text(example, encoding="utf-8")
-    return file
-
-
 #: Tables each page's examples promise, by page.
 _PROMISED: dict[str, tuple[str, ...]] = {
     "README.md": ("week", "busiest", "since_start", "board", "spy", "near_quotes", "mine"),
-    "docs/guide/concepts.md": ("kept", "watched"),
-    "docs/guide/watchlists.md": ("es", "live_board", "trades"),
-    "docs/guide/history.md": ("adjusted", "mine"),
-    "docs/guide/recipes.md": ("both",),
-    "docs/guide/troubleshooting.md": ("streams",),
+    "docs/troubleshooting.md": ("streams",),
 }
 
 
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
 @pytest.mark.parametrize("page", USER_PAGES, ids=_name)
-def test_every_user_page_example_runs_in_order(
+def test_every_user_page_example_runs_alone(
     *,
     page: Path,
     readme_server: FakeRestServer,
@@ -340,55 +316,23 @@ def test_every_user_page_example_runs_in_order(
         return real_input_table(col_defs, init_table, key_cols)
 
     monkeypatch.setattr(deephaven, "input_table", recording)
-    # The settings-file examples read the guide's example file from the home folder, by path
-    # and through the environment variable.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("DEEPHAVEN_MASSIVE_CONFIG_FILE", str(_settings_file(tmp_path)))
-    # Every path the examples read answers an empty page, except the futures contracts, which
-    # the watchlist examples stream, and must name at least one contract.
+    # Every path the examples read answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
-    contract = {"ticker": "ESZ6", "product_code": "ES", "date": "2026-10-07", "active": True}
-    readme_server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     blocks = _blocks(page.read_text(encoding="utf-8"))
-    if page != README:
-        # A guide page's examples continue from the import and the session its preamble names.
-        blocks = [PREAMBLE_CODE, *blocks]
-    names = _run_blocks(blocks, tmp_path, page.stem, console_command=console_command)
+    namespaces = _run_blocks(blocks, tmp_path, page.stem, console_command=console_command)
+    names = _merged(namespaces)
     for name in _PROMISED.get(_name(page), ()):
         assert isinstance(names[name], Table), name
-    if page.name == "install.md":
-        assert names["config"].max_outage == 600  # read from the example file
     if any("input_table(" in block for block in blocks):
         assert locked  # the watchlist examples made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
-    _forget(names)
+    names.clear()
+    _forget(namespaces)
 
 
 def test_the_readme_has_its_examples() -> None:
     # A guard on the block pattern: a typo in it would find no block, and every page would pass.
     assert len(_blocks(README.read_text(encoding="utf-8"))) >= 10
-
-
-def test_the_guide_has_its_pages() -> None:
-    # The guide pages are found by a glob; a wrong folder would find none, and every page test
-    # would pass with nothing to check.
-    assert {page.name for page in GUIDE_PAGES} >= {
-        "arguments.md",
-        "concepts.md",
-        "history.md",
-        "install.md",
-        "plans.md",
-        "recipes.md",
-        "troubleshooting.md",
-        "watchlists.md",
-    }
-
-
-@pytest.mark.parametrize("page", GUIDE_PAGES, ids=_name)
-def test_every_guide_page_opens_with_the_preamble(page: Path) -> None:
-    title, preamble, *_ = page.read_text(encoding="utf-8").split("\n\n")
-    assert title.startswith("# ")
-    assert preamble == PREAMBLE
 
 
 def test_only_allowed_blocks_skip_the_test() -> None:
@@ -426,8 +370,8 @@ def test_every_anchor_is_unique_across_the_user_pages() -> None:
 
 
 def test_every_section_citation_is_a_url() -> None:
-    # A bare path does not open from an IDE or the console, so a docstring cites a section by
-    # its full URL.
+    # A bare path does not open from an IDE or the console, so a docstring cites a section, or a
+    # dataset's page, by its full URL.
     bare = [
         f"{path}: {citation}"
         for path, text in _sources().items()
@@ -436,49 +380,34 @@ def test_every_section_citation_is_a_url() -> None:
     assert bare == []
 
 
-def test_every_readme_section_a_docstring_cites_exists() -> None:
-    anchors = set(_anchors(README))
+def test_every_page_and_section_a_docstring_cites_exists() -> None:
+    # A cited page must exist; a cited section must be one of its page's explicit anchors.
     missing = [
-        f"{path}: README.md#{anchor}"
+        f"{path}: {page}#{anchor}" if anchor else f"{path}: {page}"
         for path, text in _sources().items()
-        for anchor in _README_CITATION.findall(text)
-        if anchor not in anchors
-    ]
-    assert missing == []
-
-
-def test_every_guide_section_a_docstring_cites_exists() -> None:
-    missing = [
-        f"{path}: docs/guide/{page}#{anchor}"
-        for path, text in _sources().items()
-        for page, anchor in _GUIDE_CITATION.findall(text)
-        if not (GUIDE / page).is_file() or anchor not in _anchors(GUIDE / page)
-    ]
-    assert missing == []
-
-
-def test_every_dataset_page_a_docstring_cites_exists() -> None:
-    pages = ROOT / "docs" / "datasets"
-    missing = [
-        f"{path}: docs/datasets/{name}.md"
-        for path, text in _sources().items()
-        for name in _PAGE_CITATION.findall(text)
-        if not (pages / f"{name}.md").is_file()
+        for page, anchor in _CITATION.findall(text)
+        if not (ROOT / page).is_file() or (anchor and anchor not in _anchors(ROOT / page))
     ]
     assert missing == []
 
 
 def test_the_citations_are_found() -> None:
-    # A guard on the patterns above: a typo in any would find nothing and pass.
+    # A guard on the patterns above: a typo in either would find nothing and pass.
     text = (
-        f"See {DOCS_URL}README.md#install. See {DOCS_URL}docs/guide/arguments.md#symbols. "
-        "Columns: docs/datasets/stocks.financials.ratios.md. "
-        "Bare: README.md#install, docs/guide/arguments.md#symbols."
+        f"See {DOCS_URL}README.md#install. See {DOCS_URL}docs/troubleshooting.md#the-log. "
+        f"Columns: {DOCS_URL}docs/datasets/stocks.financials.ratios.md. "
+        "Bare: README.md#install, docs/troubleshooting.md#the-log, docs/datasets/stocks.ipos.md."
     )
-    assert _README_CITATION.findall(text) == ["install"]
-    assert _GUIDE_CITATION.findall(text) == [("arguments.md", "symbols")]
-    assert _PAGE_CITATION.findall(text) == ["stocks.financials.ratios"]
-    assert _BARE_CITATION.findall(text) == ["README.md#install", "docs/guide/arguments.md#symbols"]
+    assert _CITATION.findall(text) == [
+        ("README.md", "install"),
+        ("docs/troubleshooting.md", "the-log"),
+        ("docs/datasets/stocks.financials.ratios.md", ""),
+    ]
+    assert _BARE_CITATION.findall(text) == [
+        "README.md#install",
+        "docs/troubleshooting.md#the-log",
+        "docs/datasets/stocks.ipos.md",
+    ]
 
 
 @pytest.mark.parametrize("page", [*USER_PAGES, TESTER_GUIDE], ids=_name)
@@ -497,83 +426,7 @@ def test_every_relative_link_resolves(page: Path) -> None:
     assert broken == []
 
 
-# --- Two sections, against scripted data -------------------------------------------------------
-
-
-@pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
-def test_the_split_adjustment_examples_run(
-    *,
-    readme_server: FakeRestServer,
-    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    tmp_path: Path,
-    console_command: Callable[[Callable[[], None]], None],
-) -> None:
-    # The whole New York days of 2024-06-03 to 2024-06-14, as the range path's `{from}/{to}`.
-    path = (
-        f"/v2/aggs/ticker/NVDA/range/1/day/{_ms('2024-06-03T04:00:00')}/"
-        f"{_ms('2024-06-15T04:00:00') - 1}"
-    )
-    readme_server.reply(
-        path,
-        Reply(
-            envelope(
-                [_bar("2024-06-07", 120.888, 412_385_850), _bar("2024-06-10", 121.79, 314_162_700)],
-                adjusted=True,
-                ticker="NVDA",
-            )
-        ),
-        Reply(
-            envelope(
-                [_bar("2024-06-07", 1208.88, 41_238_585), _bar("2024-06-10", 121.79, 314_162_700)],
-                adjusted=False,
-                ticker="NVDA",
-            )
-        ),
-    )
-    readme_server.reply(
-        "/stocks/v1/splits",
-        Reply(
-            envelope(
-                [
-                    {
-                        "adjustment_type": "forward_split",
-                        "execution_date": "2024-06-10",
-                        "historical_adjustment_factor": 0.1,
-                        "id": "E1",
-                        "split_from": 1,
-                        "split_to": 10,
-                        "ticker": "NVDA",
-                    }
-                ]
-            )
-        ),
-    )
-    blocks = _section_blocks(GUIDE / "history.md", "split-adjustment")
-    assert len(blocks) == 2
-    # The section continues from the import and the session the guide's preamble names.
-    names = _run_blocks(
-        [PREAMBLE_CODE, *blocks],
-        tmp_path,
-        "split_adjustment",
-        console_command=console_command,
-    )
-
-    adjusted = {r["Date"]: r for r in dh_to_pylist(names["adjusted"])}
-    traded = {r["Date"]: r for r in dh_to_pylist(names["traded"])}
-    mine = {r["Date"]: r for r in dh_to_pylist(names["mine"])}
-    assert adjusted["2024-06-07"]["Close"] == pytest.approx(120.888)
-    assert traded["2024-06-07"]["Close"] == pytest.approx(1208.88)
-    # The recipe turns the as-traded day before the split into the adjusted one.
-    assert mine["2024-06-07"]["AdjustedClose"] == pytest.approx(120.888)
-    assert mine["2024-06-07"]["AdjustedVolume"] == pytest.approx(412_385_850)
-    # No split executes after the split's own day, so its factor is 1.
-    assert mine["2024-06-10"]["Factor"] == 1.0
-    assert mine["2024-06-10"]["AdjustedClose"] == pytest.approx(121.79)
-    assert [r.target.partition("?")[2] for r in readme_server.requests][:2] == [
-        "adjusted=true&limit=50000&sort=asc",
-        "adjusted=false&limit=50000&sort=asc",
-    ]
-    _forget(names)
+# --- Three sections, against scripted data -----------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
@@ -600,7 +453,7 @@ def test_the_backfill_example_merges_history_with_live_bars(
     minute = {**_bar("2024-06-14", 541.0, 1_000), "t": opened}
     readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="SPY")))
     [block] = _section_blocks(README, "backfill-then-live")
-    names = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
+    [names] = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
     fake_ws_server.wait_for(
         lambda server: any(
             "AM.SPY" in json.loads(frame).get("params", "")
@@ -648,7 +501,7 @@ def test_the_whole_market_example_ranks_the_day(
         Reply(envelope(day, adjusted=True, resultsCount=len(day))),
     )
     [block] = _section_blocks(README, "whole-market-day")
-    names = _run_blocks([block], tmp_path, "whole_market", console_command=console_command)
+    [names] = _run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
     assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
     busiest = dh_to_pylist(names["busiest"])
@@ -677,7 +530,7 @@ def test_the_live_board_example_compares_each_minute_with_yesterday(
     # The board's other stocks had no bar yesterday.
     readme_server.reply_default(Reply(envelope([])))
     [block] = _section_blocks(README, "live-board")
-    names = _run_blocks([block], tmp_path, "live_board", console_command=console_command)
+    [names] = _run_blocks([block], tmp_path, "live_board", console_command=console_command)
     fake_ws_server.wait_for(
         lambda server: any(
             "AM.AAPL" in json.loads(frame).get("params", "")
