@@ -391,9 +391,9 @@ each claim the run contradicts, with what you saw:
 
 <a id="plan-prices"></a>
 
-## Choose the plans to buy
+## What each plan settles
 
-Each plan you buy settles the open questions listed for it, and
+Each plan settles the open questions listed for it, and
 [the end of each run](#read-the-end-of-a-run) lists the questions still open under the plan
 that settles them. Prices are Massive's monthly list prices as of November 2026
 ([S1], [S2]):
@@ -415,7 +415,7 @@ Currencies, Options, and Stocks Starter together cost $107 a month, and adding F
 makes $136. Economy data and each class's reference data are free on Basic.
 
 Massive offers no free trial ([S4]). A plan you cancel keeps its access to the end of the
-month ([S5]), so you can buy a plan for one month's run and cancel it the same day.
+month ([S5]).
 
 <a id="what-basic-settles"></a>
 

@@ -10,12 +10,12 @@ report you send.
 
 The test runs for at least five trading days. The live run, one program that checks the
 library against Massive's servers, does most of that work on its own. One of the days must be
-a full stream day, when it streams market data from 03:15 to 20:30 New York time.
+a full stream day, when it uses your key from 03:15 to 20:30 New York time.
 
 Keep the computer on and awake the whole time, with 20 GB of free disk. During a stream day, and
 an overnight stream night if your plan includes Currencies or Futures, the live run needs your
-Massive key to itself. A free Massive account is enough to start, and the owner tells you
-whether to buy a paid plan for the live run.
+Massive key to itself. A free Massive account is enough to start, and the live run checks
+more on each paid plan your key holds.
 
 You spend about four hours on the first day, then about 10 minutes a day:
 
@@ -122,9 +122,9 @@ You should see one line, with a 40-character commit id and then `HEAD`.
 ### 2. Set your Massive API key
 
 Create an account at <https://massive.com>. The free plan is enough for setup and for every
-example, though a few examples show their full result only on a paid plan. The owner tells you
-whether to buy a plan for the live run. On Massive's dashboard, open **API Keys** and copy your
-API key. Keep it private, and never paste it into a report, a screenshot, or a chat.
+example, though a few examples show their full result only on a paid plan. On Massive's
+dashboard, open **API Keys** and copy your API key. Keep it private, and never paste it into a
+report, a screenshot, or a chat.
 
 Run this line, paste the key when it asks, and press Return. The key doesn't appear as you
 paste it, and it stays out of your shell's history:
@@ -1359,7 +1359,7 @@ Most statuses need nothing from you:
 | `passed` or `not run` | Nothing |
 | `skipped: needs <plan>`, such as `skipped: needs Stocks Starter` | Nothing. Your plan doesn't include that check, and a skip isn't a failure. |
 | `refused` | Nothing. Massive refused something its own documentation says your plan includes, and the owner reads it in the results. |
-| `failed` or `error` | Nothing the first time, because a failed check runs once more. Write to the owner if a check fails twice. |
+| `failed` or `error` | Nothing the first time, because a failed check runs once more. If a check fails twice, pack the results and send them on a GitHub issue, as [Finish the test](#finish) describes. |
 
 Note in your checklist each date you looked in, and the date of the full stream day.
 
@@ -1387,7 +1387,7 @@ everything so far, so send only the newest, on a GitHub issue as
 
 | Message | What you do |
 |---|---|
-| It names files in which it found a key, and writes no zip | Send the owner that list instead. |
+| It names files in which it found a key, and writes no zip | Put that list of file names, without the files, on a GitHub issue instead. |
 | It says to set exactly the secrets the run used | Set the same keys as when you ran `run`, and pack again. |
 
 Unless you're stopping for good, start the run again with the same `run` command.
