@@ -247,13 +247,13 @@ The README's examples follow this plan. When the README changes, change the plan
 |---|---|---|---|
 | 1 | See the whole US stock market's day | A query names the data; a verb returns a Deephaven table; `dm.ALL` | Free |
 | 2 | Compare a few stocks over a year | `symbols` as a list; dates as `yyyy-MM-dd` text; aggregation | Free |
-| 3 | Find the dataset you need | The pattern, now named; `dm.datasets()`, `columns()`, `fetch()` | Free |
+| 3 | Find a dataset and the verbs it has | The pattern, now named; `dm.datasets()`, `columns()`, `fetch()` | Free |
 | 4 | Price each dividend against the stock | Tables from two datasets join, because dates are text | Free |
 | 5 | Follow the news as it breaks | `poll()`: the first live table, and how long it runs | Free |
 | 6 | Learn what your plan allows | Plans, `dm.EntitlementError`, `rest_basic_subscriptions` | Free |
 | 7 | Watch trades arrive, four ways | The four stream shapes; aggregating a blink table | Currencies Starter |
-| 8 | Build a live board against yesterday's close | A live table joins to a static one; delayed data | Stocks Starter |
-| 9 | Drive the board from a watchlist | A live symbol table drives the subscription | Stocks Starter |
+| 8 | Build a live board against the previous close | A live table joins to a static one; delayed data | Stocks Starter |
+| 9 | Follow a watchlist with live bars | A live symbol table drives the subscription | Stocks Starter |
 | 10 | Start with today's history, then continue live | Backfill and stream from one query | Stocks Starter |
 
 <a id="placement"></a>

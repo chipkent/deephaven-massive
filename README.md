@@ -14,16 +14,16 @@ Read years of market history and watch the market live, from one Python query.
 
 Testing a trading idea often means two programs, one for the past and one for the live feed,
 each with its own columns. With deephaven-massive, one query does both jobs. A query names the
-data you want from [Massive](https://massive.com) (formerly Polygon.io), such as a year of
-Apple's daily bars. Call `history()` on it for the past, or `last_by()` for a live table that keeps
-each stock's newest row. A live table updates as data arrives, and both tables have the same
-columns. You get the same pair of tables from every dataset Massive offers both as history and
-as a stream, such as trades and quotes.
+data you want from [Massive](https://massive.com) (formerly Polygon.io), such as Apple's minute
+bars. Call `history()` on it for a date range in the past, or `last_by()` for a live table that
+keeps each stock's newest row. A live table updates as data arrives, and both tables have the
+same columns. You get the same pair of tables from every dataset Massive offers both as history
+and as a stream, such as trades and quotes.
 
-You work with the tables in [Deephaven](https://deephaven.io), a free real-time query engine
-that represents both static and streaming data as tables. It runs on your own computer, and you
-type Python into its console in your browser. Anything you build from a live table, such as a
-filtered view or a chart, updates with it.
+You work with the tables in [Deephaven](https://deephaven.io). Deephaven is a free real-time
+query engine that represents both static and streaming data as tables. It runs on your own
+computer, and you type Python into its console in your browser. Anything you build from a live
+table, such as a filtered view or a chart, updates with it.
 
 Once you've installed the library, this example runs as pasted in the Deephaven console on
 Massive's Stocks Advanced or Business plan, which stream in real time. If you're on the free
@@ -44,19 +44,20 @@ latest = bars.last_by()
 per stock, and each row is replaced as the next minute ends. A stock's row appears with its
 first minute bar after you run the code. Bars arrive in pre-market and after-hours trading, too.
 
-Stock bars are one of the library's 112 datasets, which cover stocks, options, CME Group
-futures, indices, forex, and crypto:
+Stock bars are one of the library's 112 datasets. They cover stocks, options, CME Group futures,
+indices, forex, and crypto, and beyond prices they hold company financials, SEC filings, news,
+and economic data such as Treasury yields. The [dataset index](docs/datasets/README.md) links a
+page for each, with its columns and the plans that include it.
 
-- Beyond prices, the datasets hold company financials, SEC filings, news, and economic data such
-  as Treasury yields. The [dataset index](docs/datasets/README.md) links a page for each, with
-  its columns and the plans that include it.
+Live tables follow your watchlist, and the free plan is enough to start:
+
 - A live table can follow a watchlist. Pass a table of symbols where a list would go, and the
   live table adds each symbol you add to the watchlist and drops each one you delete.
 - On Massive's free Stocks Basic plan, you can read two years of daily and minute stock bars,
   plus news and economic data.
 - Live tables stream in real time on Advanced and Business plans, and on Currencies Starter.
-  Other Starter and Developer plans stream 15 minutes late, or 10 for futures, once you name the
-  market in one setting, `delayed_subscriptions`.
+  Other Starter and Developer plans stream 15 minutes late, or 10 minutes for futures. To read
+  a delayed stream, list its subscription, such as Stocks, in the `delayed_subscriptions` setting.
 
 To begin, [install the library](#install), then work through [ten examples](#learn-by-example).
 
@@ -173,8 +174,9 @@ press Control-C there.
 ### 6. Make your first table
 
 Your first table holds a week of Apple's daily bars, and it works on every Stocks plan, the free
-Stocks Basic plan included. `dm.MassiveSession()` opens a session, your connection to Massive.
-The session reads your key from `MASSIVE_API_KEY`, and the next line reads the bars. Click in
+Stocks Basic plan included. `dm.MassiveSession()` opens a session. A session is your
+connection to Massive, and it reads your key from `MASSIVE_API_KEY`. The next line reads the
+bars. Click in
 the IDE's **Console** panel, where Python runs inside the server, then paste the code and press
 Enter:
 
@@ -211,8 +213,8 @@ on the library's log.
 
 ## Configuration
 
-You need one environment variable to start, `MASSIVE_API_KEY`, which you set in
-[Install](#install). The rest are optional. Environment variables hold your keys and the
+To start, you need only `MASSIVE_API_KEY`, and you set it in [Install](#install). The rest are
+optional. Environment variables hold your keys and the
 settings for the whole server, and settings in code change how one session behaves.
 
 <a id="environment-variables"></a>
@@ -238,9 +240,10 @@ The log variables take effect only when the server starts. To turn the log on in
 that's already running, call `dm.enable_debug_logging()` instead.
 
 If your plan includes flat files, set the two S3 keys. A `history()` of 50 or more symbols, or
-of `dm.ALL`, then reads each day from one flat file instead of sending a request for each
-symbol. Flat files hold bars as they traded, so the library reads bars from them only when you
-pass `adjusted=False`. With the default, `adjusted=True`, bars come from Massive's REST API.
+of `dm.ALL`, then downloads one file a day instead of sending a request for each symbol. Flat
+files hold bars as they traded, before any split adjustment, so the library reads bars from them
+only when you pass `adjusted=False`. [Adjust prices for splits](#split-adjustment) explains the
+difference.
 
 <a id="settings-in-code"></a>
 
@@ -254,7 +257,7 @@ session to your plans:
 
 | Setting | Set it when | What changes | Example |
 |---|---|---|---|
-| `rest_basic_subscriptions` | A subscription is on a free Basic plan, which allows five requests a minute, and you send many requests | The session keeps that subscription to five requests a minute, starting with its first request. Without the setting, it slows down only after Massive refuses a request. | `{dm.Subscription.STOCKS}` |
+| `rest_basic_subscriptions` | A subscription is on a free Basic plan, which allows five requests a minute, and you read more than five symbols or pages at a time | The session sends at most five requests a minute for that subscription, from the first request on. Without the setting, it slows down only after Massive refuses a request. | `{dm.Subscription.STOCKS}` |
 | `delayed_subscriptions` | Your Starter or Developer plan streams a subscription late: 15 minutes, or 10 for futures | Live tables read Massive's delayed feed. Without the setting, opening a live table or fetching current data, such as a snapshot, raises `dm.EntitlementError`, and its message names the line to add. | `{dm.Subscription.STOCKS}` |
 
 Pass the settings to `dm.MassiveConfig`, and pass that to `dm.MassiveSession`. This session is
@@ -280,10 +283,10 @@ same settings in every console and script, keep them in a YAML file and read it 
 
 Each example runs as pasted into a fresh console. To run one, paste it into the **Console**
 panel of the Deephaven IDE and press Enter. Examples 1 to 6 run on every Stocks plan, and
-Examples 7 to 10 each name the paid plan they need.
+Examples 1 to 5 need no settings. Examples 7 to 10 each name the paid plan they need.
 
-On the free plan, which allows five requests a minute, an example's tables can take up to a
-minute to appear. When Massive refuses a request for coming too fast, the session waits and
+Stocks Basic allows five requests a minute, so on that plan an example's tables can take up to
+a minute to appear. When Massive refuses a request for coming too fast, the session waits and
 sends it again. [Example 6](#what-your-plan-allows) shows the setting that spaces your requests
 to fit the limit.
 
@@ -291,8 +294,7 @@ to fit the limit.
 
 ### 1. Rank every US stock by one day's trading
 
-You get the daily bar of every US-listed stock for October 30, 2026, in one table. It runs on
-every Stocks plan, the free Stocks Basic plan included, with no settings.
+You get the daily bar of every US-listed stock for October 30, 2026, in one table.
 
 The code reads that day's bar for every stock, then ranks the stocks by dollars traded and by
 their gain from open to close:
@@ -323,24 +325,23 @@ Three tables open. `day` has one row per stock, and its columns include `Symbol`
 `Open`, `High`, `Low`, `Close`, `Volume`, and `Vwap`, the volume-weighted average price.
 `busiest` holds the 20 stocks with the most dollars traded, largest first. `risers` holds the 20
 stocks that rose most from open to close, among those that traded at least a million shares.
-The [stock bars page](docs/datasets/stocks.bars.md) lists every column.
+The [stock bars page](docs/datasets/stocks.bars.md) lists every column. To rank another day,
+change both dates. Stocks Basic serves any trading day in the past two years.
 
-A query names the data, and a verb reads it. Here `m.stocks.bars(dm.ALL, dm.Timespan.DAY)` is
-the query, and `dm.ALL` stands for every symbol. On its own, the query reads nothing. `history()`
-is the verb, which reads the bars from Massive and returns a Deephaven table.
+`m.stocks.bars(dm.ALL, dm.Timespan.DAY)` is the query, and `dm.ALL` stands for every symbol. On
+its own, the query reads nothing. `history()` is the verb. It reads the bars from Massive and
+returns a Deephaven table.
 
 `update_view`, `where`, `sort_descending`, and `head` are Deephaven's own
 [table operations](https://deephaven.io/core/docs/conceptual/table-operations-overview/), and
-they work on every table the library returns. To rank another day, change both dates. Stocks
-Basic reaches back two years.
+they work on every table the library returns.
 
 <a id="compare-stocks"></a>
 
 ### 2. Compare a few stocks over a year
 
 You get a three-row scorecard with each stock's first and last close of the year, its high and
-low, and its return. It runs on every Stocks plan with no settings, because a year of daily bars
-is inside the free plan's two years.
+low, and its return. A year of daily bars is well inside Stocks Basic's two years of history.
 
 `agg_by` reduces each stock's year of daily bars to one row:
 
@@ -382,7 +383,7 @@ request. Each asset class has its own form:
 | Futures | `ESZ6` | The product code, month code, and the year's last digit |
 
 A range includes both of its dates, so this read runs from November 3, 2025, through October 30,
-2026, both days included. For stocks, options, and indices, a date means the trading day in New
+2026. For stocks, options, and indices, a date means the trading day in New
 York. For futures, it means the trading day that ends on that date, and for forex and crypto,
 the UTC day. The [arguments of stock bars](docs/datasets/stocks.bars.md#arguments) give the full
 rules for symbols and ranges.
@@ -392,12 +393,11 @@ sorts by day, so `sorted_first("Date", ...)` finds the year's first close.
 
 <a id="how-it-works"></a>
 
-### 3. Find the dataset you need
+### 3. Find a dataset and the verbs it has
 
 Before you read any data, you can ask the library which dataset holds it, what a company's
-ticker is, and what each column means. It runs on every Stocks plan with no settings.
-`dm.datasets()` and `columns()` answer without a request to Massive, and the ticker search sends
-one.
+ticker is, and what each column means. `dm.datasets()` and `columns()` answer without a request
+to Massive, and the ticker search sends one.
 
 Search the catalog for dividends, look up Coca-Cola's ticker, and describe the dividend columns:
 
@@ -414,10 +414,11 @@ dividend_columns = m.stocks.dividends("KO").columns()
 
 `catalog` has one row per dataset, and its columns include `Dataset`, `Call`, `Summary`,
 `Verbs`, and `Documentation`, a link to the dataset's page. `about_dividends` keeps the datasets
-whose summary mentions dividends, `stocks.dividends` among them. `coke` lists the active
-tickers whose symbol or name matches, Coca-Cola's own `KO` among them. Its columns include
-`Symbol`, `Name`, and `PrimaryExchange`. `dividend_columns` has one row for each column of the
-dividends dataset, with its name, its type, a description, and the sources that fill it.
+whose summary mentions dividends, `stocks.dividends` among them. `coke` lists the active tickers
+whose symbol or name matches, Coca-Cola's own `KO` among them. Its columns include `Symbol`,
+`Name`, and `PrimaryExchange`. `dividend_columns` has one row for each column of the dividends
+dataset. Its columns are `Name`, `Type`, `Description`, and `SuppliedBy`, which says whether
+Massive's REST API, flat files, or live stream fills the column.
 
 `day`, `year`, and `coke` all came from one pattern:
 `m.<namespace>.<dataset>(<arguments>).<verb>()`. A namespace, such as `m.stocks` or
@@ -430,7 +431,7 @@ Each dataset has some of these verbs, and the `Verbs` column of `catalog` lists 
 
 | Verb | What it returns | Taught in |
 |---|---|---|
-| `fetch()` | A static table, read once | [Example 3](#how-it-works) |
+| `fetch()` | A static table, read once | This example |
 | `history(start, end)` | A static table of every row in a date range | [Example 1](#whole-market-day) |
 | `poll(interval)` | A live table that repeats the read every `interval` seconds | [Example 5](#follow-the-news) |
 | `last_by()`, `ring(capacity)`, `append_only()`, `blink()` | A live table fed by Massive's stream, each keeping a different set of rows | [Example 7](#table-shapes) |
@@ -439,8 +440,8 @@ Each dataset has some of these verbs, and the `Verbs` column of `catalog` lists 
 
 ### 4. Price each dividend against the stock
 
-You get each dividend KO, PEP, and JNJ paid over a year, priced against the stock's close on
-its ex-dividend date. It runs on every Stocks plan with no settings.
+One table prices each dividend KO, PEP, and JNJ paid over the past year against the stock's
+close on its ex-dividend date.
 
 `fetch()` reads the dividends whose ex-dividend date falls between `start` and `end`, and
 `history()` reads the daily closes over the same dates. `natural_join` then matches each
@@ -469,8 +470,8 @@ yields = dividends.natural_join(
 `SplitAdjustedCashAmount`, the dividend per share. It adds two more: `CloseOnExDate`, the
 stock's close that day, and `AnnualYieldPct`, the yield a year of such payments implies. The
 dividend is split-adjusted, as the closes are, so a later split doesn't skew the yield.
-`Frequency` is the number of payments a year, and 0 for a one-time special dividend, whose
-yield then shows 0.
+`Frequency` is the number of payments a year. A one-time special dividend has a `Frequency` of
+0, so its `AnnualYieldPct` is 0 too.
 
 Every date column in every table is `yyyy-MM-dd` text, so a dividend's `ExDividendDate` joins
 straight onto a bar's `Date`, with no conversion.
@@ -479,8 +480,9 @@ straight onto a bar's `Date`, with no conversion.
 
 ### 5. Follow the news as it breaks
 
-You get the latest articles about Apple, Nvidia, and Tesla in a table that adds each new article
-within five minutes of Massive listing it. It runs on every Stocks plan with no settings.
+A live table of Apple, Nvidia, and Tesla headlines picks up each new article within five
+minutes of Massive listing it. On Stocks Basic, Massive updates news hourly, so an article can
+arrive up to an hour after it's published.
 
 `poll(300)` repeats the request for each stock's ten newest articles every 300 seconds:
 
@@ -511,7 +513,8 @@ because it's built on `headlines`. Each dataset's page says how its polls combin
 Until you release it, `headlines` keeps polling while anything refers to it, such as its
 variable, a table built on it like `newest_first`, or an open panel. `m.release(headlines)`
 stops the poll unless a table built on it or an open panel still uses it. Here `newest_first`
-does, so the poll stops only once you also close its panel and `del newest_first`.
+still uses it. The poll stops once you close both tables' panels, `del newest_first`, and Python
+reclaims the table, which can take a few minutes.
 
 To stop every live table of the session at once, call `m.close()`. Each table stops updating
 and shows an error that says the session was closed. It keeps its rows, though, and
@@ -522,11 +525,11 @@ new calls, so create a new `dm.MassiveSession()` to read more.
 
 ### 6. Learn what your plan allows
 
-You see what happens when you ask for data your plan doesn't include, and where to look up a
-plan's history and delay first. Massive refuses such a request, and the library raises
-`dm.EntitlementError` with Massive's reason. The code asks for Apple's daily bars from January
-2004. Only Stocks Advanced and Business reach that far, so any other Stocks plan prints the
-refusal.
+You ask for data your plan doesn't include and catch the error it raises. You also learn where
+to check a plan's history and delay before you ask. Massive refuses such a request, and the
+library raises `dm.EntitlementError` with Massive's reason. The code asks for Apple's daily bars
+from January 2004. Only Stocks Advanced and Business reach that far, so any other Stocks plan
+prints the refusal.
 
 Stocks Basic allows five requests a minute. With `rest_basic_subscriptions`, the session spaces
 its Stocks requests to fit, instead of pausing each time Massive refuses one. Examples 1 to 5
@@ -600,9 +603,9 @@ cycles. The tables differ in which trades they keep:
 | `ticks` | `blink()` | Only the trades of the latest update cycle |
 | `since_start` | An aggregation of `ticks` | One row per pair, with its trade count, volume, and VWAP since you ran the code |
 
-An aggregation of a blink table counts every trade that passes through it, though the blink
-table holds each trade for only one cycle. For a board, use `last_by()`, and for a chart of
-recent trades, use `ring()`.
+A table from `blink()`, called a blink table, keeps each trade for only one update cycle. An
+aggregation of it, such as `since_start`, still counts every trade that passes through. For a
+board, use `last_by()`, and for a chart of recent trades, use `ring()`.
 
 If the connection to Massive drops, the library reconnects by itself, and the tables carry on.
 Trades sent while it was down are missing, so `tape` has a gap and `since_start` undercounts.
@@ -622,8 +625,9 @@ trading day's close, the latest minute's close, and the change between them.
 It needs a Stocks Starter plan or higher. Starter and Developer stream 15 minutes late. To
 accept that delayed feed, list Stocks in `delayed_subscriptions`, the setting that names the
 markets your plan delays. Without it, the `latest` line raises `dm.EntitlementError` on those
-plans, and the message names the line to add. On Advanced or Business, which stream in real
-time, leave the setting out.
+plans, and the message names the line to add. A refusal that comes after the table opens stops
+the table instead, and its row in `m.streams()` shows Massive's reason in `Error`. On Advanced
+or Business, which stream in real time, leave the setting out.
 
 `natural_join` adds each stock's newest minute bar to its row of `previous`, the previous
 trading day's bars:
@@ -647,15 +651,13 @@ board = (
 
 `board` has one row per stock as soon as you run the code, because `previous` has a row for
 each. A stock's `TimestampEnd`, `Close`, and `ChangePct` stay empty until its first minute bar
-arrives. From then on, they change as each minute ends, in pre-market and after-hours trading
-as well as regular hours. A board you create after trading ends for the day shows empty
-cells until the next trading day's first bars. On Starter and Developer, each bar arrives 15
-minutes after its minute ends.
+arrives. From then on, they change as each minute ends, in pre-market and after-hours trading as
+well as regular hours. Run it during the trading day. A board left running overnight still
+compares against the close it read when you created it. On Starter and Developer, each bar
+arrives 15 minutes after its minute ends.
 
-A live table joins a static one the same way two static tables do. `fetch()` reads the previous
-day's bars once, and that table never changes. `board` changes only when `latest` gets a new
-bar. If Massive turns down a stream after its table opens, the table stops, and its row in
-`m.streams()` shows Massive's reason in `Error`.
+`board` changes only when `latest` gets a new bar. `fetch()` reads `previous` once, and a live
+table joins a static one the same way two static tables do.
 
 <a id="drive-with-a-watchlist"></a>
 
@@ -760,11 +762,10 @@ split, as [adjust prices for splits](#split-adjustment) explains.
 
 ## Recipes
 
-For three common jobs, an example is the place to start:
-
-- To screen the whole market, see [Example 1](#whole-market-day).
-- For a live board, see [Example 8](#live-board) and [Example 9](#drive-with-a-watchlist).
-- For history that continues live, see [Example 10](#backfill-then-live).
+The recipes here stream the options near the money, read a watchlist's history, and adjust
+prices for splits. To screen the whole market, start from [Example 1](#whole-market-day). For a
+live board, start from [Example 8](#live-board) or [Example 9](#drive-with-a-watchlist), and for
+history that continues live, from [Example 10](#backfill-then-live).
 
 <a id="option-chain"></a>
 
@@ -837,7 +838,9 @@ watchlist:
 
 All three run on any Stocks plan. The code sets `rest_basic_subscriptions`, as
 [Example 6](#what-your-plan-allows) does, so the session keeps to Stocks Basic's five requests a
-minute. Its nine requests then take about two minutes. On a paid plan, leave that setting out.
+minute.
+It sends nine requests, two each for `followed` and `fixed` and one for each of the week's five
+days in `market`, so they finish in about a minute. On a paid plan, leave that setting out.
 The code builds a watchlist, then reads its daily bars each way:
 
 ```python
@@ -889,12 +892,12 @@ Flat files need a Stocks Starter plan or higher and your [S3 keys](#environment-
 
 ### Adjust prices for splits
 
-You get a stock's prices in the same shares on both sides of a split, adjusted by Massive or by
-your own code. When a company splits its stock 15 for 1, each share becomes 15 shares worth a
-fifteenth of the price. A chart of the prices as traded falls 93% overnight. A split-adjusted
-price restates each earlier price in today's shares, so the series runs on without a break. The
-`history()` of stock and option bars returns split-adjusted prices by default. Live bars are
-always as traded, and so is any read with `adjusted=False`.
+You get a stock's prices stated in today's shares on both sides of a split, adjusted by Massive
+or by your own code. When a company splits its stock 15 for 1, each share becomes 15 shares
+worth a fifteenth of the price. A chart of the prices as traded falls 93% overnight. A
+split-adjusted price restates each earlier price in today's shares, so the series runs on
+without a break. The `history()` of stock and option bars returns split-adjusted prices by
+default. Live bars are always as traded, and so is any read with `adjusted=False`.
 
 O'Reilly Automotive (ORLY) split 15 for 1 on June 10, 2025. The code reads ORLY's daily bars
 around the split, adjusted and as traded, then adjusts the as-traded bars itself with Massive's
@@ -940,7 +943,7 @@ you aggregate them into weeks or months, because a longer bar has no `Date` for 
 match.
 
 `by_hand` and `adjusted` can differ around a stock dividend. The splits dataset lists stock
-dividends, with an `AdjustmentType` of `stock_dividend`, and the code applies them, but Massive
+dividends with an `AdjustmentType` of `stock_dividend`, and the code applies them. Massive
 doesn't say whether its own adjusted bars do. To leave stock dividends out, read the splits with
 `filters={"adjustment_type_any_of": ["forward_split", "reverse_split"]}`.
 
@@ -970,16 +973,15 @@ before any request goes out. Find the message you see in the first column:
 | A read is slow on a Basic plan | Massive's Basic plans allow five requests a minute | Run `m.rate_limits()` to see the pace, or read fewer symbols |
 | A table keeps running after `del` | `del` stops a live table only once garbage collection reclaims it, which can take minutes | Call `m.release(table)`, as in [Example 5](#follow-the-news) |
 
-[Troubleshooting](docs/troubleshooting.md) lists every other message and says how to report
-a bug.
+[Troubleshooting](docs/troubleshooting.md) lists every message and says how to report a bug.
 
 <a id="where-next"></a>
 
 ## Where to go next
 
 Every object in the library documents itself in the console. Run `help()` on one, such as
-`help(m.stocks.bars)` or `help(dm.MassiveConfig)`, to read its full documentation. For the rest,
-go here:
+`help(m.stocks.bars)` or `help(dm.MassiveConfig)`, to read its full documentation. Three pages
+cover what `help()` doesn't:
 
 | Page | Go here when you want to |
 |---|---|
