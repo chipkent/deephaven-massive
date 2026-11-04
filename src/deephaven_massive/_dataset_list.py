@@ -69,13 +69,10 @@ def datasets() -> Table:
         `Dataset` (String, such as `stocks.trades`), `Call` (String, how a session `m` reaches
         it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Verbs` (String[],
         the verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
-        `ring`, `last_by`, `history`), `Transports` (String[], the transports that serve it,
+        `ring`, `last_by`, `history`), `Transports` (String[], where the library reads it from,
         spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
         Each column carries a description, shown as its tooltip in the Deephaven IDE.
-
-    The table is created on the calling thread, in the liveness scope at the top of its stack,
-    as any static table the caller makes is.
 
     Example:
         ::

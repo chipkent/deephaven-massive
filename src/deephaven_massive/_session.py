@@ -203,10 +203,10 @@ def _register(core: SessionCore) -> None:
 class MassiveSession:
     """A connection to Massive for one API key: the namespaces, diagnostics, and lifecycle.
 
-    Create it inside a Deephaven server (a server console, an application script, or anywhere
-    an `ExecutionContext` is active); the library captures that context for its own threads and
-    never starts a JVM. Configuration comes only from `MassiveConfig`, and the session does not
-    expose it again, keeping the API key out of console globals.
+    Create it inside a Deephaven server: in the console, in an application script, or anywhere
+    an `ExecutionContext` is active. The session never starts a server of its own. Its settings
+    come only from `MassiveConfig`, and the session doesn't expose them again, so your API key
+    stays out of the console's variables.
 
     Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs on a
     query return Deephaven tables
@@ -216,10 +216,11 @@ class MassiveSession:
     (https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news). As a
     context manager the session closes on exit.
 
-    Sessions of one process with the same API key share their WebSocket connections when their
-    connection settings are equal; otherwise a WARNING says they compete for the slot. The
-    session's label (`MassiveSession #1`) appears in its `repr`, its warnings, and its error
-    messages. Thread-safe.
+    Massive allows one WebSocket connection for each group of streams, such as stocks or
+    crypto. Sessions in one server with the same API key and equal connection settings share
+    their connections; otherwise a WARNING says they compete for them. The session's label
+    (`MassiveSession #1`) appears in its `repr`, its warnings, and its error messages. You can use a
+    session from several threads at once.
 
     Example:
         ::
@@ -249,9 +250,8 @@ class MassiveSession:
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Start a session.
 
-        A thread that holds the update graph's lock, as the Deephaven console does for every
-        command, may create a session; a Deephaven update-graph thread, for example inside a
-        table listener, may not.
+        Create it from the console or a script. A call on a Deephaven update-graph thread, for
+        example inside a table listener, raises.
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -443,10 +443,10 @@ class MassiveSession:
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.
 
-        One row per WebSocket connection, plus one `Transport=REST` row per resolved (asset class,
-        channel family) host decision. A connection shared with another session of the same API key
-        shows in both. Each call returns a new live view; after `close()` it keeps its final rows.
-        How to read it:
+        One row per WebSocket connection, plus one `Transport=REST` row for each asset class and
+        channel family whose host, real-time or delayed, the session has chosen. A connection shared
+        with another session of the same API key shows in both. Each call returns a new live view;
+        after `close()` it keeps its final rows. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
@@ -473,7 +473,7 @@ class MassiveSession:
 
         One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), background read
         (`read`, from `fetch(wait=False)` or `history(..., wait=False)`), and followed read
-        (`read`, a `history()` or `fetch()` of a refreshing symbol table). A stream or poll is
+        (`read`, a `history()` or `fetch()` of a watchlist). A stream or poll is
         `RUNNING`; a background read is `LOADING`, then `DONE`, or `FAILED` with the error; a
         followed read is `LOADING` while a symbol is queued, loading, or waiting to retry, and
         `RUNNING` once every symbol has landed or failed, and its `Error` groups its failed and
@@ -518,8 +518,8 @@ class MassiveSession:
 
         Massive limits REST requests per subscription (5 per minute on a free Basic plan, none on a
         paid one), counted across every key and session of the account. Each row is one
-        subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions of this
-        process with the same API key share one governor, so their tables show the same rows. Each
+        subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions in this
+        server with the same API key share these limits, so their tables show the same rows. Each
         call returns a new live view; after `close()` it keeps its final rows. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
@@ -540,16 +540,16 @@ class MassiveSession:
     def symbol_reads(self) -> Table:
         """Return the live diagnostics table of each symbol of each followed read.
 
-        A `history()` or `fetch()` whose `symbols` is a refreshing table follows it: it reads each
-        symbol as it is added, and drops each one removed. This table has one row per symbol of each
-        such result, so a user sees which symbols are loading, which failed, and why. A symbol is
-        `QUEUED` when its row enters the symbol table, `LOADING` while it is read, and `DONE` once
-        its rows are in the result (0 rows when Massive has no data for it). A failure that may pass
-        (a rate limit beyond the read's patience, a network failure, a server error) makes it
-        `RETRYING`: it is read again 1, 5, and 15 minutes later, and `FAILED` after the last; any
-        other failure makes it `FAILED` at once. Deleting and re-adding its row reads it again. The
-        rows stay for the session's life, also after their result is released. Each call returns a
-        new live view; after `close()` it keeps its final rows. How to read it:
+        A `history()` or `fetch()` whose `symbols` is a live table, a watchlist, follows it: it
+        reads each symbol you add and drops each one you delete. This table has one row per symbol
+        of each such result, so you can see which symbols are loading, which failed, and why. A
+        symbol is `QUEUED` when its row enters the symbol table, `LOADING` while it is read, and
+        `DONE` once its rows are in the result (0 rows when Massive has no data for it). A failure
+        that may pass (a rate limit beyond the read's patience, a network failure, a server error)
+        makes it `RETRYING`: it is read again 1, 5, and 15 minutes later, and `FAILED` after the
+        last; any other failure makes it `FAILED` at once. Deleting and re-adding its row reads it
+        again. The rows stay for the session's life, also after their result is released. Each call
+        returns a new live view; after `close()` it keeps its final rows. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
@@ -578,9 +578,9 @@ class MassiveSession:
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold is released on the session's reaper thread at once, or, inside a console
-        command, once the command ends. The table keeps ticking only while something else holds it
-        (a derived table, an open UI panel); once nothing does, its stream unsubscribes, its poller
+        The release takes effect at once, or, in a console command, once the command ends. The
+        table keeps ticking only while something else uses it, such as a table made from it or a
+        panel open in the Deephaven IDE. Once nothing does, its stream unsubscribes, its poller
         stops, or its background read stops. Releasing twice does nothing, and `release()` keeps
         working after `close()`. Static results are not tracked. See
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
@@ -609,14 +609,13 @@ class MassiveSession:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
         Every live table of the session, and every table derived from one, fails with
-        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so no table is
-        left looking live while it never changes. A failed table keeps its rows: take `t.snapshot()`
-        to keep working with them. `m.streams()` shows every stream `CLOSED` (one that had already
-        failed keeps `FAILED`); in a console command `close()` returns at once, waiting for nothing,
-        and the tables show their final state once the command ends. Connections no other session of
-        the key uses are closed. After `close()`, verbs and the diagnostics methods raise
-        `MassiveError("MassiveSession #1 is closed")`; building queries and `release()` keep
-        working. See
+        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`. A failed
+        table keeps its rows. To keep working with them, take a static copy with `t.snapshot()`.
+        `m.streams()` shows every stream `CLOSED` (one that had already failed keeps `FAILED`); in a
+        console command `close()` returns at once, waiting for nothing, and the tables show their
+        final state once the command ends. Connections no other session of the key uses are closed.
+        After `close()`, verbs and the diagnostics methods raise `MassiveError("MassiveSession #1 is
+        closed")`; building queries and `release()` keep working. See
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
 
         Raises:

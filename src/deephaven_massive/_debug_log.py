@@ -191,9 +191,9 @@ def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.
     requests it made with their status and `request_id`, and the values it could not read.
     They never hold the API key or the S3 secret.
 
-    It adds one handler to the `deephaven_massive` logger, sets that logger to DEBUG, and logs
-    the environment line at INFO. A second call replaces the handler and closes the old one;
-    the environment variables are then no longer read at the first session.
+    It sets the `deephaven_massive` logger to DEBUG and logs one INFO line describing the
+    environment. A second call replaces the first one's output. Once you call it, the
+    environment variable `DEEPHAVEN_MASSIVE_LOG` no longer applies.
 
     A file that cannot be opened for appending raises its `OSError` (from `open`), and the
     previous handler, if any, stays.
@@ -226,15 +226,12 @@ def disable_debug_logging() -> None:
 
     Call it once a bug report has its lines, or to quiet a console after
     `enable_debug_logging()` or `DEEPHAVEN_MASSIVE_LOG`. It logs one INFO line saying the log
-    is off, then removes and closes the handler that either switch added to the
-    `deephaven_massive` logger and sets that logger's level back to `NOTSET`. The library is
-    then as it was at import: WARNING and ERROR records reach `sys.stderr` through Python's
-    last-resort handler, and lower levels are dropped. A handler a user added to the logger
-    themselves stays, but the level is reset to `NOTSET` whoever set it. The environment
-    variables count as read afterwards, so a later first session does not turn the log back
-    on, and a read of them already under way on another thread installs nothing;
-    `enable_debug_logging()` does turn it on again. With the log already off it changes
-    nothing.
+    is off, removes the output either switch added, and sets the `deephaven_massive` logger's
+    level back to `NOTSET`. WARNING and ERROR records then reach stderr through Python's
+    last-resort handler, as they do at import, and lower levels are dropped. A handler you
+    added to the logger yourself stays, but its level is reset. A later first session doesn't
+    turn the log back on from the environment variables; `enable_debug_logging()` does. With
+    the log already off, it changes nothing.
 
     Example:
         ::

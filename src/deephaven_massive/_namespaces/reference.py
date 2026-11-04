@@ -301,7 +301,7 @@ class _Reference(Namespace):
             symbols: Tickers of any classes; None for every ticker (`dm.ALL` is refused).
             market: The market to list; None for every market.
             ticker_type: The type, such as `dm.TickerType.CS` (`ticker_types()` lists them),
-                sent as the wire parameter `type`; None for every type.
+                sent as Massive's parameter `type`; None for every type.
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
@@ -601,7 +601,7 @@ class _Reference(Namespace):
             asset_class: The class whose conditions to list (forex is sent as `fx`); None for every
                 class. The endpoint has no futures or indices conditions.
             data_type: The kind of data the conditions apply to; None for every kind.
-            condition_id: One condition's id, sent as the wire parameter `id`; None for every
+            condition_id: One condition's id, sent as Massive's parameter `id`; None for every
                 condition.
             sip: The SIP whose condition mapping to list; None for every SIP.
             sort: The field to sort by.

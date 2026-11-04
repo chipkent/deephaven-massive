@@ -162,9 +162,9 @@ class MassiveConfig:
     """Everything a `MassiveSession` needs to know: credentials, plan, hosts, timeouts, limits.
 
     Construct it with keyword arguments; any field left out takes its default, and the
-    credentials default to the environment. The object is frozen and validated at
-    construction, so it can be shared between sessions and threads. Secrets are left out of
-    its `repr`.
+    credentials default to the environment. Every value is checked when you create it, and
+    none can change afterward, so one config can serve several sessions. Its `repr` leaves out
+    your secrets.
 
     Example:
         ::
@@ -201,40 +201,34 @@ class MassiveConfig:
             real-time only; a `websocket_hosts` pin must match. Defaults to an empty set. See
             https://github.com/chipkent/deephaven-massive/blob/main/README.md#configuration.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
-            free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
-            per subscription: Basic allows 5 requests per minute, and every paid tier has no
+            free Basic plan, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
+            per subscription: Basic allows 5 requests per minute, and every paid plan has no
             limit. The REST requests of a declared subscription are paced at 5 per minute
-            from the first one, shared with every other session of the process that uses the
+            from the first one, shared with every other session in this server that uses the
             same key. Any other subscription is unpaced until Massive refuses one of its
             requests with HTTP 429: then its requests pause and resume, and when the refusal
             says the per-minute maximum was exceeded, the library learns the subscription is
             Basic and paces it from then on. Forex and crypto are one subscription,
             `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
             Defaults to an empty set: every subscription is unpaced until a refusal.
-        websocket_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
-            for example `{dm.AssetClass.STOCKS: "socket.massive.com"}` (Massive's real-time
-            feed), instead of letting the library decide from REST evidence. A pin must agree with
-            `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
-            FMV family is never pinned; it is always `business.massive.com`. Defaults to
-            an empty mapping: the library decides every host.
-        subscription_confirmation_timeout: Seconds to wait for a subscription acknowledgement before
-            re-sending it once. Must be below 60 seconds, the spacing of the later re-sends of
-            unacknowledged subscriptions, each of which awaits its answer this long.
+        websocket_hosts: Pins the WebSocket host of an asset class's streams, for example
+            `{dm.AssetClass.STOCKS: "socket.massive.com"}` (Massive's real-time feed), instead
+            of letting the library choose it from what Massive's REST answers show. A pin must agree
+            with `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
+            FMV family is never pinned; it is always `business.massive.com`. Defaults to an empty
+            mapping: the library decides every host.
+        subscription_confirmation_timeout: Seconds to wait for Massive to confirm a subscription
+            before sending it again. Must be below 60 seconds, the spacing of the later
+            re-sends, each of which waits this long for its answer.
             Defaults to 5 seconds.
-        reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
-            after any failure that is not fatal: a connection that opened and closed (cleanly
-            or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake
-            or authentication timeout, or a retryable HTTP status during the upgrade (500,
-            502, 503, 504). Each further consecutive failure doubles it, up to
-            `max_reconnect_backoff`, and the count resets only once a connection has stayed
-            up for 60 seconds. Must be at least 15 seconds: Massive's
-            knowledge base says the server takes "roughly 10 to 30 seconds" to release a
-            dropped connection, and an earlier retry can be refused for holding the allowance
-            it just lost, which on an individual plan wastes the one connection there is. The
-            30-second default waits out that whole window.
-        max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
-            lengthens a wait, so every wait lies in `[reconnect_backoff,
-            max_reconnect_backoff]`. Defaults to 120 seconds.
+        reconnect_backoff: Seconds to wait before reconnecting after a WebSocket connection
+            drops or fails to open, unless retrying can't help, as with a rejected key. Each
+            further failure in a row doubles the wait, up to `max_reconnect_backoff`, and the
+            count resets once a connection stays up for 60 seconds. Must be at least 15 seconds,
+            because Massive takes 10 to 30 seconds to release a dropped connection and can refuse an
+            earlier retry. The 30-second default waits out that whole window.
+        max_reconnect_backoff: The longest wait, in seconds, before reconnecting. Every wait
+            lies between `reconnect_backoff` and this. Defaults to 120 seconds.
         max_outage: How long, in seconds, a live table may go without data before it fails. A stream
             fails when its connection has been down this long; a `poll()` table fails when its
             cycles have kept failing, or a late cycle has received nothing, for this long. Until
@@ -247,7 +241,7 @@ class MassiveConfig:
         max_concurrency: Maximum parallel REST requests of one `poll()` or `fetch()` fan-out,
             and of the whole session at once, however many fan-outs overlap; and the most
             flat files the session reads at once. A count of requests. Defaults to 8.
-        flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
+        flush_interval: Seconds between the batches of streamed rows added to the live tables.
             Defaults to 0.05 seconds (50 ms).
         rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
         s3_endpoint_url: The flat-file S3 endpoint URL; a user and password in it show as
@@ -269,23 +263,22 @@ class MassiveConfig:
         unlisted_symbols: What a crypto pair of a symbol table does in a live stream
             (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker
             list does not hold it, so it cannot be split into the topic Massive streams it on,
-            whether the row is there at the call or added later. A pair added later whose
-            lookup cannot read the list is retried twice, after 2 and 8 seconds, and then
-            treated the same way. `OnError.LOG`, the default, skips the pair and logs each
-            distinct value once at WARNING (at most 100 values per process); `OnError.IGNORE`
-            skips it with nothing logged above DEBUG. Under both, the stream keeps its other
-            pairs, a reactive table's skipped pairs are listed in the stream's `m.streams()`
-            `Error` until their rows are deleted (a skipped pair stays skipped until its row
-            is deleted and added again), and a table whose pairs are all skipped raises
-            `MassiveError` at the call. `OnError.RAISE` raises `MassiveError` for such a pair
-            present at the call and fails the stream when one is added later. The REST verbs
-            whose paths take a pair as two currencies (the last trade and quote, the daily
-            open and close) follow it too: under `LOG` and `IGNORE`, `fetch()` and each
-            `poll()` cycle leave the pair out (a `poll()` lists it in `Error`), and a
-            `fetch()` of a refreshing table marks it `FAILED` in `m.symbol_reads()`; under
-            `RAISE`, `fetch()` raises and a `poll()` or followed `fetch()` table fails. A
-            failed read of the list fails them as before. A `str` or a list passed as
-            `symbols` always raises, whatever this says. Defaults to `LOG`.
+            whether the row is there at the call or added later. A pair added later while the
+            list can't be read is tried twice more, then treated the same way. `OnError.LOG`, the
+            default, skips the pair and logs each distinct value once at WARNING (at most 100 values
+            per process); `OnError.IGNORE` skips it with nothing logged above DEBUG. Under both, the
+            stream keeps its other pairs, a reactive table's skipped pairs are listed in the
+            stream's `m.streams()` `Error` until their rows are deleted (a skipped pair stays
+            skipped until its row is deleted and added again), and a table whose pairs are all
+            skipped raises `MassiveError` at the call. `OnError.RAISE` raises `MassiveError` for
+            such a pair present at the call and fails the stream when one is added later. The REST
+            verbs whose paths take a pair as two currencies (the last trade and quote, the daily
+            open and close) follow it too: under `LOG` and `IGNORE`, `fetch()` and each `poll()`
+            cycle leave the pair out (a `poll()` lists it in `Error`), and a `fetch()` of a
+            watchlist marks it `FAILED` in `m.symbol_reads()`; under `RAISE`, `fetch()` raises and a
+            `poll()` or followed `fetch()` table fails. A failed read of the list fails them under
+            every setting. A `str` or a list passed as `symbols` always raises, whatever this says.
+            Defaults to `LOG`.
         unreadable_symbols: What a symbol Massive sends in a spelling the library cannot read
             does. Such a spelling is a gap in the library, not in the caller's code.
             `OnError.LOG`, the default, keeps the row with a null `Symbol` and the text in the

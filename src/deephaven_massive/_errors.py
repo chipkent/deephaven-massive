@@ -103,7 +103,8 @@ it imports nothing else of the library."""
 class ErrorCause(StrEnum):
     """Whose problem a `MassiveError` is: what sets its log level and what to do about it.
 
-    Read it from `MassiveError.cause`. The values are plain names, not Massive wire strings.
+    Read it from `MassiveError.cause`. The values are the library's own names, not values Massive
+    sends.
 
     Example:
         Report a defect of the library, and handle everything else as the application's own
@@ -138,10 +139,9 @@ class MassiveError(Exception):
     """Base class of every error that Massive or this library reports.
 
     Raised directly for failures that are neither authentication nor entitlement problems: a
-    transport error, an HTTP error other than 401 or 403, a rate limit that outlived the
-    retries, or a closed session. The message always carries the context needed to act on it
-    (the host, the dataset, the server's text). `status`, `request_id`, and `cause` are
-    read-only and safe to read from any thread.
+    network error, an HTTP error other than 401 or 403, a rate limit that outlasted the
+    retries, or a closed session. The message carries what you need to act on it: the host,
+    the dataset, and Massive's text. `status`, `request_id`, and `cause` are read-only.
 
     Example:
         Catch every library failure in one place, and branch on the HTTP status::
@@ -225,15 +225,15 @@ class EntitlementError(MassiveError):
 
     Raised when Massive answers HTTP 403 (`NOT_AUTHORIZED`) to a REST request, when a WebSocket
     subscription is refused with an explicit error for its topic, when S3 refuses a flat file,
-    or when Massive labels current data `DELAYED`, or a stream's host check shows delayed data,
-    for a subscription not in `MassiveConfig.delayed_subscriptions` (the message names the line
+    or when Massive labels current data `DELAYED`, or shows a stream's data is delayed, for a
+    subscription not in `MassiveConfig.delayed_subscriptions` (the message names the line
     to add). Only the affected table fails; other tables on the same connection keep running.
 
-    The library does not model Massive's plans, so the message reports what happened rather than
-    guessing at what the plan holds: the subscription (stocks, options, indices, currencies, or
-    futures), the transport, the request that was refused, and Massive's own text. When the
-    refused request was the library's own, such as the snapshot request that checks a plan's
-    WebSocket host before the first stream of a class, the message says so. Where the library
+    The message reports what Massive refused, without guessing at what your plan holds: the
+    subscription (stocks, options, indices, currencies, or futures), whether REST, WebSocket, or
+    flat files refused it, the request, and Massive's own text. When the refused request was
+    one the library makes for you, such as the snapshot request that checks which host a
+    plan streams from before the first stream of a class, the message says so. Where the library
     has another way to read the same data, the message names it: a refused flat-file
     `history()` names `source=dm.HistorySource.REST` when REST can serve the read.
 

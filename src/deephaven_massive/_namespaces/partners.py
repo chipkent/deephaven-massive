@@ -403,7 +403,7 @@ class _Benzinga(Namespace):
         `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            sort: The wire field to sort by, such as `"smart_score"`.
+            sort: Massive's field to sort by, such as `"smart_score"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"firm_name": "Wedbush"}`.
@@ -454,7 +454,7 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"date_gte": "2025-01-01"}`.
@@ -506,7 +506,7 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"rating_action": "upgrades"}`.
@@ -598,7 +598,7 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-            sort: The wire field to sort by, such as `"last_updated"`.
+            sort: Massive's field to sort by, such as `"last_updated"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"last_updated_gte": "2025-06-01"}`.
@@ -650,7 +650,7 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"positioning": "primary"}`.
@@ -702,7 +702,7 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"importance_gte": 3}`.
@@ -750,7 +750,7 @@ class _Benzinga(Namespace):
         it, keyed by `BenzingaId`.
 
         Args:
-            sort: The wire field to sort by, such as `"name"`.
+            sort: Massive's field to sort by, such as `"name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
@@ -804,7 +804,7 @@ class _Benzinga(Namespace):
                 refused).
             start: The earliest publication time; `poll()` needs it or a `limit`.
             end: The end of the range.
-            sort: The wire field to sort by, such as `"published"`.
+            sort: Massive's field to sort by, such as `"published"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"channels_any_of": ["earnings"]}`.
@@ -886,7 +886,7 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: The wire field to sort by, such as `"effective_date"`.
+            sort: Massive's field to sort by, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
@@ -936,7 +936,7 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: The wire field to sort by, such as `"effective_date"`.
+            sort: Massive's field to sort by, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"effective_date": "2025-09-18"}`.
@@ -987,7 +987,7 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: The wire field to sort by, such as `"effective_date"`.
+            sort: Massive's field to sort by, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
@@ -1037,7 +1037,7 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: The wire field to sort by, such as `"effective_date"`.
+            sort: Massive's field to sort by, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
@@ -1086,7 +1086,7 @@ class _EtfGlobal(Namespace):
 
         Args:
             symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: The wire field to sort by, such as `"effective_date"`.
+            sort: Massive's field to sort by, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
@@ -1168,7 +1168,7 @@ class _Tmx(Namespace):
                 is refused).
             start: The first event day.
             end: The end of the range.
-            sort: The wire field to sort by, such as `"date"`.
+            sort: Massive's field to sort by, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"type": "earnings"}`.
@@ -1254,7 +1254,7 @@ class _Fable(Namespace):
         Args:
             start: The first transaction day.
             end: The end of the range.
-            sort: The wire field to sort by, such as `"transaction_date"`.
+            sort: Massive's field to sort by, such as `"transaction_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"parent_name": "Amazon Inc"}`.
@@ -1306,7 +1306,7 @@ class _Fable(Namespace):
         `LookupName` and `ActiveFrom`.
 
         Args:
-            sort: The wire field to sort by, such as `"lookup_name"`.
+            sort: Massive's field to sort by, such as `"lookup_name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Such as `{"listing_status": "public"}`.
