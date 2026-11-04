@@ -643,10 +643,13 @@ whether to keep reading, so it carries six things, in this order:
    claim to what's true: a big idea that holds for some datasets says which.
 3. One sentence that defines Deephaven for a reader who's never heard of it, in Deephaven's
    own words: a real-time query engine that represents static and streaming data as tables. It
-   runs on your own computer, and you type Python into its console in your browser.
-4. A short, complete code block that shows the big idea. If it needs a paid plan, a sentence
-   before the block names the plan it runs on as pasted and points free-plan readers to the
-   first free example. A sentence after it says what each table holds.
+   runs on your own computer, and you type Python into its console in your browser. Put it
+   where the hook first names Deephaven, never after.
+4. A short, complete code block that shows the big idea. If it needs a paid plan, say before
+   the block which plan it runs on as pasted, and point free-plan readers to the first free
+   example. The sentence right before the block says what the code does. A sentence after it
+   says what each table holds. State the big idea once; the hook is short enough that a
+   repeat reads as padding.
 5. Three to five proof points, as plain bullets without bold labels, each a checkable fact
    (the pitch lists them). State each one positively: "you never get X you didn't ask for"
    reads as a false contrast (criterion 16).
@@ -793,7 +796,10 @@ Each example takes this shape:
 ### <N>. <The task, in the reader's words>
 
 <What the reader will get, in a sentence. The plan it needs, any setting beyond the API key,
-and how to run it, ending with a colon:>
+and how to run it.>
+
+<One sentence that says what the code does, without restating the first sentence, ending
+with a colon:>
 
 ```python
 import deephaven_massive as dm
