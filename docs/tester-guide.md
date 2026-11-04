@@ -27,8 +27,9 @@ You spend about four hours on the first day, then about 10 minutes a day:
 | [Report a problem](#report-a-problem) | Write up each problem as it happens | 15 minutes a problem |
 | [Finish the test](#finish) | Pack the results, send them, and clean up | 15 minutes |
 
-You send the owner a bug report, `~/massive-test/bug-report-<time>.zip`, as each problem
-happens. At the end, you send two more things:
+You send each file on an issue in the project's GitHub repository. You send a bug report,
+`~/massive-test/bug-report-<time>.zip`, as each problem happens. At the end, you send two more
+things:
 
 - the live run's results, `~/massive-live/live-results-<date>.zip`
 - your checklist, with your notes
@@ -40,7 +41,7 @@ item, note anything that surprised you or took longer than it should:
 ```markdown
 ## Set up
 - [ ] Installed the tools, and noted their versions
-- [ ] Reached the repository with git
+- [ ] Signed in to GitHub, and reached the repository with git
 - [ ] Set the Massive API key, and the S3 keys for flat files if your dashboard shows them
 - [ ] Copied the code, and noted the release tag
 - [ ] Installed Deephaven and the library
@@ -72,7 +73,7 @@ item, note anything that surprised you or took longer than it should:
 
 Setup takes 45 to 90 minutes, most of it spent waiting for downloads. You'll install the same
 release twice. The checkout is a copy of the code, and from it you run the setup check, the
-live run, and bug reports. The Deephaven environment is a private Python environment that
+live run, and bug reports. The Deephaven environment is a separate Python environment that
 runs Deephaven, with the library installed the way a user installs it. At the end, your
 browser shows the Deephaven IDE, ready for the examples.
 
@@ -85,7 +86,7 @@ version:
 | What | Why | Check | Get it |
 |---|---|---|---|
 | git | Copies the code from GitHub | `git --version` | [git-scm.com](https://git-scm.com/downloads) |
-| GitHub CLI | Signs you in to the private repository and finds the newest release | `gh --version` | [cli.github.com](https://cli.github.com/) |
+| GitHub CLI | Signs you in to GitHub and finds the newest release | `gh --version` | [cli.github.com](https://cli.github.com/) |
 | Java 17 or later, with `JAVA_HOME` set | Runs the Deephaven server | `java -version` and `echo $JAVA_HOME` | [Deephaven's install guide](https://deephaven.io/core/docs/getting-started/pip-install/) |
 | uv | Runs the project's programs, and installs Python when your computer lacks it | `uv --version` | [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) |
 
@@ -95,14 +96,11 @@ Note each version in your checklist.
 
 <a id="12-get-access-to-the-code"></a>
 
-### 1. Get access to the code
+### 1. Sign in to GitHub
 
-The code is in a private GitHub repository, `chipkent/deephaven-massive`, and the owner has
-invited your GitHub account. Accept the invitation from the email or from
-<https://github.com/notifications>, then open <https://github.com/chipkent/deephaven-massive>.
-You should see the project's files.
-
-Next, sign in from the terminal, and let git use that sign-in:
+The code is on GitHub, at <https://github.com/chipkent/deephaven-massive>. Open that page, and
+you should see the project's files. Then sign in from the terminal, and let git use that
+sign-in:
 
 ```bash
 gh auth login
@@ -1384,8 +1382,8 @@ uv run python scripts/live_run.py pack --out ~/massive-live
 ```
 
 You should see `wrote /Users/you/massive-live/live-results-<date>.zip`. Each zip holds
-everything so far, so send only the newest. The zip holds Massive's market data, so send it
-only to the owner. If `pack` refuses, its message says why:
+everything so far, so send only the newest, on a GitHub issue as
+[Finish the test](#finish) describes. If `pack` refuses, its message says why:
 
 | Message | What you do |
 |---|---|
@@ -1524,8 +1522,7 @@ zip, with your keys removed. Before you run it, save what the zip needs:
    You should see it write `~/massive-test/bug-report-<time>.zip`. If the command finds a key
    in any file, it writes nothing and names the files instead. Send the owner that list.
 5. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, paste your
-   report, and attach the report zip and the screenshots. If GitHub won't take the upload,
-   email them to the owner.
+   report, and attach the report zip and the screenshots.
 
 The report zip holds these files, each with your keys replaced by `***`:
 
@@ -1551,12 +1548,10 @@ send your results and clean up:
 2. In the live run's terminal, with the same keys still set, pack each results folder as in
    [step 5 of Leave the live run going](#5-pack-and-send-the-results). For a second folder,
    use `--out ~/massive-live-2`.
-3. Send the newest `live-results-<date>.zip` from each folder to the owner only, because it
-   holds Massive's market data. If it's too large to email, ask the owner where to upload it.
-4. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, and attach your
-   checklist and any bug-report zips you haven't sent. If GitHub won't take the upload, email
-   them to the owner.
-5. Keep `~/massive-test` and every live-run folder, such as `~/massive-live` and
+3. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, and attach the
+   newest `live-results-<date>.zip` from each folder, your checklist, and any bug-report zips
+   you haven't sent.
+4. Keep `~/massive-test` and every live-run folder, such as `~/massive-live` and
    `~/massive-live-2`, until the owner confirms they have your files. Then delete them:
 
    ```bash
@@ -1565,7 +1560,7 @@ send your results and clean up:
 
    The command prints nothing. If you ran Deephaven in Docker, also remove its image, as
    [Run Deephaven in Docker](#run-deephaven-in-docker) shows.
-6. When the owner says the test is over, cancel any paid plan on Massive's dashboard. A plan
+5. When the owner says the test is over, cancel any paid plan on Massive's dashboard. A plan
    renews at the end of each billing period until you cancel it.
 
 <a id="run-deephaven-in-docker"></a>

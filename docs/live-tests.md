@@ -608,24 +608,6 @@ holds the same keys the run used. It compares them with the salted fingerprints 
 stored.
 The program's code is in `tests/_live/live_run/`, and `scripts/live_run.py` is its entry point.
 
-<a id="licensed-data"></a>
-
-## Keep licensed data private
-
-Share live-test output only where Massive's terms of use allow. The outputs in this table hold
-Massive's data, such as trades, quotes, bars, and partner data from Benzinga and ETF Global:
-
-| Output | What it holds | Where it is | Ignored by git |
-|---|---|---|---|
-| `live-evidence-*.log` and `live-checks.log` | Rows of Massive's data | The repository root | Yes, unless you force-add them |
-| The live-run program's results folder, and the `live-results-<date>.zip` files `pack` writes | Rows of Massive's data | The `--out` folder, such as `~/massive-live`, outside the repository | Not applicable |
-| The debug logs | Values from Massive's answers, logged with the library's decisions | `live-debug-logs/` at the repository root | Yes |
-
-Send these files in a direct message or a private repository's issue, never in a public issue,
-pull request, or gist. To quote a result in public, copy only the `smoke coverage` and
-`open questions` sections from the [end of a run](#read-the-end-of-a-run). They name tests and
-verdicts but hold no rows. The `live evidence` section, last in the output, holds rows.
-
 ## Sources
 
 - [S1] https://massive.com/pricing
