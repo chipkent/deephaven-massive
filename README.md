@@ -25,10 +25,11 @@ query engine that represents both static and streaming data as tables. It runs o
 computer, and you type Python into its console in your browser. A filtered view or a chart built
 on a live table updates with it.
 
-Once you've installed the library, this example runs as pasted in the Deephaven console. As
-pasted, it needs Massive's Stocks Advanced or Business plan. Other Stocks plans stream late or
-not at all, so on the free plan, start with [Example 1](#whole-market-day) instead. The query `bars` names the minute bars
-of Apple and Microsoft. `history()` reads one week of them, and `last_by()` makes a live table:
+This example needs Massive's Stocks Advanced or Business plan, and once you've installed the
+library, it runs as pasted in the Deephaven console. Other Stocks plans stream late or not at all,
+so on the free plan, start with [Example 1](#whole-market-day) instead. The query `bars` names the
+minute bars of Apple and Microsoft. `history()` reads one week of them, and `last_by()` makes a live
+table:
 
 ```python
 import deephaven_massive as dm
@@ -45,19 +46,19 @@ per stock, and each row is replaced as the next minute ends. A stock's row appea
 first minute bar after you run the code. Bars arrive in pre-market and after-hours trading, too.
 
 Stock bars are one of the library's 112 datasets. They cover stocks, options, CME Group futures,
-indices, forex, and crypto, and beyond prices they hold company financials, SEC filings, news,
-and economic data such as Treasury yields. The [dataset index](docs/datasets/README.md) links a
-page for each, with its columns and the plans that include it.
+indices, forex, and crypto. Beyond prices, they hold company financials, SEC filings, news, and
+economic data such as Treasury yields. The [dataset index](docs/datasets/README.md) links a page for
+each, with its columns and the plans that include it.
 
-Live tables follow your watchlist, and the free plan is enough to start:
+Live tables follow your watchlist, and your Massive plan sets what you can read and how fresh it is:
 
-- A live table can follow a watchlist. Pass a table of symbols where a list would go, and the
-  live table adds each symbol you add to the watchlist and drops each one you delete.
-- On Massive's free Stocks Basic plan, you can read two years of daily and minute stock bars,
-  plus news and economic data.
-- Live tables stream in real time on Advanced and Business plans, and on Currencies Starter.
-  Other Starter and Developer plans stream 15 minutes late, or 10 minutes for futures. To read
-  a delayed stream, list its subscription, such as Stocks, in the `delayed_subscriptions` setting.
+- Pass a table of symbols where a list would go, and the live table adds each symbol you add to the
+  watchlist and drops each one you delete.
+- On Massive's free Stocks Basic plan, you can read two years of daily and minute stock bars, plus
+  news and economic data.
+- Live tables stream in real time on Advanced and Business plans, and on Currencies Starter. Other
+  Starter and Developer plans stream 15 minutes late, or 10 minutes for futures. To read a delayed
+  stream, add the one setting that [settings in code](#settings-in-code) shows.
 
 To begin, [install the library](#install), then work through [ten examples](#learn-by-example).
 
@@ -72,10 +73,11 @@ environment, give the server your API key, and make a first table in your browse
 
 ### Check what you need
 
-The server runs on macOS, Linux, and Windows 10 or 11 through WSL 2, on a computer with at least
-8 GB of memory. Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/)
-covers each operating system, Java, and `JAVA_HOME` in detail. Get these four ready before you
-start:
+The server runs on macOS, Linux, and Windows 10 or 11 through WSL 2, on a computer with at least 8
+GB of memory. Deephaven's [pip install
+guide](https://deephaven.io/core/docs/getting-started/pip-install/) covers each operating system,
+Java, and `JAVA_HOME`. Before you start, have Python, Java, Git with the GitHub CLI, and a Massive
+account ready:
 
 | What | Why | Check | Get it |
 |---|---|---|---|
@@ -174,10 +176,11 @@ press Control-C there.
 ### 6. Make your first table
 
 Your first table holds a week of Apple's daily bars, and it works on every Stocks plan, the free
-Stocks Basic plan included. `dm.MassiveSession()` opens a session. A session is your
-connection to Massive, and it reads your key from `MASSIVE_API_KEY`. The next line reads the
-bars. Python runs inside the server, in the IDE's **Console** panel. Click in that panel, paste
-the code, and press Enter:
+Stocks Basic plan included. Python runs inside the server, in the IDE's **Console** panel, so click
+in that panel, paste the code, and press Enter.
+
+A session is your connection to Massive, and it reads your key from `MASSIVE_API_KEY`. The code
+opens one with `dm.MassiveSession()`, then reads the bars:
 
 ```python
 import deephaven_massive as dm
@@ -195,9 +198,9 @@ include `Date`, `Open`, `High`, `Low`, `Close`, and `Volume`.
 
 ### Fix a step that fails
 
-Most setup problems come from a terminal that's missing a variable or a sign-in, and each of
-these has a one-line fix. [Setup and keys](docs/troubleshooting.md#setup-messages) in
-Troubleshooting gives the cause of each:
+Most setup problems come from a terminal that lacks your GitHub sign-in, Java, or your API key, or
+from code pasted outside the Deephaven IDE. Each has a one-line fix, and [Setup and
+keys](docs/troubleshooting.md#setup-messages) in Troubleshooting gives its cause:
 
 | You see | What to do |
 |---|---|
@@ -210,9 +213,9 @@ Troubleshooting gives the cause of each:
 
 ## Configuration
 
-To start, you need only `MASSIVE_API_KEY`, and you set it in [Install](#install). The rest are
-optional. Environment variables hold your keys and the settings for the whole server, and
-settings in code change how one session behaves.
+To start, you need only `MASSIVE_API_KEY`, and you set it in [Install](#install). Every other
+variable and setting is optional. Environment variables hold your keys and the settings for the
+whole server, and settings in code change how one session behaves.
 
 <a id="environment-variables"></a>
 
@@ -233,8 +236,9 @@ see a change, so restart it after you set one:
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | The `certifi` certificate bundle | The certificate authorities to trust instead, such as your company's own. |
 | `JAVA_HOME` | None | The Java installation the server runs on. Deephaven's server reads it, and Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/) says how to set it. |
 
-The log variables take effect only when the server starts. To turn the log on in a console
-that's already running, call `dm.enable_debug_logging()` instead.
+The library reads the log variables once, when you create the first session, so set them before you
+start the server. To turn the log on in a console that's already running, call
+`dm.enable_debug_logging()` instead.
 
 If your plan includes flat files, set the two S3 keys. A `history()` of 50 or more symbols, or
 of `dm.ALL`, then downloads one file a day instead of sending a request for each symbol. Flat
@@ -293,8 +297,7 @@ to fit the limit.
 
 One read returns the daily bar of every US-listed stock for October 30, 2026.
 
-The code reads that day's bar for every stock, then ranks the stocks by dollars traded and by
-their gain from open to close:
+After the read, the code ranks the stocks by dollars traded and by their gain from open to close:
 
 ```python
 import deephaven_massive as dm
@@ -318,12 +321,12 @@ risers = (
 )
 ```
 
-Three tables open. `day` has one row per stock, and its columns include `Symbol`, `Date`,
-`Open`, `High`, `Low`, `Close`, `Volume`, and `Vwap`. `Vwap` is the volume-weighted average
-price, so `Vwap * Volume` is the dollars traded. `busiest` holds the 20 stocks with the most dollars traded, largest first. `risers` holds the 20
-stocks that rose most from open to close, among those that traded at least a million shares.
-The [stock bars page](docs/datasets/stocks.bars.md) lists every column. To rank another day,
-change both dates. Stocks Basic serves any trading day in the past two years.
+Three tables open. `day` has one row per stock, and its columns include `Symbol`, `Date`, `Open`,
+`High`, `Low`, `Close`, `Volume`, and `Vwap`. `Vwap` is the volume-weighted average price, so
+`Vwap * Volume` is the dollars traded. `busiest` holds the 20 stocks with the most dollars traded,
+largest first. `risers` holds the 20 stocks that rose most from open to close, among those that traded at
+least a million shares. The [stock bars page](docs/datasets/stocks.bars.md) lists every column. To
+rank another day, change both dates. Stocks Basic serves any trading day in the past two years.
 
 `m.stocks.bars(dm.ALL, dm.Timespan.DAY)` is the query, and `dm.ALL` stands for every symbol. On
 its own, the query reads nothing. `history()` is the verb. It reads the bars from Massive and
@@ -337,8 +340,9 @@ they work on every table the library returns.
 
 ### 2. Compare a few stocks over a year
 
-A three-row scorecard compares Apple, Microsoft, and Nvidia over a year, with each stock's first
-and last close, its high and low, and its return. A year of daily bars is well inside Stocks Basic's two years of history.
+A three-row scorecard compares Apple, Microsoft, and Nvidia over a year, with each stock's first and
+last close, its high and low, and its return. A year of daily bars is well inside Stocks Basic's two
+years of history.
 
 `agg_by` reduces each stock's year of daily bars to one row:
 
@@ -396,7 +400,7 @@ Before you read any data, you can ask the library which dataset holds it, what a
 ticker is, and what each column means. `dm.datasets()` and `columns()` answer without a request
 to Massive, and the ticker search sends one.
 
-Search the catalog for dividends, look up Coca-Cola's ticker, and describe the dividend columns:
+The code asks all three questions about dividends and Coca-Cola:
 
 ```python
 import deephaven_massive as dm
@@ -409,20 +413,19 @@ coke = m.reference.tickers(search="Coca-Cola").fetch()
 dividend_columns = m.stocks.dividends("KO").columns()
 ```
 
-`catalog` has one row per dataset, and its columns include `Dataset`, `Call`, `Summary`,
-`Verbs`, and `Documentation`, a link to the dataset's page. `about_dividends` keeps the datasets
-whose summary mentions dividends, `stocks.dividends` among them. `coke` lists the active tickers
-whose symbol or name matches, Coca-Cola's own `KO` among them. Its columns include `Symbol`,
-`Name`, and `PrimaryExchange`. `dividend_columns` has one row for each column of the dividends
-dataset. Its columns are `Name`, `Type`, `Description`, and `SuppliedBy`, which says whether
-Massive's REST API, flat files, or live stream fills the column.
+`catalog` has one row per dataset, and its columns include `Dataset`, `Call`, `Summary`, `Verbs`,
+and `Documentation`. `Documentation` holds the link to each dataset's page. `about_dividends` keeps
+the datasets whose summary mentions dividends, and `stocks.dividends` is one of them. `coke` lists
+the active tickers whose symbol or name matches, with Coca-Cola's own `KO` among them. Its columns
+include `Symbol`, `Name`, and `PrimaryExchange`. `dividend_columns` has one row for each column of
+the dividends dataset. Its columns are `Name`, `Type`, `Description`, and `SuppliedBy`. `SuppliedBy`
+names every source that fills the column: `REST`, `flat files`, `WebSocket`, or several of them.
 
 `day`, `year`, and `coke` all came from one pattern:
-`m.<namespace>.<dataset>(<arguments>).<verb>()`. A namespace, such as `m.stocks` or
-`m.reference`, groups the datasets of one market or one kind of data. Calling a dataset makes a
-query, and a verb, such as `history()` or `fetch()`, reads the data and returns a table. If you
-call a verb the dataset doesn't have, Python raises `AttributeError` and lists the verbs it does
-have.
+`m.<namespace>.<dataset>(<arguments>).<verb>()`. A namespace groups the datasets of one market or
+one kind of data, as `m.stocks` and `m.reference` do. Calling a dataset makes a query. A verb, such
+as `history()` or `fetch()`, reads the data and returns a table. If you call a verb the dataset
+doesn't have, Python raises `AttributeError` and lists the verbs it does have.
 
 Each dataset has some of these verbs, and the `Verbs` column of `catalog` lists which:
 
@@ -769,9 +772,9 @@ history that continues live, from [Example 10](#backfill-then-live).
 ### Stream the options near the money
 
 This recipe streams the latest quotes of SPY's options within 2% of SPY's price, and the set of
-contracts moves as the price does. Streaming option quotes needs Options Advanced, or Options Business
-with Massive's Expansion add-on. Both stream in real time, so you don't need to add options to
-`delayed_subscriptions`.
+contracts moves as the price does. Streaming option quotes needs Options Advanced, or Options
+Business with Massive's Expansion add-on. Both stream in real time, so you don't need to add options
+to `delayed_subscriptions`.
 
 The code re-reads SPY's chain for the next seven days of expirations every five minutes, keeps
 the contracts near the money, and streams their quotes:
@@ -889,10 +892,10 @@ Flat files need a Stocks Starter plan or higher and your [S3 keys](#environment-
 ### Adjust prices for splits
 
 This recipe states a stock's prices in today's shares on both sides of a split, first as Massive
-adjusts them and then with your own code. When a company splits its stock 15 for 1, each share becomes 15 shares
-worth a fifteenth of the price. A chart of the prices as traded falls 93% overnight. A
-split-adjusted price restates each earlier price in today's shares, so the series runs on
-without a break. The `history()` of stock and option bars returns split-adjusted prices by
+adjusts them and then with your own code. When a company splits its stock 15 for 1, each share
+becomes 15 shares worth a fifteenth of the price. A chart of the prices as traded falls 93%
+overnight. A split-adjusted price restates each earlier price in today's shares, so the series runs
+on without a break. The `history()` of stock and option bars returns split-adjusted prices by
 default. Live bars are always as traded, and so is any read with `adjusted=False`.
 
 O'Reilly Automotive (ORLY) split 15 for 1 on June 10, 2025. The code reads ORLY's daily bars
