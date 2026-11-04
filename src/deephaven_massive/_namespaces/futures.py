@@ -319,7 +319,7 @@ class _Futures(Namespace):
 
         Each row is one trade: price, size, and the exchange's sequence numbers. `Date` is the
         trading session
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#time). The
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#time). The
         stream waits up to 15 s for the contracts' schedules; a row they can't place has a null
         `Date`, with a WARNING. A date bound of `history()` is a whole session. There is no
         `fetch()`: `snapshots(symbols)` gives each contract's latest trade. REST `history()` takes

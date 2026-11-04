@@ -580,7 +580,7 @@ class _Crypto(Namespace):
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             date: The UTC day, as a calendar date (`"2026-01-02"`, a `date`, or any `DateLike`
                 date); a `datetime` or an instant is refused.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#time.
+                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#time.
 
         Returns:
             A query. Columns:

@@ -822,7 +822,7 @@ class _Stocks(Namespace):
                 dm.Timespan.DAY).history(day, day)`).
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             date: The trading day, a calendar date; a `datetime` or an instant raises. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/concepts.md#time.
+                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#time.
             adjusted: Split-adjusted prices and volume. Massive does not echo the basis here, so it
                 cannot be checked.
                 See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.

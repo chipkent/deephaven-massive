@@ -2,11 +2,11 @@
 
 The hand-written user documentation is `README.md` and the reference pages of the user guide,
 `docs/guide/*.md`: the *user pages*. Their Python examples are real code: every block of a page
-runs here, in document order, in one namespace of its own, as a reader would paste them into
-the Deephaven console one after another, against the fake REST and WebSocket servers, so nothing
-reaches Massive. A guide page opens with a line naming what its examples assume, the import and
-the session, and that code runs first. `dm.MassiveSession()` builds a new session whose REST
-client talks to the fake REST server and whose streams connect to the fake WebSocket server.
+runs here on its own, in a namespace of its own, as a reader would paste it into a fresh
+Deephaven console, against the fake REST and WebSocket servers, so nothing reaches Massive.
+Every block therefore carries its own imports and session. `dm.MassiveSession()` builds a new
+session whose REST client talks to the fake REST server and whose streams connect to the fake
+WebSocket server.
 A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
 be. Two sections, the first tables and split adjustment, also run alone against scripted
 replies (NVDA's 10-for-1 split of 2024-06-10), and the tests check that their tables hold what
@@ -56,14 +56,6 @@ GUIDE_PAGES = sorted(GUIDE.glob("*.md"))
 USER_PAGES = [README, *GUIDE_PAGES]
 TESTER_GUIDE = ROOT / "docs" / "tester-guide.md"
 SOURCE = ROOT / "src" / "deephaven_massive"
-
-PREAMBLE = (
-    "Examples on this page assume `import deephaven_massive as dm` and `m = dm.MassiveSession()`."
-)
-"""The line every guide page opens with, after its title: what its examples assume."""
-
-PREAMBLE_CODE = "import deephaven_massive as dm\n\nm = dm.MassiveSession()\n"
-"""The code the preamble names, which runs before a guide page's first block."""
 
 SKIPPED_BLOCKS: frozenset[tuple[str, str]] = frozenset(
     {("docs/guide/install.md", "from deephaven_server import Server")}
@@ -224,8 +216,8 @@ def _run_blocks(
     name: str,
     *,
     console_command: Callable[[Callable[[], None]], None],
-) -> dict[str, Any]:
-    """Run code blocks as scripts, in order, each seeing what the blocks before it defined.
+) -> list[dict[str, Any]]:
+    """Run code blocks as scripts, in order, each on its own, as a fresh console runs it.
 
     Each block runs as one console command (the `console_command` fixture): under the update
     graph's exclusive lock, as a reader pasting it into the Deephaven console runs it. A block
@@ -240,34 +232,49 @@ def _run_blocks(
         console_command: Runs one block the way the console runs a command.
 
     Returns:
-        The names the blocks defined.
+        The names each block defined, one namespace per block, in order.
     """
-    names: dict[str, Any] = {}
+    namespaces: list[dict[str, Any]] = []
     for number, block in enumerate(blocks):
         script = tmp_path / f"{name}_{number}.py"
         script.write_text(block, encoding="utf-8")
 
         def run(script: Path = script) -> None:
-            nonlocal names
-            names = runpy.run_path(str(script), init_globals=names)
+            namespaces.append(runpy.run_path(str(script)))
 
         console_command(run)
-    return names
+    return namespaces
 
 
-def _forget(names: dict[str, Any]) -> None:
+def _merged(namespaces: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return the names of several blocks as one mapping, a later block's name winning.
+
+    Args:
+        namespaces: The names each block defined, as `_run_blocks` returns them.
+
+    Returns:
+        Every name, bound to the value its last defining block gave it.
+    """
+    merged: dict[str, Any] = {}
+    for names in namespaces:
+        merged.update(names)
+    return merged
+
+
+def _forget(namespaces: Sequence[dict[str, Any]]) -> None:
     """Break the cycle between the scripts' functions and their globals, then drop the names.
 
     A function a script defined holds its module globals, which hold the function and the
     session, so the session goes with the test only once those globals are cleared.
 
     Args:
-        names: The names the scripts defined.
+        namespaces: The names each script defined.
     """
-    for value in names.values():
-        if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
-            value.__globals__.clear()
-    names.clear()
+    for names in namespaces:
+        for value in names.values():
+            if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
+                value.__globals__.clear()
+        names.clear()
 
 
 # --- Every example runs ------------------------------------------------------------------------
@@ -298,17 +305,16 @@ def _settings_file(home: Path) -> Path:
 #: Tables each page's examples promise, by page.
 _PROMISED: dict[str, tuple[str, ...]] = {
     "README.md": ("week", "near_quotes", "board"),
-    "docs/guide/concepts.md": ("kept", "watched"),
+    "docs/guide/live-tables.md": ("kept", "watched"),
     "docs/guide/watchlists.md": ("es", "live_board", "trades"),
     "docs/guide/history.md": ("adjusted", "mine"),
-    "docs/guide/recipes.md": ("both",),
     "docs/guide/troubleshooting.md": ("streams",),
 }
 
 
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
 @pytest.mark.parametrize("page", USER_PAGES, ids=_name)
-def test_every_user_page_example_runs_in_order(
+def test_every_user_page_example_runs_alone(
     *,
     page: Path,
     readme_server: FakeRestServer,
@@ -341,10 +347,8 @@ def test_every_user_page_example_runs_in_order(
     contract = {"ticker": "ESZ6", "product_code": "ES", "date": "2026-10-07", "active": True}
     readme_server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     blocks = _blocks(page.read_text(encoding="utf-8"))
-    if page != README:
-        # A guide page's examples continue from the import and the session its preamble names.
-        blocks = [PREAMBLE_CODE, *blocks]
-    names = _run_blocks(blocks, tmp_path, page.stem, console_command=console_command)
+    namespaces = _run_blocks(blocks, tmp_path, page.stem, console_command=console_command)
+    names = _merged(namespaces)
     for name in _PROMISED.get(_name(page), ()):
         assert isinstance(names[name], Table), name
     if page.name == "install.md":
@@ -352,7 +356,8 @@ def test_every_user_page_example_runs_in_order(
     if any("input_table(" in block for block in blocks):
         assert locked  # the watchlist examples made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
-    _forget(names)
+    names.clear()
+    _forget(namespaces)
 
 
 def test_the_readme_has_its_examples() -> None:
@@ -365,21 +370,13 @@ def test_the_guide_has_its_pages() -> None:
     # would pass with nothing to check.
     assert {page.name for page in GUIDE_PAGES} >= {
         "arguments.md",
-        "concepts.md",
         "history.md",
         "install.md",
+        "live-tables.md",
         "plans.md",
-        "recipes.md",
         "troubleshooting.md",
         "watchlists.md",
     }
-
-
-@pytest.mark.parametrize("page", GUIDE_PAGES, ids=_name)
-def test_every_guide_page_opens_with_the_preamble(page: Path) -> None:
-    title, preamble, *_ = page.read_text(encoding="utf-8").split("\n\n")
-    assert title.startswith("# ")
-    assert preamble == PREAMBLE
 
 
 def test_only_allowed_blocks_skip_the_test() -> None:
@@ -559,13 +556,12 @@ def test_the_split_adjustment_examples_run(
     blocks = _section_blocks(GUIDE / "history.md", "split-adjustment")
     assert len(blocks) == 2
     [recipe] = _section_blocks(README, "backfill-then-live")
-    # The sections continue from the import and the session the guide's preamble names.
-    names = _run_blocks(
-        [PREAMBLE_CODE, *blocks, recipe],
-        tmp_path,
-        "split_adjustment",
-        console_command=console_command,
+    # Each block runs alone; the do-it-yourself block reads the as-traded bars again, and the
+    # scripted path repeats its last reply, the as-traded bars.
+    namespaces = _run_blocks(
+        [*blocks, recipe], tmp_path, "split_adjustment", console_command=console_command
     )
+    names = _merged(namespaces)
 
     adjusted = {r["Date"]: r for r in dh_to_pylist(names["adjusted"])}
     traded = {r["Date"]: r for r in dh_to_pylist(names["traded"])}
@@ -589,7 +585,8 @@ def test_the_split_adjustment_examples_run(
         dh_to_pylist=dh_to_pylist,
         monkeypatch=monkeypatch,
     )
-    _forget(names)
+    names.clear()
+    _forget(namespaces)
 
 
 def _history_and_live_merges_history_with_live_bars(
@@ -657,7 +654,7 @@ def test_the_first_tables_example_runs(
     # Every other path, today's headlines among them, answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
     [block] = _section_blocks(README, "first-tables")
-    names = _run_blocks([block], tmp_path, "first_tables", console_command=console_command)
+    [names] = _run_blocks([block], tmp_path, "first_tables", console_command=console_command)
 
     assert [r["Date"] for r in dh_to_pylist(names["week"])] == [
         "2025-06-02",
