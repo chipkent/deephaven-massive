@@ -37,7 +37,8 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
    `test:`, `refactor:`, `ci:`, `chore:`, and their wording meets the Title section of
    `docs/dev/pull-requests.md`.
 4. **Review, then push through the check.** Before opening a PR and before every push to one,
-   run the `pre-push-review` skill and fix its findings; the push's pre-push hook then runs
+   run the `pre-push-review` skill, an adversarial review of your own change, and fix its
+   findings (only a typo or one-word doc fix skips it); the push's pre-push hook then runs
    `./scripts/check.sh`, which must pass. Every CI job must pass, the required free-threaded
    3.14t job too: locking must work without the GIL.
 5. **Push in batches.** Each push to a PR branch runs paid CI and review bots: push once when the
@@ -121,10 +122,11 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
 Several agents work at once, and every collision costs a full check and a paid CI run.
 
 - **Before starting**, check `gh pr list` and `gh pr diff <n> --name-only` for open PRs that
-  change your files. If yours needs another PR's content, stack on it: branch from its branch,
-  open your PR with `--base <its branch>`, and link them with `gh stack link <PRs bottom to
-  top>` (`gh extension install github/gh-stack` once). If you only share a file, stay on `main`
-  and expect one merge later.
+  change your files. If an open PR touches the same files as yours, or yours builds on it,
+  stack on it with GitHub's native stacked PRs: branch from its branch, open your PR with
+  `gh pr create --base <its branch>`, and link them with `gh stack link <PRs bottom to top>`
+  (`gh extension install github/gh-stack` once). Stacking avoids the rebases and CI reruns of
+  contention at merge time, so prefer it, and name the merge order in your PR body.
 - **Never rewrite a pushed branch**: no force-push, no rebase, and no `gh stack submit`,
   `push`, `sync`, or `rebase`. GitHub's own stack rebases are fine; after one, `git pull
   --rebase`.

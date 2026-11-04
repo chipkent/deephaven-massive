@@ -108,10 +108,10 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
 
 1. **Needs you now.** Each PR ready to merge: number, link, one plain sentence on what it does
    for a user, and a line confirming, just now, that CI is green, it is mergeable, every review
-   thread is answered, and its review is done: the author's `pre-push-review` for every PR,
-   plus an independent blockers-only review with no blocker left unfixed for a risky one
-   (concurrency, connections, TLS, or a public-contract change). A PR missing any of these is
-   not ready, so say which. Each open decision (in full the first time; later its title, its
+   thread is answered, and its author ran the adversarial `pre-push-review` and fixed what it
+   found (only a typo or one-word doc fix skips it). If a risky change also had a separate
+   reviewer agent, say whether a blocker is left. A PR missing any of these is not ready, so
+   say which. Each open decision (in full the first time; later its title, its
    options in a line each, and the recommendation). Any manual step only the owner can take.
    If nothing, say "Nothing needs you" first.
 2. **Decided**: one line each.

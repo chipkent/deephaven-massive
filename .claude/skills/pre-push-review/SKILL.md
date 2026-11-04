@@ -1,14 +1,29 @@
 ---
 name: pre-push-review
-description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It reviews the diff as a hostile senior reviewer would, proves the tests catch a regression, checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it), proves the tests catch a regression, checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
 ---
 
 # Review locally before you push
 
-Every push to a PR branch runs paid CI and the review bots, so find the problems here, where
-they are free, and push once per finished batch. A green check proves only what the tests
-already pin. This review looks for what they do not: code in the wrong place, a test that passes
-for wrong code, a lock whose scope changed, and words that no longer match the code.
+Every push to a PR branch runs paid CI and the review bots. This review exists so that they run
+as rarely as possible: find here, for free, every problem they or the owner would find, and push
+once per finished batch. A green check proves only what the tests already pin. This review looks
+for what they do not: code in the wrong place, a test that passes for wrong code, a lock whose
+scope changed, and words that no longer match the code.
+
+**Be adversarial.** You are not the author checking your work; you are a hostile senior
+reviewer whose job is to reject this change. Assume it is wrong until the diff proves otherwise.
+Attack it: hunt for the input that breaks it, the thread interleaving that deadlocks it, the
+test that would still pass if the code were wrong, the simpler design it missed, and the rule it
+quietly bends. A review that finds nothing on a non-trivial change has usually not looked hard
+enough, so look again before you conclude it is clean.
+
+**Only a trivial change skips this review**: a typo, or a one-word fix in a comment or a doc,
+that changes no code, test, configuration, public name, or documented behavior. Anything else,
+however small it looks, gets the full review.
+
+A risky change (concurrency, connections, TLS, or the public contract) may also get a second,
+separate reviewer agent. That review comes in addition to this one, never instead of it.
 
 Scope it to what is new. The push that opens the PR reviews the whole branch
 (`git diff origin/main...HEAD`); a later push reviews the commits since the last push and how
@@ -17,7 +32,7 @@ go, and fix every item before the push.
 
 ## 1. Review the diff
 
-Read it as the reviewer who has to defend the codebase, with the PR's issue and `AGENTS.md`
+Attack it as the reviewer who has to defend the codebase, with the PR's issue and `AGENTS.md`
 open. Start from `git diff --stat`: a deleted or weakened test is a finding unless the diff adds
 one that pins the same property. Then look for:
 

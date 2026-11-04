@@ -1,6 +1,6 @@
 ---
 name: plan-parallel-prs
-description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks only what must stack, reserves decision and verification-item numbers, writes short briefs, and runs one blockers-only review per PR. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
+description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks overlapping PRs in a planned merge order, reserves decision and verification-item numbers, writes short briefs, and holds every PR to its author's adversarial pre-push review. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
 ---
 
 # Planning parallel PRs
@@ -24,12 +24,19 @@ in one PR. Unrelated pieces stay separate, however small; never split or merge P
 
 ## 3. Set the merge order
 
-- PRs that share a file get a fixed merge order, told to the owner as one list ("merge #A, then
-  #B").
-- Stack a PR on another (GitHub native stacks, `gh stack link`, bottom to top) only when it
-  needs the other's content. A squash merge still leaves the upper PR conflicting, so a stack
-  costs one `main` merge per upper PR; a PR that merely shares a file branches from `main` and
-  merges `main` once when its turn comes.
+Contention at merge time (rebases, `main` merges, and the CI reruns they trigger) is a main
+reason features land slowly. Stacking is how parallel work avoids it, so use it.
+
+- When parallel PRs touch the same files or build on each other, stack them with GitHub's
+  native stacked PRs: each upper PR branches from the PR below it, opens with
+  `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
+  top>` (`gh extension install github/gh-stack` once). Never run `gh stack submit`, `push`,
+  `sync`, or `rebase`, which rewrite pushed branches. A stack is one chain, so a PR that two
+  others need sits below both.
+- Plan the merge order now and tell the owner as one list ("merge #A, then #B"). The owner
+  merges from the bottom up; after each merge GitHub re-targets and rebases the next PR, and its
+  agent pulls it. Only a conflict GitHub cannot resolve needs a merge of the base branch.
+- PRs that share no files stay independent, each from `main`.
 - When a PR renames a public name, tell every open agent the new name; the second PR to land
   merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
   A brief that asks for a repository-wide grep to prove an old name is gone excludes
@@ -63,17 +70,21 @@ A brief says only what the agent cannot know:
 
 ## 6. Review and readiness
 
-1. Every PR gets its author's `pre-push-review`. A risky PR also gets one independent review,
-   once its CI passes: one that changes concurrency (threads, locks, listeners, liveness),
-   connections, TLS, or the public contract. That review reports blockers only (wrong
-   behavior, data loss, a crash, or a rule violation), and the reviewer acts as a top-1%
-   developer who flags design smells first. Other PRs get no independent review.
-2. Low findings go into one follow-up issue, which is worked right away, never into another
+1. Before every push, each agent runs its own adversarial `pre-push-review`, so paid CI and the
+   review bots run as rarely as possible. Only a trivial change (a typo or a one-word doc fix
+   that touches no code, test, configuration, or documented behavior) skips it. Say so in every
+   brief.
+2. For a risky change (concurrency, connections, TLS, or the public contract) you may add a
+   second, separate reviewer agent, in addition to the author's review and never instead of
+   it. It reports blockers only (wrong behavior, data loss, a crash, or a rule violation), as a
+   top-1% developer who flags design smells first.
+3. Low findings go into one follow-up issue, which is worked right away, never into another
    push of the PR under review. Re-review only the fix to a blocker.
-3. A PR is ready when CI is green, GitHub reports it mergeable, every review thread (the
-   owner's included) has a reply, its issue is in `closingIssuesReferences`, and, for a risky
-   PR, its independent review found no blocker left unfixed. Check each live before saying so.
-4. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
+4. A PR is ready when its author's adversarial review is done and its findings fixed, CI is
+   green, GitHub reports it mergeable, every review thread (the owner's included) has a reply,
+   its issue is in `closingIssuesReferences`, and any separate review left no blocker unfixed.
+   Check each live before saying so.
+5. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
    with the `writing-to-the-owner` skill.
 
 ## 7. Keep cost down
