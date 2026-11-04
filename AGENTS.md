@@ -59,6 +59,7 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
    failure behavior needs an owner decision: a new `docs/dev/decisions.md` entry, with the user
    docs, docstrings, and tests updated in the same PR. A change that keeps the documented
    behavior and changes only how it is achieved cites the decision it follows, and proceeds.
+   Vet a proposed contract change as the `writing-to-the-owner` skill's design section says.
 10. **Tests mirror the package**, one leading underscore dropped per path component
     (`_massive/rest/client.py` → `tests/massive/rest/test_client.py`). The exceptions are
     `tests/_fakes/` (fake servers, untested) and `tests/_live/` (live-test fixture logic, tested
@@ -90,7 +91,8 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
     `helpers`, `util`). A module over about 1,000 lines is split or says why it is one subject.
     An exception lives where it is raised, or in `_errors.py` when several modules need it.
     `queries.py` is the one public module. Every name says what the thing is or does, in words
-    a newcomer knows.
+    a newcomer knows; a public argument or field keeps Massive's documented name unless the
+    case for renaming it is compelling (a builtin clash, rule 12, or a real user error).
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
     `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
@@ -131,9 +133,10 @@ Several agents work at once, and every collision costs a full check and a paid C
   `push`, `sync`, or `rebase`. GitHub's own stack rebases are fine; after one, `git pull
   --rebase`.
 - **Merge `main` (or your base branch) only to resolve a conflict**, never to stay current.
-  Read both sides of every conflict, never take one wholesale, and say in the PR body how you
-  resolved it. When an open PR renames a public name, merge `main` and rerun the tests once it
-  lands, because a text merge cannot catch the old name in your new code.
+  Read both sides of every conflict, never take one wholesale (regenerate a generated file
+  instead of merging it), and say in the PR body how you resolved it. When an open PR renames a
+  public name, merge `main` and rerun the tests once it lands, because a text merge cannot
+  catch the old name in your new code.
 - **The pre-push hook is the check**: never run `./scripts/check.sh` yourself just before a
   push.
 - **Numbers**: a new decision or verification item takes the number the coordinator reserved

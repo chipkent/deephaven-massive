@@ -1,6 +1,6 @@
 ---
 name: writing-to-the-owner
-description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone with background, concrete options, and a recommendation. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
+description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone with background, concrete options, and a recommendation. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
 ---
 
 # Writing to the owner
@@ -34,17 +34,21 @@ certain, is.
 
 **Yours to decide**, when you are confident (every fact checked, no earlier owner decision
 touched) and it is easy to change afterwards: PR order and splits, scheduling, private names,
-internal log levels and tuning, test mechanics, and low-level implementation or DRY questions.
+internal log levels and tuning, test mechanics, low-level implementation or DRY questions, and
+any column name the naming policy settles (`_massive/refresh/naming.py`; raise only a real gap
+in the policy, never a single column).
 Have a Fable agent check anything you are tempted to ask that a top-1% developer would find
 obvious; it should not reach the owner. List every choice you made yourself under **Decided**,
 one line each, so the owner can object. Each line states the choice itself (the new name, the
 value chosen), not just that a choice was made.
 
 **Closed subjects:** never raise licensing, legal, affiliation, or "what users may post"
-questions. Decide them yourself and do the useful thing.
+questions. Decide them yourself and do the useful thing. Never ask the owner to run anything
+with a Massive key: a check that needs a key becomes a live test and a verification item
+(`docs/dev/verification-items.md`), and the claim it supports is marked unverified until then.
 
-Before asking, check the question is still open: `docs/dev/decisions.md`, `AGENTS.md`, your
-memory notes, the owner's earlier answers. If an earlier answer may cover the case, ask and
+Before asking, check the question is still open: `docs/dev/decisions.md`, `AGENTS.md`, the
+skills, the owner's earlier answers. If an earlier answer may cover the case, ask and
 quote it.
 
 **A question from the owner is a question, not an instruction.** Answer it; change nothing
@@ -66,7 +70,36 @@ Not from memory or an agent's report:
   recommend more. Never offer a hybrid that keeps the costs of both options.
 - **One position**: if your recommendation changed since you last raised it, say so and why.
 
-## 3. The shape of a decision
+## 3. Vet a design before the owner sees it
+
+A design or contract change the owner must approve (`AGENTS.md` rule 9) reaches them only after
+it survives these steps: options built straight from raw research come out incomplete, and a
+long list of questions goes unread.
+
+1. **A Fable agent proposes the complete design, and separate Fable critics attack it.** Revise
+   until the critics run out of substantive objections. Every item a top-1% developer would find
+   obvious is decided there and listed under **Decided**; only what is still a matter of taste,
+   product, or reversing an owner decision reaches the owner, ideally fewer than five items.
+2. **Complete.** Each option covers every dataset and case it touches, defines every term, and
+   shows the calls a user writes.
+3. **Researched, not assumed.** A choice of format, standard, or convention cites what widely
+   used comparable tools do; convenience to us is not a reason. A rule about data correctness
+   (a trading day, a time zone, a stamp) cites primary sources (Massive's docs and knowledge
+   base, market-structure rules, live evidence), marks each gap unverified, and is attacked by a
+   critic before you answer. Never offer an opinion as an answer.
+4. **Not built on thin evidence.** One symbol or a few days that disagree may be bad vendor data
+   (rule 23), not a reason to change behavior for everything: measure broadly with a live test
+   first.
+5. **Held to the project's design rules.** Closed sets are enums, never magic strings. The
+   user's code works on any Massive plan, with no tier-specific configuration. Every API
+   accepts a live table and follows it, and history and live calls never mix (decisions 82 and
+   83). Bad input from the caller is refused consistently, never silently cleaned or passed
+   through. The simplest behavior that delivers the data beats a clever rule, and an error comes
+   only when no source can serve.
+6. **When you don't know how to do something** (a git workflow, a tool), stop and have an agent
+   research it with sources and a critic. Never propose one untried idea after another.
+
+## 4. The shape of a decision
 
 Each decision stands alone, in this order:
 
@@ -88,7 +121,7 @@ When a message holds three or more decisions, or any public-API or design decisi
 Fable agent with no other context read it first and list every question it could not answer
 from the message alone. Fix those before sending.
 
-## 4. Words
+## 5. Words
 
 - Answer first. Background in a few sentences. No process narrative (which agent did what,
   which review round).
@@ -102,7 +135,7 @@ from the message alone. Fix those before sending.
   coined jargon, precision theater, so-chains, hype words, colon reveals).
 - When the owner must read a file, send it (SendUserFile) rather than citing a path.
 
-## 5. Status reports
+## 6. Status reports
 
 Answer "status?", "what needs me?", and the like in this order, from live state:
 
@@ -116,7 +149,8 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
    If nothing, say "Nothing needs you" first.
 2. **Decided**: one line each.
 3. **In progress**: one plain line each, including what is blocked and on what.
-4. **Remaining**, and **when you'll next be needed**.
+4. **Remaining**, and **when you'll next be needed**. Every open issue has an agent on it, a
+   PR, a close reason, or a named owner question; none is parked for later.
 
 After the owner answers a list of questions, repeat back the answers you recorded and what is
 still open.

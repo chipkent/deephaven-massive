@@ -1,6 +1,6 @@
 ---
 name: writing-a-pr-description
-description: "Use this skill whenever you write or rewrite a pull request description, an issue body, or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, and runs that page's self-edit checklist. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a report of wrong data to Massive, or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, and runs that page's self-edit checklist. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing a PR description
@@ -67,3 +67,13 @@ would. Two passes help:
 - New PR: `gh pr create --title "<title>" --body-file <file>`.
 - Existing PR: `gh pr edit <n> --body-file <file>`, in the same batch as the push it describes.
 - Confirm the issue link: `gh pr view <n> --json closingIssuesReferences`.
+
+## A report to Massive
+
+A report of wrong vendor data (`AGENTS.md` rule 23) or any text for another project goes to a
+maintainer who knows nothing of this library, and an unclear report is declined or ignored.
+Lead with the problem they can see, in one or two plain sentences. Then give a minimal
+reproduction (the exact request, or symbol and date), the expected and the actual result, the
+evidence, and a proposed fix if there is one. Use short paragraphs, define every term, and leave
+out this project's internal names. Have a Fable agent with no other context critique it for
+clarity, and post nothing until the owner has approved the text.

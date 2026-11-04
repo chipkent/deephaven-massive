@@ -61,6 +61,19 @@ column, or failure behavior adds an entry there. The facts about Massive that th
 does not settle, and the live tests that settle them, are in
 [`docs/dev/verification-items.md`](docs/dev/verification-items.md).
 
+## Agent instructions and skills
+
+The repository carries every rule a coding agent needs; no agent should depend on notes kept
+outside it.
+
+- [`AGENTS.md`](AGENTS.md) holds only what every agent needs on every task. A rule for one kind
+  of work goes in the skill for that work (`.claude/skills/`) or on a `docs/dev/` page.
+- A skill states general rules. The facts of this project sit in one labeled place in the skill
+  or its standard, never woven into the rules or fitted to the wording of its eval prompts.
+- Skill evals are expensive. Weigh each round against what it gains: stop once the outputs meet
+  the bar, use few prompts to compare models, skip baseline reruns you don't need, and report
+  the eval cost beside the gain.
+
 ## Live integration tests
 
 The tests in `tests/**/test_*_integration.py` call Massive itself with the owner's keys, so

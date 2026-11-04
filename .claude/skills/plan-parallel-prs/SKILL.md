@@ -21,6 +21,8 @@ a close reason, or a named owner question.
 
 One PR holds one coherent change and everything it needs. Two changes to the same code path go
 in one PR. Unrelated pieces stay separate, however small; never split or merge PRs only by size.
+Never plan a step you already know is bad, such as text moved verbatim to be rewritten later, to
+make a diff easier to review: fix the content as you move it.
 
 ## 3. Set the merge order
 
@@ -77,13 +79,15 @@ A brief says only what the agent cannot know:
 2. For a risky change (concurrency, connections, TLS, or the public contract) you may add a
    second, separate reviewer agent, in addition to the author's review and never instead of
    it. It reports blockers only (wrong behavior, data loss, a crash, or a rule violation), as a
-   top-1% developer who flags design smells first.
+   top-1% developer who flags design smells first. It answers from primary sources and builds a
+   probe only when a number decides the question, kept minimal and run once.
 3. Low findings go into one follow-up issue, which is worked right away, never into another
    push of the PR under review. Re-review only the fix to a blocker.
 4. A PR is ready when its author's adversarial review is done and its findings fixed, CI is
    green, GitHub reports it mergeable, every review thread (the owner's included) has a reply,
    its issue is in `closingIssuesReferences`, and any separate review left no blocker unfixed.
-   Check each live before saying so.
+   Check each live before saying so. Sweep recently merged PRs too: a bot finding posted after
+   the merge gets a reply, and a valid one gets a fix PR that the reply links.
 5. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
    with the `writing-to-the-owner` skill.
 
@@ -94,3 +98,12 @@ for each new round of work instead of resuming a long one; resume only for a sma
 As coordinator, keep your own turns short and start a fresh session at each phase change, with
 a handover note. Settle minor choices yourself instead of running multi-agent debates, and don't
 re-run a broad review whose last pass found little.
+
+## 8. After a merge
+
+Delete the merged PR's local branch and worktree; GitHub deletes the remote branch itself. A
+branch whose PR closed without merging stays until the owner says to delete it. Before removing
+a worktree, run `grep INSTALL_PYTHON .git/hooks/pre-push` in the main clone: the shared hooks
+record the Python of whichever checkout last ran `pre-commit install`. If that is the worktree,
+first run `uv run pre-commit install --hook-type pre-commit --hook-type pre-push` from the main
+clone, or every agent's commit fails.

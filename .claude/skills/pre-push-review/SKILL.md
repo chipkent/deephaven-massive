@@ -50,8 +50,12 @@ one that pins the same property. Then look for:
   where a fix at the source would do, a second mechanism beside an existing one, an option
   nobody asked for, a helper that duplicates one elsewhere (`git grep` the concept, not only the
   name), an import of another module's private name, a guard test that pins configuration text
-  instead of behavior. Assume every new function and module is misplaced until you can say why
-  a newcomer would look for it there (rule 18); move it in this PR rather than noting it.
+  instead of behavior, a standard file (the GitHub `.gitignore` template above its marked
+  project section, a tool's documented default) trimmed or rewritten without a stated purpose,
+  and a new generated output without one command that owns its whole directory and a test that
+  fails on a stale, missing, or orphaned file. Assume every new function and module is
+  misplaced until you can say why a newcomer would look for it there (rule 18); move it in this
+  PR rather than noting it.
 - **The `AGENTS.md` rules reviews most often catch**: a `None` that selects a mode (19), a
   vendor value filled or corrected (23), one bad symbol or row that fails a table or skips
   silently (24), a hand edit to generated files (17), a widened `tests/test_layout.py` (16), a
