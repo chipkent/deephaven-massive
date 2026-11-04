@@ -1,8 +1,9 @@
-# Lists every dataset, then describes the columns of one query without sending a request.
-# You should see one line describing the query, and two new tables: catalog, one row per
-# dataset, and bar_columns, one row per column of daily stock bars.
-catalog = dm.datasets()
+# List every dataset, and describe the columns of daily stock bars without a request.
+import deephaven_massive as dm
 
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+catalog = dm.datasets()
 bars = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY)
 print(bars)
 bar_columns = bars.columns()

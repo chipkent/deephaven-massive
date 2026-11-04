@@ -1,10 +1,12 @@
-# Charts the gap between the 10-year and 2-year US Treasury yields over two years: one
-# request, counted against no subscription. You should see a new table, curve, and a chart,
-# curve_chart, whose line falls below zero when the curve is inverted.
+# Chart the gap between the 10-year and 2-year US Treasury yields over two years.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from deephaven.plot.figure import Figure
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 two_years_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=730)
 curve = (

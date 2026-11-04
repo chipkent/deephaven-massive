@@ -1,10 +1,13 @@
-# Charts NVDA's daily close over six months with its 20-day moving average: one Stocks
-# request. You should see a new table, nvda_daily, and a chart, nvda_chart, with two lines.
+# Chart NVDA's daily close over six months with its 20-day moving average: one request.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from deephaven.plot.figure import Figure
 from deephaven.updateby import rolling_avg_tick
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 six_months_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=182)
 nvda_daily = (

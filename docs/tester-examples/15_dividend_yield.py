@@ -1,8 +1,10 @@
-# Finds each Apple dividend of the past year and the closing price on the trading day
-# before it, to give each payment's yield: two requests. You should see a new table,
-# dividend_yield, with about four rows.
+# Find each Apple dividend of the past year, and its yield on the close the day before.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 year_ago = yesterday - timedelta(days=364)

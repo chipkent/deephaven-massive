@@ -1,11 +1,10 @@
-# Saves the session's diagnostics tables as files for a bug report. Run it right after a
-# problem, before you close the session. You should see the folder the files went to.
+# Save the diagnostics tables of the session in m, the one the last example opened.
 import os
 
 from deephaven.pandas import to_pandas
 
-FOLDER = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-diagnostics = os.path.join(FOLDER, "diagnostics")
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+diagnostics = os.path.join(folder, "diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {"streams": m.streams(), "connections": m.connections(), "rate_limits": m.rate_limits()}
 for name, table in tables.items():

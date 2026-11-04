@@ -49,11 +49,11 @@ GUIDE = ROOT / "docs" / "tester-guide.md"
 KEY = "PLANTED-tester-key-41c7"
 NEW_YORK = ZoneInfo("America/New_York")
 LIVE = (
-    "18_live_minute_bars.py",
-    "19_history_plus_live.py",
-    "20_live_crypto.py",
-    "22_crypto_watchlist.py",
-    "23_gainers_trades.py",
+    "17_live_minute_bars.py",
+    "18_history_plus_live.py",
+    "19_live_crypto.py",
+    "21_crypto_watchlist.py",
+    "22_gainers_trades.py",
 )
 """The examples that need a paid plan's streams."""
 
@@ -245,16 +245,16 @@ def test_every_example_runs_against_the_fake_market(
     assert re.search(r"<MassiveSession #\d+ open>", printed["01_start_a_session"])
     query = "m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)"
     assert query in printed["02_explore_datasets"]
-    assert printed["11_plan_refusals"].count(": EntitlementError: ") == 2
-    assert "live minute bars: opened;" in printed["11_plan_refusals"]
-    assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
-    assert "0 copies of the key" in printed["13_check_the_log"]
-    assert re.search(r"<MassiveSession #\d+ closed>", printed["26_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["26_finish"])
+    assert printed["10_plan_refusals"].count(": EntitlementError: ") == 2
+    assert "live minute bars: opened;" in printed["10_plan_refusals"]
+    assert printed["11_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
+    assert "0 copies of the key" in printed["12_check_the_log"]
+    assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
+    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
-    assert (out / "tables" / "21_watchlist_poll" / "watched_bars.csv").exists()
-    assert (out / "tables" / "21_watchlist_poll" / "watched_contracts.csv").exists()
-    assert (out / "tables" / "24_followed_history" / "followed.csv").exists()
+    assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
+    assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
+    assert (out / "tables" / "23_followed_history" / "followed.csv").exists()
     assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
@@ -265,17 +265,26 @@ def test_every_example_runs_against_the_fake_market(
     assert len((out / "summary.txt").read_text().splitlines()) == len(files)
 
 
+def _on_the_given_session(path: Path, folder: Path) -> Path:
+    # A copy of the example without its session line, so it runs on the `m` a test gives it.
+    copy = folder / path.name
+    copy.write_text(examples.SESSION_LINE.sub("", path.read_text(encoding="utf-8")))
+    return copy
+
+
 @pytest.mark.jvm_held
 def test_the_paid_examples_run_on_streams_from_the_fake_server(
     market: MarketServer,
     make_ws_session: Callable[..., WsSession],
+    tmp_path: Path,
     *,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
     session = make_ws_session(rest_base_url=market.url)
     namespace: dict[str, Any] = {"m": session.session, "dm": dm}
     for name in LIVE:
-        outcome, _ = examples.run_example(EXAMPLES / name, namespace)
+        runs = _on_the_given_session(EXAMPLES / name, tmp_path)
+        outcome, _ = examples.run_example(runs, namespace)
         assert (outcome.name, outcome.status, outcome.error) == (name, examples.PASSED, "")
     made = examples.tables_of(namespace)
     for name in (
@@ -294,6 +303,8 @@ def test_history_plus_live_keeps_one_row_per_minute(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    tmp_path: Path,
 ) -> None:
     # History holds 04:00 and 04:01 New York time; the stream then sends 04:01 again, as
     # Massive recomputed it, and 04:02. The table keeps one row per minute: the stream's
@@ -319,7 +330,8 @@ def test_history_plus_live_keeps_one_row_per_minute(
         )
         session = make_ws_session(rest_base_url=rest.url)
         namespace: dict[str, Any] = {"m": session.session, "dm": dm}
-        outcome, _ = examples.run_example(EXAMPLES / "19_history_plus_live.py", namespace)
+        runs = _on_the_given_session(EXAMPLES / "18_history_plus_live.py", tmp_path)
+        outcome, _ = examples.run_example(runs, namespace)
         assert (outcome.status, outcome.error) == (examples.PASSED, "")
         session.subscribed("AM.AAPL")
         live = [
@@ -346,7 +358,9 @@ def test_history_plus_live_keeps_one_row_per_minute(
 
 def test_the_guide_shows_each_example_exactly_as_its_file() -> None:
     blocks = examples.guide_blocks(GUIDE.read_text(encoding="utf-8"))
-    files = {p.name: p.read_text(encoding="utf-8") for p in examples.example_files(EXAMPLES)}
+    files = {
+        int(p.name[:2]): p.read_text(encoding="utf-8") for p in examples.example_files(EXAMPLES)
+    }
     assert blocks == files
 
 
@@ -356,7 +370,7 @@ def test_every_example_starts_with_a_comment() -> None:
 
 
 GUIDE_SAMPLE = """\
-## 1. First (`01_first.py`)
+#### 1. First
 Some prose.
 ```bash
 not python
@@ -368,15 +382,20 @@ x = 1
 ```python
 not this one
 ```
-### A heading without a file
+### 2. A step, not an example
 ```python
 nor this
+```
+#### 3. An example with no code
+### A heading without a number
+```python
+nor this either
 ```
 """
 
 
-def test_guide_blocks_reads_the_first_python_block_under_each_named_heading() -> None:
-    assert examples.guide_blocks(GUIDE_SAMPLE) == {"01_first.py": "x = 1\n\n"}
+def test_guide_blocks_reads_the_first_python_block_under_each_numbered_example() -> None:
+    assert examples.guide_blocks(GUIDE_SAMPLE) == {1: "x = 1\n\n"}
 
 
 def test_example_files_keep_only_numbered_python_files(tmp_path: Path) -> None:
@@ -385,7 +404,13 @@ def test_example_files_keep_only_numbered_python_files(tmp_path: Path) -> None:
     assert [p.name for p in examples.example_files(tmp_path)] == ["01_a.py", "02_b.py"]
 
 
-def test_the_first_example_opens_the_free_plans_session() -> None:
+def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
+    # Each runs as pasted into a fresh console; saving the diagnostics reads the session of
+    # the example before it, and converting symbols and reading the log need none.
+    without = {"11_symbols.py", "12_check_the_log.py", "24_save_diagnostics.py"}
+    for path in examples.example_files(EXAMPLES):
+        opens = examples.SESSION_LINE.search(path.read_text(encoding="utf-8")) is not None
+        assert opens == (path.name not in without), path.name
     assert examples.FREE_PLAN_SESSION in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
@@ -414,12 +439,18 @@ def test_session_line_fits_the_keys_plans() -> None:
 def test_fitted_runs_a_copy_only_when_the_session_line_changes(tmp_path: Path) -> None:
     first = _write(tmp_path, "01_a.py", f"x = 1\n{examples.FREE_PLAN_SESSION}")
     other = _write(tmp_path, "02_b.py", "y = 2\n")
+    delayed = "m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions=set()))\n"
+    third = _write(tmp_path, "03_c.py", f"# delayed\n{delayed}z = 3\n")
     paid = "m = dm.MassiveSession()\n"
     assert examples.fitted(first, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == first
+    assert examples.fitted(third, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == third
     assert examples.fitted(other, paid, tmp_path / "fitted") == other
     copy = examples.fitted(first, paid, tmp_path / "fitted")
     assert copy == tmp_path / "fitted" / "01_a.py"
     assert copy.read_text(encoding="utf-8") == f"x = 1\n{paid}"
+    # Every session line fits the plans, the paid examples' own lines included.
+    copy = examples.fitted(third, paid, tmp_path / "fitted")
+    assert copy.read_text(encoding="utf-8") == f"# delayed\n{paid}z = 3\n"
 
 
 def _write(folder: Path, name: str, code: str) -> Path:
