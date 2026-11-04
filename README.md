@@ -441,13 +441,20 @@ yields = (
     dividends.natural_join(
         closes, on=["Symbol", "ExDividendDate = Date"], joins="CloseOnExDate = Close"
     )
-    .update_view("AnnualYieldPct = 100 * CashAmount * Frequency / CloseOnExDate")
-    .view(["Symbol", "ExDividendDate", "CashAmount", "CloseOnExDate", "AnnualYieldPct"])
+    .update_view(
+        "AnnualYieldPct = 100 * SplitAdjustedCashAmount * Frequency / CloseOnExDate"
+    )
+    .view(
+        ["Symbol", "ExDividendDate", "SplitAdjustedCashAmount", "CloseOnExDate", "AnnualYieldPct"]
+    )
 )
 ```
 
-`yields` has one row per dividend whose ex-dividend date falls in the range. Each row shows the cash amount, the close on the ex-dividend date, and the yield that a
-year of such payments implies. `Frequency` is the number of payments a year.
+`yields` has one row per dividend whose ex-dividend date falls in the range. Each row shows the
+dividend per share, the close on the ex-dividend date, and the yield a year of such payments
+implies. The dividend is split-adjusted, as the closes are, so a later split doesn't skew the
+yield. `Frequency` is the number of payments a year, and 0 for a one-time special dividend,
+whose yield then shows 0.
 
 Every date column in every table is `yyyy-MM-dd` text, so a dividend's `ExDividendDate` joins
 straight onto a bar's `Date`. `fetch()` reads a dataset's rows once. For dividends, `start` and
@@ -803,9 +810,10 @@ indexes `every` by symbol, so each edit of the watchlist finds its rows without 
 whole market.
 
 Reading every symbol works when the whole market fits in the server's memory, the 4 GB that
-Install's step 6 gives it. `every.size` shows how many rows a read holds. Daily bars fit on any
-plan, and so does one day of minute bars. Reading minute bars for every symbol needs the flat
-files, which start at Stocks Starter, and `adjusted=False`. A year of minute bars, or any range
+Install's step 6 gives it. `every.size` shows how many rows a read holds. Daily bars of every
+stock fit in 4 GB, and so does one day of minute bars. To read minute bars of every symbol, pass
+`adjusted=False`. The library then reads them from flat files, which need a Stocks Starter plan
+or higher and your [S3 keys](docs/guide/install.md#s3-keys). A year of minute bars, or any range
 of trades or quotes, doesn't fit.
 
 To see how `followed` handles each edit and each symbol that fails to read, see
