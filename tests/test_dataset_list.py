@@ -86,6 +86,17 @@ def test_every_dataset_has_its_call() -> None:
         verbs=("blink", "append_only", "ring", "last_by", "history"),
         arguments=("symbols", "timespan", "multiplier", "adjusted"),
         typed=("symbols", "timespan", "multiplier", "adjusted"),
+        # Each argument's entry of the docstring's `Args`, its lines joined.
+        descriptions=(
+            "Stock tickers, or `dm.ALL`.",
+            "The bar unit, any but `SESSION`; required.",
+            "Units per bar, 1 by default; only 1 streams.",
+            "Split-adjusted prices, served by REST only.",
+        ),
+    )
+    # An entry that runs over several lines is joined into one.
+    assert calls["stocks.dividends"].descriptions[2] == (
+        "The last ex-dividend date; without it, announced dividends still to come are returned too."
     )
     # The session's own dataset method, and defaults written as a user types them.
     assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")
@@ -153,3 +164,10 @@ def test_a_dataset_without_a_method_or_a_method_without_a_dataset_fails(
         r"without a dataset: \['stocks.nothing'\]",
     ):
         dataset_calls()
+
+
+def test_a_method_without_an_args_section_has_no_argument_lines() -> None:
+    def undocumented(self: object, symbols: object) -> None:
+        """Read nothing."""
+
+    assert _dataset_list._argument_lines(undocumented) == {}

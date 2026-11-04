@@ -16,6 +16,14 @@ m.futures.exchanges(*, limit=None)
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Id` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

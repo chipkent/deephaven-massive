@@ -1,6 +1,6 @@
 ---
 name: writing-user-docs
-description: "Use this skill whenever you write, rewrite, edit, move, or review text a user of deephaven-massive reads: README.md (the hook, Install, Configuration, the teaching examples, recipes, troubleshooting), any page under docs/guide/, docs/tester-guide.md, or the hand-written intro of docs/datasets/. Use it for a whole page or a single paragraph, for 'write the Install section', 'add an example', 'fix this recipe', and 'this reads like AI' or 'this is slop'. Use it too when a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It drafts to the owner's requirements, section models, and sentence rules in docs/dev/user-docs.md, then runs cold editor passes that score the draft on the standard's O'Reilly rubric and revise it to the owner's pass bar. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write, rewrite, edit, move, or review text a user of deephaven-massive reads: README.md (the hook, Install, Configuration, the teaching examples, recipes, troubleshooting), docs/troubleshooting.md, docs/tester-guide.md, or the hand-written text of docs/datasets/ (its intro and the shared argument rules in _datasets/argument_rules.py). Use it for a whole page or a single paragraph, for 'write the Install section', 'add an example', 'fix this recipe', and 'this reads like AI' or 'this is slop'. Use it too when a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It drafts to the owner's requirements, section models, and sentence rules in docs/dev/user-docs.md, then runs cold editor passes that score the draft on the standard's O'Reilly rubric and revise it to the owner's pass bar. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing user docs
@@ -23,7 +23,7 @@ because it's the whole contract. This skill is how to work to it.
 ## How to work
 
 1. Read the standard, then the section model your task needs (the hook, Install,
-   Configuration, first examples, the teaching sequence, or guide pages). A model is a shape,
+   Configuration, first examples, the teaching sequence, or reference pages). A model is a shape,
    not text to copy: fill it with this task's facts.
 2. Gather and verify the facts before you write. Trace each one to `src/deephaven_massive/`,
    a test, the generated pages in `docs/datasets/` (each dataset's columns, and the plans that
@@ -42,7 +42,7 @@ because it's the whole contract. This skill is how to work to it.
    contrast, every series of three, read aloud). Then get a cold editor's pass (below), and
    revise until the draft meets the standard's pass bar or you've used two revision rounds.
 5. Before it goes out: run `uv run pytest tests/test_docs.py -q` for any change to `README.md`
-   or `docs/guide/`, check that every original fact survives or has a named new home, and
+   or `docs/troubleshooting.md`, check that every original fact survives or has a named new home, and
    rewrite the citations of any anchor you moved, in `src/` docstrings (by full GitHub URL)
    and on the other pages. Put the final score sheet in your report or PR description, and list what
    only a run with a Massive key can confirm, for the owner's test plan.

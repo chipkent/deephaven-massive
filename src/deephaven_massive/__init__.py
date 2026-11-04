@@ -54,9 +54,10 @@ Status:
     The library is not on PyPI yet.
 
 Read next:
-    The README, https://github.com/chipkent/deephaven-massive; the user guide's reference
-    pages in `docs/guide/`, which docstrings link to section by section; the dataset finder,
-    https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md; and
+    The README, https://github.com/chipkent/deephaven-massive; the dataset finder,
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md, whose page
+    for each dataset gives its arguments, their rules, and its columns; troubleshooting,
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md; and
     `help()` on any object.
 
 `import deephaven_massive` is cheap and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`,
@@ -76,12 +77,10 @@ Public API:
       `cause`, an `ErrorCause`, says whose problem it is: expected, a defect in the user's code
       or input, or a defect of the library (whose message says how to report it).
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
-    - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's
-      exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
-      `C:EURUSD`, `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol`
-      column, and a live one is followed as rows are added and deleted: see
-      https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols. The
-      converters turn other spellings into Massive's:
+    - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's exact
+      REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`, `C:EURUSD`,
+      `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol` column, and a live one
+      is followed as rows are added and deleted. The converters turn other spellings into Massive's:
       `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function per
       class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
       `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,

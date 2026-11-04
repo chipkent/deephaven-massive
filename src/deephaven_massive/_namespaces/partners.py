@@ -403,14 +403,10 @@ class _Benzinga(Namespace):
         `poll()` re-reads it, keyed by `BenzingaId`.
 
         Args:
-            sort: The wire field to sort by, such as `"smart_score"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"smart_score"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"firm_name": "Wedbush"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -458,15 +454,10 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"date_gte": "2025-01-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -515,15 +506,10 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"rating_action": "upgrades"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -565,10 +551,8 @@ class _Benzinga(Namespace):
 
         Args:
             symbols: US stock tickers; required (`dm.ALL` is refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            filters: The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...);
-                None aggregates every rating.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...); None
+                aggregates every rating.
 
         Returns:
             A `Query`. Columns:
@@ -614,15 +598,10 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"last_updated"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"last_updated"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"last_updated_gte": "2025-06-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -671,15 +650,10 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"positioning": "primary"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -728,15 +702,10 @@ class _Benzinga(Namespace):
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"importance_gte": 3}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -781,14 +750,10 @@ class _Benzinga(Namespace):
         it, keyed by `BenzingaId`.
 
         Args:
-            sort: The wire field to sort by, such as `"name"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"name"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -830,28 +795,19 @@ class _Benzinga(Namespace):
 
         One row per article, at its publication `Timestamp`. An article names any number of tickers,
         in its `Tickers` array; `symbols` selects the articles that name any of them, and an article
-        is listed under each named ticker it names, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` appends the articles it has not seen, keyed by `BenzingaId` and `Symbol`, and needs
-        `start` or `limit`, since each cycle reads the whole range; a fixed `start` widens the
-        window of a poll that runs for days.
+        is listed under each named ticker it names, in `Symbol`. `poll()` appends the articles it
+        has not seen, keyed by `BenzingaId` and `Symbol`, and needs `start` or `limit`, since each
+        cycle reads the whole range; a fixed `start` widens the window of a poll that runs for days.
 
         Args:
             symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The earliest publication time; `poll()` needs it or a `limit`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            sort: The wire field to sort by, such as `"published"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"published"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"channels_any_of": ["earnings"]}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -929,17 +885,11 @@ class _EtfGlobal(Namespace):
         re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"effective_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
+            sort: The wire field to sort by, such as `"effective_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -985,17 +935,11 @@ class _EtfGlobal(Namespace):
         re-reads it, keyed by `Symbol`, `EffectiveDate`, `ProcessedDate`, and `ConstituentRank`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"effective_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
+            sort: The wire field to sort by, such as `"effective_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"effective_date": "2025-09-18"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1042,17 +986,11 @@ class _EtfGlobal(Namespace):
         `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"effective_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
+            sort: The wire field to sort by, such as `"effective_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1098,17 +1036,11 @@ class _EtfGlobal(Namespace):
         and `ProcessedDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"effective_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
+            sort: The wire field to sort by, such as `"effective_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1153,17 +1085,11 @@ class _EtfGlobal(Namespace):
         re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The wire field to sort by, such as `"effective_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
+            sort: The wire field to sort by, such as `"effective_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"effective_date_gte": "2025-01-01"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1238,21 +1164,14 @@ class _Tmx(Namespace):
         `poll()` re-reads it, keyed by `TmxRecordId`.
 
         Args:
-            symbols: Tickers as TMX writes them; None, the default, for no ticker filter
-                (`dm.ALL` is refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers as TMX writes them; None, the default, for no ticker filter (`dm.ALL`
+                is refused).
             start: The first event day.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"type": "earnings"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1334,17 +1253,11 @@ class _Fable(Namespace):
 
         Args:
             start: The first transaction day.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            sort: The wire field to sort by, such as `"transaction_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"transaction_date"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"parent_name": "Amazon Inc"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:
@@ -1393,14 +1306,10 @@ class _Fable(Namespace):
         `LookupName` and `ActiveFrom`.
 
         Args:
-            sort: The wire field to sort by, such as `"lookup_name"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The wire field to sort by, such as `"lookup_name"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Such as `{"listing_status": "public"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A `Query`. Columns:

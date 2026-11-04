@@ -18,6 +18,17 @@ m.partners.fable.merchant_hierarchy(*, sort=None, order=None, limit=None, filter
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `active_from`, `active_from_gt`, `active_from_gte`, `active_from_lt`, `active_from_lte`, `active_to`, `active_to_gt`, `active_to_gte`, `active_to_lt`, `active_to_lte`, `listing_status`, `listing_status_any_of`, `lookup_name`, `lookup_name_any_of`, `lookup_name_gt`, `lookup_name_gte`, `lookup_name_lt`, `lookup_name_lte`, `ticker`, `ticker_any_of`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `sort` | The wire field to sort by, such as `"lookup_name"`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
+| `order` | The direction of `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
+| `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
+| `filters` | Such as `{"listing_status": "public"}`. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

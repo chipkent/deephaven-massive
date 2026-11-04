@@ -16,9 +16,9 @@ applies them exactly as that step does, one changed path at a time:
 - A changed workflow or composite action runs everything.
 - A path that no rule covers runs everything, so a new kind of input fails closed.
 - A path the `test` pattern matches runs the whole suite.
-- A path the `docs` pattern matches (the user guide, `README.md` and `docs/guide/`, its
-  images, and the tester guide) runs the documentation tests, `tests/test_docs.py` and
-  `tests/live/tester/test_examples.py`, as CI's `docs` job does.
+- A path the `docs` pattern matches (the user pages, `README.md` and
+  `docs/troubleshooting.md`, their images, and the tester guide) runs the documentation tests,
+  `tests/test_docs.py` and `tests/live/tester/test_examples.py`, as CI's `docs` job does.
 - Otherwise CI runs no tests, and the local check runs ruff, format, and mypy. CI runs ruff
   and mypy on every change it lints, and the local check runs them on every change, so it
   never does less.
@@ -40,7 +40,7 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 ...     lint=r"^(src|tests|scripts)/|^pyproject\.toml$",
 ...     test=r"^(src|tests|scripts|vendor)/|^docs/datasets/|^pyproject\.toml$",
 ...     build=r"^(src|tests)/|^docs/datasets/|^README\.md$",
-...     docs=r"^README\.md$|^docs/(guide|assets)/|^docs/tester-guide\.md$",
+...     docs=r"^README\.md$|^docs/troubleshooting\.md$|^docs/assets/|^docs/tester-guide\.md$",
 ...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
 ...     workflows=r"^\.github/(workflows|actions)/",
 ... )
@@ -48,8 +48,8 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 Decision(scope='lint', reason='2 changed files, none of which the tests read')
 >>> decide(["AGENTS.md", "README.md"], rules)
 Decision(scope='docs', reason='2 changed files; README.md is documentation')
->>> decide(["docs/dev/x.md", "docs/guide/history.md"], rules)
-Decision(scope='docs', reason='2 changed files; docs/guide/history.md is documentation')
+>>> decide(["docs/dev/x.md", "docs/troubleshooting.md"], rules)
+Decision(scope='docs', reason='2 changed files; docs/troubleshooting.md is documentation')
 >>> decide(["AGENTS.md", "src/deephaven_massive/__init__.py", "tests/conftest.py"], rules)
 Decision(scope='full', reason='3 changed files; src/deephaven_massive/__init__.py is a test input')
 >>> decide(["docs/dev/x.md", "docs/datasets/stocks.trades.md"], rules)

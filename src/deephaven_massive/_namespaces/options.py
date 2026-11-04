@@ -406,7 +406,6 @@ class _Options(Namespace):
         Args:
             symbols: Contracts as Massive's tickers, `O:` and the OCC symbol
                 (`"O:AAPL250117C00150000"`), or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query with `history()` and the stream verbs. Columns:
@@ -434,14 +433,13 @@ class _Options(Namespace):
         One row per contract, one request per contract. The endpoint needs Options Developer or
         above (a lower plan raises `EntitlementError`); `snapshots(symbols)` also carries each
         contract's last trade, from Options Starter up
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#plans-and-errors).
-        A contract with no trade (HTTP 404) is left out, with a WARNING. `dm.ALL` is refused: use
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#what-your-plan-allows). A
+        contract with no trade (HTTP 404) is left out, with a WARNING. `dm.ALL` is refused: use
         `chain(underlying)`. An explicit `poll(mode=dm.PollMode.APPEND)` appends each cycle's trade
         when it is new, so a trade between two cycles is missed; `trades()` streams every one.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol).
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:
@@ -476,8 +474,7 @@ class _Options(Namespace):
         a day's flat file. One `/options` connection carries at most 1,000 contract topics.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`.
 
         Returns:
             A query with `history()` and the stream verbs. Columns:
@@ -527,19 +524,15 @@ class _Options(Namespace):
 
         Each row is one contract's bar of `multiplier` times `timespan`. One-second and one-minute
         bars also stream from the WebSocket; every other length is history only. Bar windows,
-        stamps, and which bars `history()` returns
-        follow https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars.
-        REST `history()` takes explicit contracts; `dm.ALL` reads a day's flat file. One `/options`
+        stamps, and which bars `history()` returns follow the rules its columns page states. REST
+        `history()` takes explicit contracts; `dm.ALL` reads a day's flat file. One `/options`
         connection carries at most 1,000 contract topics.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`.
             timespan: The bar unit; required.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
-            adjusted: Adjust for splits of the underlying, served by REST only. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
+            adjusted: Adjust for splits of the underlying, served by REST only.
 
         Returns:
             A query of the class the timespan picks. Columns:
@@ -575,14 +568,12 @@ class _Options(Namespace):
         One row per contract: its 1-day bar of the previous completed session, one request per
         contract. A contract with no bar (HTTP 404) is left out, with a WARNING. `dm.ALL` is
         refused: `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)` reads every
-        contract's bar of a day from the flat files. Stamps
-        follow https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars.
+        contract's bar of a day from the flat files. Stamps follow the rules its columns page
+        states.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol).
             adjusted: Adjust for splits of the underlying.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:
@@ -621,8 +612,7 @@ class _Options(Namespace):
         at most 1,000 contract topics.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`.
 
         Returns:
             A query with the stream verbs. Columns:
@@ -668,14 +658,10 @@ class _Options(Namespace):
                 `"I:SPX"`; case is kept and nothing is converted. Or a table of them in a
                 `Symbol` column, each read as if passed alone.
             contract_type: `dm.ContractType.CALL` or `PUT`; None, the default, for both.
-            sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: `strike_price`, `expiration_date`, and their range forms. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: `strike_price`, `expiration_date`, and their range forms.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:
@@ -737,17 +723,12 @@ class _Options(Namespace):
         every contract Massive has: millions of rows and many requests.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol), or `dm.ALL`.
             sort: `"ticker"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
                 `ticker_lte`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:
@@ -812,7 +793,6 @@ class _Options(Namespace):
         Args:
             symbols: Contracts to describe, as Massive's tickers; None, the default, lists
                 contracts. `dm.ALL` is refused.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`;
                 the rows' `Underlying` is the same canonical ticker. Or a table of them in a
                 `Symbol` column, each listed as if passed alone; a refreshing one is followed
@@ -820,16 +800,12 @@ class _Options(Namespace):
                 https://github.com/chipkent/deephaven-massive/blob/main/README.md#option-chain.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
             as_of: The day whose contracts to list; None for today.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#as-of.
             expired: True lists expired contracts only; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            limit: The most rows in total without `symbols`; per contract with them, so no
-                effect there.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: `strike_price`, `expiration_date`, and their range forms. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            order: The direction of `sort`.
+            limit: The most rows in total without `symbols`; per contract with them, so no effect
+                there.
+            filters: `strike_price`, `expiration_date`, and their range forms.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:
@@ -903,12 +879,9 @@ class _Options(Namespace):
         it cannot be checked.
 
         Args:
-            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            date: The trading day, a calendar date (a `datetime` raises). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            symbols: Contracts as Massive's tickers (`O:` and the OCC symbol).
+            date: The trading day, a calendar date (a `datetime` raises).
             adjusted: Adjust for splits of the underlying.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
             A query with `fetch()` and `poll()`. Columns:

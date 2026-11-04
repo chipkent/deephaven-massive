@@ -18,6 +18,19 @@ m.futures.products(*, product_code=None, as_of=None, sort=None, order=None, limi
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `asset_class`, `asset_class_any_of`, `asset_sub_class`, `asset_sub_class_any_of`, `name`, `name_any_of`, `name_gt`, `name_gte`, `name_lt`, `name_lte`, `provider_id`, `sector`, `sector_any_of`, `sub_sector`, `sub_sector_any_of`, `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`, `type`, `type_any_of` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `product_code` | Only this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
+| `as_of` | The day whose specifications to list; None for today. | The day to read the data as it stood on, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. Leave it out for today's state. How far back you can go depends on your plan; this page's plan table says how much history each plan holds. |
+| `sort` | Such as `"name"`; the endpoint sorts by `date`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
+| `order` | Needs `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
+| `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
+| `filters` | Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

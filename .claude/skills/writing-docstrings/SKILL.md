@@ -1,14 +1,15 @@
 ---
 name: writing-docstrings
-description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or verb, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link to the user pages (by full GitHub URL) and docs/datasets/ instead of repeating them, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/guide/ pages (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or verb, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link their generated docs/datasets/ page (by full GitHub URL) instead of repeating shared argument rules, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/troubleshooting.md (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing docstrings
 
 Docstrings serve two readers: a person in an IDE or the Deephaven console, and an agent that
 knows nothing but the code. Write clear, edited prose. A one-line docstring on anything with
-behavior worth knowing is a defect. The user docs (`README.md` and `docs/guide/`) and the
-public docstrings are the user contract, so a docstring that disagrees with the code is a bug.
+behavior worth knowing is a defect. The user docs (`README.md`, `docs/troubleshooting.md`, and
+the generated `docs/datasets/`) and the public docstrings are the user contract, so a docstring
+that disagrees with the code is a bug.
 
 ## What each docstring says
 
@@ -25,30 +26,33 @@ public docstrings are the user contract, so a docstring that disagrees with the 
 
 ## Dataset methods and verbs link instead of repeating
 
-The user docs define each shared argument (`symbols`, `start` and `end`, `as_of`, `sort`,
-`order`, `limit`, `filters`, `adjusted`, `timespan`, `multiplier`, `venues`, the verb
-arguments) and each concept (bars, history sources, split adjustment, live-table lifetime)
-once. A dataset docstring:
+An argument many datasets share (`symbols`, `start`, `end`, `as_of`, `sort`, `order`, `limit`,
+`filters`, `adjusted`, `timespan`, `multiplier`, `venues`) has one rule, written once in
+`src/deephaven_massive/_datasets/argument_rules.py`. `scripts/render_reference.py` prints it in
+the Arguments table of every dataset page that takes the argument, beside the dataset's own
+line from its docstring's `Args`. A rule about a public type, such as `dm.Order` or
+`dm.HistorySource`, lives in that type's docstring. A dataset docstring:
 
-- gives a shared argument one line with only this dataset's difference and a citation of the
-  section that defines it, by its full GitHub URL so it opens from an IDE or the console:
-  `See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/<page>.md#<anchor>.` for a guide page, or
-  `See https://github.com/chipkent/deephaven-massive/blob/main/README.md#<anchor>.` for the README. Cite the page the
-  section is on now. A line that ends in the URL may run past 100 columns (ruff allows it);
-  keep "See" on that line;
-- names its columns page, `docs/datasets/<dataset>.md`, in its Returns line;
+- gives each argument one line that says only what is particular to this dataset, with no link:
+  the page carries the shared rule. Every argument gets a line, because that line fills the
+  page's "For this dataset" column;
+- names its page, `docs/datasets/<dataset>.md`, by its full GitHub URL in its Returns line, so
+  it opens from an IDE or the console;
 - runs about 15 to 25 lines: the summary, what a row is and what is unusual, one Args line per
   argument, Returns, exact Raises, and one or two example lines.
 
-`tests/test_docs.py` fails on a cited anchor or page that does not exist, and on a section
-cited as a bare path (`docs/guide/<page>.md#<anchor>`) instead of a URL.
+To change a shared rule, edit `argument_rules.py` and regenerate the pages. Any other citation,
+such as a README section or a troubleshooting section, uses the full URL too:
+`https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`. `tests/test_docs.py`
+fails on a cited page or anchor that does not exist, and on a bare path instead of a URL.
 
 ## Where documentation lives
 
-- User pages are `README.md` and `docs/guide/`; `docs/dev/user-docs.md` says which page owns
-  each fact, and the `writing-user-docs` skill covers writing them. Every Python block on them
+- User pages are `README.md` and `docs/troubleshooting.md`; `docs/dev/user-docs.md` says which
+  page owns each fact, and the `writing-user-docs` skill covers writing them. Every Python block on them
   runs in `tests/test_docs.py`, so an example is real code.
-- `docs/datasets/` is generated by `scripts/render_reference.py`; never edit it by hand.
+- `docs/datasets/` is generated by `scripts/render_reference.py` from the catalog, the dataset
+  docstrings, and `argument_rules.py`; never edit it by hand.
 - Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`; agent rules in `AGENTS.md` and
   the skills.
 

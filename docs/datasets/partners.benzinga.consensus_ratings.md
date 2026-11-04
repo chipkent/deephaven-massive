@@ -17,6 +17,15 @@ m.partners.benzinga.consensus_ratings(symbols, *, filters=None)
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `filters` | `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `symbols` | US stock tickers; required (`dm.ALL` is refused). | Massive's ticker for each symbol, spelled exactly as Massive spells it: `AAPL` or `BRK.B` for a stock, `O:SPY271217C00700000` (the OCC code) for an option, `I:SPX` for an index, `C:EURUSD` for a forex pair, `X:BTCUSD` for a crypto pair, and `ESZ6` for a future. Pass one symbol as text, several as a list, or a table with a `Symbol` column. A live table is followed: each symbol you add is read, and the rows of each one you delete leave the table. `dm.ALL` reads every symbol, and leaving the argument out reads every record with no filter by symbol, where this dataset takes them. A misspelled symbol in text or a list raises `ValueError` at the call; a misspelled row of a table is skipped and logged, and the table keeps running. `dm.canonical_symbol` converts other spellings to Massive's. A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. |
+| `filters` | The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...); None aggregates every rating. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

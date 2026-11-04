@@ -10,7 +10,7 @@
 #
 # full compares the branch and its uncommitted files with origin/main (scripts/check_scope.py).
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
-# workers; when CI would not, full runs only the documentation tests if the user guide or the
+# workers; when CI would not, full runs only the documentation tests if the user pages or the
 # tester guide changed, and no tests otherwise. It prints the scope it chose and why.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first

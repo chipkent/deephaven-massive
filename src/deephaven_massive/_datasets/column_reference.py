@@ -12,7 +12,8 @@ which readers browse on GitHub before they install anything. This module owns th
   classes by dataset and a list of every dataset by namespace, with the methods of the session
   itself (`m.snapshots`) under a heading of their own. A dataset's page says how to
   call it, its verbs, its time range, its `poll()` mode, the `sort` values and `filters` keys
-  it accepts, which of Massive's plans include it (from the plan tables of Massive's own pages,
+  it accepts, each argument with its docstring line and its shared rule (`argument_rules.py`),
+  which of Massive's plans include it (from the plan tables of Massive's own pages,
   so they follow every refresh), and its columns, with the Massive field behind each column
   folded away. It is pure: it reads only its arguments and the schemas the catalog merges,
   imports no Deephaven (a type cell is the `ColumnType` value), and writes nothing.
@@ -40,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Final
 
+from deephaven_massive._datasets.argument_rules import ARGUMENT_RULES
 from deephaven_massive._datasets.column_descriptions import (
     TRANSPORT_LABELS,
     TRANSPORT_ORDER,
@@ -103,8 +105,9 @@ _NOT_INCLUDED: Final = "Not included"
 
 _INDEX_GUIDE: Final = (
     "Every dataset the library serves, one page each. A page shows how to call the dataset, "
-    "its verbs, the `sort` values and `filters` keys it accepts, which of Massive's plans "
-    "include it, and every column of its tables, in the order every verb returns them. The "
+    "its verbs, the `sort` values and `filters` keys it accepts, each argument and its rules, "
+    "which of Massive's plans include it, and every column of its tables, in the order every "
+    "verb returns them. The "
     "same column descriptions appear in the Deephaven IDE's column tooltips and in a query's "
     "`columns()`, and `dm.datasets()` lists these datasets as a table."
 )
@@ -178,6 +181,12 @@ _POLL_MODES: Final[Mapping[PollMode, str]] = {
 }
 """What each default `poll()` mode does to the table, as a page says it."""
 
+_ARGUMENTS_GUIDE: Final = (
+    "What each argument does for this dataset, and the rule it follows for every dataset that "
+    "takes it."
+)
+"""The paragraph under a page's Arguments heading."""
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetCall:
@@ -199,12 +208,17 @@ class DatasetCall:
         typed: The wire parameter each argument sets, whose `filters` forms the method
             refuses, such as `"type"` for an argument `ticker_type`; an argument that sets
             none appears under its own name, which is harmless.
+        descriptions: Each argument's line from the method's docstring, in the order of
+            `arguments`, such as `"The first ex-dividend date."`; the page's Arguments table
+            shows it beside the argument's shared rule (`ARGUMENT_RULES`). An argument past
+            the end of the tuple has an empty line.
     """
 
     signature: str
     verbs: tuple[str, ...]
     arguments: tuple[str, ...] = ()
     typed: tuple[str, ...] = ()
+    descriptions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,9 +299,12 @@ def render(
     transports that serve it, the wire parameters its time range is sent as (when it has
     one), its default `poll()` mode and keys (for a dataset with `fetch()`), the `sort` values
     it takes (an enum's values, or any field of the rows for a free-text `sort`), and the
-    `filters` keys it accepts (`filters.filter_keys`). Then come the plan tables of Massive's
-    pages that document its sources (`_dataset_urls`, from `Provenance.plans`): one row per
-    plan, one column per page, each cell the plan's recency and history (or "Not included"),
+    `filters` keys it accepts (`filters.filter_keys`). Then comes an Arguments table, when the
+    method takes arguments: each argument, its line from the method's docstring
+    (`DatasetCall.descriptions`), and its shared rule (`ARGUMENT_RULES`). Then come the plan
+    tables of Massive's pages that document its sources (`_dataset_urls`, from
+    `Provenance.plans`): one row per plan, one column per page, each cell the plan's recency
+    and history (or "Not included"),
     and the summary of a page that lists no plan. Then the columns, one row per column in
     result order (**Column**, **Deephaven type**, the `ColumnType` value such as `Instant`,
     **Description**, **Supplied by**, the transports that fill it), and, folded in
@@ -482,6 +499,7 @@ def _page(
         _row(["", ""]),
         _row(["---", "---"]),
         *(_row(fact) for fact in _facts(spec, call, catalog)),
+        *_arguments(call),
     ]
     urls = _dataset_urls(spec, provenance)
     lines.extend(_plans(urls, provenance))
@@ -522,6 +540,31 @@ def _facts(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[list[
         keys = filter_keys(catalog, spec, typed=call.typed)
         facts.append(["`filters`", ", ".join(f"`{key}`" for key in keys) or "none"])
     return facts
+
+
+def _arguments(call: DatasetCall) -> list[str]:
+    """Render a dataset page's Arguments section: one row per argument of its method.
+
+    Args:
+        call: The dataset's call, for its arguments and their docstring lines.
+
+    Returns:
+        The heading, a guide, and a table of **Argument**, **For this dataset** (the
+        docstring's line), and **For every dataset** (the shared rule in `ARGUMENT_RULES`,
+        empty for an argument without one), each line preceded by a blank line; nothing for
+        a method that takes no argument.
+    """
+    if not call.arguments:
+        return []
+    described = dict(zip(call.arguments, call.descriptions, strict=False))
+    lines = ["", "## Arguments", "", _ARGUMENTS_GUIDE, ""]
+    lines.append(_row(["Argument", "For this dataset", "For every dataset"]))
+    lines.append(_row(["---"] * 3))
+    lines.extend(
+        _row([f"`{name}`", described.get(name, ""), ARGUMENT_RULES.get(name, "")])
+        for name in call.arguments
+    )
+    return lines
 
 
 def _poll_text(spec: DatasetSpec) -> str:

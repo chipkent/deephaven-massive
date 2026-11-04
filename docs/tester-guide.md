@@ -1635,9 +1635,9 @@ run `docker rmi deephaven-massive-test`. On Linux, files the container wrote bel
 A settings file gives the container settings such as `delayed_subscriptions`, so you need not
 type them into every example.
 
-1. Write the settings in `~/massive-test/settings.yaml`. The user guide's
-   [settings file](guide/install.md#settings-file) section shows a full example. Never put your
-   key in the file: the library refuses it there, and `-e MASSIVE_API_KEY` passes it in
+1. Write the settings in `~/massive-test/settings.yaml`, one `name: value` line per setting,
+   such as `max_outage: 600`; `help(dm.MassiveConfig.from_file)` shows an example. Never put
+   your key in the file: the library refuses it there, and `-e MASSIVE_API_KEY` passes it in
    already.
 2. Add two options to the `docker run` line, before the image name:
 

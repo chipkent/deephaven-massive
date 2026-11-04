@@ -18,6 +18,20 @@ m.futures.contracts(symbols=None, *, product_code=None, as_of=None, sort=None, o
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |
 | `filters` | `active`, `first_trade_date`, `first_trade_date_gt`, `first_trade_date_gte`, `first_trade_date_lt`, `first_trade_date_lte`, `last_trade_date`, `last_trade_date_gt`, `last_trade_date_gte`, `last_trade_date_lt`, `last_trade_date_lte`, `provider_id`, `provider_product_id`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `type`, `type_any_of` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `symbols` | Only these contracts; None, the default, lists every contract. `dm.ALL` is refused. | Massive's ticker for each symbol, spelled exactly as Massive spells it: `AAPL` or `BRK.B` for a stock, `O:SPY271217C00700000` (the OCC code) for an option, `I:SPX` for an index, `C:EURUSD` for a forex pair, `X:BTCUSD` for a crypto pair, and `ESZ6` for a future. Pass one symbol as text, several as a list, or a table with a `Symbol` column. A live table is followed: each symbol you add is read, and the rows of each one you delete leave the table. `dm.ALL` reads every symbol, and leaving the argument out reads every record with no filter by symbol, where this dataset takes them. A misspelled symbol in text or a list raises `ValueError` at the call; a misspelled row of a table is skipped and logged, and the table keeps running. `dm.canonical_symbol` converts other spellings to Massive's. A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. |
+| `product_code` | Only contracts of this product (`"ES"`) or these (`["ES", "NQ"]`); None for every product. A table of codes, in a `ProductCode` column, reads each code as if passed alone; a refreshing one is followed by `fetch()` and re-read by each `poll()` cycle. |  |
+| `as_of` | The day whose specifications to list; None for today. | The day to read the data as it stood on, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. Leave it out for today's state. How far back you can go depends on your plan; this page's plan table says how much history each plan holds. |
+| `sort` | Such as `"ticker"`; the endpoint sorts by `product_code`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
+| `order` | Needs `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
+| `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
+| `filters` | Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

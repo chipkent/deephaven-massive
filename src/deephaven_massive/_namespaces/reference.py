@@ -298,26 +298,20 @@ class _Reference(Namespace):
         ticker's rows; `symbols=None` lists every ticker in one request series.
 
         Args:
-            symbols: Tickers of any classes; None for every ticker (`dm.ALL` is refused). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers of any classes; None for every ticker (`dm.ALL` is refused).
             market: The market to list; None for every market.
             ticker_type: The type, such as `dm.TickerType.CS` (`ticker_types()` lists them),
                 sent as the wire parameter `type`; None for every type.
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            as_of: The day the listing is as of, sent as `date`; None for today. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#as-of.
+            as_of: The day the listing is as of, sent as `date`; None for today.
             active: True (the default) lists tickers traded on `as_of`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
-            sort:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by.
+            order: The direction of `sort`.
             limit: Per ticker when tickers are named, else in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters.
 
         Returns:
             A `Query`. Columns:
@@ -369,11 +363,8 @@ class _Reference(Namespace):
         WARNING. `poll()` re-fetches them, keyed by `Symbol`.
 
         Args:
-            symbols: Tickers of any classes (`dm.ALL` is refused: `tickers()` lists every
-                ticker).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            as_of: The day the details are as of, sent as `date`; None for the latest. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#as-of.
+            symbols: Tickers of any classes (`dm.ALL` is refused: `tickers()` lists every ticker).
+            as_of: The day the details are as of, sent as `date`; None for the latest.
 
         Returns:
             A `Query`. Columns:
@@ -442,7 +433,6 @@ class _Reference(Namespace):
 
         Args:
             symbols: Tickers of any classes (`dm.ALL` is refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             types: The event types to include, such as `["ticker_change"]` (one `str` is one
                 type); None for every type.
 
@@ -479,7 +469,6 @@ class _Reference(Namespace):
 
         Args:
             symbols: The tickers to find peers of (`dm.ALL` is refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A `Query`. Columns:
@@ -515,30 +504,21 @@ class _Reference(Namespace):
         """News articles about tickers, with their publishers and sentiment insights.
 
         One row per article. An article names several tickers, in its `Tickers` array, and is listed
-        under each ticker it was read for, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        The endpoint takes one ticker per request, so each ticker is its own request, `limit`,
-        `sort`, and `order` apply to each ticker's request (newest first by default). `poll()`
-        appends new articles, keyed by `Id` and `Symbol`, and needs `start` or `limit`; it re-reads
-        a watchlist table every cycle, and a fixed `start` widens the window of a poll that runs for
-        days.
+        under each ticker it was read for, in `Symbol`. The endpoint takes one ticker per request,
+        so each ticker is its own request, `limit`, `sort`, and `order` apply to each ticker's
+        request (newest first by default). `poll()` appends new articles, keyed by `Id` and
+        `Symbol`, and needs `start` or `limit`; it re-reads a watchlist table every cycle, and a
+        fixed `start` widens the window of a poll that runs for days.
 
         Args:
             symbols: The tickers whose articles to read; None for every article (`dm.ALL` is
                 refused).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The earliest publication.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The end of the range.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            sort: Each ticker's sort field, `"published_utc"` by default. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: Each ticker's sort field, `"published_utc"` by default.
             order: Each ticker's order, newest first by default.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            limit: Articles per ticker, or in total without `symbols`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            limit: Articles per ticker, or in total without `symbols`.
+            filters: Further endpoint parameters.
 
         Returns:
             A `Query`. Columns:
@@ -624,14 +604,10 @@ class _Reference(Namespace):
             condition_id: One condition's id, sent as the wire parameter `id`; None for every
                 condition.
             sip: The SIP whose condition mapping to list; None for every SIP.
-            sort:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            order:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by.
+            order: The direction of `sort`.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters:
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters.
 
         Returns:
             A `Query`. Columns:

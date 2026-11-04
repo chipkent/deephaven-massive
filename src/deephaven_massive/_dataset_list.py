@@ -8,7 +8,8 @@ the network. What a dataset's columns mean is its query's `columns()` and the da
 page that each row links.
 
 `dataset_calls` pairs each dataset with the session method that serves it, for the generated
-dataset reference: the method's signature as a user writes it, and the verbs its queries have.
+dataset reference: the method's signature as a user writes it, the verbs its queries have, and
+each argument's line from the method's docstring.
 The dataset layer renders the pages but may not import the methods, so the reference command
 and its parity test build these here and pass them down.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import enum
 import inspect
+import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -129,9 +131,15 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
 _AS_OF: Final = "as_of"
 """The shared argument for the day a reference list is read as of, which sets `date`."""
 
+_ARGS_SECTION: Final = re.compile(r"^Args:\n((?:[ \t].*\n|\n)*)", re.MULTILINE)
+"""A docstring's `Args` section: the `Args:` line and every indented or blank line after it."""
+
+_ARGS_ENTRY: Final = re.compile(r"^    (\w+): (.*)$")
+"""One argument's first line in an `Args` section: its name, then the start of its text."""
+
 
 def dataset_calls() -> Mapping[str, DatasetCall]:
-    """Return how each dataset is called: its method's signature, verbs, and arguments.
+    """Return how each dataset is called: its method's signature, verbs, and documented arguments.
 
     Walks every namespace class of the namespace modules, whose public methods are named by
     their path from the session (`stocks.bars`, which `Namespace` sets as each method's
@@ -212,7 +220,34 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         verbs=verbs(spec),
         arguments=tuple(param.name for param in parameters),
         typed=tuple(typed),
+        descriptions=tuple(_argument_lines(method).get(param.name, "") for param in parameters),
     )
+
+
+def _argument_lines(method: Callable[..., object]) -> dict[str, str]:
+    """Read each argument's entry from the `Args` section of a method's docstring.
+
+    Args:
+        method: A dataset method, whose docstring follows the Google style: an `Args:` line,
+            then one entry per argument, `name: text`, indented one level, its text running on
+            over lines indented further.
+
+    Returns:
+        Each entry's text by argument name, its lines joined by single spaces, such as
+        `{"start": "The first ex-dividend date."}`; empty for a method without an `Args`
+        section.
+    """
+    section = _ARGS_SECTION.search(inspect.getdoc(method) or "")
+    lines: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in (section[1] if section else "").splitlines():
+        entry = _ARGS_ENTRY.match(line)
+        if entry:
+            current = lines.setdefault(entry[1], [])
+            current.append(entry[2])
+        elif line.strip():
+            current.append(line.strip())
+    return {name: " ".join(parts) for name, parts in lines.items()}
 
 
 def _wire_name(argument: str, wire: AbstractSet[str]) -> str:

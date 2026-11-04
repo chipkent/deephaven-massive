@@ -16,6 +16,15 @@ m.reference.ticker_types(*, asset_class=None, locale=None)
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Locale` and `Code` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `asset_class` | The class whose types to list (forex is sent as `fx`); None for every class. The endpoint has no futures types. |  |
+| `locale` | The locale whose types to list; None for both. |  |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

@@ -37,20 +37,22 @@ User documentation has three parts:
 
 - [`README.md`](README.md): the complete landing page, which takes a new user from "what is
   this?" through install to everyday use and the main recipes.
-- `docs/guide/`: reference pages, looked up when a specific case comes up.
-- [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference. Never edit it by
-  hand; regenerate it with `uv run python scripts/render_reference.py`.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md): every error message and symptom with
+  its fix, the diagnostics tables, the debug log, and how to report a bug.
+- [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference, one page per
+  dataset with its call, arguments, plans, and columns. Never edit it by hand; regenerate it
+  with `uv run python scripts/render_reference.py`. The rules of the arguments many datasets
+  share come from `src/deephaven_massive/_datasets/argument_rules.py`, and each dataset's own
+  line for an argument from its method's docstring.
 
 [`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: the project
 section (readers, owner requirements, install decision, page map), the rules, the AI tells, the
 section models, the terminology, and the rubric and pass bar.
 `tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
-Docstrings cite a section by its full GitHub URL, so the link opens from an IDE or the
-console:
-`https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/<page>.md#<anchor>`, or
-`README.md#<anchor>` after the same prefix. They cite a dataset page as
-`docs/datasets/<dataset>.md`. The same test checks that every section citation is a URL and
-that every cited anchor and dataset page exists.
+Docstrings cite a page or section by its full GitHub URL, so the link opens from an IDE or
+the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page,
+such as `docs/datasets/<dataset>.md` or `README.md#<anchor>`. The same test checks that every
+citation is a URL and that every cited page and anchor exists.
 
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.

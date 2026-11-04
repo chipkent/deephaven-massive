@@ -158,17 +158,11 @@ class _Economy(Namespace):
 
         Args:
             start: The first date; a calendar date only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future.
             sort: The wire field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -211,17 +205,11 @@ class _Economy(Namespace):
 
         Args:
             start: The first date; a calendar date only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future.
             sort: The wire field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -264,17 +252,11 @@ class _Economy(Namespace):
 
         Args:
             start: The first date; a calendar date only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future.
             sort: The wire field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -317,17 +299,11 @@ class _Economy(Namespace):
 
         Args:
             start: The first date; a calendar date only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future.
             sort: The wire field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -370,17 +346,11 @@ class _Economy(Namespace):
 
         Args:
             start: The first date; a calendar date only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future.
             sort: The wire field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`; it needs `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:

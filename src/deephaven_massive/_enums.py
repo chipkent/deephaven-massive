@@ -175,11 +175,9 @@ class PollMode(StrEnum):
 class HistorySource(StrEnum):
     """Where `history()` reads from.
 
-    - `AUTO`: the library picks flat files or REST from the S3 credentials, the dataset, the
-      bar shape and `adjusted`, and the number of symbols (`flat_file_symbol_threshold`). A
-      day whose file is missing, or files the plan lacks, are read from REST when REST can
-      serve them.
-      See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#history-sources.
+    - `AUTO`: the library picks flat files or REST from the S3 credentials, the dataset, the bar
+      shape and `adjusted`, and the number of symbols (`flat_file_symbol_threshold`). A day whose
+      file is missing, or files the plan lacks, are read from REST when REST can serve them.
     - `REST`: the REST history endpoint, paged internally.
     - `FLAT_FILES`: the gzip CSV files on S3 (`files.massive.com`); needs S3 credentials.
 

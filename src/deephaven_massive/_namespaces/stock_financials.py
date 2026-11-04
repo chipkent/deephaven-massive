@@ -5,15 +5,13 @@ the flow statements) trailing twelve months, and the daily valuation ratios. A s
 describe one filer's period and list the filer's tickers, so the three statements keep `Tickers`,
 and a row is listed under each named ticker it lists, in `Symbol`; the ratios name one ticker each.
 
-Each dataset is one factory method that validates its arguments and returns a query; nothing
-touches the network until a verb is called on the query. This module owns the namespace's
-`DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
-`_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
-the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and `end` bound the
-statement period, and `sort`, `order`, `limit`, and `filters` work as
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit and
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters describe.
-`m.stocks` (`stocks.py`) creates the namespace.
+Each dataset is one factory method that validates its arguments and returns a query; nothing touches
+the network until a verb is called on the query. This module owns the namespace's `DatasetSpec`s,
+exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in `_session.py`). Every
+dataset is a REST list dataset: `symbols` is optional and only filters the request, `dm.ALL` is
+refused in favour of `symbols=None`, `start` and `end` bound the statement period, and `sort`,
+`order`, `limit`, and `filters` work as each dataset's page describes. `m.stocks` (`stocks.py`)
+creates the namespace.
 """
 
 from __future__ import annotations
@@ -207,27 +205,19 @@ class _StockFinancials(Namespace):
         Each row is a company's assets, liabilities, and equity at the end of a quarter or fiscal
         year, as filed with the SEC. A filing can name several share classes, so its `Tickers`
         column holds the filing's tickers, `symbols` selects the filings that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces the table
+        each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; None, the default, for both. A balance
                 sheet is a position, so it has no trailing twelve months.
             start: The first period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
             A query. Columns:
@@ -283,27 +273,19 @@ class _StockFinancials(Namespace):
         Each row is a company's revenue, expenses, earnings, and per-share figures for a quarter or
         fiscal year, as filed with the SEC. A filing can name several share classes, so its
         `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        them, and a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces
+        the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
                 default, for every timeframe.
             start: The first period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
             A query. Columns:
@@ -353,27 +335,19 @@ class _StockFinancials(Namespace):
         Each row is a company's operating, investing, and financing cash flows for a quarter or
         fiscal year, as filed with the SEC. A filing can name several share classes, so its
         `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        them, and a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces
+        the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
                 default, for every timeframe.
             start: The first period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last period end date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"period_end"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
             A query. Columns:
@@ -422,15 +396,10 @@ class _StockFinancials(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             sort: The field to sort by, such as `"market_cap"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`.
 
         Returns:
             A query. Columns:

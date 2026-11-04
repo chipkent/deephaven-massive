@@ -16,6 +16,14 @@ m.crypto.movers(direction)
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `Updated` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `direction` | `dm.Direction.GAINERS` or `dm.Direction.LOSERS`. |  |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

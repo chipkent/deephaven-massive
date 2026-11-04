@@ -16,6 +16,16 @@ m.stocks.daily_open_close(symbols, date, *, adjusted=True)
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `symbols` | Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`). | Massive's ticker for each symbol, spelled exactly as Massive spells it: `AAPL` or `BRK.B` for a stock, `O:SPY271217C00700000` (the OCC code) for an option, `I:SPX` for an index, `C:EURUSD` for a forex pair, `X:BTCUSD` for a crypto pair, and `ESZ6` for a future. Pass one symbol as text, several as a list, or a table with a `Symbol` column. A live table is followed: each symbol you add is read, and the rows of each one you delete leave the table. `dm.ALL` reads every symbol, and leaving the argument out reads every record with no filter by symbol, where this dataset takes them. A misspelled symbol in text or a list raises `ValueError` at the call; a misspelled row of a table is skipped and logged, and the table keeps running. `dm.canonical_symbol` converts other spellings to Massive's. A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. |
+| `date` | The trading day, a calendar date; a `datetime` or an instant raises. | One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant is refused at the call. |
+| `adjusted` | Split-adjusted prices and volume. Massive does not echo the basis here, so it cannot be checked. | `True`, the default, gives split-adjusted prices, restated in terms of every later stock split; `False` gives prices as traded. Only REST adjusts: flat files and live bars are always as traded. |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

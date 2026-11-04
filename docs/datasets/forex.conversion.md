@@ -16,6 +16,17 @@ m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastTimestamp` |
 
+## Arguments
+
+What each argument does for this dataset, and the rule it follows for every dataset that takes it.
+
+| Argument | For this dataset | For every dataset |
+| --- | --- | --- |
+| `from_currency` | The currency to convert from, a three-letter code such as `"AUD"`, written exactly: upper case, nothing around it. |  |
+| `to_currency` | The currency to convert to, such as `"USD"`. |  |
+| `amount` | The amount to convert, a positive, finite `int` or `float`; 1.0 by default. |  |
+| `precision` | The decimal places of the result, 0 to 4; 2 by default. |  |
+
 ## Plan access
 
 Which of Massive's plans include this dataset, how recent its data is on each, and how far back its history goes, as Massive's pages state them.

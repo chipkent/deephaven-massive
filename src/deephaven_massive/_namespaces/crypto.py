@@ -271,7 +271,6 @@ class _Crypto(Namespace):
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`, which
                 `history()` reads only from the flat files.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -304,7 +303,6 @@ class _Crypto(Namespace):
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
                 `m.crypto.snapshots(dm.ALL)`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -338,8 +336,7 @@ class _Crypto(Namespace):
         is refused when the verb runs, since Massive spells it as two currencies.
 
         Args:
-            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`.
 
         Returns:
             A query. Columns:
@@ -387,19 +384,15 @@ class _Crypto(Namespace):
         stream from the WebSocket; every other length is history only. Days are UTC days and weeks
         run Sunday to Saturday. A 1-day bar that Massive stamps elsewhere than its UTC day's first
         or last millisecond keeps its stamp, ends a day later, and has no `Date`, with a WARNING.
-        Crypto has no
-        corporate actions, so there is no `adjusted`. Bar windows, stamps, and which bars
-        `history()` returns
-        follow https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars. A
-        pair missing from Massive's crypto ticker list (read once per session, delisted pairs
-        included) is refused when the verb runs, since Massive spells it as two currencies.
+        Crypto has no corporate actions, so there is no `adjusted`. Bar windows, stamps, and which
+        bars `history()` returns follow the rules its columns page states. A pair missing from
+        Massive's crypto ticker list (read once per session, delisted pairs included) is refused
+        when the verb runs, since Massive spells it as two currencies.
 
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL` (`history()`
                 takes it for one-minute and one-day bars).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             timespan: The bar unit; required.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#timespan-and-multiplier.
             multiplier: Units per bar; only 1 streams.
 
         Returns:
@@ -435,15 +428,13 @@ class _Crypto(Namespace):
 
         One row per pair, from one REST request per pair: the 1-day bar of the previous completed
         UTC day. A bar stamped elsewhere than its UTC day's first or last millisecond keeps its
-        stamp, ends a day later, and has no `Date`, with a WARNING
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars). An
-        explicit `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404)
-        is left out, with a WARNING.
+        stamp, ends a day later, and has no `Date`, with a WARNING. An explicit
+        `mode=dm.PollMode.APPEND` appends each new day's bar. A pair with no bar (HTTP 404) is left
+        out, with a WARNING.
 
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
                 `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -477,14 +468,13 @@ class _Crypto(Namespace):
 
         Each row is one update of Massive's proprietary price estimate, from its Business feed. A
         plan without it fails the stream's table with `EntitlementError`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#plans-and-errors).
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#what-your-plan-allows).
         Stream only: no `history()` or `fetch()`. A pair missing from Massive's crypto ticker list
         (read once per session, delisted pairs included) is refused when the verb runs, since
         Massive spells it as two currencies.
 
         Args:
-            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL`.
 
         Returns:
             A query. Columns:
@@ -514,7 +504,6 @@ class _Crypto(Namespace):
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`, or `dm.ALL` for every
                 traded pair.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -577,10 +566,8 @@ class _Crypto(Namespace):
         Args:
             symbols: Crypto pairs as Massive's tickers, such as `X:BTCUSD`. `dm.ALL` is refused: use
                 `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             date: The UTC day, as a calendar date (`"2026-01-02"`, a `date`, or any `DateLike`
                 date); a `datetime` or an instant is refused.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#time.
 
         Returns:
             A query. Columns:

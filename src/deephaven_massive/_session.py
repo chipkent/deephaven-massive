@@ -208,13 +208,13 @@ class MassiveSession:
     never starts a JVM. Configuration comes only from `MassiveConfig`, and the session does not
     expose it again, keeping the API key out of console globals.
 
-    Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs
-    on a query return Deephaven tables
+    Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs on a
+    query return Deephaven tables
     (https://github.com/chipkent/deephaven-massive/blob/main/README.md#how-it-works). A live table
     keeps running, and keeps its session running, while it or a table derived from it is in use;
     release it with `m.release(table)`, and `m.close()` stops everything and fails every live table
-    (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables).
-    As a context manager the session closes on exit.
+    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news). As a
+    context manager the session closes on exit.
 
     Sessions of one process with the same API key share their WebSocket connections when their
     connection settings are equal; otherwise a WARNING says they compete for the slot. The
@@ -396,17 +396,12 @@ class MassiveSession:
             symbols: Massive's exact tickers of any class (`AAPL`, `O:SPY251219C00600000`,
                 `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a table; a ticker without a prefix is a stock.
                 `dm.ALL` is refused: use a class's `snapshots(dm.ALL)`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             sort: The field to sort by (`"ticker"`); past 250 tickers it orders each request's rows,
                 not all of them.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The sort direction, per request the same way.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The total-row cap.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters; `type` is refused, since Massive rejects it beside
                 tickers.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -448,11 +443,11 @@ class MassiveSession:
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.
 
-        One row per WebSocket connection, plus one `Transport=REST` row per resolved (asset
-        class, channel family) host decision. A connection shared with another session of the
-        same API key shows in both. Each call returns a new live view; after `close()` it keeps
-        its final rows. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/troubleshooting.md#diagnostics.
+        One row per WebSocket connection, plus one `Transport=REST` row per resolved (asset class,
+        channel family) host decision. A connection shared with another session of the same API key
+        shows in both. Each call returns a new live view; after `close()` it keeps its final rows.
+        How to read it:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Transport`, `AssetClass`, and `Family`, with `Host`, `Path`,
@@ -495,7 +490,7 @@ class MassiveSession:
         rows may be missing (a recovered outage, a run of failed cycles) once the note is gone.
         Each call returns a new live view; after `close()` it keeps its final rows. How to read
         it:
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/troubleshooting.md#diagnostics.
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that built
@@ -521,13 +516,12 @@ class MassiveSession:
     def rate_limits(self) -> Table:
         """Return the live diagnostics table of REST rate limits, one row per subscription.
 
-        Massive limits REST requests per subscription (5 per minute on a free Basic plan, none
-        on a paid one), counted across every key and session of the account. Each row is one
-        subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions of
-        this process with the same API key share one governor, so their tables show the same
-        rows. Each call returns a new live view; after `close()` it keeps its final rows. How
-        to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/troubleshooting.md#diagnostics.
+        Massive limits REST requests per subscription (5 per minute on a free Basic plan, none on a
+        paid one), counted across every key and session of the account. Each row is one
+        subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions of this
+        process with the same API key share one governor, so their tables show the same rows. Each
+        call returns a new live view; after `close()` it keeps its final rows. How to read it:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Bucket` (`stocks`, `options`, `indices`, `currencies`,
@@ -556,7 +550,7 @@ class MassiveSession:
         other failure makes it `FAILED` at once. Deleting and re-adding its row reads it again. The
         rows stay for the session's life, also after their result is released. Each call returns a
         new live view; after `close()` it keeps its final rows. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/troubleshooting.md#diagnostics.
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId` (the result's row in `m.streams()`) and `Symbol`
@@ -584,12 +578,12 @@ class MassiveSession:
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold is released on the session's reaper thread at once, or, inside a
-        console command, once the command ends. The table keeps ticking only while something
-        else holds it (a derived table, an open UI panel); once nothing does, its stream
-        unsubscribes, its poller stops, or its background read stops. Releasing twice does
-        nothing, and `release()` keeps working after `close()`. Static results are not tracked.
-        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables.
+        The library's hold is released on the session's reaper thread at once, or, inside a console
+        command, once the command ends. The table keeps ticking only while something else holds it
+        (a derived table, an open UI panel); once nothing does, its stream unsubscribes, its poller
+        stops, or its background read stops. Releasing twice does nothing, and `release()` keeps
+        working after `close()`. Static results are not tracked. See
+        https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -615,16 +609,15 @@ class MassiveSession:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
         Every live table of the session, and every table derived from one, fails with
-        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so no
-        table is left looking live while it never changes. A failed table keeps its rows: take
-        `t.snapshot()` to keep working with them. `m.streams()` shows every stream `CLOSED`
-        (one that had already failed keeps `FAILED`); in a console command `close()` returns at
-        once, waiting for nothing, and the tables show their final state once the command ends.
-        Connections no other session of the key
-        uses are closed. After `close()`, verbs and the diagnostics methods raise
+        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so no table is
+        left looking live while it never changes. A failed table keeps its rows: take `t.snapshot()`
+        to keep working with them. `m.streams()` shows every stream `CLOSED` (one that had already
+        failed keeps `FAILED`); in a console command `close()` returns at once, waiting for nothing,
+        and the tables show their final state once the command ends. Connections no other session of
+        the key uses are closed. After `close()`, verbs and the diagnostics methods raise
         `MassiveError("MassiveSession #1 is closed")`; building queries and `release()` keep
-        working.
-        See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables.
+        working. See
+        https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
 
         Raises:
             ValueError: On a Deephaven update-graph thread, for example inside a table

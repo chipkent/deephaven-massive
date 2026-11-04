@@ -192,15 +192,14 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
-        delayed_subscriptions: The subscriptions whose live data you accept from Massive's
-            delayed feed, 15 minutes behind (10 for futures), such as
-            `{dm.Subscription.OPTIONS}`. A listed subscription's streams read the delayed feed.
-            An unlisted one is real-time: a stream, or a `fetch()` or `poll()` of current data,
-            raises `EntitlementError` naming the line to add when Massive shows the data is
-            delayed. Past data and `history()` are never checked. `dm.Subscription.CURRENCIES`
-            cannot be listed and is never refused; FMV streams are real-time only; a
-            `websocket_hosts` pin must match. Defaults to an empty set. See
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#real-time-or-delayed.
+        delayed_subscriptions: The subscriptions whose live data you accept from Massive's delayed
+            feed, 15 minutes behind (10 for futures), such as `{dm.Subscription.OPTIONS}`. A listed
+            subscription's streams read the delayed feed. An unlisted one is real-time: a stream, or
+            a `fetch()` or `poll()` of current data, raises `EntitlementError` naming the line to
+            add when Massive shows the data is delayed. Past data and `history()` are never checked.
+            `dm.Subscription.CURRENCIES` cannot be listed and is never refused; FMV streams are
+            real-time only; a `websocket_hosts` pin must match. Defaults to an empty set. See
+            https://github.com/chipkent/deephaven-massive/blob/main/README.md#configuration.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no
@@ -236,12 +235,12 @@ class MassiveConfig:
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
             max_reconnect_backoff]`. Defaults to 120 seconds.
-        max_outage: How long, in seconds, a live table may go without data before it fails.
-            A stream fails when its connection has been down this long; a `poll()` table fails when
-            its cycles have kept failing, or a late cycle has received nothing, for this long.
-            Until then, `m.streams()` says so in `Error`. Call the verb again for a new table.
-            `0` fails at the first drop or failed cycle. Defaults to 300 seconds. See
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/live-tables.md#live-tables.
+        max_outage: How long, in seconds, a live table may go without data before it fails. A stream
+            fails when its connection has been down this long; a `poll()` table fails when its
+            cycles have kept failing, or a late cycle has received nothing, for this long. Until
+            then, `m.streams()` says so in `Error`. Call the verb again for a new table. `0` fails
+            at the first drop or failed cycle. Defaults to 300 seconds. See
+            https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
         flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
             flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
             read flat files. Defaults to 50.
@@ -417,13 +416,11 @@ class MassiveConfig:
 
         The file is a mapping of setting names, the attribute names of this class, to values;
         a setting it leaves out takes its default. Precedence is code, then the file, then the
-        defaults: override a setting of the file in code with `dataclasses.replace`. The
-        credentials are never read from the file; they come from code or from their
-        environment variables, as for `MassiveConfig()`. Every scalar is read as text and
-        converted by the setting's own rule, so a ticker such as `ON` or `NO` stays text, and
-        an enum word is taken only as spelled exactly (`raise`, not `Raise`). The user guide's
-        "Settings file" section shows a full file
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/install.md#settings-file).
+        defaults: override a setting of the file in code with `dataclasses.replace`. The credentials
+        are never read from the file; they come from code or from their environment variables, as
+        for `MassiveConfig()`. Every scalar is read as text and converted by the setting's own rule,
+        so a ticker such as `ON` or `NO` stays text, and an enum word is taken only as spelled
+        exactly (`raise`, not `Raise`).
 
         Example:
             ::

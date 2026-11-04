@@ -7,16 +7,13 @@ and 4, the insider activity and holdings, and the 8-K disclosures each list seve
 those datasets keep `Tickers`, and a row is listed under each named ticker it lists, in `Symbol`;
 the other filings take `Symbol` from their rows, null for a filing without a ticker.
 
-Each dataset is one factory method that validates its arguments and returns a query; nothing
-touches the network until a verb is called on the query. This module owns the namespace's
-`DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
-`_session.py`). Every dataset is a REST list dataset: `symbols` is optional and only filters
-the request (the 13-F holdings and the taxonomies take none), `dm.ALL` is refused in favour of
-`symbols=None`, `start` and `end` bound the filing date where the dataset has one, and
-`sort`, `order`, `limit`, and `filters` work as
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit and
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters describe.
-`m.stocks` (`stocks.py`) creates the namespace.
+Each dataset is one factory method that validates its arguments and returns a query; nothing touches
+the network until a verb is called on the query. This module owns the namespace's `DatasetSpec`s,
+exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in `_session.py`). Every
+dataset is a REST list dataset: `symbols` is optional and only filters the request (the 13-F
+holdings and the taxonomies take none), `dm.ALL` is refused in favour of `symbols=None`, `start` and
+`end` bound the filing date where the dataset has one, and `sort`, `order`, `limit`, and `filters`
+work as each dataset's page describes. `m.stocks` (`stocks.py`) creates the namespace.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -485,20 +482,13 @@ class _StockFilings(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every filer.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             form_type: The SEC form type, such as `"10-K"`; None, the default, for every form.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
 
         Returns:
             A query. Columns:
@@ -550,19 +540,12 @@ class _StockFilings(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every filer.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"section": "risk_factors"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"section": "risk_factors"}`.
 
         Returns:
             A query. Columns:
@@ -614,19 +597,12 @@ class _StockFilings(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every filer.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`.
 
         Returns:
             A query. Columns:
@@ -674,26 +650,17 @@ class _StockFilings(Namespace):
         (see `disclosure_taxonomy()`), the supporting text, and the filing's accession number and
         date. A filing can name several share classes, so its `Tickers` column holds the filing's
         tickers, `symbols` selects the filings that list any of them, and a row is listed under each
-        named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
-        `limit`.
+        named ticker it lists, in `Symbol`. `poll()` appends new rows, told apart by the dataset's
+        key columns, and needs a `start` or a `limit`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`.
 
         Returns:
             A query. Columns:
@@ -744,19 +711,12 @@ class _StockFilings(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every filer.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
 
         Returns:
             A query. Columns:
@@ -810,17 +770,11 @@ class _StockFilings(Namespace):
             filer_cik: The filing manager's SEC CIK, as text with its leading zeros, such as
                 `"0001067983"`, or a sequence of them; None, the default, for every filer.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -870,30 +824,21 @@ class _StockFilings(Namespace):
         issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
         filing can name several share classes, so its `Tickers` column holds the filing's tickers,
         `symbols` selects the filings that list any of them, and a row is listed under each named
-        ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
-        `limit`.
+        ticker it lists, in `Symbol`. `poll()` appends new rows, told apart by the dataset's key
+        columns, and needs a `start` or a `limit`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
                 default, for every owner.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -944,30 +889,22 @@ class _StockFilings(Namespace):
         reported, or a holding reported beside them: the transaction code, date, shares, price, and
         the shares owned afterwards, with the issuer and owner. A filing can name several share
         classes, so its `Tickers` column holds the filing's tickers, `symbols` selects the filings
-        that list any of them, and a row is listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
+        that list any of them, and a row is listed under each named ticker it lists, in `Symbol`.
         `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
         `limit`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose filings to return; None, the default, for every filing.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
                 default, for every owner.
             start: The first filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"filing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"transaction_code": "P"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"transaction_code": "P"}`.
 
         Returns:
             A query. Columns:
@@ -1019,28 +956,20 @@ class _StockFilings(Namespace):
         part traded under a prearranged Rule 10b5-1 plan. `insider_transactions()` returns the Form
         4 lines themselves. A company can have several share classes, so its `Tickers` column holds
         the issuer's tickers, `symbols` selects the issuers that list any of them, and a row is
-        listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        The totals cover the issuer, not each ticker. `poll()` replaces the table each cycle, keyed
-        by `IssuerCik`, `TransactionDate`, and `Symbol`, so a late filing revises its day in place.
-        Massive updates the data daily.
+        listed under each named ticker it lists, in `Symbol`. The totals cover the issuer, not each
+        ticker. `poll()` replaces the table each cycle, keyed by `IssuerCik`, `TransactionDate`, and
+        `Symbol`, so a late filing revises its day in place. Massive updates the data daily.
 
         Args:
-            symbols: Tickers whose issuers to return; None, the default, for every issuer. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Tickers whose issuers to return; None, the default, for every issuer.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             start: The first transaction date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last transaction date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"net_value"`; the default is the newest transaction
                 date first.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
@@ -1096,30 +1025,23 @@ class _StockFilings(Namespace):
         in percent (0.0198 means 0.0198%). `OldestPositionDate` far behind `LastFilingDate` warns
         that a position may be stale. A company can have several share classes, so its `Tickers`
         column holds the issuer's tickers, `symbols` selects the issuers that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol`
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols).
-        `poll()` replaces the table each cycle, keyed by `IssuerCik` and `OwnerCik`, so a new filing
-        updates its insider's row in place. Massive updates the data daily.
+        a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces the table
+        each cycle, keyed by `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row
+        in place. Massive updates the data daily.
 
         Args:
             symbols: Tickers whose issuers' insiders to return; None, the default, for every issuer.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
                 of them; None, the default, for every issuer.
             owner_cik: The insider's SEC CIK, or a sequence of them, to list every company one
                 person is an insider of; None, the default, for every insider.
             start: The earliest latest-filing date (`LastFilingDate`); an insider who has not filed
                 since is left out.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last latest-filing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"shares_owned"`; the default is the most recent
                 latest-filing date first.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Unused today: the arguments above reserve every endpoint parameter, so any key
                 raises `ValueError`.
 
@@ -1170,14 +1092,10 @@ class _StockFilings(Namespace):
         each cycle, keyed by `Taxonomy` and the three categories.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by, such as `"primary_category"`.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`.
 
         Returns:
             A query. Columns:
@@ -1220,14 +1138,10 @@ class _StockFilings(Namespace):
         each cycle, keyed by `Taxonomy` and the three categories.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by, such as `"primary_category"`.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`.
 
         Returns:
             A query. Columns:

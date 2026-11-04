@@ -73,7 +73,7 @@ with the library installed, and a first table in your browser.
 ### Check what you need
 
 The server runs on macOS, Linux, and Windows 10 or 11 through WSL 2. Your computer needs at
-least 8 GB of memory. [Platform notes](docs/guide/install.md#platforms) cover each operating
+least 8 GB of memory. [Platform notes](https://deephaven.io/core/docs/getting-started/pip-install/) cover each operating
 system in more detail.
 
 Get these four ready before you start. The Check column shows how to confirm each one:
@@ -219,7 +219,7 @@ see:
 | A traceback in the console ending in `AuthenticationError: no Massive API key: ...` | The server started before `MASSIVE_API_KEY` was set | Stop the server with Control-C, set the key in that terminal, and start the server again |
 | `RuntimeError: The Deephaven Server has not been initialized` | The code ran in plain Python, outside the server | Paste it into the **Console** panel of the Deephaven IDE |
 
-[Troubleshooting](docs/guide/troubleshooting.md) lists every other message and says how to turn
+[Troubleshooting](docs/troubleshooting.md) lists every other message and says how to turn
 on the library's log.
 
 <a id="configuration"></a>
@@ -244,7 +244,7 @@ server read:
 | `MASSIVE_API_KEY` | None; required | Your Massive API key. Creating a session without it raises `dm.AuthenticationError`. |
 | `MASSIVE_S3_ACCESS_KEY_ID` | Unset | The access key for Massive's flat files, which are compressed files that each hold a whole market's trades, quotes, or bars for one day. Massive shows it beside your API key on paid plans. |
 | `MASSIVE_S3_SECRET_ACCESS_KEY` | Unset | The secret key that goes with the access key. Set both keys or neither. |
-| `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Unset | The path of a [settings file](docs/guide/install.md#settings-file), which `dm.MassiveConfig.from_file()` reads when you call it with no path. |
+| `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Unset | The path of a settings file, which `dm.MassiveConfig.from_file()` reads when you call it with no path. |
 | `DEEPHAVEN_MASSIVE_LOG` | Unset, so only warnings and errors reach the server's terminal | Turns on the library's log at a level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `DEEPHAVEN_MASSIVE_LOG_FILE` | Unset, so the log goes to the server's terminal | A file to append the log to. Set alone, it turns the log on at `DEBUG`. |
 | `HTTPS_PROXY`, `NO_PROXY` | Your system's proxy settings on macOS and Windows; otherwise none | The proxy for every connection to Massive, and the hosts that skip it. |
@@ -257,7 +257,7 @@ that's already running, call `dm.enable_debug_logging()` instead.
 With both S3 keys set, `history()` reads flat files for a request of 50 or more symbols, or
 `dm.ALL`. It does so only when the files hold the data you asked for. Without the keys, it reads
 from Massive's REST API, the web API that `fetch()` and `poll()` also use.
-[S3 keys for flat files](docs/guide/install.md#s3-keys) says where to find the keys.
+S3 keys for flat files says where to find the keys.
 
 <a id="settings-in-code"></a>
 
@@ -288,7 +288,7 @@ m = dm.MassiveSession(config)
 
 `help(dm.MassiveConfig)` in the console lists every other setting and its default. To share
 settings among consoles, scripts, and containers, put them in a
-[settings file](docs/guide/install.md#settings-file).
+settings file.
 
 <a id="learn-by-example"></a>
 
@@ -379,11 +379,11 @@ scorecard = year.agg_by(
 per stock, with `Start`, `End`, `High`, `Low`, and `ReturnPct`.
 
 The first argument, `symbols`, takes one ticker, a list, or `dm.ALL`. Its full rules are in
-[`symbols`](docs/guide/arguments.md#symbols).
+[`symbols`](docs/datasets/stocks.bars.md#arguments).
 
 Dates are `yyyy-MM-dd` text, and the range includes both ends. Because `Date` holds the same
 text, it sorts by day, which is how `sorted_first` finds the year's first close. For the rules of
-a range, see [`start` and `end`](docs/guide/arguments.md#start-and-end).
+a range, see [`start` and `end`](docs/datasets/stocks.bars.md#arguments).
 
 <a id="how-it-works"></a>
 
@@ -417,7 +417,7 @@ column of the dividends dataset, with its name, its type, and a description.
 `m.reference`, groups the datasets of one market or one kind of data. Calling a dataset makes a
 query, and a verb, such as `history()` or `fetch()`, reads the data and returns a table. If you
 call a verb the dataset doesn't have, Python raises `AttributeError` and lists the verbs it does
-have. The [verb reference](docs/guide/arguments.md#verb-reference) describes each verb.
+have. The verb reference describes each verb.
 
 <a id="price-dividends"></a>
 
@@ -491,8 +491,8 @@ because it's built on `headlines`.
 
 `headlines` keeps polling for as long as it, or a table built on it such as `newest_first`, is
 open in the IDE or held in a variable. To stop a live table at once, call `m.release(headlines)`.
-[Live tables](docs/guide/live-tables.md#live-tables) says when else a live table stops, and
-[poll modes](docs/guide/arguments.md#poll-modes) says how polls of other datasets combine their
+Live tables says when else a live table stops, and
+poll modes says how polls of other datasets combine their
 reads.
 
 <a id="what-your-plan-allows"></a>
@@ -534,7 +534,7 @@ The biggest differences are between the free Basic plan and the paid ones:
 | History of stock bars | Two years | Five years on Starter, ten on Developer, and all of Massive's history on Advanced |
 
 Each dataset's page has Massive's plan table, such as the one for
-[stock bars](docs/datasets/stocks.bars.md#plan-access). [Plans](docs/guide/plans.md) covers
+[stock bars](docs/datasets/stocks.bars.md#plan-access). [Plans](https://massive.com/pricing) covers
 the rest, futures and currencies included.
 
 <a id="table-shapes"></a>
@@ -583,7 +583,7 @@ differ in which trades they keep:
 An aggregation of a blink table counts every trade that passes through it, though the blink
 table holds each trade for only one cycle. That's how `since_start` keeps running totals
 without storing the trades. To choose a live table for a job, see
-[choose a live table](docs/guide/arguments.md#choose-a-live-table).
+[choose a live table](#table-shapes).
 
 <a id="seed-a-live-board"></a>
 <a id="live-board"></a>
@@ -625,8 +625,8 @@ A live table joins a static one the same way two static tables join. `latest` up
 arrive, and `fetch()` read `yesterday` once.
 
 To give every stock a row before its first bar, see
-[show every symbol before it trades](docs/guide/watchlists.md#seed-a-watchlist-board). For how
-each plan's feed works, see [real-time or delayed](docs/guide/plans.md#real-time-or-delayed).
+show every symbol before it trades. For how
+each plan's feed works, see [real-time or delayed](#configuration).
 
 <a id="drive-with-a-watchlist"></a>
 
@@ -660,7 +660,7 @@ watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
 Adding NVDA started streaming it. Deleting MSFT stopped its stream and dropped its row.
 
 Wherever a dataset takes `symbols`, it also takes a table with a `Symbol` column, and it follows
-a live one as it changes. [Watchlists](docs/guide/watchlists.md) says what each verb does as a
+a live one as it changes. Watchlists says what each verb does as a
 watchlist changes.
 
 To add a symbol to `watchlist` by hand in the Deephaven IDE:
@@ -702,7 +702,7 @@ The code opens the stream before it reads history, so no minute falls between th
 both have the same minute, `last_by` keeps the live bar.
 
 History is split-adjusted, and live bars are as traded. After a split, build the table again.
-[Split adjustment](docs/guide/history.md#split-adjustment) has the details.
+Split adjustment has the details.
 
 <a id="recipes"></a>
 
@@ -813,11 +813,11 @@ Reading every symbol works when the whole market fits in the server's memory, th
 Install's step 6 gives it. `every.size` shows how many rows a read holds. Daily bars of every
 stock fit in 4 GB, and so does one day of minute bars. To read minute bars of every symbol, pass
 `adjusted=False`. The library then reads them from flat files, which need a Stocks Starter plan
-or higher and your [S3 keys](docs/guide/install.md#s3-keys). A year of minute bars, or any range
+or higher and your S3 keys. A year of minute bars, or any range
 of trades or quotes, doesn't fit.
 
 To see how `followed` handles each edit and each symbol that fails to read, see
-[`history()` and `fetch()` of a watchlist](docs/guide/watchlists.md#followed-reads).
+`history()` and `fetch()` of a watchlist.
 
 <a id="troubleshooting"></a>
 
@@ -832,14 +832,14 @@ the message you see:
 | `... refused the subscription to ...` | Your plan doesn't stream this data | Check the dataset's plan table in the [dataset index](docs/datasets/README.md). Stream a dataset your plan includes. If the plan table lists REST for this dataset, read it with `poll()` or `history()` instead. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins | Start inside your plan's history, which the dataset's plan table gives, such as two years of bars on Stocks Basic |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan doesn't include this dataset | Read the message, which names another dataset where one exists |
-| `ValueError` naming a symbol | The symbol isn't spelled as Massive spells it, such as `aapl` for `AAPL` | Use Massive's spelling. See [`symbols`](docs/guide/arguments.md#symbols). |
+| `ValueError` naming a symbol | The symbol isn't spelled as Massive spells it, such as `aapl` for `AAPL` | Use Massive's spelling. See [`symbols`](docs/datasets/stocks.bars.md#arguments). |
 | `timespan must be dm.Timespan` | This argument takes one of the `dm.Timespan` constants, not a string | Write `dm.Timespan.DAY`, not `"day"` |
 | `AttributeError` naming a verb | The dataset doesn't have that verb | Use a verb the message lists |
 | A live table stays empty | The market is closed, your plan is delayed and the market opened less than 15 minutes ago, or the stream failed | Run `m.streams()`, which shows each live table's state and error |
 | A read is slow on the free plan | The Basic plan allows five requests a minute | Run `m.rate_limits()` to see the pace, or read fewer symbols |
 | A table keeps running after `del` | `del` stops a live table only once garbage collection reclaims it, which can take minutes | Call `m.release(table)`. The table stops at once unless a table you built from it, or an open panel, still uses it. |
 
-[Troubleshooting](docs/guide/troubleshooting.md) lists every other message and says how to report
+[Troubleshooting](docs/troubleshooting.md) lists every other message and says how to report
 a bug.
 
 <a id="where-next"></a>
@@ -848,13 +848,7 @@ a bug.
 
 | Page | Go here when you want to |
 |---|---|
-| [Install](docs/guide/install.md) | Run Deephaven in Docker or Jupyter instead of from a terminal |
-| [Watchlists](docs/guide/watchlists.md) | Edit a watchlist, or stream only during market hours |
-| [History](docs/guide/history.md) | Choose where history comes from, or adjust bars for splits yourself |
-| [Live tables](docs/guide/live-tables.md) | Stop a live table, or learn what it does when the connection drops |
-| [Plans](docs/guide/plans.md) | Check what your plan includes |
-| [Arguments](docs/guide/arguments.md) | Look up the rules of an argument or a verb, or choose a live table |
-| [Troubleshooting](docs/guide/troubleshooting.md) | Find an error message or report a bug |
+| [Troubleshooting](docs/troubleshooting.md) | Find an error message or report a bug |
 | [Dataset index](docs/datasets/README.md) | Find a dataset's columns and Massive's plan table for it |
 | [Deephaven's crash course](https://deephaven.io/core/docs/getting-started/crash-course/overview/) | Learn Deephaven's filters, joins, aggregations, and plots |
 

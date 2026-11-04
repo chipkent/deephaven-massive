@@ -14,12 +14,10 @@ wire parameters behind `start`, `end`, and `symbols`, its `poll()` defaults, and
 size (the largest `limit` the endpoint documents); columns, types, and units come from the
 generated schemas.
 
-The REST list datasets (dividends through share float) share one shape: `symbols` is optional
-and only filters the request, `dm.ALL` is refused in favour of `symbols=None` (`EVERY_TICKER`),
-`start` and `end` bound the dataset's date axis where it has one, and `sort`, `order`,
-`limit`, and `filters` work as
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit and
-https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters describe.
+The REST list datasets (dividends through share float) share one shape: `symbols` is optional and
+only filters the request, `dm.ALL` is refused in favour of `symbols=None` (`EVERY_TICKER`), `start`
+and `end` bound the dataset's date axis where it has one, and `sort`, `order`, `limit`, and
+`filters` work as each dataset's page describes.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -420,7 +418,6 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -450,8 +447,7 @@ class _Stocks(Namespace):
         endpoint and raise `EntitlementError`; `snapshots()` also carries each ticker's last trade.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`).
 
         Returns:
             A query. Columns:
@@ -486,7 +482,6 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -515,8 +510,7 @@ class _Stocks(Namespace):
         endpoint and raise `EntitlementError`; `snapshots()` also carries each ticker's last quote.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
+            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`).
 
         Returns:
             A query. Columns:
@@ -571,20 +565,16 @@ class _Stocks(Namespace):
 
         Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
         stream from the WebSocket; every other length is history only. Windows, stamps, `Date`, and
-        which bars `history()` returns
-        follow https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars.
-        Daily `dm.ALL` history reads Massive's grouped daily bars, one request per day. Intraday
-        `dm.ALL` history needs `adjusted=False`, since only REST adjusts and its intraday bars need
-        named symbols. The previous session's bar alone is `previous_day_bar()`.
+        which bars `history()` returns follow the rules its columns page states. Daily `dm.ALL`
+        history reads Massive's grouped daily bars, one request per day. Intraday `dm.ALL` history
+        needs `adjusted=False`, since only REST adjusts and its intraday bars need named symbols.
+        The previous session's bar alone is `previous_day_bar()`.
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            timespan: The bar unit, any but `SESSION`; required. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#timespan-and-multiplier.
+            timespan: The bar unit, any but `SESSION`; required.
             multiplier: Units per bar, 1 by default; only 1 streams.
             adjusted: Split-adjusted prices, served by REST only.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
             A query of the class the timespan picks. Columns:
@@ -618,16 +608,13 @@ class _Stocks(Namespace):
         Each row is one symbol's 1-day bar of the previous completed session, read by REST one
         request per symbol; a symbol with no bar (HTTP 404) is left out, with a WARNING. `poll()`
         replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps each new
-        day's bar. Massive stamps the bar at the session close, which is moved to the day's start as
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#bars
-        describes; an unexpected stamp is served with a WARNING.
+        day's bar. Massive stamps the bar at the session close, which is moved to the day's start,
+        as its columns page describes; an unexpected stamp is served with a WARNING.
 
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
                 dm.Timespan.DAY).history(day, day)`).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             adjusted: Split-adjusted prices and volume.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
             A query. Columns:
@@ -665,7 +652,6 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -693,7 +679,6 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -720,7 +705,6 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
 
         Returns:
             A query. Columns:
@@ -746,11 +730,10 @@ class _Stocks(Namespace):
         last trade and quote, today's change, and the fair market value where the plan includes it.
         `poll()` replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps
         each new state by its `Updated` time. Snapshots need a paid plan
-        (https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/plans.md#plans-and-errors).
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#what-your-plan-allows).
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for the full market.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             include_otc: True to include OTC securities; False, the default, leaves them out.
 
         Returns:
@@ -820,12 +803,9 @@ class _Stocks(Namespace):
         Args:
             symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
                 dm.Timespan.DAY).history(day, day)`).
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            date: The trading day, a calendar date; a `datetime` or an instant raises. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#time.
+            date: The trading day, a calendar date; a `datetime` or an instant raises.
             adjusted: Split-adjusted prices and volume. Massive does not echo the basis here, so it
                 cannot be checked.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#adjusted.
 
         Returns:
             A query. Columns:
@@ -875,20 +855,13 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first ex-dividend date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last ex-dividend date; without it, announced dividends still to come are
                 returned too.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
-            sort: The field to sort by, such as `"ex_dividend_date"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by, such as `"ex_dividend_date"`.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"distribution_type": "special"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"distribution_type": "special"}`.
 
         Returns:
             A query. Columns:
@@ -935,24 +908,16 @@ class _Stocks(Namespace):
         Each row is one split: its `ExecutionDate`, the ratio (`SplitFrom` to `SplitTo`), the
         adjustment type, and `HistoricalAdjustmentFactor`, the cumulative factor that adjusts
         earlier prices. `poll()` replaces the table each cycle, keyed by `Id`. Use it to adjust
-        as-traded bars yourself, with the recipe
-        in https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/history.md#split-adjustment.
+        as-traded bars yourself,.
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first execution date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last execution date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"execution_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
 
         Returns:
             A query. Columns:
@@ -1005,17 +970,12 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every offering.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first listing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last listing date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"listing_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The sort direction; here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
-            filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`.
 
         Returns:
             A query. Columns:
@@ -1065,19 +1025,12 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first settlement date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last settlement date.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"settlement_date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`.
 
         Returns:
             A query. Columns:
@@ -1127,19 +1080,12 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
             start: The first trading day.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             end: The last trading day.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#start-and-end.
             sort: The field to sort by, such as `"date"`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`.
 
         Returns:
             A query. Columns:
@@ -1187,15 +1133,10 @@ class _Stocks(Namespace):
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#symbols.
-            sort: The field to sort by, such as `"free_float_percent"`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
+            sort: The field to sort by, such as `"free_float_percent"`.
             order: The direction of `sort`.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
             limit: The most rows to return, in total.
-                See https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. See
-                https://github.com/chipkent/deephaven-massive/blob/main/docs/guide/arguments.md#filters.
+            filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`.
 
         Returns:
             A query. Columns:

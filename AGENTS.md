@@ -2,10 +2,10 @@
 
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
 Deephaven tables: a Python library managed with `uv`. This file wins over every other document.
-The user docs (`README.md` and `docs/guide/`) and the public docstrings are the user contract,
-enforced by tests; `docs/dev/decisions.md` records why the contract is what it is. The library
-has no users yet, so nothing is kept, aliased, or shimmed for compatibility: a rename is an
-ordinary edit.
+The user docs (`README.md`, `docs/troubleshooting.md`, and the generated `docs/datasets/`) and
+the public docstrings are the user contract, enforced by tests; `docs/dev/decisions.md` records
+why the contract is what it is. The library has no users yet, so nothing is kept, aliased, or
+shimmed for compatibility: a rename is an ordinary edit.
 
 ## Commands
 
@@ -150,12 +150,15 @@ Several agents work at once, and every collision costs a full check and a paid C
 
 Docstrings serve a person in an IDE or the Deephaven console and an agent that knows only the
 code: a one-line docstring on anything with behavior worth knowing is a defect. User docs have
-three parts: `README.md`, the landing page from install to everyday use; `docs/guide/`, pages
-looked up for specific cases; and `docs/datasets/`, generated. Follow the `writing-user-docs`
-skill for any user page, or a change to behavior one describes, and the `writing-docstrings`
-skill for docstrings and other text in code. A docstring cites a user-page section by its full
-GitHub URL, `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the
-link opens from an IDE or the console; `tests/test_docs.py` rejects a bare path.
+three parts: `README.md`, the landing page from install to everyday use; `docs/troubleshooting.md`,
+looked up by message or symptom; and `docs/datasets/`, generated, one page per dataset with its
+arguments, plans, and columns. A rule several datasets share lives once in code
+(`_datasets/argument_rules.py`) and is printed on each dataset page; a dataset docstring gives
+each argument one line and links its page. Follow the `writing-user-docs` skill for any user
+page, or a change to behavior one describes, and the `writing-docstrings` skill for docstrings
+and other text in code. A docstring cites a page or section by its full GitHub URL,
+`https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the link opens from
+an IDE or the console; `tests/test_docs.py` rejects a bare path.
 
 ## Deephaven invariants
 

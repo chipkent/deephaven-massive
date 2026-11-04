@@ -36,9 +36,9 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
     graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
     update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
-    # The refusal names the recipe that does a listener's usual job without one.
+    # The refusal names the way to do a listener's usual job without one.
     with pytest.raises(
-        ValueError, match=r"update-graph thread.*docs/guide/watchlists\.md#schedules$"
+        ValueError, match=r"update-graph thread.*pass a refreshing symbol table as symbols"
     ):
         refuse_update_graph_thread(cast("ExecutionContext", update_thread))
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
