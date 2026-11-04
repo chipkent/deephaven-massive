@@ -1,7 +1,9 @@
-# Asks for three things the free Basic plan does not include, and prints how each was
-# refused. You should see three lines, each starting with what was asked. The first and the
-# third show EntitlementError and the reason; the live minute bars open, and Massive's live
-# connection refuses them a few seconds later, in the streams panel.
+# Ask for three things the free Basic plan doesn't include, and print how each was refused.
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+streams = m.streams()
+
 try:
     m.stocks.last_trade(["AAPL"]).fetch()
     print("the latest trade: no error, so your plan includes it")

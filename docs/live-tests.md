@@ -1,762 +1,618 @@
 # Live integration tests
 
-The tests in `tests/**/test_*_integration.py` call Massive's real servers. They settle
-questions Massive's documentation leaves open, such as a timestamp's unit, where a day bar is
-cut, or how a ticker is spelled, and you rerun them whenever Massive may have changed. Each
-test records what Massive sent, and its docstring says what each answer means for the
-library.
+The live tests, `tests/**/test_*_integration.py`, call Massive's real servers. They answer
+questions Massive's documentation leaves open, such as a timestamp's unit, where a day's bar
+starts, or how a ticker is spelled. Each test records what Massive sent, and its docstring says
+what each answer means for the library. You run them with your own keys, whenever you suspect
+Massive has changed something. Testers run the same checks through the
+[live-run program](#live-run-program), as [the tester guide](tester-guide.md) describes.
 
-This page is the runbook: how to run the tests safely, within the plans your key holds, and
-how to read what they record. Testers on their own machines use the
-[live-run program](#the-live-run-program) through [the tester guide](tester-guide.md).
+<a id="run-the-tests"></a>
 
-## Quick start
+## Run the tests
 
-From the repository root, with every other client of the key stopped:
+A run takes three commands, in a set order: about 40 minutes on Basic for the main command,
+plus the limit tests. Run every command from the repository root, in a terminal that holds the
+[variables](#variables). The live tests carry these pytest markers:
 
-```bash
-export MASSIVE_API_KEY=...                       # required
-export MASSIVE_S3_ACCESS_KEY_ID=...              # optional: the flat files
-export MASSIVE_S3_SECRET_ACCESS_KEY=...
-uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
-uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
-uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
-```
+| Marker | What it runs |
+|---|---|
+| `integration` | The evidence tests, each answering one question |
+| `integration_smoke` | Every dataset and verb once, checked automatically |
+| `integration_rate_limits` | The three tests that go over Basic's 5 requests a minute on purpose (Basic is Massive's free plan, and the tests and their output use that name) |
+| `integration_limits` | The four tests that go over Massive's subscription and connection limits on purpose |
 
-[Run order](#run-order) explains each command; [Reading the results](#reading-the-results)
-says what to look at afterwards.
+Every live test carries `integration`, and `-m integration` leaves out the tests that also carry
+one of the other three markers. A plain `pytest` run deselects every live test, so
+`./scripts/check.sh` and CI never run one. Every live test also skips without `MASSIVE_API_KEY`,
+and whenever `CI` is set.
 
-## Test markers
+<a id="variables"></a>
 
-| Marker | What it runs | Command |
-|---|---|---|
-| `integration` | The evidence tests, one question each | `uv run pytest -m integration` |
-| `integration_smoke` | Every dataset and verb once, checked automatically | `uv run pytest -m integration_smoke` |
-| `integration_limits` | The four tests that go over Massive's subscription and connection limits on purpose | `uv run pytest -m integration_limits` |
-| `integration_rate_limits` | The three tests that go over a Basic subscription's 5 requests a minute on purpose | `uv run pytest -m integration_rate_limits` |
+### Set the variables
 
-- Every live test carries `integration`. The smoke, limit, and rate-limit tests also carry
-  their own marker, and `-m integration` leaves them out.
-- The default run deselects every live test, so `./scripts/check.sh` and CI never run one.
-- Every live test skips without `MASSIVE_API_KEY`, and whenever `CI` is set.
-- `tests/conftest.py` enforces the markers.
-
-## Variables
+The tests read the keys and their options from the environment:
 
 | Variable | Needed by | Without it |
 |---|---|---|
 | `MASSIVE_API_KEY` | Every test | Every test skips |
-| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | The flat-file tests ([S3 keys](#s3-keys)) | They skip |
-| `MASSIVE_DELAYED_API_KEY` | Two checks: what Massive says when a delayed key subscribes on the real-time feed, when Stocks is not on Starter or Developer (then the main key serves); and whether past stock data reads on the default configuration, when Massive labels the main key's past data `OK` | They skip |
-| `MASSIVE_LIVE_PLANS` | Optional: declares the plans instead of probing them ([Declare the plans](#declare-the-plans)) | The run probes |
-| `DEEPHAVEN_MASSIVE_LOG_FILE`, `DEEPHAVEN_MASSIVE_LOG` | Optional: the debug log's file and level ([The debug log](#the-debug-log-of-a-pytest-run)) | The run picks a file; the level is DEBUG |
+| `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` | The flat-file tests | They skip |
+| `MASSIVE_DELAYED_API_KEY` | The check of what Massive says to a delayed key on the real-time feed, when your Stocks plan is Advanced or above, and the check of past stock data labeled `DELAYED`, when it's Developer or above | They skip |
+| `MASSIVE_LIVE_PLANS` | Optional: declares the plans instead of probing them ([Declare plans the probe can't see](#declare-the-plans)) | The run probes |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` and `DEEPHAVEN_MASSIVE_LOG` | Optional: the debug log's file and level ([Read the debug log](#debug-log)) | The run picks a file, and the level is DEBUG |
 
-### S3 keys
+The flat-file tests read Massive's flat files with the S3 keys. Massive's dashboard shows those
+keys beside the API key, as the
+[flat-files quickstart](https://massive.com/docs/flat-files/quickstart.md) says. Each
+asset class's files come with its Starter plan or above. The trades files need Developer, and
+the stocks and options quotes files need Advanced ([pricing](https://massive.com/pricing)).
 
-The flat files are an S3 bucket, `flatfiles` at `https://files.massive.com`, with keys of
-their own: an access key id and a secret access key, separate from the API key. Massive's
-dashboard issues them on its keys page, beside the API key ([S14]).
+The delayed key answers two questions that a real-time main key can't. The first is what
+Massive says when a delayed key subscribes on the real-time feed. The second is whether past
+stock data reads on the default configuration when Massive labels it `DELAYED`.
 
-| Files | Plan needed |
+### Plan the time a run takes
+
+How long a run takes depends on your plans and on the market's hours. These times are
+estimates from earlier runs:
+
+| Part | Time |
 |---|---|
-| Each class's files | That class's Starter plan or above |
-| Trades files | Developer |
-| Stocks and options quotes files | Advanced |
+| The main command, every class on Basic | About 40 minutes, most of it waiting for Basic's 5 requests a minute |
+| The smoke tests on paid plans, markets open | About 30 minutes, because each stream test waits for its rows |
+| The smoke tests on paid plans, markets closed | Under ten minutes |
+| The rate-limit tests | About six minutes, most of it pauses |
+| A real-time Stocks key's delayed-feed check, in the first quarter hour of the stock session | Up to 17 more minutes |
 
-Export both variables, and the probe finds which files they reach.
+The repository records no measured time for the whole main command on paid plans, or for the
+limit tests.
 
-## How the tests learn your plans
+<a id="run-order"></a>
 
-Massive sells one subscription per asset class (Stocks, Options, Indices, Currencies for forex
-and crypto, Futures), each on its own plan, and the S3 flat files come with the paid plans
-([S1], [S3]). You can hold any mix, and upgrade during the month, so the tests ask Massive
-what the key holds.
+### Run the main command, then the limit tests
 
-### The probe
+The limit tests disturb the key's connections, so they run last and alone:
 
-The first live test of a run probes each class with a few cheap requests:
-
-| What it asks | What an answer means |
-|---|---|
-| A snapshot of one liquid ticker (AAPL, SPY's option chain, `I:NDX`, `C:EURUSD`, the ES contracts) | Starter or above; refused means Basic |
-| That ticker's trades, then its quotes (stocks, and the chain's contract with the most volume that day) | Developer (trades), Advanced (quotes). An empty answer counts as access, since a plan without it refuses with a 403. |
-| The front ES contract's trades, and its recency label in the snapshot (futures) | Developer or above (trades). A `REAL-TIME` label means Advanced, since Developer is delayed. The front contract is the one with the most volume that session among those carrying a label. |
-| A non-null `fmv` in the snapshot (stocks, options, currencies) | Business. For stocks and options it is always the base Business plan: its REST trades and quotes answer too (at end-of-day recency), so only a declaration names the trades and quotes expansion. |
-| A real-time indices snapshot | Advanced |
-| One file of every flat-file prefix | Which flat files the S3 keys reach: only a file that opens counts |
-
-What the probe cannot tell:
-
-- **An empty snapshot.** A snapshot counts only with at least one row. An empty one proves
-  nothing, so the probe stops and the run asks you to declare the plans.
-- **03:30 to 04:30 New York time.** Massive clears and refills its snapshots then, and a
-  Business plan's `fmv` can be missing, so the probe does not run.
-- **Stocks or options Business.** It is not an Advanced plan: without the expansion it
-  streams no trades, quotes, LULD, or per-second bars, so a test that needs Advanced skips on
-  it. Declare `business_expansion` to run those tests on a key with the expansion.
-- **Indices Business** leaves no mark a request can see, and reads as Advanced.
-- **Futures Business** is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Advanced. A
-  test of a venue the plan lacks is refused.
-
-### The cache
-
-The probe's answer is kept for an hour in `.live-plans.json` in the repository root. Git
-ignores it, and it names the key and the S3 access key id only by a digest.
-
-- Runs within the hour reuse it, and print a `live plans:` line that says so and when the
-  plans were probed.
-- To probe again at once, after an upgrade, delete the file.
-- The plans head the evidence (under "live plans") and the summary at the end of the run.
-
-### Declare the plans
-
-To skip the probe, set `MASSIVE_LIVE_PLANS`, comma-separated:
-
-- `<class>=<plan>` for each paid class: `starter`, `developer`, `advanced`, `business`, or,
-  for stocks and options, `business_expansion`;
-- `s3` when the S3 keys reach the flat files.
-
-Every class you leave out is Basic, the free plan. A declaration overrides the probe and the
-cache.
-
-```bash
-export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
-```
-
-### Delayed plans
-
-The live sessions list every class on a delayed plan in
-`MassiveConfig.delayed_subscriptions`, since the library refuses delayed data for any class
-not listed there. The delayed plans are Stocks, Options, and Futures Starter and Developer, and
-Indices Starter. Their streams use Massive's delayed feed, and their REST reads are not
-checked.
-
-## How a test decides to skip
-
-Each test declares the plans it needs, such as `@pytest.mark.needs("currencies:starter", "s3")`.
-
-| Case | Outcome |
-|---|---|
-| The key lacks the plans | Skips before any request, naming the plan and its monthly price, such as "needs Currencies Starter ($49/month)" |
-| A test of what a delayed plan receives declares `<class>:delayed`, such as `futures:delayed` | Only Starter or Developer (Starter for indices) meets it, since a real-time plan cannot answer it |
-| Refused as "Your plan doesn't include this data timeframe", for a day before the first day the plan keeps | Skips as "outside the plan's history", by the history windows Massive documents per plan (two years on Stocks, Options, Currencies, and Futures Basic; all history on Indices Basic) |
-| The same refusal, for a day the plan keeps | Fails: it may be a library bug |
-| Any other refusal of a test whose plans the key holds | Fails, and the refusal is recorded: either the probe or the documented plan table is wrong |
-| A refused dataset in the smoke tests | Reported as "not entitled: needs <plan>", and counted apart from failures |
-
-## The free plan
-
-Basic is REST only, without WebSocket access or flat files ([S3], [S7]).
-
-### Pacing
-
-Basic allows 5 REST requests a minute per class; paid plans have no limit.
-
-- **The library paces itself.** The classes on Basic become the live sessions'
-  `MassiveConfig.rest_basic_subscriptions`. Every live test shares one rate governor per key
-  for the whole run, on the real clock, so every REST request to a Basic class, the library's
-  and the tests' raw ones, waits for its class's place within 5 a minute.
-- **No test waits more than about a minute.** A test that may read a class on Basic sends that
-  class at most 5 requests, and declares the count with `@pytest.mark.requests(n)`. A unit
-  test fails when a live test declares more than 5 for a class it may read on Basic, and a
-  live run skips such a test while its class is on Basic: "needs a paid <class> plan: N
-  requests would take about M minutes on Basic".
-- **A test reads less on Basic.** It reads fewer underlyings, symbols, or pages, or leaves out
-  a part that repeats what another request shows. For example, the underlying spellings read
-  only the contracts of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`; the split and cash-dividend checks
-  try only the newest event, and the stock-dividend check at most three. Each such test's
-  docstring says what it leaves out, and its evidence has a line that says so.
-- **A paced run never looks hung.** Each wait of 5 s or more prints one line, such as
-  `live pacing: options: waiting 47 s for a request slot (paced at 5 requests a minute); 3 of
-  this test's 5 requests left`.
-- **Timeouts.** A test's timeout grows with its request count. A live run lifts the 120 s
-  limit after which faulthandler would end the process; each test's own timeout bounds it.
-
-### How long a run takes
-
-The main command of [Run order](#run-order) runs the rate-limit tests, the evidence tests, and
-the smoke tests.
-
-- **Every class on Basic: about 40 minutes.** The classes are paced side by side, so stocks
-  sets the pace:
-
-  | Part | Requests declared, at most | Time at 5 a minute |
-  |---|---|---|
-  | Evidence tests (the [Every class on Basic](#every-class-on-basic) list) | About 74 to stocks (reference data included), 32 to currencies, 31 to futures, 8 to options, 7 to indices | Up to about 15 minutes |
-  | Smoke tests | 88 to stocks, 36 to currencies, 24 each to options and futures, 14 to indices; its stream cases skip before any request, since Basic does not stream | Up to about 18 minutes |
-  | Rate-limit tests | | About six minutes of pauses between them |
-
-  A run takes less when a test sends fewer requests than it declares.
-- **Paid plans.** Nothing waits for its pace, but each stream case waits for its rows while
-  its market is open (up to 75 s for a minute bar). The smoke tests take about half an hour in
-  market hours, and under ten minutes when the markets are closed. The delayed-feed check of a
-  real-time Stocks key can add up to 17 minutes in the first quarter hour of a stock session.
-
-### Indices on Basic
-
-Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]). With Indices on Basic, the index tests
-use `I:NDX` instead of `I:SPX`.
-
-### The rate-limit tests
-
-The three tests carry `integration_rate_limits`, so `-m integration` leaves them out.
-
-- They need at least one class left on Basic; Indices is preferred.
-- They draw a few HTTP 429 refusals on purpose, so each sends its class more than 5 requests.
-- The main command runs them first, each after a minute's pause, so earlier requests no
-  longer count.
-
-| Test | What it records |
-|---|---|
-| The refusal | The 429's text, and which requests outside every subscription Massive counts |
-| The market filter | Whether a ticker lookup filtered by a class's market (Indices, Currencies, or Stocks) is charged to that class |
-| The learned limit | Whether a session learns the limit from the refusal, and a later session of the key forgets it; about three minutes |
-
-They need no open market. To keep market hours for the streams, run them apart, at any other
-time, and leave them out of the market-hours run:
-
-```bash
-uv run pytest -m integration_rate_limits 2>&1 | tee -a live-checks.log
-uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log   # in market hours
-```
-
-## Run order
-
-1. **Prepare.** Stop every other client of the key, and export the [variables](#variables).
-2. **The main run**, at any hour, on any day:
+1. Stop every other program that uses the key. A stream test on a connection another program
+   uses either waits for a slot or disconnects that program.
+2. Run the main command. You can run it at any hour. A stream test checks rows only while its
+   market is open, so a weekday run in market hours covers more:
 
    ```bash
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
 
-   It probes the plans, runs the rate-limit tests first, then every evidence test and the
-   smoke tests. Whatever the key lacks, the market's hours, or the plan's history leaves out
-   skips with its reason. Nothing needs a person to time it, but a stream proves its rows only
-   while its market is open, so a run in market hours checks more than one on a weekend. Two
-   checks answer more on some days:
+   It probes your plans, runs the rate-limit tests first, then every evidence test and the smoke
+   tests. A test skips, and prints why, when your plans don't include its data, its market is
+   closed, or your plan's history doesn't reach the dates it reads. On Basic, each wait of 5
+   seconds or more prints a line such as `live pacing: options: waiting 47 s for a request slot
+   (paced at 5 requests a minute); 3 of this test's 5 requests left`. When the first test
+   records a line, pytest prints `live evidence: writing <repo>/live-evidence-<UTC time>.log`.
+   The `tee -a` appends each command's output to `live-checks.log`, so the three commands leave
+   one log.
 
-   - the LULD check needs the regular session for rows;
-   - `/prev` shows a short-day stamp only on the trading day after a half day (its evidence
-     marks that day `half day: yes`).
+   The rate-limit tests need no open market. If you start during market hours, run them at
+   another time, and use `-m "integration or integration_smoke"` in the main command. Run
+   apart, they need at least one asset class still on Basic, and they use Indices first, then
+   Currencies, then Stocks:
 
-3. **The limit tests**, after the main run, apart, with no other client of the key. They go
-   over Massive's limits on purpose:
+   ```bash
+   uv run pytest -m integration_rate_limits 2>&1 | tee -a live-checks.log
+   ```
+
+3. Run the limit tests, one command after the other:
 
    ```bash
    uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
    uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
    ```
 
-   - The first command runs the wide WebSocket tests: one frame of 1,000 crypto topics, 1,000
-     far-dated options contracts on two channels, and `XT.*` with `XT.BTC-USD` for 30 s.
-   - The second runs, last and alone, the second-connection test, which takes a second
-     connection slot with the same key. If Massive drops the older connection instead of
-     refusing the newer, the two sessions can drop each other until the test ends.
+   The first command sends wide WebSocket subscriptions, such as one frame of 1,000 crypto
+   topics, 1,000 far-dated options contracts, and the crypto wildcard. The second takes a
+   second connection slot with the same key. If Massive drops the older connection instead of
+   refusing the newer one, the two sessions can drop each other until the test ends.
 
-Each run writes its evidence to a file of its own in the repository root,
-`live-evidence-<UTC time>.log`, and prints its path when it records the first line. Every test
-appends what it observes as it goes, flushed line by line, so a run cut short keeps everything
-recorded before. The same lines close the run's terminal output, under "live evidence".
+Each command ends with the sections that [Read the end of a run](#read-the-end-of-a-run)
+describes, and writes its own `live-evidence-<UTC time>.log`.
 
-## Checks to read by hand
+<a id="plans"></a>
 
-Four checks answer questions the library's design leans on. Make sure each ran, and read its
-evidence.
+## Let the run find your plans
 
-### The options cap
+You usually don't tell the tests your plans. Massive sells one subscription per asset class
+(Stocks, Options, Indices, Currencies for forex and crypto, and Futures), and each has its own
+plan. Your key can hold any mix, and you can upgrade during the month. So the first live test
+of each run asks Massive which plan your key holds in each class. This check, the probe, sets
+which later tests run and which skip.
 
-`test_the_options_cap_counts_contracts_or_topics`: a limit test, so it runs only in the first
-`integration_limits` command; it needs Options Advanced.
+The plans head the summary at the end of the run, in a line that starts `plans:`. The evidence
+file records the same line under `live plans`
+([Read the end of a run](#read-the-end-of-a-run)).
 
-- **The question:** does Massive's 1,000-contract cap per connection count contracts or
-  topics? The library counts topics.
-- **Inconclusive** when Massive refuses topics for the plan, or when the socket reconnects
-  with no status that says why, which a network drop causes too: run it again.
+The run saves the probe's answer in `.live-plans.json` at the repository root. For the next
+hour, every run with the same API key and S3 access key ID reuses it. Such a run prints a line
+that starts `live plans:`, saying when the plans were probed. Git ignores the file. It holds a
+digest of each key, never the key itself. To probe again at once, after an upgrade, delete the
+file.
 
-### The index minute file's day
+<a id="declare-the-plans"></a>
 
-`test_an_index_minute_file_holds_its_own_new_york_day`: in the main run; it needs Indices
-Starter and `s3`.
+### Declare plans the probe can't see
 
-- **The question:** does `us_indices/minute_aggs_v1` hold only its own New York day?
-  `history()` trims each index file to that day before joining REST rows, so a failure means
-  index ranges lose or repeat an hour at each midnight.
-- Minutes REST has and the file lacks are recorded, not failed: they are a gap in Massive's
-  file, not a wrong day.
+Declare your plans in `MASSIVE_LIVE_PLANS` in any of these cases:
+
+| Case | What the probe does | What you declare |
+|---|---|---|
+| A snapshot comes back empty | It stops, and the run asks you to declare the plans | Every paid plan you hold |
+| The run starts between 03:30 and 04:30 New York time, when Massive clears and refills its snapshots | It stops, and the run asks you to declare the plans, unless it saved an answer in the last hour | Every paid plan you hold, or wait until 04:30 |
+| Stocks or Options Business with the trades and quotes expansion | It reports the base Business plan, which streams no trades, quotes, LULD bands, or per-second bars | Every paid plan you hold, with `business_expansion` for that class |
+| Indices Business | It reports Advanced, because no request tells the two apart | Every paid plan you hold, with `indices=business` |
+| Futures Business | It reports Advanced, because no request tells the two apart | Every paid plan you hold, with `futures=business`. Massive sells it per venue, and refuses a test of a venue your plan lacks. |
+
+List each paid class as `<class>=<plan>`, separated by commas, and add `s3` when your S3 keys
+(both `MASSIVE_S3_*` variables) reach the flat files. Every class you leave out is on Basic.
+A declaration overrides both the probe and the saved answer. Each class has its own plan
+names:
+
+| Class | Plans you can declare |
+|---|---|
+| `stocks`, `options` | `starter`, `developer`, `advanced`, `business`, `business_expansion` |
+| `futures` | `starter`, `developer`, `advanced`, `business` |
+| `indices` | `starter`, `advanced`, `business` |
+| `currencies` | `starter`, `business` |
+
+This line declares Starter for Stocks, Options, and Currencies, Basic for Indices and Futures,
+and flat files:
+
+```bash
+export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
+```
+
+With it set, the run probes nothing, and the summary's first line lists the declared plans.
+
+<a id="reading-the-results"></a>
+
+## Read the results
+
+Treat a failure as a fault in Massive or the library. Your plans or the clock explain every
+skip, and a pass still leaves evidence for you to read. Most evidence tests carry one of two
+markers:
+
+- A test marked `verifies` asserts the answer the library assumes, so it fails the day Massive
+  changes that answer.
+- A test marked `settles` records evidence for you to read, and passes whatever the answer.
+
+Both name, by number, the [open questions](dev/verification-items.md) they answer. A test
+fails when:
+
+- a request it needs fails or returns nothing
+- a stream delivers no row while rows are due
+- Massive refuses a request although your key holds the test's plans
+- a `verifies` test gets an answer other than the one the library assumes
+
+A test skips when:
+
+- your key lacks a plan it needs, and the skip names the plan with its price, such as
+  "needs Currencies Starter ($49/month)"
+- `MASSIVE_API_KEY` or the S3 keys aren't set
+- the day it asks for is older than your plan keeps
+- the market isn't open
+
+Any other test passes, and its docstring says what its evidence means.
+
+### Know when a refusal is a skip
+
+Massive's refusal "Your plan doesn't include this data timeframe" skips the test as "outside
+the plan's history" when the day is older than the plan keeps. The free plans keep two years
+of Stocks, Options, Currencies, and Futures, and all of Indices. The same refusal for a day the
+plan does keep fails the test, because it may be a library bug.
+
+Any other refusal fails a test whose plans your key holds, and the run records the refusal. Such
+a refusal means the probe misread your plans, or Massive's pricing page is wrong about what the
+plan includes.
+
+A smoke case, or any other test that declares no plans, skips as "not entitled: needs <plan>"
+when Massive refuses it. The smoke coverage counts these skips apart from failures. The smoke
+case for stock imbalances always skips, because imbalances arrive only around the opening and
+closing auctions.
+
+### Know when a stream test passes
+
+A stream test passes only when rows reached its table, never on Massive's acknowledgement
+alone. Stock trades and quotes are due from 04:00 New York time, in the extended hours. Every
+other stock, option, and index stream is due in the regular session, from 09:30. A delayed plan
+is due once the session has been open as long as the plan's delay. When rows aren't due, the
+test skips after the acknowledgement, with a reason that starts "not exercised:", such as
+"not exercised: market closed (acknowledged)".
+
+The LULD check needs the regular session, the only time the bands change. The `/prev` check
+shows a short day's stamp only on the trading day after a half day, and its evidence marks that
+day `half day: yes`.
+
+<a id="read-the-end-of-a-run"></a>
+
+### Read the end of a run
+
+The evidence goes to its own file at the repository root, `live-evidence-<UTC time>.log`. The
+run writes each line the moment a test records it, so a run cut short keeps everything
+recorded up to then. Before pytest's own short summary, the run prints up to four sections,
+in this order:
+
+| Section | What it holds |
+|---|---|
+| `smoke coverage` | The smoke cases that passed, passed with drift, weren't entitled, were skipped, and failed. Drift means the case saw a library WARNING or a `SchemaDrift`, and each one is listed. |
+| `open questions` | The plans line, then the questions the run touched, in groups: `verified X of Y`, `ran, evidence to read, X of Y`, one group for each plan some questions need, with its price, and the groups `not verified (failed or skipped)` and `not verified (partly run)` |
+| `live debug log` | The path of the run's debug log |
+| `live evidence` | The evidence file's lines again |
+
+Each question appears under its group on a line of its own, its number beside its one-line
+title.
+
+### Know which tests need older history
+
+Four tests read fixed dates, and a plan that doesn't keep the date can't run them. Every other
+test picks its days back from the run's own day, inside the two years every free plan keeps:
+
+| Test | Fixed date | Plans that keep it | Without one |
+|---|---|---|---|
+| The option split check | NVDA's 10-for-1 split of 2024-06-10 | Options Developer (four years) or Advanced (all history) | It skips, naming Options Developer |
+| The deliverable check's adjusted option roots | `AAPL7` (2014-06-10), `DELL1` (2021-11-15), `FF1` (2024-04-15) | The Options plans whose history reaches each day | It records each root it can't read as outside the plan's history |
+| `tests/tables/test_followed_read_integration.py` | The week of 2025-06-02 to 2025-06-06 | Every Stocks plan; Basic only until June 2027 | It skips as outside the plan's history |
+| The `responses` group of the [live-run program](#live-run-program) | NVDA's daily bars from 2024-06-03 to 2024-06-14 | The Stocks plans whose history reaches the day | It skips the example, naming the Stocks plan it needs |
+
+<a id="debug-log"></a>
+
+### Read the debug log
+
+Every pytest run that selects a live test writes the library's DEBUG log, so you can diagnose
+a failure without another live run. The run logs to
+`live-debug-logs/<UTC time>-<process id>/debug.log`, which git ignores, and prints the path
+under `live debug log`.
+
+The library keeps the API key and the S3 keys out of every line, and the run scans the log for
+them anyway. If it finds a secret, the same section says so and names where. Don't share that
+log, because a secret in it is a library bug to fix before the next run.
+
+When `DEEPHAVEN_MASSIVE_LOG_FILE` is set, the run logs to that file instead, and
+`DEEPHAVEN_MASSIVE_LOG` still chooses the level.
+
+<a id="checks-to-read-by-hand"></a>
+
+## Read five checks by hand
+
+Five checks record a question the library's design depends on, and four of them pass whatever
+Massive answers. A green result from one of those tells you only that it ran. Read each check's
+[evidence](#reading-the-results), compare it with the answer the library assumes, and open an
+issue when they differ:
+
+| Check | Run | Plans | The question | The answer the library assumes |
+|---|---|---|---|---|
+| `test_the_options_cap_counts_contracts_or_topics` | The first [limit-test command](#run-order) | Options Advanced | Does Massive's cap of 1,000 per connection count contracts or topics? | Topics |
+| `test_an_index_minute_file_holds_its_own_new_york_day` | The [main command](#run-order) | Indices Starter and `s3` | Does each index minute file hold only its own New York day? | Yes. This check asserts it, and fails otherwise. |
+| `test_index_day_windows_and_files_across_many_indices` | The main command, with about 110 requests | Indices Starter and `s3` | Which day, New York or Chicago, do the index day bars from REST and the daily files cover, and do the files match REST? | No assumption. The check records which day each source covers. |
+| `test_futures_bar_buckets_against_the_bars_inside_them` | The main command, with about 40 requests | Futures Starter | Does each futures bar of a session or longer hold the whole sessions that start in its UTC days? | Yes |
+| A quiet connection | The stream day of the [live-run program](#live-run-program) | Any plan that streams stocks | Does Massive send status frames on a connection that has no data? | Yes, within 5 minutes |
+
+### Read the options cap
+
+The options check subscribes 1,000 far-dated SPY contracts on two channels, 2,000 topics. If
+Massive acknowledges all 2,000, the cap counts contracts, and the library could count
+contracts as well. If
+Massive refuses topics past 1,000, or closes the socket after a status that says why, the cap
+counts topics. The check skips as inconclusive when Massive refuses topics for want of a plan.
+It also skips when the socket reconnects with no status that says why, because a network drop
+looks the same. In either case, run the first limit-test command again.
+
+### Read the index checks
+
+The index minute file matters because `history()` trims each index file to its New York day
+before it joins the REST rows. If a file held the Chicago day instead, index ranges would lose
+or repeat an hour at each midnight. The check reads `I:AAVE100`, which updates around the
+clock, from the most recent Monday's file. Minutes that REST has and the file lacks are
+recorded, not failed, because they're a gap in Massive's file. To run this check alone:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
 ```
 
-### Index day windows across many indices
+The run prints the path of its evidence file, and the check's lines record the file's rows
+outside the New York day. The answer the library expects is that there are none.
 
-`test_index_day_windows_and_files_across_many_indices`: in the main run; it needs Indices
-Starter and `s3`. It sends about 110 REST requests and reads two flat files a day.
+The many-indices check reads about ten indices over four or five recent days, and ends with
+three verdict lines:
 
-- **The question:** which day, New York or Chicago, each index day source covers, and whether
-  the index day and minute files match REST, for about ten indices over four or five recent
-  days.
-- **Its last three evidence lines answer:**
-  1. whether REST day bars cover the Chicago day for most indices that update outside the
-     stock session;
-  2. for regular-hours and around-the-clock indices apart: which day files cover another
-     window than the range bar, which match no window, and which minute files have gaps or
-     other prices;
-  3. whether `I:AAVE100`'s wrong values (a day file in no window, or other minute prices) are
-     an isolated case.
+- Line (a) counts the indices whose REST day bars cover the Chicago day, out of those whose New
+  York and Chicago days differ.
+- Line (b) splits the indices into regular-hours and around-the-clock groups. For each group,
+  it names the indices whose day file covers a different day than REST's 1-day bar, and those
+  whose minute file has gaps or prices that differ from REST.
+- Line (c) says whether `I:AAVE100` is the only around-the-clock index whose day file matches
+  neither day, or whose minute prices differ from REST.
 
-### Futures bar buckets
+### Read the futures bar check
 
-`test_futures_bar_buckets_against_the_bars_inside_them`: in the main run; it needs Futures
-Starter. It sends about 40 REST requests, and its `VERDICT` lines answer each question per
-contract, for ES, corn, live cattle, and Micro Bitcoin over the most recent whole month:
+Each futures bar of a session or longer covers a bucket of whole UTC days, and Massive puts each
+session in the bucket of the UTC day it opens. The futures check reads the front contract of ES,
+corn, live cattle, and Micro Bitcoin over the most recent whole month, and prints `VERDICT`
+lines per contract. The library's model of futures bars holds when three things are true:
 
-- where each 1-session bar's `window_start` falls against its first minute bar;
-- whether any session opens on a Friday evening or a Saturday (the UTC days 1-session bars
-  start on, and their labels' weekdays);
-- whether 2-session bars follow a fixed grid;
-- the day 1-week bars start on;
-- whether each longer bar holds exactly the whole sessions that start in its UTC days;
-- whether a 2-month bar read from inside its bucket is clipped at `{from}`.
+- every bar holds the whole sessions that start in its UTC days
+- 2-session bars follow a fixed grid, rather than starting at the date you ask from
+- a 2-month bar comes back the same whether you ask from before its period or from a month
+  into it
 
-To run the last two alone:
+Any other answer shows where the model breaks. The lines also show where each 1-session bar
+starts against its first minute bar, which weekday 1-week bars start on, and whether any
+session opens on a Friday evening or a Saturday.
+
+This command runs the many-indices and futures checks alone. Their verdicts are the lines that
+start `(a)`, `(b)`, `(c)`, and `VERDICT`:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py tests/namespaces/test_futures_integration.py -k "many_indices or bar_buckets" 2>&1 | tee -a live-checks.log
 ```
 
-### A quiet connection
+### Read a quiet connection
 
-One answer comes from the stream day's `debug.log` (a [live-run](#the-live-run-program)
-group) rather than a test: **does Massive send frames on a quiet connection?**
+The library warns after 5 minutes without a frame, and that threshold is right only if Massive
+sends status frames while no data flows. The stream day's [debug log](#debug-log) answers
+this. From 03:45
+to 04:00 New York time, the stocks connection holds its subscriptions and gets no data, because
+stocks trade from 04:00. Record that connection's `status` lines
+(`wss://.../stocks status ...`) from those 15 minutes, and the longest stretch without one.
 
-- A connection with acknowledged subscriptions logs a WARNING after 5 minutes without any
-  frame during its market's regular hours: `no frame for ... during ... trading hours`.
-- Whether that threshold is right depends on whether Massive sends a status frame while no
-  data flows.
-- From 03:45 to 04:00 New York time the stocks connection holds its subscriptions and gets no
-  data, since stocks trade from 04:00. Record that connection's `status` lines
-  (`wss://.../stocks status ...`) in those 15 minutes, and the longest stretch without one.
-- Report every `no frame for` WARNING with its time and connection.
+Separately, report every `no frame for ... during ... trading hours` WARNING from the rest of
+the day, with its time and connection. The warning fires only in a market's regular hours,
+09:30 to 16:00 for stocks, so it never appears in the early window. Open an issue with both
+records, because the 5-minute threshold is set from them.
 
-The threshold and its gate change only on that evidence.
+<a id="plan-prices"></a>
 
-## Dates and markets
+## Choose the plans to buy
 
-### Which days the tests read
+Each plan you buy settles the open questions listed for it, and
+[the end of each run](#read-the-end-of-a-run) lists the questions still open under the plan
+that settles them. Prices are Massive's monthly list prices as of November 2026
+([S1], [S2]):
 
-Most tests compute their days from the run's New York day, with the US exchanges' holiday
-rules, so their reads stay inside the shortest Basic history window: two years, on Stocks,
-Options, Currencies, and Futures Basic (Indices Basic keeps all history). The
-[fixed-date exceptions](#fixed-date-tests) follow the table.
-
-| Test | Days it reads |
-|---|---|
-| Common choices | The most recent Monday that traded and whose files are published; the most recent calendar week without a holiday; the most recent whole month; the most recent half day (the Friday after Thanksgiving, July 3, or December 24) whose week has ended |
-| The many-index check | Four or five days: the three trading days before the run's, the most recent Monday, and the trading day after the most recent holiday |
-| The futures tests | The contract that was front on their day (for the bucket check, at the end of the most recent whole month) |
-| The holiday-session checks | The most recent Martin Luther King Day and Good Friday |
-| The split and dividend checks | The year's most recent forward split and special cash dividend, found through the library's own `stocks.splits` and `stocks.dividends`, choosing common stocks with no later split |
-| The bar-stamp checks | The most recent half day whose week has ended, and the full trading day before it; the month and quarter reads are the two whole ones before the run's; the index year read runs from January 1 to the run's day |
-
-<a id="fixed-date-tests"></a>
-
-Fixed-date tests:
-
-| Test | Fixed date | When the plan does not keep it |
+| Plans | Per month | What they settle |
 |---|---|---|
-| The option split check | NVDA's 10-for-1 split of 2024-06-10, whose thin OTC neighbors list no options | It needs Options Developer, which keeps four years |
-| The deliverable check's adjusted option roots | `AAPL7` (2014-06-10), `DELL1` (2021-11-15), `FF1` (2024-04-15) | Each is read only when the key's Options plan keeps its day, by the documented history windows; otherwise it is recorded as outside the plan's history |
-| `tests/tables/test_followed_read_integration.py` | The week of 2025-06-02 to 2025-06-06 | Every plan keeps it until June 2027 |
-| The live-run `responses` group | NVDA's daily bars from 2024-06-03 to 2024-06-14 | The example is skipped, naming the Stocks plan whose history keeps the day |
+| Every class on Basic | $0 | The questions in [What Basic settles](#what-basic-settles) |
+| Currencies Starter | $49 | The questions in [What Currencies Starter settles](#what-currencies-starter-settles) |
+| Options Starter | $29 | The questions in [What Options Starter settles](#what-options-starter-settles) |
+| Stocks Starter | $29 | The questions in [What Stocks Starter settles](#what-stocks-starter-settles) |
+| Futures Starter | $29 | The questions in [What Futures Starter settles](#what-futures-starter-settles) |
+| Indices Starter | $49 | The questions in [What Indices Starter settles](#what-indices-starter-settles) |
+| Options Developer | $79 | Whether `adjusted=true` adjusts option bars for NVDA's 10-for-1 split of June 2024 |
+| Stocks Advanced; Options Advanced | $199 each | The unit of the LULD bands; whether Massive serves a real-time Stocks key on its delayed feed when `delayed_subscriptions` lists stocks; the options topic cap |
+| Business plans | $999 and up | The unit of fair market value (Currencies Business, $999), and the WebSocket host of the base Business plan (Stocks Business, $2,499) ([S2], [S8]). Futures Business, sold per venue, covers only its own venue's tests, and other Business questions have fixture tests only. |
+| Partner datasets | $49 to $99 each | Benzinga, ETF Global, TMX, and consumer spending cost $99 a month each, and NOI costs $49 ([S9]). The Benzinga add-on adds one check, that every consensus-ratings row names its ticker, and that test skips without it. |
 
-Edge cases:
+Currencies, Options, and Stocks Starter together cost $107 a month, and adding Futures Starter
+makes $136. Economy data and each class's reference data are free on Basic.
 
-- **A December 24 half day** stays the latest until the next Thanksgiving week ends, so the
-  bar-stamp reads can be about eleven months old: still inside two years.
-- **Before the year's first trading day** there is no year bar yet, and the index year read is
-  recorded as skipped.
+Massive offers no free trial ([S4]). A plan you cancel keeps its access to the end of the
+month ([S5]), so you can buy a plan for one month's run and cancel it the same day.
 
-### When a stream test passes
+<a id="what-basic-settles"></a>
 
-A stream test passes only when rows reached its table. It never passes on the acknowledgement
-alone.
+### What Basic settles
 
-1. It asserts that Massive acknowledged its topics, which Massive does whether or not the
-   market is open.
-2. It reads the market's status: `/v1/marketstatus/now`, or for futures ES's `market_event`
-   in `/futures/v1/market-status`.
-3. It requires rows while the market is open for the stream's kind of rows:
+A key with every class on Basic settles these questions:
 
-   | Stream | Rows required |
-   |---|---|
-   | Stock trades and quotes | In the extended hours too: status `extended-hours`, from 04:00 New York time |
-   | Every other stock, option, and index stream | In the regular session, from 09:30 |
-   | On a delayed plan | Once the session has been open as long as the plan's delay: 15 minutes on Stocks, Options, and Indices Starter (and Stocks and Options Developer); 10 minutes on Futures Starter and Developer, counted for futures from the `timestamp` of its market status |
-   | A minute-bar stream | It waits until right after the next minute boundary, up to 75 s |
-
-4. When rows are not required, it skips after the acknowledgement: "not exercised: market
-   closed (acknowledged)" or the like.
-
-Special cases:
-
-- **LULD** needs the regular session, the only time bands change; the smoke tests stream the
-  LULD bands of every ticker for the same reason.
-- **Stock imbalances** arrive only around the auctions, so their smoke case always skips
-  after the acknowledgement.
-- **A skip for the market's hours** holds only for that moment: the live-run program runs the
-  check again on a later attempt, and a whole stream day fails a unit whose streams delivered
-  no row once its session had opened.
-- **Unproven passes run again.** In a results folder, stream checks that passed before
-  streams had to deliver rows (the smoke stream cases, the delayed-feed check, and the
-  stream-day units) count as unproven, and run again by themselves.
-
-### Protocol and watchlist checks
-
-- **The wire-protocol checks** that belong to no asset class (the unsubscribe, the
-  1,000-topic frame, the wildcard) stream crypto, which trades all the time. On a key that
-  streams stocks but no currencies, they stream stocks instead, on the feed of the key's
-  Stocks plan, while stock bars are due.
-- **The reconnect check** closes the session's streaming socket from under it, and requires
-  the crypto stream to reconnect, return to `RUNNING`, and deliver new trades. It records any
-  `WAITING_SLOT` on the way.
-- **The `AUTO` check** reads AAPL's minute bars from the previous trading day through today on
-  `AUTO` and on REST, before today's flat file exists. It requires the same minutes from
-  both, no day missing or doubled, and records `AUTO`'s warning that it filled days from REST.
-  It needs Stocks Starter and the S3 keys.
-- **The watchlist check**, `test_a_crypto_stream_follows_its_watchlist` in
-  `tests/ingest/test_ws_integration.py`, streams crypto trades from an input table, adds
-  `X:ETHUSD`, deletes it, and adds it again. It requires a row after each add; the row and the
-  stream's `Symbols` entry gone after the delete; and no row from before the re-add. It needs
-  Currencies Starter; each step waits at most 60 s.
-
-### Delayed-plan labels
-
-- **The past-data check** records the envelope status Massive gives AAPL's previous day bar,
-  and counts only when that status is `DELAYED`. On a key that gets `OK`, it uses
-  `MASSIVE_DELAYED_API_KEY` when set, and otherwise skips: "needs a Basic or Starter stocks
-  key".
-- **The unlisted-delayed check.** Because the live sessions list every delayed class in
-  `delayed_subscriptions`, one check opens a session with the key alone, as a user who lists
-  nothing would. It requires the first delayed class's stream (or, for options, the chain) to
-  be refused with a message that names the remedy.
-
-## What each plan settles
-
-Each test names the open questions it answers. A test marked `verifies` asserts the answer the
-library assumes, so it fails the day Massive changes; a test marked `settles` records evidence
-that a person reads.
-
-Prices are monthly list prices from massive.com/pricing, as of 2026-11 ([S1], [S2]). Massive
-offers no free trial, and a cancelled plan keeps its access to the month's end ([S4], [S5]).
-
-| Plans | Per month | Settles |
-|---|---|---|
-| Every class on Basic | $0 | [The list below](#every-class-on-basic) |
-| Currencies Starter | $49 | Adds the crypto and forex day cuts and file pairs; whether forex weekend day files exist; the REST timestamp units; the forex topic spelling; the unsubscribe, frame-size, slot, and wildcard checks; the watchlist follow; the raw frame forms (with `s3` for the files) |
-| Options Starter | $29 | [Options Starter](#options-starter) |
-| Stocks Starter | $29 | Adds what Massive says when a delayed key subscribes on the real-time feed, and the stamps of AAPL's 1-day, week, and month bars on every source. With `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
-| **Currencies, Options, and Stocks Starter** | **$107** | Every priority question |
-| The same and Futures Starter | $136 | [Futures Starter](#futures-starter): most of the open questions |
-| Indices Starter | $49 | [Indices Starter](#indices-starter) |
-| Options Developer | $79 | Adds option bars across NVDA's 2024 split under both bases: whether `adjusted=true` adjusts option bars for the underlying's split |
-| Stocks Advanced; Options Advanced | $199 each | The LULD unit; whether Massive serves a real-time Stocks key on its delayed feed (`delayed_subscriptions` listing stocks); the options topic cap |
-| Business plans | $999 and up | The FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue. |
-
-### Every class on Basic
-
-- The reference keys: ticker events, inactive tickers, exchanges, conditions.
-- The filings without a ticker; the insider activity and holdings keys.
-- Week, month, and multi-unit bar alignment.
-- The futures sessions, labels, and holiday session (from minute bars); the futures session
-  labels around the 17:00 Chicago roll and Good Friday.
-- The crypto minute rebuild; the REST sides of the crypto and forex day cuts.
-- The encoded index path (with `I:NDX`); the stock and index half-day stamps.
-- The split basis: the year's latest forward split, the adjusted echo on every page, the
-  latest special cash dividend, stock dividends.
-- An unknown ticker's statuses; the daily indicator stamps.
+- Which keys Massive sends for ticker events, inactive tickers, exchanges, and conditions.
+- Which keys the filings without a ticker carry, and which the insider activity and holdings
+  carry.
+- How week, month, and multi-unit bars align.
+- Where futures sessions start and end, and how the holiday session looks, read from minute
+  bars.
+- How futures sessions are labeled, around the 17:00 Chicago roll and on Good Friday.
+- Whether crypto minute bars rebuild the day bar, and where Massive's REST answers cut the
+  crypto and forex day.
+- Whether an index path with `I:` in it works, read with `I:NDX`, and where stock and index
+  bars of a half day are stamped.
+- Which basis the split data uses, checked on the year's latest forward split, the latest
+  special cash dividend, and stock dividends, and whether every page echoes the `adjusted`
+  value it was sent.
+- Which statuses an unknown ticker gets, and where the daily indicators are stamped.
 - Whether past stock data (the previous day's bar, a day's open and close) reads on the
   default configuration, though Massive labels it `DELAYED`.
-- The futures spread ticker forms of every venue; how Massive writes a futures contract's year
-  (one digit or two); the crypto ticker list's currencies.
-- Whether `fetch()` of futures contracts follows a live table of product codes: a code added
-  lands, a code deleted leaves.
-- The rate-limit questions: the 429 text, the rate buckets, whether a market-filtered ticker
-  lookup is charged to its class, how a spent minute frees its requests, and whether a
-  learned limit outlives the key's sessions.
+- How Massive writes futures spread tickers on every venue, whether it writes a futures
+  contract's year with one digit or two, and which currencies the crypto ticker list holds.
+- Whether `fetch()` of futures contracts follows a live table of product codes, so a code you
+  add lands and a code you delete leaves.
+- How the rate limits behave:
+  - what a 429 refusal says
+  - which requests count against which limit
+  - whether a ticker lookup filtered by market counts against its class
+  - how a spent minute frees its requests
+  - whether a learned limit outlives the key's sessions
 
-### Options Starter
+<a id="what-currencies-starter-settles"></a>
 
-- Whether a delayed plan's option chain says `DELAYED`, in its envelope status or
-  `last_trade.timeframe`. `fetch()` and `poll()` refuse it unless options are listed in
-  `delayed_subscriptions`. **UNVERIFIED**, and only on Starter or Developer: a real-time plan
-  skips it.
-- The index and `BRK.B` underlying spellings across the chain and snapshots.
-- The adjusted deliverables; the oldest roots only on a plan that keeps their day.
-- The stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with
-  `s3` for the day file).
-- Whether `fetch()` of the option chain follows a live table of underlyings: an underlying
-  added lands, one deleted leaves.
+### What Currencies Starter settles
 
-### Futures Starter
+- Where Massive cuts the crypto and forex day, and whether the forex and crypto file pairs
+  match it.
+- Whether forex weekend day files exist.
+- Which unit the REST timestamps use.
+- How forex topics are spelled.
+- Whether unsubscribing works, how large a subscribe frame can be, what happens when a second
+  connection takes the slot, and how the wildcard subscription behaves.
+- Whether a crypto stream follows its watchlist.
+- How Massive's raw WebSocket frames look, and, with `s3`, the matching file rows.
 
-- The futures files' sessions.
-- The snapshot's `timeframe` fields and envelope status: whether a delayed futures plan's REST
-  answers say `DELAYED`. It is the only futures evidence of a delayed plan the library reads,
-  for streams and for `fetch()` and `poll()` alike. **UNVERIFIED**, and only on Starter or
-  Developer: a real-time plan skips it.
-- The snapshot's ticker location.
-- The streamed futures dates and one-second bar ends.
-- The futures bar buckets of ES, corn, live cattle, and Micro Bitcoin: where each session and
-  longer bar falls, the 2-session grid, whether any session opens on a Friday evening or a
-  Saturday, and clipping at `{from}`.
+<a id="what-options-starter-settles"></a>
 
-### Indices Starter
+### What Options Starter settles
 
-- The index values file unit.
-- `I:SPX` everywhere.
-- The index 1-day, week, month, quarter, and year bar stamps, and which day and week they
-  cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file).
-- With `s3`: whether an index minute file holds exactly its New York day (`I:AAVE100`, which
-  updates around the clock, against its REST minutes), and the day windows and file agreement
-  of about ten indices over recent days.
-- Possibly the index value stream: the documentation says Starter, the pricing page Advanced.
+- Whether a delayed plan's option chain says `DELAYED`, in its envelope status or in
+  `last_trade.timeframe`. Nobody has confirmed the answer yet. Only a Starter or Developer key
+  can settle it, and on a real-time plan the test skips. `fetch()` and `poll()` refuse the
+  chain unless `delayed_subscriptions` lists options.
+- How the chain and the snapshots spell index and `BRK.B` underlyings.
+- What a contract adjusted for a split delivers. The oldest option roots are checked only on a
+  plan whose history reaches their day.
+- Where SPY's and SPXW's 1-day, half-day minute, and week bars are stamped on every source,
+  with `s3` for the day file.
+- Whether `fetch()` of the option chain follows a live table of underlyings, so an underlying
+  you add lands and one you delete leaves.
 
-### Partner datasets
+<a id="what-stocks-starter-settles"></a>
 
-- Benzinga, ETF Global, TMX, and consumer spending are $99 a month each; NOI is a $49
-  expansion ([S9]). Economy data and each class's reference data are free on Basic.
-- The Benzinga add-on adds one check, that every consensus-ratings row names its ticker;
-  without the add-on it skips.
+### What Stocks Starter settles
 
-### Answers Massive already states
+- What Massive says when a delayed key subscribes on the real-time feed.
+- Where AAPL's 1-day, week, and month bars are stamped on every source.
+- With `s3`, when Massive publishes each day's flat file, and what the split stock's day file
+  holds, as traded.
+- With `s3`, whether a weekend flat-file key answers 404 `NoSuchKey`. Any other answer makes
+  the library raise on every flat-file range that holds a weekend.
 
-Massive's knowledge base states some answers, which the live tests confirm ([S10] to [S13]):
+<a id="what-futures-starter-settles"></a>
 
-- a missing flat file answers 404 `NoSuchKey`;
-- one subscribe frame of 120,003 entries is accepted;
-- a connection carries about 1,000 options contracts;
-- grouped daily stamps the end of its window;
-- the crypto and forex files spell `X:BTC-USD` and `C:EUR-USD`.
+### What Futures Starter settles
 
-Each documentation page names its plan in its "Plan Access" table ([S15]).
+- Which sessions the futures files hold.
+- Whether a delayed futures plan's REST answers say `DELAYED`, in the snapshot's `timeframe`
+  fields and envelope status. It's the only futures evidence of a delayed plan the library
+  reads, for streams and for `fetch()` and `poll()` alike. Nobody has confirmed the answer
+  yet. Only a Starter or Developer key can settle it, and on a real-time plan the test skips.
+- Where the snapshot puts the ticker.
+- Which dates streamed futures rows carry, and where one-second bars end.
+- How the futures bars of ES, corn, live cattle, and Micro Bitcoin fall, as
+  [Read the futures bar check](#read-the-futures-bar-check) describes.
 
-## Safety
+<a id="what-indices-starter-settles"></a>
 
-- **Streams.** Every stream test subscribes to one symbol per asset class, except the LULD
-  check, which streams the bands of every ticker (`LULD.*`) so that some arrive within seconds
-  in an open session. Each test releases its stream as soon as the first rows arrive and
-  closes its session at the end, so no cluster holds more than one of the run's connections.
-  The limit tests are the exception.
-- **REST.** Some checks query several symbols, because the question is about the differences
-  between them:
-  - nine options underlyings, and five contract roots;
-  - four stock ticker types, and three partner pages;
-  - nine futures products' schedules, every futures combo product, and the combo contracts of
-    four venues;
-  - the crypto ticker list (at most 5 pages on Basic);
-  - the inactive tickers from `A` to `AC`, and every exchange and condition;
-  - a month of four filings datasets.
-- **Other clients.** Stop every other client of the key before you run: a stream test on a
-  cluster another client uses either waits for a connection slot or disconnects that client.
-- **Licensed data.** The evidence files and `live-checks.log` are git-ignored. They hold raw
-  licensed rows (quotes, and partner data such as Benzinga and ETF Global): attach them only
-  where the audience may see that data, and redact those rows before you share them anywhere
-  public.
+### What Indices Starter settles
 
-## Reading the results
+- Which unit the index values file uses.
+- Whether `I:SPX` works on every source.
+- Where the 1-day, week, month, quarter, and year bars of `I:SPX` and `I:AAVE100` are stamped,
+  and which day and week each covers, with `s3` for the day file.
+- With `s3`, the answers of the [index checks](#read-the-index-checks).
+- Possibly the index value stream. Massive's documentation says Starter includes it, and the
+  pricing page says Advanced.
 
-| Outcome | When |
-|---|---|
-| Fails | A request it needs fails or returns nothing; a stream delivers no row while rows are due; it is refused although the key holds its plans; or, for a test marked `verifies`, Massive's answer is no longer the one the library assumes |
-| Skips | Something was missing, and the skip names it: a plan, a key, S3 keys, history beyond the plan's window, or a market that is closed or within its feed's delay, so no row was due ("not exercised") |
-| Passes | Everything else is evidence: read each test's docstring for what it means |
+<a id="live-run-program"></a>
 
-The end of a run:
+## Run the live-run program
 
-- **The summary** says "verified X of Y" for the asserted questions whose every test passed,
-  and "ran" for the evidence-only questions whose every test passed (their evidence still
-  needs reading). Each remaining group follows, under the plan it needs and its price.
-- **The smoke tests' coverage**: passed (with the count that passed with drift, a library
-  WARNING or a `SchemaDrift` the case saw, each listed), not entitled, otherwise skipped, and
-  failed. The not-entitled and skipped cases are grouped by the plan they need or their
-  reason, with a count per group.
-- **The open questions**, each group with its count, and each question's number beside its
-  one-line title.
+To record every live check a key allows without sitting at the terminal, run
+`scripts/live_run.py`. It follows a fixed New York timetable on your machine or a tester's,
+and `pack` turns its results into one zip you can read. A full pass takes at least three
+trading days: a stream day, the day after it, and one ordinary day. It also takes a stream
+night when the key streams crypto or futures.
 
-## The debug log of a pytest run
-
-Every pytest run that selects a live test also writes the library's DEBUG log, so you can
-diagnose a failure without another live run.
-
-- **Where:** once the run's tests are chosen, and before any opens a session, the run creates
-  `live-debug-logs/<UTC time>-<process id>/` and logs to `debug.log` inside it. Git ignores
-  the folder.
-- **Its path** is in the last lines of the run, under "live debug log". Send that file with a
-  report of any failure.
-- **No log:** a run of unit tests only writes none, and a run whose live tests opened no
-  session (each skipped for want of a key, say) removes its empty folder.
-- **No secrets.** The library keeps the API key and the S3 pair out of every line, and the run
-  checks anyway: it scans the folder for each secret set in its environment. If it finds one,
-  the same last lines say so and name where. Do not send that log; send the owner the list.
-- **Your own file:** a run whose environment sets `DEEPHAVEN_MASSIVE_LOG_FILE` logs to that
-  file and changes nothing. The live-run program sets it for each of its children, so their
-  logs stay in their attempt's folder. `DEEPHAVEN_MASSIVE_LOG` still chooses the level when
-  set.
-
-## The live-run program
-
-`scripts/live_run.py` runs everything above unattended, for days, on a tester's machine. It
-records what you need to diagnose a problem afterwards without another live run.
-
-- It probes what the key can do at each start and each trading morning.
-- It runs every group of checks at a fixed New York time.
-- It adapts by itself when the subscriptions change.
-- You can stop and start it at any time.
-
-A tester follows [the tester guide](tester-guide.md), which walks through it step by step. Run
-it from the repository root, in the terminal that holds the [variables](#variables):
+The program probes the key when it starts and each trading morning. When the probe finds a plan
+added or raised, the program reruns the checks that plan allows. Run it from the repository
+root, in a terminal that holds the [variables](#variables), starting with `check`:
 
 ```bash
 uv run python scripts/live_run.py check                       # the machine and the key; writes nothing
 uv run python scripts/live_run.py run --out ~/massive-live    # add --any-time for a first run now
 uv run python scripts/live_run.py status --out ~/massive-live
 uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-results-<date>.zip
-uv run python scripts/live_run.py upgrade-check stocks --out ~/massive-live   # only when the owner asks
+uv run python scripts/live_run.py upgrade-check stocks --out ~/massive-live   # attended
 ```
 
-`run --redo GROUP,...` makes every check of the named groups run again, failed ones included.
+The `check` command prints an `OK`, `WARN`, or `FAIL` line for each part of the machine, then
+each subscription's plan and how far back its history goes, then `ready: yes` or `ready: no`.
+The `status` command prints the latest probe, then each check's status and reason, then a
+count per group. The `upgrade-check` command is attended: run it while the subscription is
+still on Basic, upgrade when it tells you to, and it records whether the library stops pacing
+that subscription.
 
-### Groups
+On a first run, `--any-time` starts the
+groups that need no market hours (`rate-limits`, `evidence`, `smoke`, and `responses`) at
+once. It counts only the first time you give it for a results folder, and after that the
+program follows the timetable.
+
+### Know when each group runs
+
+The program runs its checks in groups, each at a set New York time:
 
 | Group | What it runs | When (New York time) |
 |---|---|---|
 | `rate-limits` | `-m integration_rate_limits` | From 11:30 |
 | `evidence` | `-m integration -k "not luld"` | From 11:30, after the previous day's flat files |
-| `luld` | `-m integration -k luld` | 09:28, for the opening bands |
+| `luld` | `-m integration -k luld` | 09:28, for the opening bands, except on the day after a stream day |
 | `smoke` | `-m integration_smoke` | From 11:30 |
-| `responses` | The documentation's examples, each in its own session, every raw reply recorded | From 11:30 |
-| `limits-ws`, `limits-second-connection` | The two limit-test commands of [Run order](#run-order), the second last and alone | From 16:15 |
+| `responses` | The documentation's examples, each in its own session, with every raw reply recorded | From 11:30 |
+| `limits-ws` | The WebSocket limit tests | From 16:15 |
+| `limits-second-connection` | The second-connection test, which runs last with nothing else open | From 11:30, after the groups before it |
 | `stream-day` | A full trading day of streams for every class the key can stream | 03:45 to 20:30 on a planned day |
 | `throughput` | Every symbol's busiest streams, measured over an hour | 09:15 to 11:00 the next day |
 | `stream-day-reconcile` | The streamed minute bars against REST history | From 11:30 the next day |
 | `stream-night` | Crypto and futures streams through one night | 16:30 on a planned evening to 09:30 the next morning |
-| `stream-night-reconcile` | The night's minute bars against REST history, overall and at each boundary | From 11:30 the morning after |
+| `stream-night-reconcile` | The night's minute bars against REST history | From 11:30 the morning after |
 | `half-day` | The bar-stamp tests | On the trading day after a half day |
 
-### How the groups run
+Each time a group starts is one attempt, with its own folder in the results folder,
+`<group>/<date>-<n>/`, which holds the attempt's debug log. While it waits for the next group,
+`run` packs a fresh zip on its own when a group has finished since the last zip.
 
-- **Children.** Each group runs in a child process, with:
-  - the probed plans in `MASSIVE_LIVE_PLANS`;
-  - the library's debug log in the attempt's folder, `<group>/<date>-<n>/debug.log`;
-  - a pytest plugin (`tests/_live/live_run/outcomes.py`) that records each test's outcome as
-    it runs, so a crash loses nothing.
-- **Raw replies** come from the wire package's reply-capture hook, which hands over every REST
-  body and WebSocket frame already cleaned of the key.
-- **Reruns.**
+### Know when a check runs again
 
-  | Check | Runs again |
-  |---|---|
-  | Passed | Only when a subscription's plan rises |
-  | Failed | Once more |
-  | Skipped for a missing subscription | When the subscriptions change |
+The program reruns a check by itself, depending on its last result:
 
-- **Stop and resume.** Control-C, a closed terminal, and a `kill` all stop the program the
-  same way: the running child is stopped, the state saved, and the same `run` command
-  resumes. A resume first stops any child an earlier run left behind, and keeps every result
-  that child recorded. `--any-time` takes effect once per results folder; a resume finishes
-  its groups without it.
-
-### The stream night
-
-A stream day stops at 20:30, so it never holds a stream through the hours only 24-hour markets
-trade. Those hours hold two date boundaries:
-
-- crypto's `Date` is the UTC date, which changes at 00:00 UTC;
-- a futures row's `Date` is its trading session, which the library takes from Massive's
-  futures schedules. It changes when the evening's session closes at 16:00 Chicago time: a
-  row in the pause before the 17:00 open already belongs to the next session.
-
-**What it streams.** When the key streams crypto (a paid Currencies plan) or futures, the
-program plans a stream night, from 16:30 New York time to 09:30 the next morning:
-
-- crypto: the trades, quotes, and minute bars of `X:BTCUSD` and `X:ETHUSD`;
-- futures: the minute bars of the front ES and NQ contracts, and from Futures Developer up
-  their trades and quotes.
-
-**When.**
-
-- A night is planned for the first evening, after the probe that finds its checks due, whose
-  next morning is a full trading day: a Sunday evening, when futures open for the week, or a
-  Monday to Thursday evening that is itself a full trading day.
-- Holidays and early closes come from the exchanges' fixed rules, and from the closures
-  Massive's market status lists as upcoming, which each probe reads.
-- A night never shares a day with a stream day.
-- That evening no other group starts from 16:15, and one still running is stopped then.
-- No other group starts from 16:30 until 09:00 the next morning, even when the night's child
-  has stopped for good.
-- A child that dies is started again, up to five times, until 09:00. A night whose child has
-  used its five starts is over: the next probe, even the morning's before 09:30, plans the
-  next night.
-
-**What it writes.** The night writes what a stream day writes (rows by hour, per-minute counts,
-latency, samples, gaps), and at its end:
-
-| File | What it holds |
+| Last result | When it runs again |
 |---|---|
-| `hours.csv` | The rows of each stream per UTC hour |
-| `boundaries.csv` | The rows within 90 minutes before and after the 16:00 Chicago close (futures) and 00:00 UTC (crypto), with their `Date` values. Futures rows must move from the evening's session to the morning's, the pause's included; on a Sunday nothing trades before the close, so only the side after is judged. Crypto rows must move from one UTC date to the next. |
-| `summary.json` | The gaps, the most reconnects of each connection, and the quiet hours |
+| Passed | Only when a subscription's plan rises |
+| Passed under an older rule that didn't require stream rows | Until it passes under the current rule |
+| Failed | Once more |
+| Skipped for a missing subscription | When the subscriptions change |
+| Skipped for the moment, such as a closed market | Up to three attempts in all |
 
-**When a unit fails.**
+To make every check of a group run again, failed ones included, pass its name to `run --redo`,
+such as `--redo luld,smoke`.
 
-- One of its streams failed.
-- The night's gaps passed 30 minutes.
-- An hour its market was open went without a row. Futures pause from 16:00 to 17:00 Chicago
-  time; crypto never closes.
-- A row near a boundary carries the wrong `Date`.
+### Stop and resume the program
 
-**The next day,** `stream-night-reconcile` compares the night's minute bars with REST history
-of both dates, kept to the night's hours, over the whole night and within 90 minutes on each
-side of each boundary.
+Control-C, a closed terminal, and `kill` all stop the program the same way. The same `run`
+command resumes it, and keeps every result recorded so far. It refuses to resume a results
+folder on a different commit, so pulling `main` between starts blocks the resume.
 
-- A futures bar whose `Date` differs from history's fails its unit.
-- A crypto bar, on either side, whose `Date` is not the UTC date of its start fails its unit.
-- Each unit is compared with the night it passed in, so a reconciliation that runs late,
-  after the next night, still reads the right night: one night per run, the oldest first.
+### Know what a stream night tests
 
-`status` shows the next stream night, and `REPORT.md` in each zip has a section per night.
+A stream night covers the hours only 24-hour markets trade, which a stream day, ending at
+20:30, never reaches. When the key streams crypto or futures, the program plans one on the
+first suitable Sunday to Thursday evening before a full trading day. It runs from 16:30 New
+York time to 09:30 the next morning. It streams the trades, quotes, and minute bars of
+`X:BTCUSD` and `X:ETHUSD`, and the minute bars of the front ES and NQ contracts. From Futures
+Developer up, it streams their trades and quotes too.
 
-### Secrets
+The night checks the two date boundaries in those hours. Crypto's `Date` changes at 00:00 UTC,
+and a futures row's `Date` changes to the next session at the 16:00 Chicago close. The night
+records separate results for crypto and futures, and each fails in five cases:
 
-The program reads the secrets only from the environment, and never writes them.
+- one of its streams failed
+- its gaps passed 30 minutes in all
+- the recorder couldn't write a batch of rows
+- an hour its market was open brought no row
+- a row near a boundary carries the wrong `Date`
 
-- **Every line it prints or writes** passes through a filter that replaces with `***` each
-  secret's value (plain or URL-encoded), a proxy URL's password, and any `apiKey=`,
-  `Authorization`, or `X-Amz-` value.
-- **`pack` scans** every file of the results folder for each secret, plain, URL-encoded, and
-  base64, and refuses to zip a folder in which it finds one.
-- **`pack` refuses** unless the terminal holds exactly the secrets the run used. `run` records
-  a salted fingerprint of each one, never its value, so a scan for other values cannot pass
-  by mistake.
+On the next day, `stream-night-reconcile` compares the night's minute bars with REST history,
+and the night's crypto or futures result fails if any bar's `Date` differs. The files
+`hours.csv`, `boundaries.csv`, and `summary.json` hold the night's evidence, and `REPORT.md` in
+each zip has a section per night.
 
-The program's logic lives in `tests/_live/live_run/` (`cli.py` and the modules it names),
-unit-tested against the fakes; the script is its entry point.
+### Keep the secrets out of the results
+
+The program reads the keys only from the environment, and never writes them. Its output and
+the text files it writes pass through a filter that replaces each secret with `***`. Before it
+zips anything, `pack` scans every file of the results folder for each secret, plain,
+URL-encoded, and base64, and refuses if it finds one. `pack` also refuses unless your terminal
+holds the same keys the run used. It compares them with the salted fingerprints `run`
+stored.
+The program's code is in `tests/_live/live_run/`, and `scripts/live_run.py` is its entry point.
 
 ## Sources
 
 - [S1] https://massive.com/pricing
 - [S2] https://massive.com/business
-- [S3] https://massive.com/knowledge-base/article/what-are-the-different-massive-subscriptions-i-can-use
 - [S4] https://massive.com/knowledge-base/article/does-massive-offer-free-trials
 - [S5] https://massive.com/knowledge-base/article/how-can-i-downgrade-or-cancel-my-massive-account
-- [S6] https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier
-- [S7] https://massive.com/knowledge-base/article/why-am-i-not-authorized-when-attempting-to-connect-to-massives-websockets
 - [S8] https://massive.com/knowledge-base/article/does-the-business-plan-include-real-time-trades-and-quotes-or-only-fair-market-value
 - [S9] https://massive.com/knowledge-base/article/does-massive-have-nasdaq-order-imbalance-data-or-only-nyse
-- [S10] https://massive.com/knowledge-base/article/what-time-are-massives-flat-files-ready-each-day
-- [S11] https://massive.com/knowledge-base/article/why-doesnt-a-bar-from-the-rest-api-match-the-flat-files
-- [S12] https://massive.com/knowledge-base/article/how-many-massive-websocket-connections-can-i-use-at-one-time
-- [S13] https://massive.com/knowledge-base/article/how-many-tickers-can-you-subscribe-to-on-a-single-massive-websocket-connection
-- [S14] https://massive.com/docs/flat-files/quickstart.md
-- [S15] the "Plan Access" table of each documentation page, vendored under `vendor/massive/`

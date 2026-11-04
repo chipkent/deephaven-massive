@@ -1,8 +1,8 @@
-# Converts symbols written in other conventions into Massive's, one at a time and as a
-# table. You should see C:EURUSD, X:BTCUSD, I:SPX, and BRK.B, then a ValueError that names
-# the conventions to choose from, and a new table, converted, whose bad row is empty.
+# Convert symbols written in other conventions into Massive's, one at a time and as a table.
 from deephaven import new_table
 from deephaven.column import string_col
+
+import deephaven_massive as dm
 
 print(dm.canonical_symbol("EUR/USD", dm.AssetClass.FOREX))
 print(dm.canonical_symbol("btc-usd", dm.AssetClass.CRYPTO))
@@ -14,7 +14,7 @@ try:
 except ValueError as error:
     print(f"ValueError: {error}")
 
-watchlist = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
+yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
-    watchlist, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+    yahoo_symbols, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )

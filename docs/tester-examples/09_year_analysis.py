@@ -1,14 +1,19 @@
-# Compares the year of the two stocks: daily returns, growth, volatility, correlation, a
-# chart, and a saved file. Run it once year's row in streams reads DONE. You should see a
-# correlation between -1 and 1 (positive for these two stocks), new tables (pair, returns,
-# growth, summary_year, and side_by_side), a chart named growth_chart, and the file
-# growth.parquet in your test folder.
-from deephaven import parquet
+# Compare a year of two stocks: daily returns, growth, volatility, correlation, a chart, a file.
+import os
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from deephaven import agg, parquet
 from deephaven.pandas import to_pandas
 from deephaven.plot.figure import Figure
 from deephaven.updateby import delta
 
-pair = year.snapshot()
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
+pair = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago)
 returns = (
     pair.sort(["Symbol", "Date"])
     .update_by(ops=[delta(cols=["Change = Close"])], by=["Symbol"])
@@ -55,4 +60,5 @@ growth_chart = (
     .show()
 )
 
-parquet.write(growth, os.path.join(FOLDER, "growth.parquet"))
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+parquet.write(growth, os.path.join(folder, "growth.parquet"))
