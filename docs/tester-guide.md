@@ -8,12 +8,14 @@ report you send.
 
 ## Plan your test
 
-The test runs for at least five trading days. Most of that time, the live run, one program
-that checks the library against Massive's servers, works on its own. One of the days must be a
-full stream day, when it streams market data from 03:15 to 20:30 New York time. Keep the
-computer on and awake the whole time, with 20 GB of free disk. During a stream day or night,
-the live run needs your Massive key to itself. A free Massive account is enough to start, and the owner tells you whether to buy a paid plan
-for the live run.
+The test runs for at least five trading days. The live run, one program that checks the
+library against Massive's servers, does most of that work on its own. One of the days must be
+a full stream day, when it streams market data from 03:15 to 20:30 New York time.
+
+Keep the computer on and awake the whole time, with 20 GB of free disk. During a stream day, and
+an overnight stream night if your plan includes Currencies or Futures, the live run needs your
+Massive key to itself. A free Massive account is enough to start, and the owner tells you
+whether to buy a paid plan for the live run.
 
 You spend about four hours on the first day, then about 10 minutes a day:
 
@@ -137,8 +139,8 @@ To check the key without printing it, run `echo "${#MASSIVE_API_KEY} characters"
 should see the length of the key you copied, such as `32 characters`. The key lives only in
 the terminal where you set it, so set it again in every new terminal you use for the test.
 
-Paid plans also come with S3 keys, which let the library read Massive's daily flat files. If your dashboard's
-keys page shows them, set them the same way:
+Paid plans also come with S3 keys, which let the library read Massive's daily flat files. If
+your dashboard's keys page shows them, set them the same way:
 
 ```bash
 printf 'S3 access key id: '; read -rs MASSIVE_S3_ACCESS_KEY_ID; echo; export MASSIVE_S3_ACCESS_KEY_ID
@@ -321,8 +323,8 @@ console's examples use the same key's request limits.
    uv run python scripts/tester.py examples
    ```
 
-   The runner first asks Massive which plans your key holds, and adjusts each example's
-   settings to them. It takes 15 minutes or more. You should see one line per example as it runs, then
+   The runner first asks Massive which plans your key holds, and adjusts each example's settings
+   to them. It takes 15 minutes or more. You should see one line per example as it runs, then
    `no example failed` or the names of the examples that failed.
 3. Read the verdicts in `~/massive-test/examples-output/summary.txt`. Each example has its
    own file there with everything it printed, and its tables are under `tables/`:
@@ -419,8 +421,8 @@ server again, as in [step 6](#6-start-deephaven).
 
 #### 2. List the datasets
 
-The library reads more than 100 of Massive's datasets, and `dm.datasets()` lists them. Next, the code
-describes the columns of one query without sending Massive a request:
+The library reads more than 100 of Massive's datasets, and `dm.datasets()` lists them. Next, the
+code describes the columns of one query without sending Massive a request:
 
 ```python
 # List every dataset, and describe the columns of daily stock bars without a request.
@@ -731,8 +733,8 @@ On a free key, you should see three lines:
 
 On Stocks Advanced, the first line says "no error". On Starter and Business, which don't
 include the latest trade, it's an `EntitlementError`. On Developer, it's an `EntitlementError`
-that names `delayed_subscriptions`, because this session doesn't accept delayed data, and the
-second line on Starter and Developer says the same. That's expected, and example 17 shows the
+that names `delayed_subscriptions`, because this session doesn't accept delayed data. On
+Starter and Developer, the second line says the same. That's expected, and example 17 shows the
 setting. On Advanced or Business, the third line says "no error", and the live minute bars
 keep streaming.
 
@@ -935,10 +937,10 @@ line falls below zero wherever the curve was inverted.
 
 #### 17. Stream live minute bars
 
-A `last_by` table keeps the latest minute bar of each stock, replaced as each minute ends. It
-needs a paid Stocks plan. Stocks Starter and Developer stream data 15 minutes late, so the session
-accepts delayed data. On Stocks Advanced or Business, which stream in real time, delete the
-`delayed_subscriptions` setting before you run it:
+A `last_by` table keeps the latest minute bar of each stock, replaced as each minute ends. To
+run it, you need a paid Stocks plan. Stocks Starter and Developer stream data 15 minutes late,
+so the session accepts delayed data. On Stocks Advanced or Business, which stream in real time,
+delete the `delayed_subscriptions` setting before you run it:
 
 ```python
 # Keep the latest minute bar of five stocks, updated live. Needs a paid Stocks plan.
@@ -1541,8 +1543,8 @@ The report zip holds these files, each with your keys replaced by `***`:
 ## Finish the test
 
 The test ends once the live run has covered five trading days, one of them a full stream day.
-If the dates in your checklist fall short, leave the run going and come back later. When they
-reach it, send your results and clean up:
+If the dates in your checklist fall short, leave the run going and come back later. When they do,
+send your results and clean up:
 
 1. Stop the live run with Control-C in its terminal, and stop any Deephaven server with
    Control-C in its own terminal.
@@ -1571,13 +1573,13 @@ reach it, send your results and clean up:
 ## Run Deephaven in Docker
 
 To run the Deephaven IDE from Docker instead of from a second Python environment, follow
-these steps. You still need Java and the checkout, because the setup check and the example
-runner use the checkout's own Deephaven. A Docker image is a saved starting point for a small
-Linux system, and a container is that system running on your computer. These steps replace
-steps 4 to 6 of Set up, and they end with the Deephaven IDE open in your browser.
+these steps. They replace steps 4 to 6 of Set up and end with the Deephaven IDE open in your
+browser. You still need Java and [the checkout](#3-copy-the-code), because the setup check and
+the example runner use the checkout's own Deephaven.
 
-The image is Deephaven's own `ghcr.io/deephaven/server`, with the library added from your
-checkout. You still need the checkout from [step 3 of Set up](#3-copy-the-code).
+A Docker image is a saved starting point for a small Linux system, and a container is that
+system running on your computer. The image here is Deephaven's own `ghcr.io/deephaven/server`,
+with the library added from your checkout.
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/), and give it at
    least 6 GB of memory. On macOS and Linux, set the memory in Docker Desktop's settings. On
