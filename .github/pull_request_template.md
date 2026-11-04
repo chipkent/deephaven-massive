@@ -1,9 +1,9 @@
 <!--
 The standard is docs/dev/pull-requests.md: it reads as if an O'Reilly technical editor wrote
 it, and a reader skimming only the headings and the first words of each bullet gets every fact
-that matters. Prefer bullets and tables. Every fact the reader needs to understand or
-decide, and nothing they don't: cut padding, repetition, and narration. Run its self-edit checklist, and rewrite the
-whole description to the final state on every push.
+that matters. Prefer bullets and tables. Every fact the reader needs to understand or decide,
+and nothing they don't: cut padding, repetition, and narration. Run its self-edit checklist, and
+rewrite the whole description to the final state on every push.
 -->
 
 ## Summary

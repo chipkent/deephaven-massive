@@ -78,6 +78,6 @@ outside it.
 
 ## Live integration tests
 
-The tests in `tests/**/test_*_integration.py` call Massive itself with the owner's keys, so
+The tests in `tests/**/test_*_integration.py` call Massive itself with a real key, so
 neither `./scripts/check.sh` nor CI ever runs them. [`docs/live-tests.md`](docs/live-tests.md)
 says how to run them and what each plan can verify.

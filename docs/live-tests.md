@@ -411,11 +411,7 @@ that settles them. Prices are Massive's monthly list prices as of November 2026
 | Business plans | $999 and up | The unit of fair market value (Currencies Business, $999), and the WebSocket host of the base Business plan (Stocks Business, $2,499) ([S2], [S8]). Futures Business, sold per venue, covers only its own venue's tests, and other Business questions have fixture tests only. |
 | Partner datasets | $49 to $99 each | Benzinga, ETF Global, TMX, and consumer spending cost $99 a month each, and NOI costs $49 ([S9]). The Benzinga add-on adds one check, that every consensus-ratings row names its ticker, and that test skips without it. |
 
-Currencies, Options, and Stocks Starter together cost $107 a month, and adding Futures Starter
-makes $136. Economy data and each class's reference data are free on Basic.
-
-Massive offers no free trial ([S4]). A plan you cancel keeps its access to the end of the
-month ([S5]).
+Economy data and each class's reference data are free on Basic.
 
 <a id="what-basic-settles"></a>
 
@@ -635,7 +631,5 @@ The program's code is in `tests/_live/live_run/`, and `scripts/live_run.py` is i
 
 - [S1] https://massive.com/pricing
 - [S2] https://massive.com/business
-- [S4] https://massive.com/knowledge-base/article/does-massive-offer-free-trials
-- [S5] https://massive.com/knowledge-base/article/how-can-i-downgrade-or-cancel-my-massive-account
 - [S8] https://massive.com/knowledge-base/article/does-the-business-plan-include-real-time-trades-and-quotes-or-only-fair-market-value
 - [S9] https://massive.com/knowledge-base/article/does-massive-have-nasdaq-order-imbalance-data-or-only-nyse

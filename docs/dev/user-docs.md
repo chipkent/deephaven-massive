@@ -1,11 +1,11 @@
 # Writing user documentation
 
-This page is the standard for every page a user reads: `README.md`,
-`docs/troubleshooting.md`, the tester guide, and the hand-written text of the generated dataset
-reference (its intro and the shared argument rules). It tells you where each fact goes, how to write the sentences, what shape each kind
+This page is the standard for every page a user reads: `README.md`, `docs/troubleshooting.md`, the
+tester guide, and the hand-written text of the generated dataset reference (its intro and the shared
+argument rules). It tells you where each fact goes, how to write the sentences, what shape each kind
 of section takes, and how an editor grades the result. The `writing-user-docs` skill walks you
-through it for each edit. Docstrings follow the `writing-docstrings` skill, and PR
-descriptions follow [`pull-requests.md`](pull-requests.md).
+through it for each edit. Docstrings follow the `writing-docstrings` skill, and PR descriptions
+follow [`pull-requests.md`](pull-requests.md).
 
 The bar is the one an O'Reilly development editor sets. A reader should feel that a senior
 colleague is explaining the library at a whiteboard. If a page reads like a specification, a
@@ -238,9 +238,11 @@ Each fact has one home. Other pages link to it instead of repeating it.
 | Docstrings, read with `help()` | The fine detail of every verb, setting, enum, and exception |
 | `docs/tester-guide.md` | What release-candidate testers do and report |
 
-Installing and running Deephaven belongs to Deephaven's docs, and what each Massive plan includes
-belongs to Massive's site: link them, never copy them. A rule several datasets share is written
-once, in `argument_rules.py`, and every dataset page that takes the argument prints it.
+Installing and running Deephaven belongs to Deephaven's docs, and the full contents of each Massive
+plan belong to Massive's site: link them, never copy them. Which plans include each dataset is
+generated onto the dataset pages from Massive's pages, so it updates when Massive changes its plans.
+A rule several datasets share is written once, in `argument_rules.py`, and every dataset page that
+takes the argument prints it.
 
 Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`, never on a user page.
 
@@ -614,9 +616,9 @@ The README follows it:
 
 #### The hero image
 
-The owner will supply the hero image, in light and dark versions. Put it right after the title,
-as revup and python-game-server do, with GitHub's
-[`<picture>` element](https://github.blog/changelog/2022-08-15-specify-theme-context-for-images-in-markdown-ga)
+The owner will supply the hero image, in light and dark versions. Put it right after the title, as
+revup and python-game-server do, with GitHub's [`<picture>`
+element](https://github.blog/changelog/2022-08-15-specify-theme-context-for-images-in-markdown-ga)
 and relative paths:
 
 ```html
@@ -626,7 +628,8 @@ and relative paths:
 </picture>
 ```
 
-Write the alt text to GitHub's [style guide](https://github.com/github/docs/blob/main/content/contributing/style-guide-and-content-model/style-guide.md):
+Write the alt text to GitHub's [style
+guide](https://github.com/github/docs/blob/main/content/contributing/style-guide-and-content-model/style-guide.md):
 
 - Say what the image means, not what it looks like literally.
 - Start with the kind of image ("Screenshot of", "Diagram that shows"), never with "Image of".
@@ -908,17 +911,17 @@ A page earns trust when every claim checks out and every link still lands.
 
 ### Anchors
 
-- Give every cited section an explicit anchor, `<a id="sort-order-limit"></a>`, on the line
-  before its heading. Docstrings and other pages cite the anchor, never a heading's generated
-  slug, so rewording a heading breaks nothing.
-- A docstring cites a page or section by its full GitHub URL, so the link opens from an IDE or
-  the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page,
-  such as `README.md#<anchor>` or `docs/troubleshooting.md#<anchor>`. A user page links to another with a relative
-  path.
+- Give every cited section an explicit anchor, `<a id="sort-order-limit"></a>`, on the line before
+  its heading. Docstrings and other pages cite the anchor, never a heading's generated slug, so
+  rewording a heading breaks nothing.
+- A docstring cites a page or section by its full GitHub URL, so the link opens from an IDE or the
+  console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page, such as
+  `README.md#<anchor>` or `docs/troubleshooting.md#<anchor>`. A user page links to another with a
+  relative path.
 - Keep an anchor's id when you reword its section.
-- When you move or rename an anchor, rewrite its citations in the same PR: in `src/`, in other
-  user pages, and in the tester guide. `tests/test_docs.py` fails on a cited anchor or page
-  that doesn't exist.
+- When you move or rename an anchor, rewrite its citations in the same PR: in `src/`, in other user
+  pages, and in the tester guide. `tests/test_docs.py` fails on a cited anchor or page that doesn't
+  exist.
 
 <a id="rubric"></a>
 

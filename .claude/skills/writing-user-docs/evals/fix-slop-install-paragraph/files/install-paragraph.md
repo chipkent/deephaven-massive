@@ -2,7 +2,7 @@
 
 The library runs on macOS and Linux, and on Windows through WSL2, on a computer with at least
 8 GB of memory. It is not on PyPI, and while its repository is private you need access to it
-(see the [tester guide's access step](docs/tester-guide.md#12-get-access-to-the-code)). Outside
+(see the [tester guide's access step](docs/tester-guide.md#1-sign-in-to-github)). Outside
 testers get access and a version from the owner, and follow the
 [tester guide](docs/tester-guide.md), which walks through every step. With access to the
 repository, you need Python 3.11 or later, Java 17 or

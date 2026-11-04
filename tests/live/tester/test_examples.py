@@ -166,7 +166,7 @@ def market(
         server.reply(f"/v2/aggs/ticker/{symbol}/prev", PREVIOUS_DAY)
     for path in ("/v2/last/trade/AAPL", "/v3/snapshot"):
         server.reply(path, REFUSED)
-    # Example 21's contracts of a futures product: one ES contract.
+    # Example 20's contracts of a futures product: one ES contract.
     contract = {"ticker": "ESZ6", "product_code": "ES", "date": "2026-10-30"}
     server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     # The first example turns the debug log on: give it a switch of its own, and take its
@@ -219,7 +219,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.jvm_held
-@pytest.mark.timeout(300)  # 26 examples, Deephaven compiling each formula, on a busy worker
+@pytest.mark.timeout(300)  # 25 examples, Deephaven compiling each formula, on a busy worker
 def test_every_example_runs_against_the_fake_market(
     market: MarketServer,
     tmp_path: Path,

@@ -12,7 +12,7 @@ The test runs for at least five trading days. The live run, one program that che
 library against Massive's servers, does most of that work on its own. One of the days must be
 a full stream day, when it uses your key from 03:15 to 20:30 New York time.
 
-Keep the computer on and awake the whole time, with 20 GB of free disk. During a stream day, and
+Keep the computer on and awake the whole time, with 25 GB of free disk. During a stream day, and
 an overnight stream night if your plan includes Currencies or Futures, the live run needs your
 Massive key to itself. A free Massive account is enough to start, and the live run checks
 more on each paid plan your key holds.
@@ -53,7 +53,7 @@ item, note anything that surprised you or took longer than it should:
 - [ ] Ran examples 1 to 12 by hand
 - [ ] Noted how Massive answered the free key's live minute bars in example 10
 - [ ] Ran examples 13 to 19 by hand
-- [ ] Ran examples 20 to 23 by hand, with their watchlist steps
+- [ ] Ran examples 20 to 23 by hand, with the watchlist steps of 20, 21, and 23
 - [ ] Ran examples 24 and 25 by hand
 
 ## Live run
@@ -94,7 +94,7 @@ Deephaven's install guide covers Java on each platform, setting `JAVA_HOME`, and
 through WSL 2. On Windows, run every command of the test inside the Ubuntu terminal of WSL 2.
 Note each version in your checklist.
 
-<a id="12-get-access-to-the-code"></a>
+<a id="1-sign-in-to-github"></a>
 
 ### 1. Sign in to GitHub
 
@@ -360,7 +360,6 @@ into the console once:
 ```python
 import glob
 import os
-
 
 def run(n):
     pattern = f"~/massive-test/deephaven-massive/docs/tester-examples/{n:02d}_*.py"
@@ -729,12 +728,13 @@ On a free key, you should see three lines:
 | Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` turns `FAILED`, with an `Error` that quotes Massive and says Basic has no live data. |
 | Bars from 2015 | `EntitlementError`: your plan doesn't reach back to 2015 |
 
-On Stocks Advanced, the first line says "no error". On Starter and Business, which don't
-include the latest trade, it's an `EntitlementError`. On Developer, it's an `EntitlementError`
-that names `delayed_subscriptions`, because this session doesn't accept delayed data. On
-Starter and Developer, the second line says the same. That's expected, and example 17 shows the
-setting. On Advanced or Business, the third line says "no error", and the live minute bars
-keep streaming.
+On Stocks Advanced, the first line says "no error". On Starter and Business, which don't include the
+latest trade, it's an `EntitlementError`. On Developer, it's an `EntitlementError` that names
+`delayed_subscriptions`, because this session doesn't accept delayed data. On Starter and Developer,
+the second line is also an `EntitlementError` that names `delayed_subscriptions`, or, if Massive
+refuses after the table opens, the `stocks.bars` row in `streams` shows the refusal. That's
+expected, and example 17 shows the setting. On Advanced or Business, the third line says "no error",
+and the live minute bars keep streaming.
 
 Note in your checklist whether each message, the `Error` in `streams` included, told you what
 went wrong and what you could do about it. Note any message that suggested your key was wrong
@@ -1241,11 +1241,10 @@ days, and it needs about 10 minutes of your time a day. One program, `scripts/li
 runs every check your Massive plan allows at set times of the New York day, and records
 Massive's answers for the owner. You start it once and leave it running.
 
-When it starts, and again each trading morning, the program asks Massive which plan your key
-holds for each subscription, such as Stocks Starter, or Stocks Basic if you're on the free
-plan. This
-check is the probe. Because of it, you can buy, upgrade, or cancel a plan at any time, and the
-program runs the checks your new plan allows.
+When it starts, and again each trading morning, the program asks Massive which plan your key holds
+for each subscription, such as Stocks Starter, or Stocks Basic if you're on the free plan. This
+check is the probe. Because of it, your plans can change at any time, and the program runs the
+checks your current plans allow.
 
 Two kinds of check keep the computer busy for many hours, and they need it on and awake:
 
@@ -1374,8 +1373,8 @@ anything unclear for your report.
 
 ### 5. Pack and send the results
 
-Pack the results whenever the owner asks, and when you stop for good. To pack, press Control-C
-and run this in the same terminal, which must hold exactly the keys the run used:
+Pack the results whenever a comment on your issue asks, and when you stop for good. To pack, press
+Control-C and run this in the same terminal, which must hold exactly the keys the run used:
 
 ```bash
 uv run python scripts/live_run.py pack --out ~/massive-live
@@ -1402,12 +1401,12 @@ The same `run` command resumes the run after any stop:
 | The computer restarted | Open a terminal, set your keys again, go to the checkout, and run the same command. |
 | You changed your plan | Nothing, because the next morning's probe notices. To make it notice at once, press Control-C and run the same command. |
 | You got S3 keys for the first time | The program prints a reminder. Stop it, set the keys, and start it again. |
-| The owner sends a new release | Copy the code of the new release, and start a new results folder, such as `--out ~/massive-live-2`. The program refuses to resume a folder on another commit. |
+| A new release comes out | Copy the code of the new release, and start a new results folder, such as `--out ~/massive-live-2`. The program refuses to resume a folder on another commit. |
 
-### Run the upgrade check when the owner asks
+### Run the upgrade check when asked
 
 The upgrade check tests that once you upgrade a subscription from the free plan, the library
-stops limiting it to 5 requests a minute. Run it only when the owner asks:
+stops limiting it to 5 requests a minute. Run it only when a comment on your issue asks:
 
 1. Stop the run with Control-C, before you upgrade.
 2. Start the check with the name of the subscription you'll upgrade, which is `stocks`,
@@ -1437,7 +1436,7 @@ that slept:
 | The probe shows a lower plan than you bought | A purchase can take minutes to reach the key. Wait ten minutes, then restart the run. |
 | A gap in a stream day or night, in the zip's `REPORT.md` | Keep the computer awake with the lid open. After a first gap of more than 30 minutes, the program plans one more stream day or night. |
 | A stream night fails because an hour its market was open brought no data | Nothing. The owner reads it in the zip. |
-| Anything else | Send the owner the `status` output and the newest zip. |
+| Anything else | Open an issue in this repository with the `status` output, and attach the newest zip. |
 
 <a id="report-a-problem"></a>
 
@@ -1520,7 +1519,8 @@ zip, with your keys removed. Before you run it, save what the zip needs:
    ```
 
    You should see it write `~/massive-test/bug-report-<time>.zip`. If the command finds a key
-   in any file, it writes nothing and names the files instead. Send the owner that list.
+   in any file, it writes nothing and names the files instead. Put that list of file names,
+   without the files, on a GitHub issue.
 5. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, paste your
    report, and attach the report zip and the screenshots.
 
@@ -1552,7 +1552,7 @@ send your results and clean up:
    newest `live-results-<date>.zip` from each folder, your checklist, and any bug-report zips
    you haven't sent.
 4. Keep `~/massive-test` and every live-run folder, such as `~/massive-live` and
-   `~/massive-live-2`, until the owner confirms they have your files. Then delete them:
+   `~/massive-live-2`, until your results issue is closed. Then delete them:
 
    ```bash
    rm -rf ~/massive-test ~/massive-live ~/massive-live-2
@@ -1560,8 +1560,6 @@ send your results and clean up:
 
    The command prints nothing. If you ran Deephaven in Docker, also remove its image, as
    [Run Deephaven in Docker](#run-deephaven-in-docker) shows.
-5. When the owner says the test is over, cancel any paid plan on Massive's dashboard. A plan
-   renews at the end of each billing period until you cancel it.
 
 <a id="run-deephaven-in-docker"></a>
 

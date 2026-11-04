@@ -69,8 +69,8 @@ your draft for these before an editor sees it:
   paragraph one topic and three to five sentences.
 - A caveat before the point, or a warning after the step it guards.
 - Live-table timing stated loosely. A `last_by` table keeps its last rows after trading
-  stops; it's empty only when you create it while the market is closed. The repository doesn't
-  document trading-hour windows, so don't state them.
+  stops; it's empty only when you create it while the market is closed. User pages don't state
+  trading-hour windows.
 - Marketing lines in the hook. Selling copy is where the AI tells cluster: taglines, series of
   three, "never X you didn't ask for", and lead-ins that only announce a list. Sell with
   concrete facts in plain sentences.
