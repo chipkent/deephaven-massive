@@ -366,6 +366,29 @@ the day, with its time and connection. The warning fires only in a market's regu
 09:30 to 16:00 for stocks, so it never appears in the early window. Open an issue with both
 records, because the 5-minute threshold is set from them.
 
+<a id="user-doc-checks"></a>
+
+## Check the user docs by hand
+
+The README and the troubleshooting page make claims that only a keyed run can confirm, and no
+live test asserts them. Run the example the claim belongs to, as pasted, in the Deephaven
+console of a server started as the README's Install section starts it. Then open an issue for
+each claim the run contradicts, with what you saw:
+
+| Claim | Where | Plan | What to record |
+|---|---|---|---|
+| ORLY's 15-for-1 split | README, [Adjust prices for splits](../README.md#split-adjustment) | Stocks Basic | `splits` has a row with `ExecutionDate` 2025-06-10 and `HistoricalAdjustmentFactor` near 1/15 (0.0667). `traded` closes near $1,350 before June 10 and `adjusted` near $90, and `by_hand`'s `AdjustedClose` matches `adjusted`'s `Close`. |
+| ORLY's `AdjustmentType` | The same recipe | Stocks Basic | Whether Massive labels the split `forward_split` or `stock_dividend`. O'Reilly paid it as a stock dividend of 14 shares per share. |
+| Stock dividends in the cumulative factor | The same recipe | Stocks Basic | For a stock with a `stock_dividend` row and a later split, whether reading the splits without the `stock_dividend` rows changes the later split's `HistoricalAdjustmentFactor`, or only which row each bar joins. |
+| Stocks Basic reaches June 2025 | The split recipe, and the debug-log example in troubleshooting | Stocks Basic | Both reads return rows rather than `Your plan doesn't include this data timeframe`. |
+| Free-plan timing | README Examples 1 to 5, and [Read the history of a watchlist](../README.md#history-of-a-watchlist) | Stocks Basic | How long each takes to fill its tables. The README says up to a minute. |
+| `UnderlyingAssetPrice` | README, [Stream the options near the money](../README.md#option-chain) | Each Stocks plan you hold, with any Options plan | Whether `spy_chain`'s `UnderlyingAssetPrice` is filled or null on each Stocks plan. |
+| Releasing a poll | README Example 5 | Stocks Basic | After `m.release(headlines)`, closing both panels, and `del newest_first`, whether the poll's `State` in `m.streams()` leaves `RUNNING` within a few minutes. |
+| Minute bars outside regular hours | README hook and Example 8 | Stocks Starter or higher | Whether live minute bars arrive in pre-market and after-hours trading, and whether `board` shows each stock's row with null `TimestampEnd`, `Close`, and `ChangePct` until its first bar. |
+| Memory in 4 GB | README, [Read the history of a watchlist](../README.md#history-of-a-watchlist) | Stocks Basic for daily bars; Stocks Starter with S3 keys for minute bars | With `-Xmx4g`, whether a year of every stock's daily bars, and one day of every stock's minute bars with `adjusted=False`, each load without running out of memory. Record `market.size`. |
+| What you see | Every README example | The plan each example names | The tables that open, their row counts, and their first columns, against the text after each example. |
+| Many sessions on one key | Every README and troubleshooting example, run in one console | The plans the examples name | Whether `m.connections()` ever shows `WAITING_SLOT` once a dozen or more sessions, some with different settings, have opened live tables on the same key. |
+
 <a id="plan-prices"></a>
 
 ## Choose the plans to buy

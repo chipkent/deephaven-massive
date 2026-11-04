@@ -11,17 +11,23 @@ of the Deephaven IDE.
 
 Where a message in these tables shows `...`, the text you see has more words in that place.
 
+<a id="setup-messages"></a>
+
 ### Setup and keys
 
-These messages come from the server, the session, or your keys:
+These messages come from the install, the server, the session, or your keys:
 
 | You see | Why | What to do |
 |---|---|---|
-| `no Massive API key` | The server can't see `MASSIVE_API_KEY`. | Set the key in the terminal that starts the server, then restart the server, as [Install](../README.md#install) shows. |
+| `Repository not found`, or a password prompt, during the install | Git can't use your GitHub sign-in. | Run `gh auth login` and `gh auth setup-git`, then install again. |
+| The server stops at startup with an error about Java | Java isn't installed, or `JAVA_HOME` isn't set in this terminal. | Follow the Java steps of Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/), then start the server again. |
+| `AuthenticationError: no Massive API key: ...` | The server started before `MASSIVE_API_KEY` was set in its terminal. | Stop the server with Control-C, set the key in that terminal, and start the server again, as [Install](../README.md#install) shows. |
 | `RuntimeError: The Deephaven Server has not been initialized` | The code ran in plain Python, outside the server. | Paste it into the console of the Deephaven IDE, or start Deephaven's [embedded server](https://deephaven.io/core/docs/getting-started/pip-install/) first. |
 | `MassiveSession must be created inside a Deephaven server` | The code ran on a thread with no Deephaven execution context, such as a thread you started yourself. | Create the session in the console or an application script, or enter a context first, as the message shows. |
 | `flat files need both s3_access_key_id and s3_secret_access_key` | Only one of the two S3 keys is set. | Set both [S3 keys](../README.md#environment-variables), or neither. |
 | `S3 rejected the flat-file credentials` | Your S3 keys are wrong. With `source=dm.HistorySource.AUTO`, the read falls back to REST and this text arrives as a WARNING. | Copy both keys from Massive's dashboard again, then restart the server. |
+
+<a id="settings-file-messages"></a>
 
 ### Settings file
 
@@ -32,6 +38,8 @@ These messages come from `dm.MassiveConfig.from_file()`:
 | `no settings file: pass its path ...` | You called it with no path, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` isn't set where the server runs. | Pass the path, or set the variable before you start the server. `help(dm.MassiveConfig.from_file)` shows an example file. |
 | `settings file ..., line ..., column ...: ...` | The file holds something the library refuses, such as an unknown setting, a word in the wrong case, a key, or a YAML tag. | Fix that line. For an unknown setting, the message suggests the closest name. |
 
+<a id="refused-calls"></a>
+
 ### Calls the library refuses
 
 These messages mean the library refused a call before sending any request:
@@ -39,9 +47,11 @@ These messages mean the library refused a call before sending any request:
 | You see | Why | What to do |
 |---|---|---|
 | `timespan must be dm.Timespan, e.g. ...` | An argument that picks from a fixed set takes an enum member, not text. | Write `dm.Timespan.DAY`, not `"day"`. |
-| `ValueError` that names a symbol | The symbol isn't spelled as Massive spells it. | Fix the spelling with the [symbol spellings in Example 2](../README.md#compare-stocks), or convert it with `dm.canonical_symbol`. |
+| `ValueError` that names a symbol | The symbol isn't spelled as Massive spells it, such as `aapl` for `AAPL`. | Fix the spelling with the [symbol spellings in Example 2](../README.md#compare-stocks). To convert another spelling, such as Yahoo's `BRK-B`, call `dm.canonical_symbol`, whose `help()` lists the spellings it reads. |
 | `AttributeError` that names a verb, the call that ends a query, such as `history()` | The dataset doesn't have that verb. The message lists the verbs it has, and often what to call instead. | Call what the message suggests, such as `history()` for intraday bars, or another dataset, such as `m.stocks.last_trade(...)`. |
 | `... poll() needs a start or a limit` | A news or filings poll without either would read the whole archive every cycle. | Give the query a `start` or a `limit`. |
+
+<a id="missing-data"></a>
 
 ### Missing symbols, rows, or values
 
@@ -101,14 +111,16 @@ include it.
 | You see | Why | What to do |
 |---|---|---|
 | `... would be delayed (Massive reports ...)` | Your plan's data for that subscription, such as Stocks, is 15 minutes behind, and you didn't ask for delayed data. | Add the line the message shows, as in [settings in code](../README.md#settings-in-code), or upgrade the plan. |
-| `... refused the subscription to ...` | Your plan doesn't stream this data, though it can stream other data of the same market. | Stream bars instead of trades, or read with `history()` or `poll()`. When the message names `delayed_subscriptions`, add that market to it, such as `dm.Subscription.STOCKS`. |
+| `... refused the subscription to ...` | Your plan doesn't stream this data, though it can stream other data of the same market. | Check what your plan streams in the plan table of the dataset's page. Stream bars instead of trades, or read with `history()` or `poll()`. When the message names `delayed_subscriptions`, add that market to it, such as `dm.Subscription.STOCKS`. |
 | `delayed_subscriptions cannot hold dm.Subscription.CURRENCIES` | Forex and crypto, which Massive sells together as Currencies, have no delayed feed. | Remove `CURRENCIES` from the set. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive's streaming API gives the same answer for a wrong key and for a plan without streams of that market. | Try `fetch()` with the same key. If it works, your plan doesn't stream this data, so read it with `history()` or `poll()`. |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan doesn't include this dataset. | Use the dataset the message names, where it names one, as [what your plan allows](../README.md#what-your-plan-allows) explains. |
-| `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins. | Ask for a later start. |
+| `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins. | Start inside your plan's history, which the plan table of the dataset's page gives, such as two years of bars on Stocks Basic. |
 | `WAITING_SLOT` in `m.connections()` | Your key's one connection is in use elsewhere. | See [the connections table](#connections-table). |
 | `rate limited: ...; this read ran inside a Deephaven console command` | Massive kept refusing requests for coming too fast (`HTTP 429`), and a read run in the console gives up after 90 seconds of those pauses. Another program that uses the same key is the usual cause. | Stop the other program, or pass `wait=False`, which waits up to 10 minutes. On a Basic plan, list the market in `rest_basic_subscriptions`. |
-| A download is slow | Each Basic plan allows five requests a minute. `m.rate_limits()` shows the pace. | On a paid plan with [S3 keys](../README.md#environment-variables), `history()` of 50 or more symbols reads flat files. In the console, pass `wait=False` to any read that needs more than five requests, which takes over a minute on a Basic plan. |
+| A download is slow | Each Basic plan allows five requests a minute. `m.rate_limits()` shows the pace. | Read fewer symbols. On a paid plan with [S3 keys](../README.md#environment-variables), `history()` of 50 or more symbols reads flat files. In the console, pass `wait=False` to any read that needs more than five requests, which takes over a minute on a Basic plan. |
+
+<a id="history-messages"></a>
 
 ### History reads
 
@@ -155,7 +167,7 @@ These rows cover tables that a stream or a poll keeps updating. The columns they
 | `rows for ... are being dropped` in `Error` | Massive sent rows of a `dm.ALL` stream that the library can't read. | Treat those symbols' last values as stale, and [report it](#report-a-bug) with the log. |
 | `... the last 100 rows of channel ... were dropped` | The library couldn't read 100 rows in a row, so it stopped the stream. Massive has most likely changed its format. | [Report it](#report-a-bug) with the log. |
 | Memory keeps growing | `append_only()` keeps every row. | Use `ring(n)`, `last_by()`, or `blink()` with an aggregation. |
-| A table keeps running after `del` | Python hasn't reclaimed the table yet. | Call `m.release(table)`. |
+| A table keeps running after `del` | Python hasn't reclaimed the table yet, which can take minutes. | Call `m.release(table)`, as [Example 5](../README.md#follow-the-news) shows. |
 | The server exits after `m.close()` | `m.close()` fails both tables of a `where_in` or `where_not_in` between two live tables, and Deephaven ends the server process when the second one fails. | Filter with a join, as [filter by a live table](#filter-with-a-join) shows. |
 
 <a id="filter-with-a-join"></a>
@@ -291,9 +303,9 @@ stays empty unless a read fails, and then it has that symbol's row, with the rea
 
 ## Turn on the debug log
 
-The library writes its warnings and errors to Deephaven's log, which the Deephaven IDE shows in
-its **Log** panel. The debug log adds INFO and DEBUG lines that say what the library decided
-and why:
+The library's warnings and errors appear in the terminal that runs the server and in the **Log**
+panel of the Deephaven IDE. The debug log adds INFO and DEBUG lines that say what the
+library decided and why:
 
 | Level | Meaning | What to do |
 |---|---|---|
@@ -308,7 +320,7 @@ This example reads a week of Apple's daily bars, which works on every Stocks pla
 ```python
 import deephaven_massive as dm
 
-# Pass a file path to write the log to a file instead of the Log panel.
+# Pass a file path, such as "/tmp/massive.log", to write the log to that file.
 dm.enable_debug_logging()
 m = dm.MassiveSession()
 week = m.stocks.bars("AAPL", dm.Timespan.DAY).history(
@@ -317,8 +329,10 @@ week = m.stocks.bars("AAPL", dm.Timespan.DAY).history(
 dm.disable_debug_logging()
 ```
 
-The **Log** panel then shows a line for the session's settings, each request the read sent, and
-what came back. To capture your own problem, replace the read with the code that fails.
+The **Log** panel and the server's terminal then show a line for the session's settings, each
+request the read sent, and what came back. To capture your own problem, replace the read with
+the code that fails. While the log goes to a file, every line goes only there, warnings and
+errors included.
 
 To capture a problem from the first session on, set `DEEPHAVEN_MASSIVE_LOG` to `DEBUG`, or to
 `INFO` for a long run. To write the log to a file, set `DEEPHAVEN_MASSIVE_LOG_FILE` to its path.

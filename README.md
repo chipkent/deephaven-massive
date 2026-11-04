@@ -22,12 +22,12 @@ and as a stream, such as trades and quotes.
 
 You work with the tables in [Deephaven](https://deephaven.io). Deephaven is a free real-time
 query engine that represents both static and streaming data as tables. It runs on your own
-computer, and you type Python into its console in your browser. Anything you build from a live
-table, such as a filtered view or a chart, updates with it.
+computer, and you type Python into its console in your browser. A filtered view or a chart built
+on a live table updates with it.
 
-Once you've installed the library, this example runs as pasted in the Deephaven console on
-Massive's Stocks Advanced or Business plan, which stream in real time. If you're on the free
-plan, start with [Example 1](#whole-market-day) instead. The query `bars` names the minute bars
+Once you've installed the library, this example runs as pasted in the Deephaven console. As
+pasted, it needs Massive's Stocks Advanced or Business plan. Other Stocks plans stream late or
+not at all, so on the free plan, start with [Example 1](#whole-market-day) instead. The query `bars` names the minute bars
 of Apple and Microsoft. `history()` reads one week of them, and `last_by()` makes a live table:
 
 ```python
@@ -176,9 +176,8 @@ press Control-C there.
 Your first table holds a week of Apple's daily bars, and it works on every Stocks plan, the free
 Stocks Basic plan included. `dm.MassiveSession()` opens a session. A session is your
 connection to Massive, and it reads your key from `MASSIVE_API_KEY`. The next line reads the
-bars. Click in
-the IDE's **Console** panel, where Python runs inside the server, then paste the code and press
-Enter:
+bars. Python runs inside the server, in the IDE's **Console** panel. Click in that panel, paste
+the code, and press Enter:
 
 ```python
 import deephaven_massive as dm
@@ -196,26 +195,24 @@ include `Date`, `Open`, `High`, `Low`, `Close`, and `Volume`.
 
 ### Fix a step that fails
 
-Most setup problems come from a terminal that's missing a variable or a sign-in. Find the
-message or symptom you see in the first column:
+Most setup problems come from a terminal that's missing a variable or a sign-in, and each of
+these has a one-line fix. [Setup and keys](docs/troubleshooting.md#setup-messages) in
+Troubleshooting gives the cause of each:
 
-| You see | Why | What to do |
-|---|---|---|
-| `Repository not found`, or a password prompt, during the install | Git can't use your GitHub sign-in | Run `gh auth login` and `gh auth setup-git`, then install again |
-| The server stops at startup with an error about Java | Java isn't installed, or `JAVA_HOME` isn't set in this terminal | Follow the Java steps of Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/), then start the server again |
-| A traceback in the console ending in `AuthenticationError: no Massive API key: ...` | The server started before `MASSIVE_API_KEY` was set | Stop the server with Control-C, set the key in that terminal, and start the server again |
-| `RuntimeError: The Deephaven Server has not been initialized` | The code ran in plain Python, outside the server | Paste it into the **Console** panel of the Deephaven IDE |
-
-[Troubleshooting](docs/troubleshooting.md) lists every other message and says how to turn
-on the library's log.
+| You see | What to do |
+|---|---|
+| `Repository not found`, or a password prompt, during the install | Run `gh auth login` and `gh auth setup-git`, then install again |
+| The server stops at startup with an error about Java | Set up Java as Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/) shows, then start the server again |
+| `AuthenticationError: no Massive API key: ...` | Stop the server, set `MASSIVE_API_KEY` in its terminal, and start it again |
+| `RuntimeError: The Deephaven Server has not been initialized` | Paste the code into the **Console** panel of the Deephaven IDE |
 
 <a id="configuration"></a>
 
 ## Configuration
 
 To start, you need only `MASSIVE_API_KEY`, and you set it in [Install](#install). The rest are
-optional. Environment variables hold your keys and the
-settings for the whole server, and settings in code change how one session behaves.
+optional. Environment variables hold your keys and the settings for the whole server, and
+settings in code change how one session behaves.
 
 <a id="environment-variables"></a>
 
@@ -227,11 +224,11 @@ see a change, so restart it after you set one:
 | Variable | Default | What it does |
 |---|---|---|
 | `MASSIVE_API_KEY` | None; required | Your Massive API key. Creating a session without it raises `dm.AuthenticationError`. |
-| `MASSIVE_S3_ACCESS_KEY_ID` | Unset | The access key for Massive's flat files, which are compressed files that each hold a whole market's trades, quotes, or bars for one day. Massive shows it beside your API key on paid plans. |
+| `MASSIVE_S3_ACCESS_KEY_ID` | Unset | The access key for Massive's flat files: compressed files of a whole market's trades, quotes, or bars, one file a day. Massive shows it beside your API key on paid plans. |
 | `MASSIVE_S3_SECRET_ACCESS_KEY` | Unset | The secret key that goes with the access key. Set both keys or neither. |
 | `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Unset | The path of a settings file, which `dm.MassiveConfig.from_file()` reads when you call it with no path. |
-| `DEEPHAVEN_MASSIVE_LOG` | Unset, so only warnings and errors reach the server's terminal | Turns on the library's log at a level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
-| `DEEPHAVEN_MASSIVE_LOG_FILE` | Unset, so the log goes to the server's terminal | A file to append the log to. Set alone, it turns the log on at `DEBUG`. |
+| `DEEPHAVEN_MASSIVE_LOG` | Unset, so only warnings and errors appear, in the server's terminal and the IDE's **Log** panel | Turns on the library's log at a level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | Unset, so the log goes to the server's terminal and the IDE's **Log** panel | A file to append the log to. Set alone, it turns the log on at `DEBUG`. |
 | `HTTPS_PROXY`, `NO_PROXY` | Your proxy settings on macOS; none on Linux and WSL | The proxy for every connection to Massive, and the hosts that skip it. |
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | The `certifi` certificate bundle | The certificate authorities to trust instead, such as your company's own. |
 | `JAVA_HOME` | None | The Java installation the server runs on. Deephaven's server reads it, and Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/) says how to set it. |
@@ -294,7 +291,7 @@ to fit the limit.
 
 ### 1. Rank every US stock by one day's trading
 
-You get the daily bar of every US-listed stock for October 30, 2026, in one table.
+One read returns the daily bar of every US-listed stock for October 30, 2026.
 
 The code reads that day's bar for every stock, then ranks the stocks by dollars traded and by
 their gain from open to close:
@@ -322,8 +319,8 @@ risers = (
 ```
 
 Three tables open. `day` has one row per stock, and its columns include `Symbol`, `Date`,
-`Open`, `High`, `Low`, `Close`, `Volume`, and `Vwap`, the volume-weighted average price.
-`busiest` holds the 20 stocks with the most dollars traded, largest first. `risers` holds the 20
+`Open`, `High`, `Low`, `Close`, `Volume`, and `Vwap`. `Vwap` is the volume-weighted average
+price, so `Vwap * Volume` is the dollars traded. `busiest` holds the 20 stocks with the most dollars traded, largest first. `risers` holds the 20
 stocks that rose most from open to close, among those that traded at least a million shares.
 The [stock bars page](docs/datasets/stocks.bars.md) lists every column. To rank another day,
 change both dates. Stocks Basic serves any trading day in the past two years.
@@ -340,8 +337,8 @@ they work on every table the library returns.
 
 ### 2. Compare a few stocks over a year
 
-You get a three-row scorecard with each stock's first and last close of the year, its high and
-low, and its return. A year of daily bars is well inside Stocks Basic's two years of history.
+A three-row scorecard compares Apple, Microsoft, and Nvidia over a year, with each stock's first
+and last close, its high and low, and its return. A year of daily bars is well inside Stocks Basic's two years of history.
 
 `agg_by` reduces each stock's year of daily bars to one row:
 
@@ -562,8 +559,8 @@ plan's history and delay, such as the one for
 
 ### 7. Watch trades arrive, four ways
 
-You get Bitcoin and Ether trades in four live tables, each keeping a different part of one
-stream, plus a running summary. Crypto trades around the clock, so you can run this at any
+Four live tables keep different parts of one stream of Bitcoin and Ether trades, and a fifth
+keeps a running summary. Crypto trades around the clock, so you can run this at any
 hour. It needs a Currencies Starter plan or higher, which streams crypto in real time.
 
 Each verb on the `crypto` query makes a different kind of live table, and all four read one
@@ -619,7 +616,7 @@ connection stays down for five minutes, the tables stop with an error that names
 
 ### 8. Build a live board against the previous close
 
-You get a board of five stocks, with a row for each from the start. Each row shows the previous
+A board of five stocks has a row for each from the start. Each row shows the previous
 trading day's close, the latest minute's close, and the change between them.
 
 It needs a Stocks Starter plan or higher. Starter and Developer stream 15 minutes late. To
@@ -663,8 +660,8 @@ table joins a static one the same way two static tables do.
 
 ### 9. Follow a watchlist with live bars
 
-You get the latest minute bar of each stock on a watchlist, a table you edit, so you can change
-the stocks while the table runs. The plan and the setting are those of
+This board keeps the latest minute bar of each stock on your watchlist, and you can change the
+stocks while it runs. The plan and the setting are those of
 [Example 8](#live-board): Stocks Starter or higher, with `delayed_subscriptions` on Starter and
 Developer.
 
@@ -718,8 +715,8 @@ To add a symbol to `watchlist` by hand in the Deephaven IDE:
 
 ### 10. Start with today's history, then continue live
 
-You get one table of SPY's minute bars for today, with every minute so far from history and
-each new minute added as it ends. Like [Example 8](#live-board), it needs Stocks Starter or
+One table holds every minute bar SPY has had today, read from history, and adds each new minute
+as it ends. Like [Example 8](#live-board), it needs Stocks Starter or
 higher, and `delayed_subscriptions` on Starter and Developer.
 
 The code opens SPY's live stream of minute bars, reads today's history, and merges the two:
@@ -771,8 +768,8 @@ history that continues live, from [Example 10](#backfill-then-live).
 
 ### Stream the options near the money
 
-You get the latest quotes of SPY's options within 2% of SPY's price, and the set of streamed
-contracts follows the price. Streaming option quotes needs Options Advanced, or Options Business
+This recipe streams the latest quotes of SPY's options within 2% of SPY's price, and the set of
+contracts moves as the price does. Streaming option quotes needs Options Advanced, or Options Business
 with Massive's Expansion add-on. Both stream in real time, so you don't need to add options to
 `delayed_subscriptions`.
 
@@ -826,9 +823,8 @@ leave, so keep the filter narrow enough that `near` stays under 1,000 rows.
 
 ### Read the history of a watchlist
 
-You get the daily bars of every symbol on a watchlist, in a table that can follow your edits of
-the list. You can read them three ways, which differ in what happens when you edit the
-watchlist:
+You can read the daily bars of every symbol on a watchlist three ways. They differ in what
+happens when you edit the watchlist:
 
 | Way | When you edit the watchlist | Cost |
 |---|---|---|
@@ -892,8 +888,8 @@ Flat files need a Stocks Starter plan or higher and your [S3 keys](#environment-
 
 ### Adjust prices for splits
 
-You get a stock's prices stated in today's shares on both sides of a split, adjusted by Massive
-or by your own code. When a company splits its stock 15 for 1, each share becomes 15 shares
+This recipe states a stock's prices in today's shares on both sides of a split, first as Massive
+adjusts them and then with your own code. When a company splits its stock 15 for 1, each share becomes 15 shares
 worth a fifteenth of the price. A chart of the prices as traded falls 93% overnight. A
 split-adjusted price restates each earlier price in today's shares, so the series runs on
 without a break. The `history()` of stock and option bars returns split-adjusted prices by
@@ -943,9 +939,11 @@ you aggregate them into weeks or months, because a longer bar has no `Date` for 
 match.
 
 `by_hand` and `adjusted` can differ around a stock dividend. The splits dataset lists stock
-dividends with an `AdjustmentType` of `stock_dividend`, and the code applies them. Massive
-doesn't say whether its own adjusted bars do. To leave stock dividends out, read the splits with
-`filters={"adjustment_type_any_of": ["forward_split", "reverse_split"]}`.
+dividends as well as splits, with an `AdjustmentType` of `stock_dividend`, and the code applies
+every row. Massive doesn't say whether its own adjusted bars apply stock dividends. Before you
+drop a row by its `AdjustmentType`, check its `SplitFrom` and `SplitTo`, because a company can
+carry out a split as a stock dividend. O'Reilly paid this one as a dividend of 14 new shares
+for each share held.
 
 A table that merges adjusted history with live bars, as [Example 10](#backfill-then-live) does,
 shows a jump if it runs across a split. From the split's date on, live bars arrive in the new
@@ -957,23 +955,21 @@ the split to put both on the same shares.
 ## Fix common errors
 
 Most errors after setup come from what your plan includes or from how a call is written. A plan
-refusal raises `dm.EntitlementError`, and a mistake in a call raises `ValueError` or `TypeError`
-before any request goes out. Find the message you see in the first column:
+refusal raises `dm.EntitlementError`, and a mistake in a call raises `ValueError` before any
+request goes out. These six are the ones new users meet first, and each links to its full entry
+in Troubleshooting:
 
-| You see | Why | What to do |
-|---|---|---|
-| An `EntitlementError` that says `... would be delayed (Massive reports ...)` | Massive sends this data late on your plan, and the session accepts delayed data only for the subscriptions you list | Add the setting the message shows, as in [settings in code](#settings-in-code) |
-| `... refused the subscription to ...` | Your plan doesn't stream this data | Check the plan table on the dataset's page, which the [dataset index](docs/datasets/README.md) links. Stream a dataset your plan includes, or read this one with `poll()` or `history()` if its plan table lists REST. |
-| `Your plan doesn't include this data timeframe` | The range starts before your plan's history begins | Start inside your plan's history, which the dataset's plan table gives, such as two years of bars on Stocks Basic |
-| `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan doesn't include this dataset | Read the message, which names another dataset where one exists |
-| `ValueError` naming a symbol | The symbol isn't spelled as Massive spells it, such as `aapl` for `AAPL` | Use Massive's spelling, from the table in [Example 2](#compare-stocks). To convert another spelling, such as Yahoo's `BRK-B`, call `dm.canonical_symbol`, whose `help()` lists the spellings it reads. |
-| `timespan must be dm.Timespan` | This argument takes one of the `dm.Timespan` constants, not a string | Write `dm.Timespan.DAY`, not `"day"` |
-| `AttributeError` naming a verb | The dataset doesn't have that verb | Use a verb the message lists |
-| A live table stays empty | The market is closed, your plan is delayed and the market opened less than 15 minutes ago, or the stream failed | Run `m.streams()`, which shows each live table's state and error |
-| A read is slow on a Basic plan | Massive's Basic plans allow five requests a minute | Run `m.rate_limits()` to see the pace, or read fewer symbols |
-| A table keeps running after `del` | `del` stops a live table only once garbage collection reclaims it, which can take minutes | Call `m.release(table)`, as in [Example 5](#follow-the-news) |
+| You see | What to do |
+|---|---|
+| `EntitlementError` with `... would be delayed (Massive reports ...)` | Add the setting the message shows, as in [settings in code](#settings-in-code). See [plan limits and refusals](docs/troubleshooting.md#plan-messages). |
+| `HTTP 403` from `fetch()`, `poll()`, or `history()` | Use the dataset the message names, if it names one. See [plan limits and refusals](docs/troubleshooting.md#plan-messages). |
+| `Your plan doesn't include this data timeframe` | Start the range inside your plan's history. See [plan limits and refusals](docs/troubleshooting.md#plan-messages). |
+| `ValueError` naming a symbol | Spell it as Massive does, as in [Example 2](#compare-stocks). See [calls the library refuses](docs/troubleshooting.md#refused-calls). |
+| A live table stays empty | Run `m.streams()`, which shows each live table's state and error. See [live tables](docs/troubleshooting.md#live-table-messages). |
+| A read is slow on a Basic plan | Run `m.rate_limits()` to see the pace. See [plan limits and refusals](docs/troubleshooting.md#plan-messages). |
 
-[Troubleshooting](docs/troubleshooting.md) lists every message and says how to report a bug.
+[Troubleshooting](docs/troubleshooting.md) has many more messages and symptoms. It also explains
+the diagnostics tables and the debug log, and says how to report a bug.
 
 <a id="where-next"></a>
 
