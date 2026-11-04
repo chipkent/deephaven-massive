@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: teaching-example-live-board
+expected_outcome: |
+  example-8.md follows the teaching-sequence shape: a task heading, an introducing sentence, a short runnable block that joins a live last_by() of minute bars to a static previous-day read, what you see, one to three sentences of why with a link, and the plan line (Stocks Starter or higher, with the delayed-data setting). It passes the editor's rubric and doesn't read as AI.
