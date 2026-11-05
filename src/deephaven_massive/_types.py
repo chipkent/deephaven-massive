@@ -84,9 +84,9 @@ class _All(Enum):
 ALL: Final = _All.ALL
 """Every symbol: a stream of the whole market, a whole flat file, or a full-market snapshot.
 
-`ALL` is accepted by stream verbs, by every per-class `snapshots()`, and by `history()` when a
-flat file or a grouped-daily REST path exists. Everywhere else it raises `ValueError` naming the
-alternative.
+`ALL` is accepted by the stream methods, by every per-class `snapshots()`, and by `history()`
+when a flat file or a grouped-daily REST path exists. Everywhere else it raises `ValueError`
+naming the alternative.
 """
 
 Symbols: TypeAlias = str | Sequence[str] | Table | _All

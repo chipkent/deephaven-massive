@@ -6,30 +6,31 @@
   <img alt="Placeholder for the hero screenshot: the project name on a plain background." src="docs/images/hero-light.png">
 </picture>
 
-![Python 3.11 or later](https://img.shields.io/badge/python-3.11%2B-blue)
-![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)
+[![CI](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml/badge.svg)](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml)
 
 Market data from [Massive](https://massive.com) as live and historical
 [Deephaven](https://deephaven.io) tables, for traders and quants who work in Python.
 
-Testing a trading idea usually starts with data plumbing: one program for history, another for
-the live feed, and a streaming system before you see a live number. Here, one query gives both
-the history and the live table, with the same columns.
+- **Research faster.** A year of bars, or every listed US stock on one day, is one line.
+- **Go live without a rewrite.** The query that reads history also opens the live table.
+- **Build live boards, not infrastructure.** Your stocks' live change since the previous close
+  is [about ten lines](#change-since-close).
+- **Spend your time trading, not coding.** Live tables that follow your watchlist are already
+  built.
 
-- Read a year of bars, or every listed US stock on one day, in one line.
-- See each stock's change from the previous close, updated every minute.
-- Live feeds, reconnects, and tables that follow your watchlist come built, so your code is the
-  query and the table logic.
-
-On Stocks Basic, Massive's free plan:
+This charts a year of Apple's daily closes on Massive's free Stocks Basic plan:
 
 ```python
+import deephaven.plot.express as dx
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
-day = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2026-10-30", "2026-10-30")
-# day: a row per stock, with its open, high, low, close, and volume
+apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-11-03", "2026-10-30")
+chart = dx.line(apple, x="Date", y="Close")
 ```
+
+Paste it into the Deephaven IDE's console to see the chart. You never download or manage a data
+file.
 
 [Install the library](#install), then start the [tutorial](#tutorial) with a week of Apple's
 prices.
@@ -127,63 +128,8 @@ in your browser. Keep the terminal open while you work, and press Control-C ther
 server.
 
 Next, run the tutorial's [first example](#read-daily-bars). If a step fails,
-[Troubleshooting](docs/troubleshooting.md#setup-messages) lists each setup message and its fix.
-
-<a id="configuration"></a>
-
-## Configuration
-
-Examples 1 to 7 need only the API key you set in Install. Everything else here is optional.
-
-<a id="environment-variables"></a>
-
-### Environment variables
-
-Set these in your shell's startup file, as Install does for the keys. After you set one, stop
-the server and start it from a new terminal, as [Start the server](#start-the-server) does.
-
-| Variable | What you get | Default |
-|---|---|---|
-| `MASSIVE_API_KEY` | Access to Massive. Every session needs it. | Unset; required |
-| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` from Massive's flat files, on plans that include them. Index values have no other history source, and trades, quotes, and as-traded bars use the files for the whole market or for 50 or more symbols. Set both or neither. | Unset |
-| `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Your settings file, read by `dm.MassiveConfig.from_file()` called with no path | Unset |
-| `DEEPHAVEN_MASSIVE_LOG` | The library's log at the level you name: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Warnings and errors only, in the server's terminal |
-| `DEEPHAVEN_MASSIVE_LOG_FILE` | The log in this file instead of the terminal. Set alone, it logs at `DEBUG`. | Unset |
-| `HTTPS_PROXY`, `NO_PROXY` | A proxy for every connection to Massive, and the hosts that skip it | Your system's proxy on macOS; none on Linux |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own. Flat-file reads use only `SSL_CERT_FILE`. | The `certifi` bundle |
-
-[Turn on the debug log](docs/troubleshooting.md#the-log) explains each log level and how to
-record what the library does, and [Report a bug](docs/troubleshooting.md#report-a-bug) says how
-to attach the log to an issue.
-
-<a id="massive-config"></a>
-
-### MassiveConfig
-
-`dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`, or leave
-it out for the defaults. Each Massive subscription (Stocks, Options, and so on) has its own plan,
-and two settings match a session to your plans:
-
-| Setting | Set it when | What changes |
-|---|---|---|
-| `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
-| `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
-
-This session is for an account with Stocks Starter and Options Basic:
-
-```python
-import deephaven_massive as dm
-
-config = dm.MassiveConfig(
-    delayed_subscriptions={dm.Subscription.STOCKS},
-    rest_basic_subscriptions={dm.Subscription.OPTIONS},
-)
-m = dm.MassiveSession(config)
-```
-
-`dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as the
-[plans and settings](#what-your-plan-allows) example shows. `help(dm.MassiveConfig)` lists every
-setting and its default.
+[Troubleshooting](docs/troubleshooting.md#setup-messages) lists common setup problems and their
+fixes.
 
 <a id="tutorial"></a>
 
@@ -430,8 +376,9 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 `dm.EntitlementError`.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
-script. Your keys stay in the environment, never in the file.
-[MassiveConfig](#massive-config) lists the settings.
+script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
+covers the environment variables and the settings a new user needs, and the
+[settings page](docs/configuration.md) lists every setting a file can hold.
 
 Next, a live table that streams instead of polling.
 
@@ -583,6 +530,69 @@ Deephaven's guide to
 [creating dashboards](https://deephaven.io/core/ui/docs/creating-layouts/creating-dashboards/)
 shows more layouts.
 
+<a id="configuration"></a>
+
+## Configuration
+
+The library reads your keys and a few options from environment variables, and every other
+setting from `dm.MassiveConfig`.
+
+<a id="environment-variables"></a>
+
+### Environment variables
+
+Set these in your shell's startup file, as Install does for the keys. After you set one, stop
+the server and start it from a new terminal, as [Start the server](#start-the-server) does.
+
+| Variable | What you get | Default |
+|---|---|---|
+| `MASSIVE_API_KEY` | Access to Massive. Every session needs it, unless your code passes the key. | Unset |
+| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` from Massive's flat files, on plans that include them. Index values have no other history source, and trades, quotes, and as-traded minute and daily bars use the files for the whole market or for 50 or more symbols. Set both or neither. | Unset |
+| `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Your settings file, read by `dm.MassiveConfig.from_file()` called with no path | Unset |
+| `DEEPHAVEN_MASSIVE_LOG` | The library's log at the level you name: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Warnings and errors only, in the server's terminal |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | The log in this file instead of the terminal. Set alone, it logs at `DEBUG`. | Unset |
+| `HTTPS_PROXY`, `NO_PROXY` | A proxy for every connection to Massive, and the hosts that skip it | Your system's proxy on macOS; none on Linux |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own. Flat-file reads use only `SSL_CERT_FILE`. | The `certifi` bundle |
+
+[Turn on the debug log](docs/troubleshooting.md#the-log) explains each log level and how to
+record what the library does, and [Report a bug](docs/troubleshooting.md#report-a-bug) says how
+to attach the log to an issue.
+
+<a id="massive-config"></a>
+
+### MassiveConfig
+
+`dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`, or leave
+it out for the defaults. Massive sells Stocks, Options, and its other subscriptions separately,
+each on its own plan. Two settings match a session to your plans:
+
+| Setting | Set it when | What changes |
+|---|---|---|
+| `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
+| `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
+
+This session is for an account that has bought only Stocks Starter. Every product you haven't
+bought is on its free Basic plan:
+
+```python
+import deephaven_massive as dm
+
+config = dm.MassiveConfig(
+    delayed_subscriptions={dm.Subscription.STOCKS},
+    rest_basic_subscriptions={
+        dm.Subscription.OPTIONS,
+        dm.Subscription.INDICES,
+        dm.Subscription.CURRENCIES,
+        dm.Subscription.FUTURES,
+    },
+)
+m = dm.MassiveSession(config)
+```
+
+`dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
+[Example 8](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
+setting, its values, and its default, with an example settings file.
+
 <a id="next-steps"></a>
 
 ## Next steps
@@ -591,7 +601,8 @@ shows more layouts.
 - The [dataset index](docs/datasets/README.md) has a page for each of the 112 datasets, with its
   arguments, its columns, and the plans that include it. `dm.datasets()` lists them in the
   console.
-- [Troubleshooting](docs/troubleshooting.md) gives each error message and its fix.
+- [Troubleshooting](docs/troubleshooting.md) covers the problems whose message doesn't say how
+  to fix them, and how to report a bug.
 
 <a id="contributing"></a>
 

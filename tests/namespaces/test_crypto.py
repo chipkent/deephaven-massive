@@ -282,7 +282,7 @@ def test_daily_open_close_schema() -> None:
         ("Open", "double"),
         ("Close", "double"),
         ("ClosingTrades", "String"),
-        ("IsUtc", "boolean"),
+        ("IsUtc", "Boolean"),
         ("OpenTrades", "String"),
         ("TimestampInsert", "Instant"),
     ]

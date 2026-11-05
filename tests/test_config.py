@@ -1087,3 +1087,114 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
     assert not getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
+# --- The settings reference --------------------------------------------------------------------
+
+CONFIGURATION_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
+
+
+def test_the_committed_settings_page_is_the_rendered_one() -> None:
+    page = CONFIGURATION_PAGE.read_text(encoding="utf-8")
+    assert page == _config.with_settings_reference(page), (
+        "docs/configuration.md is out of date; run `uv run python scripts/render_reference.py`"
+    )
+
+
+def test_the_reference_is_one_row_per_file_setting_in_order() -> None:
+    reference = _config.settings_reference()
+    rows = [line for line in reference.splitlines() if line.startswith("| `")]
+    assert [row.split("`")[1] for row in rows] == list(_config._SETTING_ORDER)
+    outage = "A number of seconds, `0` or more, such as `600`"
+    texts = _config._setting_texts()
+    assert f"| `max_outage` | {texts['max_outage']} | {outage} | `300` |" in reference
+    assert "| `flush_interval` |" in reference
+    assert "`0.05` |" in reference
+    assert "| `log`, `ignore`, or `raise` | `log` |" in reference
+    assert "api_key" not in reference
+    assert reference.startswith("`help(dm.MassiveConfig)` gives each setting's full behavior.")
+
+
+@pytest.mark.usefixtures("key")
+def test_every_value_forms_example_is_accepted_by_a_settings_file(tmp_path: Path) -> None:
+    forms = _config._value_forms()
+    assert set(forms) == set(_config._CONVERTERS)
+    for name, form in forms.items():
+        example = re.search(r"such as `([^`]+)`", form) or re.search(r"`([^`]+)`$", form)
+        assert example is not None, form
+        # Raises if the settings file refuses the example.
+        MassiveConfig.from_file(_settings(tmp_path, f"{name}: {example[1]}\n"))
+
+
+def test_delayed_subscriptions_offers_only_what_it_accepts() -> None:
+    form = _config._value_forms()["delayed_subscriptions"]
+    assert "`currencies`" not in form
+    assert "`currencies`" in _config._value_forms()["rest_basic_subscriptions"]
+
+
+def test_the_reference_takes_each_entry_from_the_docstring_without_its_default() -> None:
+    texts = _config._setting_texts()
+    assert set(texts) == {f.name for f in dataclasses.fields(MassiveConfig)}
+    # The default comes from the code, so the entry's last sentence giving it is left out, and
+    # the paragraphs after the first are detail for help(), not for the page.
+    assert texts["s3_bucket"] == "Sets the S3 bucket flat files are read from."
+    assert "Defaults to" not in texts["reconnect_backoff"]
+    assert "EntitlementError" in (MassiveConfig.__doc__ or "")
+    assert "EntitlementError" not in texts["delayed_subscriptions"]
+    assert texts["unavailable_symbols"] == (
+        "Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't "
+        "request with the arguments you gave it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "written"),
+    [
+        (OnError.RAISE, "raise"),
+        (frozenset({Subscription.STOCKS, Subscription.OPTIONS}), "[options, stocks]"),
+        (frozenset(), "[]"),
+        ({AssetClass.STOCKS: "socket.massive.com"}, "{stocks: socket.massive.com}"),
+        ({}, "{}"),
+        (0.05, "0.05"),
+        (300.0, "300"),
+        (8, "8"),
+        ("flatfiles", "flatfiles"),
+    ],
+)
+def test_a_default_is_written_as_a_settings_file_writes_it(value: object, written: str) -> None:
+    assert _config._file_value(value) == written
+
+
+def test_the_reference_refuses_an_order_that_misses_or_repeats_a_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = _config._SETTING_ORDER
+    monkeypatch.setattr(_config, "_SETTING_ORDER", order[1:])
+    with pytest.raises(ValueError, match="not every file setting once"):
+        _config.settings_reference()
+    monkeypatch.setattr(_config, "_SETTING_ORDER", (*order, order[0]))
+    with pytest.raises(ValueError, match="not every file setting once"):
+        _config.settings_reference()
+
+
+def test_only_the_generated_part_of_the_page_is_rewritten() -> None:
+    start, end = _config.SETTINGS_REFERENCE_START, _config.SETTINGS_REFERENCE_END
+    page = f"# Hand\n\nIntro.\n\n{start}\nstale\n{end}\nAfter.\n"
+    rewritten = _config.with_settings_reference(page)
+    assert rewritten.startswith(f"# Hand\n\nIntro.\n\n{start}\n\n`help(dm.MassiveConfig)`")
+    assert rewritten.endswith(f"\n{end}\nAfter.\n")
+    assert "stale" not in rewritten
+    assert _config.with_settings_reference(rewritten) == rewritten
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "no markers",
+        f"{_config.SETTINGS_REFERENCE_START} only the start",
+        f"{_config.SETTINGS_REFERENCE_END} then {_config.SETTINGS_REFERENCE_START}",
+    ],
+)
+def test_a_page_without_both_markers_is_refused(page: str) -> None:
+    with pytest.raises(ValueError, match="SETTINGS_REFERENCE_START and SETTINGS_REFERENCE_END"):
+        _config.with_settings_reference(page)

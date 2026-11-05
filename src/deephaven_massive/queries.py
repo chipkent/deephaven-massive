@@ -1,7 +1,7 @@
 """The query classes and argument types, public for type annotations.
 
 A dataset method such as `m.stocks.trades("AAPL")` returns a query, and the query's class says
-which verbs it has. Import the classes from here to annotate code of your own, such as a helper
+which methods it has. Import the classes from here to annotate code of your own, such as a helper
 that takes any dataset with a live stream and keeps each symbol's latest row::
 
     from deephaven.table import Table
@@ -22,14 +22,14 @@ that takes any dataset with a live stream and keeps each symbol's latest row::
 | `Query` | A REST dataset: `fetch()` and `poll(interval)`. |
 | `StreamQuery` | A WebSocket dataset: `blink()`, `append_only()`, `ring(capacity)`, `last_by()`. |
 | `HistoryQuery` | A dataset with history only: `history(start, end=None)`. |
-| `StreamHistoryQuery` | The stream verbs and `history()`; a subclass of both. |
+| `StreamHistoryQuery` | The stream methods and `history()`; a subclass of both. |
 | `Symbols` | What a market-data dataset takes as its instruments. |
 | `DateLike` | What a time bound (`start`, `end`, `as_of`, a day) takes. |
 | `FilterValue` | What a value of a `filters` mapping takes. |
 
-Every query also has `columns()`, and each class's docstring describes its verbs. Users never
+Every query also has `columns()`, and each class's docstring describes its methods. Users never
 construct a query: the dataset methods do, after checking their arguments. `dm.datasets()`
-lists the verbs of every dataset.
+lists the methods of every dataset.
 
 `import deephaven_massive` does not import this module, so annotating costs nothing until it
 is used. Like the session, it needs a running Deephaven JVM.

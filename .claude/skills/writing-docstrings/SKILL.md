@@ -1,6 +1,6 @@
 ---
 name: writing-docstrings
-description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or verb, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link their generated docs/datasets/ page (by full GitHub URL) instead of repeating shared argument rules, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/troubleshooting.md (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or query method, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link their generated docs/datasets/ page (by full GitHub URL) instead of repeating shared argument rules, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/troubleshooting.md (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing docstrings
@@ -24,18 +24,20 @@ that disagrees with the code is a bug.
   exception and when; side effects (network calls, threads, subscriptions, tables created); and
   blocking and threading constraints.
 
-## Dataset methods and verbs link instead of repeating
+## Dataset methods and query methods link instead of repeating
 
 An argument many datasets share (`symbols`, `start`, `end`, `as_of`, `sort`, `order`, `limit`,
 `filters`, `adjusted`, `timespan`, `multiplier`, `venues`) has one rule, written once in
-`src/deephaven_massive/_datasets/argument_rules.py`. `scripts/render_reference.py` prints it in
-the Arguments table of every dataset page that takes the argument, beside the dataset's own
-line from its docstring's `Args`. A rule about a public type, such as `dm.Order` or
+`src/deephaven_massive/_datasets/argument_rules.py`. `scripts/render_reference.py` prints the
+shared rules once, under "Shared arguments" on the dataset index, `docs/datasets/README.md`,
+each with its own anchor. A dataset page's Arguments table links each shared argument's name to
+its rule on the index and prints beside it only the dataset's own line from its docstring's
+`Args`. A rule about a public type, such as `dm.Order` or
 `dm.HistorySource`, lives in that type's docstring. A dataset docstring:
 
 - gives each argument one line that says only what is particular to this dataset, with no link:
-  the page carries the shared rule. Every argument gets a line, because that line fills the
-  page's "For this dataset" column;
+  the index carries the shared rule. Every argument gets a line, because that line fills the
+  page's Description column;
 - names its page, `docs/datasets/<dataset>.md`, by its full GitHub URL in its Returns line, so
   it opens from an IDE or the console;
 - runs about 15 to 25 lines: the summary, what a row is and what is unusual, one Args line per

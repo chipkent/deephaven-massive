@@ -20,6 +20,8 @@ The person who spawned you gives you:
   aren't in front of you, say so on your sheet, and mark that page's claims UNCHECKED rather
   than unsourced.
 - A path to write the score sheet to, if they want a file.
+- For a revised hook or section, the owner-approved version. Its intent and content are
+  locked: flag a problem in them, but never rewrite them.
 
 Read the whole standard first, `docs/dev/user-docs.md`, and especially "This project": the
 readers, their pains, the owner's requirements, and the page map. The owner's list of sections
@@ -54,7 +56,12 @@ Read the first 90 words of prose after the title, about 20 seconds of reading, a
 - How many words of prose come before the first code sample or call to action? Count them.
 - Does any sentence in the opening carry an aside, a history note ("formerly ..."), a caveat,
   or a plan detail?
-- Is there a sample? If so, is it six lines or fewer, with its result visible?
+- Is there a sample? If so, is it six lines or fewer, with its result visible (a chart, or a
+  comment that shows what the table holds), followed by one or two plain sentences on how
+  little it took? Is it a net gain for a 20-second read? A sample with no visible result is a
+  fault.
+- Given an approved version, is the revision at least as clear and direct? Each place it
+  dilutes the approved message (a hedge, an aside, mechanism, a vaguer outcome) is a fault.
 
 The opening **fails the twenty-second test** if the who, what, and outcome aren't all clear in
 those 90 words, or if more than 150 words of prose come before the sample or call to action.
@@ -110,8 +117,15 @@ reader who returns later gets `command not found`.
 - Sections: for this project's pages, is every section one the owner asked for? Name each one
   that isn't. For any page, name content this reader doesn't need at this point (reference
   detail, mechanism, edge cases) and where it belongs.
+- Order: does the page bury the lead? A landing page runs hook, Install, the tutorial, then
+  reference. Install reaches the first result by the shortest path and sets every key in one
+  step. Reference material (settings, environment variables, configuration tables) between
+  Install and the first result is a fault.
 - Placement: is each setting documented with the object it belongs to? Does each environment
-  variable or setting say what the reader gets, rather than how the library uses it?
+  variable or setting say what the reader gets, rather than how the library uses it? Does each
+  configuration concept link to its reference page (`docs/configuration.md`)?
+- Badges: does each badge render for the page's viewers and stay current? A static badge that
+  can go stale is a fault.
 - Steps: is every step needed? Is anything the reader sets up once (keys, an environment) split
   across steps or sections? Is any choice stated as "do A", other material, then "or B"?
 - Headings: does each say what the section delivers, in the reader's words, as an imperative

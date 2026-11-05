@@ -43,8 +43,14 @@ outline skips this step, and so does a task whose request already fixes the outl
 Write to the standard. These are the faults that sank the last README; check for each as you
 go:
 
-- The hook: who, what, and outcome in the first sentence; the reader's job-level pain; about 90
-  words before the sample or call to action; no asides or caveats.
+- The hook: who, what, and outcome in the first sentence; the reader's job-level pain in
+  short bullets led by bold outcomes; about 90 words before the sample or call to action; no
+  asides or caveats. A sample stays only if it shows a visible result, such as a chart.
+- Order: hook, Install, the tutorial, then reference. Install reaches the first result by the
+  shortest path and sets every key in one step; settings and environment variables never sit
+  between it and the first result.
+- Links: every configuration concept links to its generated reference page
+  (`docs/configuration.md`).
 - Numbers: none without a source. No setup times, memory minimums, or "about a minute".
 - Commands: each runs as written where the last step left the reader. A new terminal loses the
   activated environment.
@@ -66,9 +72,19 @@ Fix every FAIL. Judge every WARN: it's a hint, and some are fine (a numbered ins
 sourced "15 minutes late"). The checker can't see whether the page works as a whole; the
 editor does that.
 
-### 5. Grade with the editor, and revise
+### 5. Check the facts, grade with two editors, and revise
 
-Spawn a fresh subagent, which hasn't seen your draft being written, with this brief:
+Owner-approved intent and content are locked: a grader may flag them, but never rewrites them.
+Wording may improve, as long as it never dilutes the approved message. Report a flag on
+approved content to the owner instead of acting on it.
+
+Spawn one fresh subagent to fact-check: it traces every claim, command, and column name in the
+changed lines and any new page to its source and marks each SOURCED, FALSE, or UNSOURCED. Fix
+every FALSE or UNSOURCED claim before grading.
+
+Then spawn one pair of fresh, independent graders, which haven't seen your draft being written,
+each with this brief, scoped to the changed sections, and give them the approved version of any
+revised hook to compare against:
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly. Grade
@@ -76,10 +92,12 @@ Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exac
 root for sources. Write the score sheet to <path> and return it.
 ```
 
-Revise from the sheet. Fix each fault's pattern everywhere it occurs, not only the quoted line,
-and rewrite a paragraph with several faults rather than patching it. Answer every reader's "no"
-on the simplicity question: that verdict alone fails the page. Then grade again with a new
-subagent, giving it the previous sheet to check against.
+Apply only the fixes both sheets agree on, plus any false claim either finds. Fix each fault's
+pattern everywhere it occurs, not only the quoted line, and rewrite a paragraph with several
+faults rather than patching it. Answer every reader's "no" on the simplicity question: that
+verdict alone fails the page. Fix wording nits directly, with no new round. Grade again with a
+second pair, given the first pair's sheets, only when the first pair finds a false or unsourced
+claim or the page misses the bar.
 
 Grade a page at most twice. A page still short of the pass bar after its second grade goes to
 the owner with both graders' sheets and what blocks it, instead of another round. Never call a
@@ -95,8 +113,8 @@ run `uv run pytest tests/test_docs.py -q`. If you moved an anchor, rewrite its c
 
 ### 7. Show the owner
 
-Never tell the owner a page is ready to read until a fresh editor's grade passes the bar: a
-holistic score of 9 or more, all four readers finding it simple and easy, no unsourced or false
+Never tell the owner a page is ready to read until both fresh graders pass it: a mean
+holistic score of 9 or more, no caps, all four readers finding it simple and easy, no unsourced or false
 claim, and no failing command. Until then, report what blocks it.
 
 Hand over the page with the final score sheet, the list of facts only a run with a Massive key

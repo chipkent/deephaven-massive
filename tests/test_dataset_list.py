@@ -10,7 +10,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive import _dataset_list
 from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS, dataset_calls
-from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall
+from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall, QueryMethod
 from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._session import CATALOG
 
@@ -31,7 +31,7 @@ def test_one_row_per_dataset_in_catalog_order(dh_to_pylist: ToPylist) -> None:
         "Dataset": dtypes.string,
         "Call": dtypes.string,
         "Summary": dtypes.string,
-        "Verbs": dtypes.string_array,
+        "Methods": dtypes.string_array,
         "Transports": dtypes.string_array,
         "Documentation": dtypes.string,
     }
@@ -44,14 +44,14 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
         "Dataset": "stocks.trades",
         "Call": "m.stocks.trades",
         "Summary": CATALOG.by_name["stocks.trades"].summary,
-        "Verbs": stream_and_history,
+        "Methods": stream_and_history,
         "Transports": ["REST", "flat files", "WebSocket"],
         "Documentation": f"{_PAGES}stocks.trades.md",
     }
-    assert rows["stocks.last_trade"]["Verbs"] == ["fetch", "poll"]
+    assert rows["stocks.last_trade"]["Methods"] == ["fetch", "poll"]
     assert rows["stocks.last_trade"]["Transports"] == ["REST"]
     # Bars stream at some timespans only; the dataset lists every verb one of its calls has.
-    assert rows["stocks.bars"]["Verbs"] == stream_and_history
+    assert rows["stocks.bars"]["Methods"] == stream_and_history
     ratios = rows["stocks.financials.ratios"]
     assert ratios["Documentation"] == f"{_PAGES}stocks.financials.ratios.md"
     assert rows["snapshots"]["Call"] == "m.snapshots"
@@ -59,7 +59,7 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
 
 
 def test_the_list_can_be_filtered_by_verb(dh_to_pylist: ToPylist) -> None:
-    streams = dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")
+    streams = dm.datasets().where("Arrays.asList(Methods).contains(`blink`)")
     names = {row["Dataset"] for row in dh_to_pylist(streams)}
     assert "stocks.trades" in names
     assert "stocks.last_trade" not in names
@@ -89,14 +89,28 @@ def test_every_dataset_has_its_call() -> None:
         # Each argument's entry of the docstring's `Args`, its lines joined.
         descriptions=(
             "Stock tickers, or `dm.ALL`.",
-            "The bar unit, any but `SESSION`; required.",
-            "Units per bar, 1 by default; only 1 streams.",
-            "Split-adjusted prices, served by REST only.",
+            "The bar's unit, any but `dm.Timespan.SESSION`.",
+            "Units per bar.",
+            "Adjusts volume as well as prices.",
         ),
+        # Each verb's call, with its positional arguments, and its docstring's summary.
+        methods=calls["stocks.bars"].methods,
+    )
+    methods = {m.name: m for m in calls["stocks.bars"].methods}
+    assert list(methods) == ["blink", "append_only", "ring", "last_by", "history"]
+    assert methods["ring"] == QueryMethod(
+        "ring", "ring(capacity)", "The latest `capacity` rows the stream sends."
+    )
+    assert methods["history"].call == "history(start, end=None)"
+    assert methods["last_by"].call == "last_by(by='Symbol')"
+    poll = calls["stocks.dividends"].methods[1]
+    assert poll == QueryMethod(
+        "poll", "poll(interval)", "A live table that fetches the query again every `interval`."
     )
     # An entry that runs over several lines is joined into one.
-    assert calls["stocks.dividends"].descriptions[2] == (
-        "The last ex-dividend date; without it, announced dividends still to come are returned too."
+    assert calls["stocks.previous_day_bar"].descriptions[0] == (
+        "Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use "
+        "`m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`."
     )
     # The session's own dataset method, and defaults written as a user types them.
     assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")

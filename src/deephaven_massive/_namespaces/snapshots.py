@@ -26,7 +26,7 @@ __all__ = ["DATASETS", "SNAPSHOTS"]
 
 SNAPSHOTS: Final = DatasetSpec(
     name="snapshots",
-    summary="The current state of tickers of any asset classes, from Massive's unified snapshot.",
+    summary="The current state of tickers of any asset class, from Massive's unified snapshot.",
     fetch_path="/v3/snapshot",
     serves_current_data=True,
     keys={

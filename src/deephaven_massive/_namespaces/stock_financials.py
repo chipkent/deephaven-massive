@@ -169,10 +169,11 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 class _StockFinancials(Namespace):
-    """`m.stocks.financials`: company financial statements and daily valuation ratios.
+    """The financial statement datasets, reached as `m.stocks.financials`.
 
-    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
-    any thread. Each method builds a query and never blocks.
+    Its methods cover the balance sheets, income statements, and cash flow statements that companies
+    file with the SEC, and Massive's valuation ratios. Each method only builds a query, so it never
+    blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -180,8 +181,8 @@ class _StockFinancials(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            sheets = m.stocks.financials.balance_sheets("AAPL", timeframe=dm.Timeframe.ANNUAL)
-            t = sheets.fetch()
+            annual = m.stocks.financials.balance_sheets("AAPL", timeframe=dm.Timeframe.ANNUAL)
+            sheets = annual.fetch()
     """
 
     __slots__ = ()
@@ -202,38 +203,40 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Balance sheets of US public companies, one row per filer and reporting period.
 
-        Each row is a company's assets, liabilities, and equity at the end of a quarter or fiscal
-        year, as filed with the SEC. A filing can name several share classes, so its `Tickers`
-        column holds the filing's tickers, `symbols` selects the filings that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces the table
-        each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        Each row holds a company's assets, liabilities, and equity at the end of a quarter or fiscal
+        year, as filed with the SEC. A filing that lists several of your tickers appears once for
+        each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
-            timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; None, the default, for both. A balance
-                sheet is a position, so it has no trailing twelve months.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
+            timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; leave it out for both. A balance sheet
+                has no trailing twelve months.
             start: The first period end date.
             end: The last period end date.
-            sort: The field to sort by, such as `"period_end"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.balance_sheets.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, `symbols` is
-                `dm.ALL` or empty, a bound is not a date or ISO date, `end` is before `start`,
-                `order` is given without `sort`, or a filter is unknown, reserved, or of the wrong
-                kind.
+            ValueError: If:
+                - `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`;
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.financials.balance_sheets(
+                annual = m.stocks.financials.balance_sheets(
                     "AAPL", timeframe=dm.Timeframe.ANNUAL
                 ).fetch()
         """
@@ -270,37 +273,39 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Income statements of US public companies, one row per filer and reporting period.
 
-        Each row is a company's revenue, expenses, earnings, and per-share figures for a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so its
-        `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces
-        the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        Each row holds a company's revenue, expenses, earnings, and per-share figures, as filed with
+        the SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing
+        that lists several of your tickers appears once for each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
-                default, for every timeframe.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; leave it out
+                for all three.
             start: The first period end date.
             end: The last period end date.
-            sort: The field to sort by, such as `"period_end"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.income_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, `order` is given without `sort`, or a filter is unknown,
-                reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.financials.income_statements(
+                annual = m.stocks.financials.income_statements(
                     "NVDA", timeframe=dm.Timeframe.ANNUAL
                 ).fetch()
         """
@@ -332,37 +337,39 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
-        Each row is a company's operating, investing, and financing cash flows for a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so its
-        `Tickers` column holds the filing's tickers, `symbols` selects the filings that list any of
-        them, and a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces
-        the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+        Each row holds a company's operating, investing, and financing cash flows, as filed with the
+        SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing that
+        lists several of your tickers appears once for each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; None, the
-                default, for every timeframe.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; leave it out
+                for all three.
             start: The first period end date.
             end: The last period end date.
-            sort: The field to sort by, such as `"period_end"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.cash_flow_statements.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, `order` is given without `sort`, or a filter is unknown,
-                reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.financials.cash_flow_statements("AAPL", start="2024-01-01").fetch()
+                flows = m.stocks.financials.cash_flow_statements("AAPL", start="2024-01-01").fetch()
         """
         return _statement_query(
             self._core,
@@ -389,26 +396,29 @@ class _StockFinancials(Namespace):
     ) -> Query:
         """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
-        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity, and so
-        on) as of its `Date`, computed by Massive from the trailing twelve months of filings and the
-        daily close. The endpoint has no date filter, so there is no `start` or `end`. `poll()`
-        replaces the table each cycle, keyed by `Symbol` and `Date`.
+        Each row holds one ticker's ratios as of its `Date`, such as price to earnings, return on
+        equity, and debt to equity. Massive computes them for the most recent trading day only, so
+        the dataset has no `start` or `end`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker.
-            sort: The field to sort by, such as `"market_cap"`.
+            symbols: Stock tickers; leave it out for every ticker. `dm.ALL` is refused.
+            sort: Any of Massive's field names, such as `"market_cap"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
             filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.ratios.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, `order` is
-                given without `sort`, or a filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

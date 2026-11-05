@@ -2,10 +2,10 @@
 
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
 Deephaven tables: a Python library managed with `uv`. This file wins over every other document.
-The user docs (`README.md`, `docs/troubleshooting.md`, and the generated `docs/datasets/`) and
-the public docstrings are the user contract, enforced by tests; `docs/dev/decisions.md` records
-why the contract is what it is. The library has no users yet, so nothing is kept, aliased, or
-shimmed for compatibility: a rename is an ordinary edit.
+The user docs (`README.md`, `docs/troubleshooting.md`, `docs/configuration.md`, and the
+generated `docs/datasets/`) and the public docstrings are the user contract, enforced by tests;
+`docs/dev/decisions.md` records why the contract is what it is. The library has no users yet,
+so nothing is kept, aliased, or shimmed for compatibility: a rename is an ordinary edit.
 
 ## Commands
 
@@ -18,7 +18,7 @@ setup, whole-suite, and build commands.
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded, own venv
 uv run python -m deephaven_massive._massive.refresh   # regenerate _massive/spec/*.json; no network
-uv run python scripts/render_reference.py             # regenerate docs/datasets/
+uv run python scripts/render_reference.py             # regenerate docs/datasets/ and the settings page
 ```
 
 - `uv.lock` is not committed and `check.sh` upgrades on every run, so a new ruff or mypy release
@@ -83,8 +83,9 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
     layer map, allow lists, or exceptions to pass a change; ask the owner.
 17. **Never edit generated or vendored files by hand**: `_massive/spec/*.json` (through the
     refresh; hand input only in `refresh/lexicon.py`, `overrides.py`, `exclusions.py`, each entry
-    with a reason), `vendor/massive/` (through `refresh --fetch`), and `docs/datasets/` (through
-    `render_reference.py`, committed with its cause). See `docs/dev/spec-refresh.md`.
+    with a reason), `vendor/massive/` (through `refresh --fetch`), and `docs/datasets/` and the
+    settings of `docs/configuration.md` (through `render_reference.py`, committed with their
+    cause). See `docs/dev/spec-refresh.md`.
 18. **Placement and names.** A module holds one subject, named in the first line of its
     docstring; new code goes where that subject is, or in a new module, never in a neighbor
     whose summary would grow "…, and X". No pattern-word module names (`base`, `core`, `common`,
@@ -150,13 +151,14 @@ Several agents work at once, and every collision costs a full check and a paid C
 
 Docstrings serve a person in an IDE or the Deephaven console and an agent that knows only the
 code: a one-line docstring on anything with behavior worth knowing is a defect. User docs have
-three parts: `README.md`, the landing page from install to everyday use; `docs/troubleshooting.md`,
-looked up by message or symptom; and `docs/datasets/`, generated, one page per dataset with its
-arguments, plans, and columns. A rule several datasets share lives once in code
-(`_datasets/argument_rules.py`) and is printed on each dataset page; a dataset docstring gives
-each argument one line and links its page. Follow the `writing-user-docs` skill for any user
-page, or a change to behavior one describes, and the `writing-docstrings` skill for docstrings
-and other text in code. A docstring cites a page or section by its full GitHub URL,
+four parts: `README.md`, the landing page from install to everyday use; `docs/troubleshooting.md`,
+looked up by message or symptom; `docs/configuration.md`, every `MassiveConfig` setting and the
+settings file, its settings generated from the class docstring; and `docs/datasets/`, generated,
+one page per dataset with its arguments, plans, and columns. A rule several datasets share lives
+once in code (`_datasets/argument_rules.py`) and is printed on each dataset page; a dataset
+docstring gives each argument one line and links its page. Follow the `writing-user-docs` skill
+for any user page, or a change to behavior one describes, and the `writing-docstrings` skill for
+docstrings and other text in code. A docstring cites a page or section by its full GitHub URL,
 `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the link opens from
 an IDE or the console; `tests/test_docs.py` rejects a bare path.
 
