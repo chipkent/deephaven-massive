@@ -36,20 +36,23 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
             "- A live table of symbols works as a watchlist. Each symbol you add is read, and "
             "each one you delete stops being read. Deleting a symbol also drops its rows from "
-            "`fetch()`, `history()`, `last_by()` keyed by `Symbol`, and `REPLACE` polls. "
-            "`APPEND` and `UPSERT` polls keep them.\n"
-            "- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no "
-            "filter by symbol. Each dataset's page says which of the two it takes.\n"
-            "- A symbol in text or a list must be Massive's exact ticker: `aapl` raises "
-            "`ValueError` at the call. A table's row that isn't Massive's exact ticker is "
-            "skipped and logged by default, and the table keeps running. "
-            "`MassiveConfig.noncanonical_symbols` changes that. A table whose rows are all "
-            "invalid is refused at the call.\n"
+            "`fetch()`, `history()`, `last_by()` keyed by `Symbol`, and a `poll()` in "
+            "`dm.PollMode.REPLACE` mode. A `poll()` in `dm.PollMode.APPEND` or "
+            "`dm.PollMode.UPSERT` mode keeps them.\n"
+            "- To read every symbol, pass `dm.ALL` on a dataset that takes it, or leave "
+            "`symbols` out on a dataset whose default reads every record. Each dataset's page "
+            "says which.\n"
+            "- Where a dataset takes Massive's tickers, a symbol in text or a list must be "
+            "spelled exactly: `aapl` raises `ValueError` at the call. A table's row that isn't "
+            "Massive's exact ticker is skipped and logged by default, and the table keeps "
+            "running. `MassiveConfig.noncanonical_symbols` changes that. A table with rows, "
+            "none of them Massive's exact ticker, raises `ValueError` at the call.\n"
             "- `dm.canonical_symbol` converts other spellings to Massive's: "
             '`dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, '
             'convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.\n'
             "- A record that lists several symbols, such as a news article, appears once for "
-            "each symbol you named that it lists."
+            "each symbol you named that it lists. A record that lists none of them appears "
+            "once, with a null `Symbol`."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
@@ -71,8 +74,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
             "of June 2. An instant `end` is excluded from the range.\n"
-            "- Leave it out to include records still to come, such as dividends whose "
-            "ex-dividend date hasn't come yet. A query's `history()` without "
+            "- Leave it out to include records dated in the future, such as dividends with a "
+            "future ex-dividend date. A query's `history()` without "
             "`end` reads through now."
         ),
         "date": (
@@ -81,7 +84,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "as_of": (
             "The day to read the data as it stood on, in the same forms as a `start` date. Leave "
-            "it out for today's data. The dataset's plan table says how far back each plan goes."
+            "it out for Massive's latest data. The dataset's plan table says how far back each "
+            "plan goes."
         ),
         "sort": (
             "The field to order the rows by, as Massive names it, such as "
@@ -95,15 +99,16 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "`ValueError`."
         ),
         "limit": (
-            "The most rows Massive returns for the whole request, across every symbol you "
-            "name, in Massive's order.\n"
+            "The most rows to return, in Massive's order. A dataset that reads one symbol per "
+            "request, such as `m.reference.tickers` with symbols named, caps each symbol's rows. "
+            "Every other dataset caps the whole request, across every symbol you name.\n"
             "\n"
             "- To keep the latest rows, sort newest first, such as "
             '`sort="ex_dividend_date", order=dm.Order.DESC`.\n'
-            "- A symbol that comes first can use up the whole limit, so leave `limit` out when "
-            "you need every row of each symbol.\n"
-            "- On a table of symbols, `fetch()` applies the limit to each read: one symbol's, "
-            "or one group's on a dataset that reads several symbols at once."
+            "- Where the cap covers the whole request, a symbol that comes first can use it up, "
+            "so leave `limit` out when you need every row of each symbol.\n"
+            "- On a table of symbols, `fetch()` applies the cap to each of its requests, not to "
+            "the whole table."
         ),
         "filters": (
             "Any other parameter Massive documents for the dataset, as a `dict` from the "

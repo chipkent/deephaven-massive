@@ -121,8 +121,8 @@ _METHODS_ANCHOR: Final = "query-methods"
 
 _METHODS_GUIDE: Final = (
     "Create a session with `m = dm.MassiveSession()`. A dataset method, such as "
-    "`m.stocks.dividends()`, returns a query. A query names the data and reads nothing, and "
-    "its methods read the data and return a Deephaven table."
+    "`m.stocks.dividends()`, returns a query, which names the data and reads nothing. The "
+    "methods below read the data and return a Deephaven table."
 )
 """The paragraph above the index's table of query methods."""
 
@@ -156,7 +156,8 @@ _DIFFERENCES_HEADING: Final = "Columns whose type differs by asset class"
 """The heading of the index's table of the shared columns whose type differs between classes."""
 
 _TYPE_DIFFERENCES: Final = (
-    "Tables of one kind from two asset classes share these columns with different types. To "
+    "The same dataset in two asset classes, such as `m.stocks.snapshots` and "
+    "`m.crypto.snapshots`, gives these columns different types. To "
     "merge two such tables, cast one table's column to the other's type first, such as "
     '`a.update("LastTradeSize = (double) LastTradeSize")`:'
 )

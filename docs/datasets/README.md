@@ -8,7 +8,7 @@ This index lists every dataset by asset class, with the query methods, argument 
 
 ## Query methods
 
-Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.stocks.dividends()`, returns a query. A query names the data and reads nothing, and its methods read the data and return a Deephaven table.
+Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.stocks.dividends()`, returns a query, which names the data and reads nothing. The methods below read the data and return a Deephaven table.
 
 | Method | Returns |
 | --- | --- |
@@ -225,11 +225,11 @@ Each symbol is Massive's ticker, spelled exactly:
 | Futures | `ESZ6` |
 
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
-- A live table of symbols works as a watchlist. Each symbol you add is read, and each one you delete stops being read. Deleting a symbol also drops its rows from `fetch()`, `history()`, `last_by()` keyed by `Symbol`, and `REPLACE` polls. `APPEND` and `UPSERT` polls keep them.
-- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no filter by symbol. Each dataset's page says which of the two it takes.
-- A symbol in text or a list must be Massive's exact ticker: `aapl` raises `ValueError` at the call. A table's row that isn't Massive's exact ticker is skipped and logged by default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table whose rows are all invalid is refused at the call.
+- A live table of symbols works as a watchlist. Each symbol you add is read, and each one you delete stops being read. Deleting a symbol also drops its rows from `fetch()`, `history()`, `last_by()` keyed by `Symbol`, and a `poll()` in `dm.PollMode.REPLACE` mode. A `poll()` in `dm.PollMode.APPEND` or `dm.PollMode.UPSERT` mode keeps them.
+- To read every symbol, pass `dm.ALL` on a dataset that takes it, or leave `symbols` out on a dataset whose default reads every record. Each dataset's page says which.
+- Where a dataset takes Massive's tickers, a symbol in text or a list must be spelled exactly: `aapl` raises `ValueError` at the call. A table's row that isn't Massive's exact ticker is skipped and logged by default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table with rows, none of them Massive's exact ticker, raises `ValueError` at the call.
 - `dm.canonical_symbol` converts other spellings to Massive's: `dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.
-- A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists.
+- A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. A record that lists none of them appears once, with a null `Symbol`.
 
 <a id="start"></a>
 
@@ -248,7 +248,7 @@ The first day or moment of the range. Give `start` and `end` as two dates or two
 The last day, or the moment the range stops, in the same form as `start`.
 
 - A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all of June 2. An instant `end` is excluded from the range.
-- Leave it out to include records still to come, such as dividends whose ex-dividend date hasn't come yet. A query's `history()` without `end` reads through now.
+- Leave it out to include records dated in the future, such as dividends with a future ex-dividend date. A query's `history()` without `end` reads through now.
 
 <a id="date"></a>
 
@@ -260,7 +260,7 @@ One calendar day, in the same forms as a `start` date, and meaning the same day.
 
 ### as_of
 
-The day to read the data as it stood on, in the same forms as a `start` date. Leave it out for today's data. The dataset's plan table says how far back each plan goes.
+The day to read the data as it stood on, in the same forms as a `start` date. Leave it out for Massive's latest data. The dataset's plan table says how far back each plan goes.
 
 <a id="sort"></a>
 
@@ -278,11 +278,11 @@ The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`.
 
 ### limit
 
-The most rows Massive returns for the whole request, across every symbol you name, in Massive's order.
+The most rows to return, in Massive's order. A dataset that reads one symbol per request, such as `m.reference.tickers` with symbols named, caps each symbol's rows. Every other dataset caps the whole request, across every symbol you name.
 
 - To keep the latest rows, sort newest first, such as `sort="ex_dividend_date", order=dm.Order.DESC`.
-- A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol.
-- On a table of symbols, `fetch()` applies the limit to each read: one symbol's, or one group's on a dataset that reads several symbols at once.
+- Where the cap covers the whole request, a symbol that comes first can use it up, so leave `limit` out when you need every row of each symbol.
+- On a table of symbols, `fetch()` applies the cap to each of its requests, not to the whole table.
 
 <a id="filters"></a>
 
@@ -336,7 +336,7 @@ Each column has one of these Deephaven types:
 
 ## Columns whose type differs by asset class
 
-Tables of one kind from two asset classes share these columns with different types. To merge two such tables, cast one table's column to the other's type first, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
+The same dataset in two asset classes, such as `m.stocks.snapshots` and `m.crypto.snapshots`, gives these columns different types. To merge two such tables, cast one table's column to the other's type first, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
 
 | Dataset | Column | Types |
 | --- | --- | --- |

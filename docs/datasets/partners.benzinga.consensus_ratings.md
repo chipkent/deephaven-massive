@@ -39,7 +39,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The requested ticker." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `BuyRatings` | long | The count of 'Buy' ratings from contributing analysts. |
 | `ConsensusPriceTarget` | double | The average price target across all analysts, rounded to 2 decimal places. |
 | `ConsensusRating` | String | The overall rating category determined by the average consensus weight. Possible values: 'strong_buy', 'buy', 'hold', 'sell', 'strong_sell'. |
