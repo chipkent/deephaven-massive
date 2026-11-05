@@ -38,7 +38,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). |
@@ -67,7 +67,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TodaysChange` | double | The value of the change from the previous day. |
 | `TodaysChangePerc` | double | The percentage change since the previous day. |
 | `Updated` | Instant | The last updated timestamp. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -117,4 +117,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

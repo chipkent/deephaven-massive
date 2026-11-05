@@ -47,12 +47,12 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. |
 | `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. |
 | `ShortInterest` | long | The total number of shares that have been sold short but have not yet been covered or closed out. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -78,4 +78,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

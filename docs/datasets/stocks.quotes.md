@@ -42,8 +42,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
+| `Timestamp` | Instant | The row's event time. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket |
 | `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST, flat files, WebSocket |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket |
@@ -56,7 +56,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `SequenceNumber` | long | The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day. | REST, flat files, WebSocket |
 | `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket |
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this quote. | REST, flat files |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page, flat-file block or WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
 
 <a id="massive-fields"></a>
 
@@ -94,4 +94,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

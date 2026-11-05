@@ -35,15 +35,16 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
             "- A live table of symbols works as a watchlist. Each symbol you add is read, and "
-            "each one you delete stops being read. `fetch()`, `history()`, `last_by()` keyed "
-            "by `Symbol`, and a `poll()` in `dm.PollMode.REPLACE` mode also drop a deleted "
-            "symbol's rows. `APPEND` and `UPSERT` polls keep them.\n"
+            "each one you delete stops being read. Deleting a symbol also drops its rows from "
+            "`fetch()`, `history()`, `last_by()` keyed by `Symbol`, and `REPLACE` polls. "
+            "`APPEND` and `UPSERT` polls keep them.\n"
             "- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no "
             "filter by symbol. Each dataset's page says which of the two it takes.\n"
-            "- Text or a list with a symbol that isn't Massive's exact ticker, such as `aapl`, "
-            "raises `ValueError` at the call. Such a row of a table is skipped and logged by "
-            "default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes "
-            "that. A table with no valid row is refused at the call.\n"
+            "- A symbol in text or a list must be Massive's exact ticker: `aapl` raises "
+            "`ValueError` at the call. A table's row that isn't Massive's exact ticker is "
+            "skipped and logged by default, and the table keeps running. "
+            "`MassiveConfig.noncanonical_symbols` changes that. A table whose rows are all "
+            "invalid is refused at the call.\n"
             "- `dm.canonical_symbol` converts other spellings to Massive's: "
             '`dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, '
             'convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.\n'
@@ -70,8 +71,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
             "of June 2. An instant `end` is excluded from the range.\n"
-            "- Leave it out to include records still to come, such as dividends announced but "
-            "not yet paid. A query's `history()` without "
+            "- Leave it out to include records still to come, such as dividends whose "
+            "ex-dividend date hasn't come yet. A query's `history()` without "
             "`end` reads through now."
         ),
         "date": (
@@ -101,10 +102,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             '`sort="ex_dividend_date", order=dm.Order.DESC`.\n'
             "- A symbol that comes first can use up the whole limit, so leave `limit` out when "
             "you need every row of each symbol.\n"
-            "- A `fetch()` that follows a table of symbols applies the limit to each request it "
-            "sends. A request carries one symbol, or a group of symbols on a dataset that takes "
-            "several at once. A dataset's page notes any other case where it applies to each "
-            "symbol."
+            "- On a table of symbols, `fetch()` applies the limit to each read: one symbol's, "
+            "or one group's on a dataset that reads several symbols at once."
         ),
         "filters": (
             "Any other parameter Massive documents for the dataset, as a `dict` from the "

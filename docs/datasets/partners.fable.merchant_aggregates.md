@@ -67,7 +67,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TwentyEightDayRollingTotalAccounts` | long | The count of unique consumer accounts active for a given country and consumer type that had any transaction activity (across all categories) over the prior 28 days. Provides a longer-term baseline for total panel size. |
 | `Type` | String | The type of aggregation. Can be 'merchant' or 'payment_processor'. |
 | `UserCountry` | String | Country of consumer's residence (ISO codes). Available countries: UK, DE, FR, ES, IT, AT. Values outside these are mapped to 'unknown'. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -112,4 +112,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

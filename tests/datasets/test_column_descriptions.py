@@ -243,7 +243,7 @@ def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
         f'WebSocket `t`: "{wire(W, "stocks/T", "SipTimestamp").description}"',
     ]
     assert columns["Timestamp"].description == (
-        f"The row's primary time, as an Instant. From {'; '.join(timestamp)}"
+        f"The row's event time. From {'; '.join(timestamp)}"
     )
 
 
@@ -258,8 +258,7 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
         c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
     )
     assert underlying.description == (
-        "The instrument Massive links the row to, as Massive's ticker. For an option, it's the "
-        "linked instrument, not what the contract delivers. From "
+        "The instrument Massive lists the row under, as Massive's ticker. From "
         f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
     )
 
@@ -326,7 +325,7 @@ def test_a_key_part_quoted_differently_by_one_transport_names_each_source() -> N
     columns = dataset_schema(dataset, (dataset,), lambda _, key: made[key]).columns
     timestamp = next(c for c in columns if c.name == "Timestamp")
     assert timestamp.description == (
-        "The row's primary time, as an Instant. From REST `/first` and REST `/third` `t`: "
+        "The row's event time. From REST `/first` and REST `/third` `t`: "
         '"The start."; REST `/second` `t`: "The end."'
     )
     # The symbol's key is quoted alike by every path, so its item names none.
@@ -402,21 +401,21 @@ def test_the_library_describes_its_time_columns() -> None:
         "The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`."
     )
     insert = description(stocks.SNAPSHOTS, "TimestampInsert")
-    assert insert.startswith("When the library received the row, as an Instant")
+    assert insert.startswith("When the library received the row, by the local clock.")
 
 
 def test_the_arrival_time_names_only_what_the_dataset_has() -> None:
     # A REST list: REST pages and polls, no history, flat files, or WebSocket.
     assert description(stocks.SNAPSHOTS, "TimestampInsert") == (
-        "When the library received the row, as an Instant, by the local clock. Every row of one "
-        "REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` "
-        "table, it's the latest poll's time."
+        "When the library received the row, by the local clock. Rows that arrive together, in "
+        "one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` "
+        "table, it's the time of the poll the row's values came from."
     )
     # A stream with history from REST and flat files, and no poll.
     assert description(crypto.TRADES, "TimestampInsert") == (
-        "When the library received the row, as an Instant, by the local clock. Every row of one "
-        "REST page, flat-file block or WebSocket frame shares it. It isn't Massive's time, and "
-        "it isn't monotonic. On `history()` rows, it's the download time."
+        "When the library received the row, by the local clock. Rows that arrive together, in "
+        "one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, "
+        "and it isn't monotonic. On `history()` rows, it's the download time."
     )
 
 
@@ -480,7 +479,9 @@ def test_a_column_note_follows_the_description() -> None:
     )
     columns = {c.name: c for c in dataset_schema(dataset, (dataset,), lambda *_: made).columns}
     assert columns["Price"].description == "A price. A note."
-    assert columns["TimestampInsert"].description.endswith("the latest poll's time. Another.")
+    assert columns["TimestampInsert"].description.endswith(
+        "the poll the row's values came from. Another."
+    )
     bare = Source(key="/notes", transport=R, fields=(described("", "p", "Price"),))
     alone = dataset_schema(dataset, (dataset,), lambda *_: bare).columns[0]
     assert alone.description == "A note."

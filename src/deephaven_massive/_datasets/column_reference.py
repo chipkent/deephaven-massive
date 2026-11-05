@@ -106,9 +106,10 @@ _NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
-    "Each dataset has a page with how to call it, its arguments, the plans that include it, and "
-    "its columns. In the Deephaven IDE, the same column descriptions show as column tooltips, and "
-    "`dm.datasets()` lists every dataset as a table."
+    "This index lists every dataset by asset class, with the query methods, argument rules, and "
+    "column types they share. Each dataset links its own page, with its call, arguments, plans, "
+    "and columns. In the Deephaven IDE, column descriptions show as tooltips. `dm.datasets()` "
+    "lists every dataset as a table."
 )
 """The paragraph under the index's title."""
 
@@ -119,8 +120,9 @@ _METHODS_ANCHOR: Final = "query-methods"
 """The anchor of the index's table of query methods."""
 
 _METHODS_GUIDE: Final = (
-    "A dataset method, such as `m.stocks.dividends()`, returns a query. A query names the data "
-    "and reads nothing, and its methods read the data and return a Deephaven table."
+    "Create a session with `m = dm.MassiveSession()`. A dataset method, such as "
+    "`m.stocks.dividends()`, returns a query. A query names the data and reads nothing, and "
+    "its methods read the data and return a Deephaven table."
 )
 """The paragraph above the index's table of query methods."""
 
@@ -200,7 +202,8 @@ _WIRE_REQUEST: Final = "`request` marks a value the library fills from the reque
 _PROVENANCE: Final = (
     "The plan tables and most column descriptions are Massive's, from its documentation as "
     "fetched on {fetched}, with a few corrected where Massive's are wrong. The library writes "
-    "its own descriptions of the key columns and the columns it computes."
+    "its own descriptions of the columns it names or computes, such as `Symbol` and "
+    "`TimestampInsert`."
 )
 """Every page's footer, formatted with the fetch date."""
 

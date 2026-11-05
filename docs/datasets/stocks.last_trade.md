@@ -44,8 +44,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `T`: "The exchange symbol that this item is traded under." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Timestamp` | Instant | The row's event time. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Price` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. |
 | `Size` | double | The size of a trade (also known as volume). |
 | `Conditions` | long[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. |
@@ -58,7 +58,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. |
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. |
 | `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -94,4 +94,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

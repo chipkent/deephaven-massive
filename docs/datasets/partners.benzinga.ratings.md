@@ -42,7 +42,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The stock symbol of the company being rated." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `AdjustedPriceTarget` | double | The current price target adjusted for stock splits and dividends. |
 | `Analyst` | String | The name of the individual analyst who issued the rating. |
 | `BenzingaAnalystId` | String | The identifier used by Benzinga for this analyst. |
@@ -66,7 +66,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Rating` | String | The current rating set by the analyst. |
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS UTC) when the rating was issued. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -111,4 +111,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

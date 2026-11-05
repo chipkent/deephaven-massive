@@ -42,9 +42,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
+| `Timestamp` | Instant | The row's event time. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
 | `Price` | double | The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract. | REST, flat files, WebSocket |
 | `Size` | double | The size of a trade (also known as volume). | REST, flat files, WebSocket |
 | `Conditions` | long[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket |
@@ -54,7 +54,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. | REST |
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be consecutive (e.g. 1, 2, 6, 9, 10, 11). | REST, WebSocket |
 | `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page, flat-file block or WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
 
 <a id="massive-fields"></a>
 
@@ -90,4 +90,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

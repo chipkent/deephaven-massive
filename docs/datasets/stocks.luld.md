@@ -42,14 +42,14 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From WebSocket `T`: "The ticker symbol for the given stock." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Timestamp` | Instant | The row's event time. From WebSocket `t`: "The Timestamp in Unix MS." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `HighPrice` | double | The high price. |
 | `LowPrice` | double | The low price. |
 | `Indicators` | long[] | The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom). |
 | `Tape` | long | The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq). |
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. |
 
 <a id="massive-fields"></a>
 
@@ -78,4 +78,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

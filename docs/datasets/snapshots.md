@@ -59,7 +59,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker symbol for the asset." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. Null on a row of any other class. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Value` | double | Value of Index. |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
@@ -131,10 +131,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `Underlying` | String | The instrument Massive links the row to, as Massive's ticker. For an option, it's the linked instrument, not what the contract delivers. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
+| `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `Type` | String | The asset class for this ticker. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -235,4 +235,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

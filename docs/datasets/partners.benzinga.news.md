@@ -44,7 +44,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." |
+| `Timestamp` | Instant | The row's event time. From REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." |
 | `Author` | String | The name of the journalist or entity that authored the news article. |
 | `BenzingaId` | long | The identifier used by Benzinga for this record. |
 | `Body` | String | The full text content of the news article. |
@@ -56,7 +56,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Tickers` | String[] | A list of stock or crypto tickers mentioned in the article. |
 | `Title` | String | The headline of the news article. |
 | `Url` | String | The direct link to the source of the news article. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -89,4 +89,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

@@ -60,7 +60,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. |
@@ -76,7 +76,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `PrimaryExchange` | String | The ISO code of the primary listing exchange for this asset. |
 | `ShareClassFigi` | String | The share Class OpenFIGI number for this ticker. Find more information here (https://www.openfigi.com/about/figi) |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -116,4 +116,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

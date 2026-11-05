@@ -45,8 +45,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket |
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session Massive's futures schedules place it in (between two sessions, the next one). A row they cannot place has a null Date, since the 17:00 Chicago rule can be wrong around a holiday, and the stream keeps running: a spread, a contract whose schedule lookup failed or did not load before the stream opened, or a row outside the loaded schedule logs a WARNING (once per product and date); a contract still being looked up (one a live watchlist or dm.ALL adds) logs at DEBUG only; a row with no readable symbol has a null Date too. From REST and flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST and flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
+| `Timestamp` | Instant | The row's event time. From REST and flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket |
 | `BidSize` | double | The quote size represents the number of futures contracts available at the given bid price. | REST, flat files, WebSocket |
 | `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket |
@@ -57,7 +57,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `AskTimestamp` | Instant | The time when the ask price was submitted to the exchange. | REST, flat files, WebSocket |
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page, flat-file block or WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
 
 <a id="massive-fields"></a>
 
@@ -96,4 +96,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

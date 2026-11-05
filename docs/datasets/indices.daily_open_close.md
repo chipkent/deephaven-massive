@@ -44,14 +44,14 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Open` | double | The open value for the symbol in the given time period. |
 | `High` | double | The highest value for the symbol in the given time period. |
 | `Low` | double | The lowest value for the symbol in the given time period. |
 | `Close` | double | The close value for the symbol in the given time period. |
 | `AfterHours` | double | The close value of the ticker symbol in after hours trading. |
 | `PreMarket` | double | The open value of the ticker symbol in pre-market trading. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -82,4 +82,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

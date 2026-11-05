@@ -622,7 +622,8 @@ _CALLS = {
 _FOOTER = (
     "The plan tables and most column descriptions are Massive's, from its documentation as "
     "fetched on 2026-10-27, with a few corrected where Massive's are wrong. The library writes "
-    "its own descriptions of the key columns and the columns it computes."
+    "its own descriptions of the columns it names or computes, such as `Symbol` and "
+    "`TimestampInsert`."
 )
 
 
@@ -663,7 +664,7 @@ def test_the_rendered_index() -> None:
     # Every dataset's query methods, once each, in the order they first appear.
     methods = (
         '<a id="query-methods"></a>\n\n## Query methods\n\n'
-        "A dataset method, such as `m.stocks.dividends()`, returns a query."
+        "Create a session with `m = dm.MassiveSession()`. A dataset method"
     )
     assert methods in index
     table = (

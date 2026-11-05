@@ -49,13 +49,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The timestamp for the given market event." |
+| `Timestamp` | Instant | The row's event time. From REST `timestamp`: "The timestamp for the given market event." |
 | `Event` | String | The type of session on the given trading date. |
 | `ProductCode` | String | The product code of the futures contract. |
 | `ProductName` | String | The name of the futures product to which this schedule applies. |
 | `SessionEndDate` | String | The session end date (also known as the trading date) of the session the event belongs to. Trading sessions end at 5 PM Central Time, so a session ending at 5 PM CT on January 1st has a session_end_date of 2025-01-01. |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this schedule's product trades. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
@@ -81,4 +81,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

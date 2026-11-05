@@ -43,8 +43,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From WebSocket `T`: "The ticker symbol for the given stock." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Timestamp` | Instant | The row's event time. From WebSocket `t`: "The Timestamp in Unix Ns." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `AuctionTime` | long | The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST. |
 | `AuctionType` | String | The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only) |
 | `SymbolSequence` | long | The symbol sequence. |
@@ -52,7 +52,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ImbalanceQuantity` | long | The imbalance quantity. |
 | `PairedQuantity` | long | The paired quantity. |
 | `BookClearingPrice` | double | The book clearing price. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. |
 
 <a id="massive-fields"></a>
 
@@ -83,4 +83,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

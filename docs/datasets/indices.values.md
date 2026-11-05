@@ -40,10 +40,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `T`: "The assigned ticker of the index." | flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | flat files, WebSocket |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From flat files `timestamp`: "The timestamp in Unix MS."; WebSocket `t`: "The Timestamp in Unix MS." | flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | flat files, WebSocket |
+| `Timestamp` | Instant | The row's event time. From flat files `timestamp`: "The timestamp in Unix MS."; WebSocket `t`: "The Timestamp in Unix MS." | flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | flat files, WebSocket |
 | `Value` | double | The value of the index. | flat files, WebSocket |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one flat-file block or WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one flat-file block or WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | flat files, WebSocket |
 
 <a id="massive-fields"></a>
 
@@ -69,4 +69,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

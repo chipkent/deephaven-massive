@@ -77,11 +77,8 @@ tickers (`DatasetSpec.ticker_list`), a column the library fills from the request
 
 KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The row's instrument, as Massive's ticker.",
-    TIMESTAMP: "The row's primary time, as an Instant.",
-    "Underlying": (
-        "The instrument Massive links the row to, as Massive's ticker. For an option, it's the "
-        "linked instrument, not what the contract delivers."
-    ),
+    TIMESTAMP: "The row's event time.",
+    "Underlying": "The instrument Massive lists the row under, as Massive's ticker.",
 }
 """The library's own sentence for each renamed key column of every dataset; its description
 goes on to name the wire key or request parameter behind it on each transport."""
@@ -104,7 +101,7 @@ DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     RAW_SYMBOL: (
         "The symbol exactly as Massive sent it, on a row whose symbol the library can't read "
         "for the dataset's asset class. That row's `Symbol` is null. Null on every other row. "
-        "The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, "
+        "The column is absent when `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, "
         "which fails on such a row instead."
     ),
 }
@@ -176,8 +173,8 @@ _NULL_DATE: Final = (
 """The join caveat every bars dataset's `Date` ends with."""
 
 _INSERT_SENTENCE: Final = (
-    "When the library received the row, as an Instant, by the local clock. Every row of one "
-    "{carriers} shares it. It isn't Massive's time, and it isn't monotonic."
+    "When the library received the row, by the local clock. Rows that arrive together, in one "
+    "{carriers}, share it. It isn't Massive's time, and it isn't monotonic."
 )
 """The first sentences of every dataset's `TimestampInsert`, formatted with what carries rows
 on the dataset's transports (`_CARRIERS`)."""
@@ -192,7 +189,7 @@ _CARRIERS: Final[Mapping[Transport, str]] = {
 _HISTORY_INSERT: Final = "On `history()` rows, it's the download time."
 """The sentence `TimestampInsert` adds on a dataset with `history()`."""
 
-_POLL_INSERT: Final = "In a `poll()` table, it's the latest poll's time."
+_POLL_INSERT: Final = "In a `poll()` table, it's the time of the poll the row's values came from."
 """The sentence `TimestampInsert` adds on a dataset with `fetch()`, and so `poll()`."""
 
 _FROM_PARTS: Final = frozenset({"Symbol", "Underlying", TIMESTAMP, START, DATE})
