@@ -142,8 +142,9 @@ class MassiveError(Exception):
     the retries, or a closed session. The message names the host, the dataset, and Massive's own
     text. To branch on the failure, read `status`, such as 404 or 429, instead of the message.
 
-    A static verb raises the error. A live table, or a static verb called with `wait=False`, fails
-    with it instead: the table shows the error, the log records it, and `m.streams()` lists it.
+    A static `fetch()` or `history()` raises the error. A live table, or a call with `wait=False`,
+    fails with it instead: the table shows the error, the log records it, and `m.streams()` lists
+    it.
 
     Example:
         Catch every failure of the library, and branch on the HTTP status::

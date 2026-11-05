@@ -160,7 +160,7 @@ class _Economy(Namespace):
         Args:
             start: The first date.
             end: The last date.
-            sort: Any field of the rows, such as `"yield_10_year"`.
+            sort: Any of Massive's field names, such as `"yield_10_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -171,9 +171,10 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
-                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -209,7 +210,7 @@ class _Economy(Namespace):
         Args:
             start: The first date.
             end: The last date.
-            sort: Any field of the rows, such as `"cpi_year_over_year"`.
+            sort: Any of Massive's field names, such as `"cpi_year_over_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -220,9 +221,10 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
-                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -258,7 +260,7 @@ class _Economy(Namespace):
         Args:
             start: The first date.
             end: The last date.
-            sort: Any field of the rows, such as `"market_10_year"`.
+            sort: Any of Massive's field names, such as `"market_10_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -269,9 +271,10 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
-                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -307,7 +310,7 @@ class _Economy(Namespace):
         Args:
             start: The first date.
             end: The last date.
-            sort: Any field of the rows, such as `"unemployment_rate"`.
+            sort: Any of Massive's field names, such as `"unemployment_rate"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -318,9 +321,10 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
-                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -357,7 +361,7 @@ class _Economy(Namespace):
         Args:
             start: The first date.
             end: The last date.
-            sort: Any field of the rows, such as `"effective_fed_funds_rate"`.
+            sort: Any of Massive's field names, such as `"effective_fed_funds_rate"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -368,9 +372,10 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
-                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

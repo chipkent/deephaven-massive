@@ -172,8 +172,8 @@ class _StockFinancials(Namespace):
     """The financial statement datasets, reached as `m.stocks.financials`.
 
     Its methods cover the balance sheets, income statements, and cash flow statements that companies
-    file with the SEC. They also cover Massive's valuation ratios. Each method only builds a query,
-    so it never blocks, and you can call it from any thread.
+    file with the SEC, and Massive's valuation ratios. Each method only builds a query, so it never
+    blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -204,17 +204,17 @@ class _StockFinancials(Namespace):
         """Balance sheets of US public companies, one row per filer and reporting period.
 
         Each row holds a company's assets, liabilities, and equity at the end of a quarter or fiscal
-        year, as filed with the SEC. A filing can name several share classes, and `Tickers` holds
-        them all. `symbols` selects the filings that list any of your tickers. A filing appears once
-        for each of your tickers it lists, named in `Symbol`.
+        year, as filed with the SEC. A filing that lists several of your tickers appears once for
+        each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             timeframe: `dm.Timeframe.ANNUAL` or `QUARTERLY`; leave it out for both. A balance sheet
                 has no trailing twelve months.
             start: The first period end date.
             end: The last period end date.
-            sort: Any field of the rows, such as `"fiscal_year"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -226,10 +226,12 @@ class _StockFinancials(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, or `symbols` is
-                `dm.ALL` or empty. It's also raised when a bound isn't a date, `end` is before
-                `start`, or `order` is given without `sort`. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`;
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -272,18 +274,17 @@ class _StockFinancials(Namespace):
         """Income statements of US public companies, one row per filer and reporting period.
 
         Each row holds a company's revenue, expenses, earnings, and per-share figures, as filed with
-        the SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing can
-        name several share classes, and `Tickers` holds them all. `symbols` selects the filings that
-        list any of your tickers. A filing appears once for each of your tickers it lists, named in
-        `Symbol`.
+        the SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing
+        that lists several of your tickers appears once for each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; leave it out
                 for all three.
             start: The first period end date.
             end: The last period end date.
-            sort: Any field of the rows, such as `"fiscal_year"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -295,9 +296,11 @@ class _StockFinancials(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `symbols` is `dm.ALL` or empty. It's also raised when a bound isn't a
-                date, `end` is before `start`, or `order` is given without `sort`. A filter the
-                dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -335,18 +338,17 @@ class _StockFinancials(Namespace):
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
         Each row holds a company's operating, investing, and financing cash flows, as filed with the
-        SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing can
-        name several share classes, and `Tickers` holds them all. `symbols` selects the filings that
-        list any of your tickers. A filing appears once for each of your tickers it lists, named in
-        `Symbol`.
+        SEC. The period is a quarter, a fiscal year, or the trailing twelve months. A filing that
+        lists several of your tickers appears once for each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`; leave it out
                 for all three.
             start: The first period end date.
             end: The last period end date.
-            sort: Any field of the rows, such as `"fiscal_year"`.
+            sort: Any of Massive's field names, such as `"fiscal_year"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -358,9 +360,11 @@ class _StockFinancials(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `str` timeframe.
-            ValueError: If `symbols` is `dm.ALL` or empty. It's also raised when a bound isn't a
-                date, `end` is before `start`, or `order` is given without `sort`. A filter the
-                dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -393,13 +397,12 @@ class _StockFinancials(Namespace):
         """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
         Each row holds one ticker's ratios as of its `Date`, such as price to earnings, return on
-        equity, and debt to equity. Massive computes them for the most recent trading day. It uses
-        the trailing twelve months of filings and that day's price. So the dataset has no `start` or
-        `end`.
+        equity, and debt to equity. Massive computes them for the most recent trading day only, so
+        the dataset has no `start` or `end`.
 
         Args:
-            symbols: Stock tickers; leave it out for every ticker.
-            sort: Any field of the rows, such as `"market_cap"`.
+            symbols: Stock tickers; leave it out for every ticker. `dm.ALL` is refused.
+            sort: Any of Massive's field names, such as `"market_cap"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -411,9 +414,11 @@ class _StockFinancials(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `order` is given without `sort`. A filter the
-                dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

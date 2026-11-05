@@ -413,11 +413,11 @@ class _Stocks(Namespace):
         """Trades of US-listed stocks, tick by tick.
 
         Each row holds one trade reported to the SIP. `Timestamp` is the SIP's time. Streams and
-        flat-file history serve every ticker of `dm.ALL`. REST history needs named tickers. For only
-        each symbol's latest trade, use `last_trade()`.
+        flat-file history take `dm.ALL`. REST history needs named tickers. For only each symbol's
+        latest trade, use `last_trade()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -425,8 +425,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -440,13 +442,13 @@ class _Stocks(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed stock.
 
-        Each row holds one symbol's most recent trade. A symbol with no trade is left out, with a
-        WARNING. `poll(mode=dm.PollMode.APPEND)` keeps each new last trade. It misses any trade
-        between two cycles, which `trades()` streams. `snapshots()` also carries each ticker's last
-        trade.
+        Each row holds one symbol's most recent trade. A symbol with no trade is left out, and the
+        library logs a WARNING. Each poll sees only the trade that is latest at that moment. For
+        every trade, stream `trades()`.
 
         Args:
-            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)`.
+            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
+                ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -454,8 +456,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or holds a ticker that isn't
-                Massive's exact ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -475,11 +479,11 @@ class _Stocks(Namespace):
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
         Each row holds one NBBO update. `Timestamp` is the SIP's time. Streams and flat-file history
-        serve every ticker of `dm.ALL`. REST history needs named tickers. For only each symbol's
-        latest NBBO, use `last_quote()`.
+        take `dm.ALL`. REST history needs named tickers. For only each symbol's latest NBBO, use
+        `last_quote()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -487,8 +491,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -501,13 +507,13 @@ class _Stocks(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest national best bid and offer of each US-listed stock.
 
-        Each row holds one symbol's most recent NBBO. A symbol with no quote is left out, with a
-        WARNING. `poll(mode=dm.PollMode.APPEND)` keeps each new last quote. It misses any quote
-        between two cycles, which `quotes()` streams. `snapshots()` also carries each ticker's last
-        quote.
+        Each row holds one symbol's most recent NBBO. A symbol with no quote is left out, and the
+        library logs a WARNING. Each poll sees only the quote that is latest at that moment. For
+        every quote, stream `quotes()`.
 
         Args:
-            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)`.
+            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
+                ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -515,8 +521,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or holds a ticker that isn't
-                Massive's exact ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -583,8 +591,9 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION` or `multiplier` is below 1. It's also raised when
-                `symbols` is None or empty, or holds a ticker that isn't Massive's exact ticker.
+            ValueError: If:
+                - `timespan` is `SESSION`, or `multiplier` is below 1;
+                - `symbols` is None or empty, or holds a ticker that isn't Massive's exact ticker.
 
         Example:
             ::
@@ -607,8 +616,7 @@ class _Stocks(Namespace):
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
         Each row holds one symbol's bar of the previous completed session. A symbol with no bar is
-        left out, with a WARNING. Massive stamps the bar at the session's close. The library moves
-        the stamp to the day's start, as the columns page describes.
+        left out, and the library logs a WARNING. The dataset's page says how the bar is stamped.
 
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
@@ -621,8 +629,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `adjusted` isn't a `bool`, or `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or holds a ticker that isn't
-                Massive's exact ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -646,11 +656,11 @@ class _Stocks(Namespace):
     def luld(self, symbols: Symbols) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
-        Each row holds one band update from the SIP. It has the upper and lower price limits, the
-        indicators, and the tape. The bands only stream, so there's no history.
+        Each row holds one band update from the SIP, with its upper and lower price limits. The
+        bands only stream, so there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -658,8 +668,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -672,12 +684,11 @@ class _Stocks(Namespace):
     def imbalances(self, symbols: Symbols) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
-        Each row holds one imbalance message. It has the auction's type and time, the imbalance and
-        paired quantities, the book clearing price, and the exchange. Imbalances only stream, so
-        there's no history.
+        Each row holds one imbalance message, with the auction's type and time and the imbalance
+        quantity. Imbalances only stream, so there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -685,8 +696,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -700,10 +713,10 @@ class _Stocks(Namespace):
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row holds one fair market value and the time Massive computed it. It streams only on a
-        Business plan. There's no history.
+        Business plan, and there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -711,8 +724,10 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't one of the accepted forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -725,12 +740,11 @@ class _Stocks(Namespace):
     def snapshots(self, symbols: Symbols, *, include_otc: bool = False) -> Query:
         """Current market snapshots of US-listed stocks, one row per ticker.
 
-        Each row holds a ticker's state now. It has the day's bar, the previous day's bar, the
-        latest minute bar, the last trade and quote, and the day's change. It also has the fair
-        market value when your plan includes it.
+        Each row holds a ticker's state now: the day's bar, the previous day's bar, the latest
+        minute bar, the last trade and quote, and the day's change.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL` for the whole market.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
             include_otc: True to include OTC securities.
 
         Returns:
@@ -740,8 +754,10 @@ class _Stocks(Namespace):
         Raises:
             TypeError: If `include_otc` isn't a `bool`, or `symbols` isn't one of the accepted
                 forms.
-            ValueError: If `symbols` is None or empty, or holds a ticker that isn't Massive's exact
-                ticker. A table with no `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -760,9 +776,8 @@ class _Stocks(Namespace):
     def movers(self, direction: Direction, *, include_otc: bool = False) -> Query:
         """The twenty US stocks with the largest percentage move today, up or down.
 
-        Each row holds one mover's full snapshot, as `snapshots()` returns it. The movers are the
-        tickers with the largest gain or loss since the previous close. In a `poll()` table, a
-        ticker that leaves the list leaves the table.
+        Each row holds one mover's full snapshot, as `snapshots()` returns it. In a `poll()` table,
+        a ticker that leaves the list leaves the table.
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
@@ -794,13 +809,13 @@ class _Stocks(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
-        Each row holds one ticker's session on `date`. Its window is the same as a daily bar's. A
-        symbol with no session that day, such as on a holiday, is left out, with a WARNING.
+        Each row holds one ticker's session on `date`. A symbol with no session that day, such as on
+        a holiday, is left out, and the library logs a WARNING.
 
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
                 `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-            date: The trading day, as a date. A `datetime` or an instant raises.
+            date: The trading day, as a date.
             adjusted: Adjusts volume as well as prices. Massive doesn't report the basis of these
                 prices, so the library can't check it.
 
@@ -810,9 +825,11 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or holds a ticker that isn't
-                Massive's exact ticker. A table with no `Symbol` column raises it too. So does a
-                `date` that is a `datetime`, another time, or text that isn't a date.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column;
+                - `date` is a `datetime`, another time, or text that isn't a date.
 
         Example:
             ::
@@ -855,7 +872,7 @@ class _Stocks(Namespace):
             end: The last ex-dividend date.
             sort: Any of Massive's field names, such as `"pay_date"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+            limit: The most rows to return, in total. With a watchlist, `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"distribution_type": "special"}`.
 
@@ -865,10 +882,12 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's exact
+                  ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -911,7 +930,7 @@ class _Stocks(Namespace):
             symbols: Stock tickers; leave it out for every ticker.
             start: The first execution date.
             end: The last execution date.
-            sort: Any field of the rows, such as `"execution_date"`.
+            sort: Any of Massive's field names, such as `"execution_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -923,10 +942,12 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -961,15 +982,14 @@ class _Stocks(Namespace):
         """Initial public offerings on US exchanges, upcoming and past, one row per offering.
 
         Each row holds an offering's issuer, ticker, dates, status, price range, final price, and
-        shares offered. Its status moves through rumored, pending, new, and withdrawn, among others.
-        A `poll()` table updates each offering in place as its status changes. If Massive renames an
-        issuer during an offering, the old row stays beside the new one.
+        shares offered. A `poll()` table updates each offering in place as its status changes. If
+        Massive renames an issuer during an offering, the old row stays beside the new one.
 
         Args:
             symbols: Stock tickers; leave it out for every offering.
             start: The first listing date.
             end: The last listing date.
-            sort: Any field of the rows, such as `"listing_date"`.
+            sort: Any of Massive's field names, such as `"listing_date"`.
             order: The direction of the rows. Here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
             filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`.
@@ -980,9 +1000,11 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date or `end` is before `start`.
-                A filter the dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1016,15 +1038,14 @@ class _Stocks(Namespace):
     ) -> Query:
         """Short interest of US-listed stocks, one row per ticker and FINRA settlement date.
 
-        Each row holds the shares sold short and not yet covered on a settlement date. It also holds
-        the average daily volume and the days to cover. Short interest is reported to FINRA twice a
-        month.
+        Each row holds the shares sold short and not yet covered on a settlement date, the average
+        daily volume, and the days to cover. Short interest is reported to FINRA twice a month.
 
         Args:
             symbols: Stock tickers; leave it out for every ticker.
             start: The first settlement date.
             end: The last settlement date.
-            sort: Any field of the rows, such as `"settlement_date"`.
+            sort: Any of Massive's field names, such as `"settlement_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -1036,10 +1057,12 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1073,14 +1096,14 @@ class _Stocks(Namespace):
     ) -> Query:
         """Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 
-        Each row holds a day's short volume, its exempt and non-exempt parts, the total volume, and
-        the short volume ratio. It also holds the breakdown by venue that FINRA publishes.
+        Each row holds a day's short volume, the total volume, the short volume ratio, and the
+        breakdown by venue that FINRA publishes.
 
         Args:
             symbols: Stock tickers; leave it out for every ticker.
             start: The first trading day.
             end: The last trading day.
-            sort: Any field of the rows, such as `"short_volume_ratio"`.
+            sort: Any of Massive's field names, such as `"short_volume_ratio"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -1092,10 +1115,12 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1127,13 +1152,13 @@ class _Stocks(Namespace):
     ) -> Query:
         """The free float of US-listed stocks: the latest count of shares the public can trade.
 
-        Each row holds one ticker's most recent free float and its percentage of shares outstanding.
-        It also holds the date the float took effect. Massive has no date filter here, so there's no
-        `start` or `end`.
+        Each row holds one ticker's most recent free float, its percentage of shares outstanding,
+        and the date it took effect. Massive offers no date filter here, so there's no `start` or
+        `end`.
 
         Args:
             symbols: Stock tickers; leave it out for every ticker.
-            sort: Any field of the rows, such as `"free_float_percent"`.
+            sort: Any of Massive's field names, such as `"free_float_percent"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -1145,9 +1170,11 @@ class _Stocks(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `order` is given without `sort`. A filter the
-                dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

@@ -139,12 +139,12 @@ class NotBars(Enum):
 
 
 class PollMode(StrEnum):
-    """How a `poll()` table combines one cycle's rows with the last.
+    """How a `poll()` table combines one poll's rows with the last.
 
     - `AUTO`, the default of `poll()`: the mode the dataset's page names. It's `APPEND` for the news
       and filings feeds, `UPSERT` for IPOs, and `REPLACE` for the rest.
-    - `REPLACE`: a keyed table that holds exactly the latest cycle's rows. A key the cycle doesn't
-      return is deleted, even when the cycle returns no rows.
+    - `REPLACE`: a keyed table that holds exactly the latest poll's rows. A key the poll doesn't
+      return is deleted, even when the poll returns no rows.
     - `UPSERT`: a keyed table that adds and updates rows but never deletes them.
     - `APPEND`: an append-only table that adds only rows it hasn't seen. The dataset's keys identify
       a row, such as a news article's id. A snapshot's update time is part of its key, so `APPEND`

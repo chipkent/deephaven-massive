@@ -90,14 +90,14 @@ A column such tables share has one name, and one type in every class except thos
 | Dataset | Summary | Methods |
 | --- | --- | --- |
 | [`m.futures.trades`](futures.trades.md) | Trades of futures contracts, tick by tick. | blink, append_only, ring, last_by, history |
-| [`m.futures.quotes`](futures.quotes.md) | Quotes of futures contracts: every change of the best bid and offer. | blink, append_only, ring, last_by, history |
+| [`m.futures.quotes`](futures.quotes.md) | Best bid and offer quotes of futures contracts, tick by tick. | blink, append_only, ring, last_by, history |
 | [`m.futures.bars`](futures.bars.md) | Open, high, low, close, and volume bars of futures contracts. | blink, append_only, ring, last_by, history |
-| [`m.futures.snapshots`](futures.snapshots.md) | Snapshots of futures contracts: the latest trade, quote, minute bar, and session. | fetch, poll |
-| [`m.futures.contracts`](futures.contracts.md) | Futures contracts: the specification of every listed contract. | fetch, poll |
-| [`m.futures.products`](futures.products.md) | Futures products: the specification of every product, the family of its contracts. | fetch, poll |
-| [`m.futures.exchanges`](futures.exchanges.md) | Futures exchanges: the exchanges and trading venues of US futures. | fetch, poll |
-| [`m.futures.market_status`](futures.market_status.md) | Futures market status: whether each futures product is trading right now. | fetch, poll |
-| [`m.futures.schedules`](futures.schedules.md) | Futures schedules: the timed events of each product's trading sessions. | fetch, poll |
+| [`m.futures.snapshots`](futures.snapshots.md) | The latest trade, quote, minute bar, and session of each futures contract. | fetch, poll |
+| [`m.futures.contracts`](futures.contracts.md) | The specification of every listed futures contract. | fetch, poll |
+| [`m.futures.products`](futures.products.md) | The specification of every futures product. | fetch, poll |
+| [`m.futures.exchanges`](futures.exchanges.md) | The exchanges and trading venues of US futures. | fetch, poll |
+| [`m.futures.market_status`](futures.market_status.md) | Whether each futures product is trading right now. | fetch, poll |
+| [`m.futures.schedules`](futures.schedules.md) | The timed events of each futures product's trading sessions. | fetch, poll |
 
 ## `m.indices`
 
@@ -140,7 +140,7 @@ A column such tables share has one name, and one type in every class except thos
 
 | Dataset | Summary | Methods |
 | --- | --- | --- |
-| [`m.reference.tickers`](reference.tickers.md) | Every ticker Massive supports, across asset classes, with its listing details. | fetch, poll |
+| [`m.reference.tickers`](reference.tickers.md) | Tickers of stocks, OTC securities, indices, forex, and crypto, with listing details. | fetch, poll |
 | [`m.reference.ticker_details`](reference.ticker_details.md) | One ticker's company and listing details: address, branding, shares, and more. | fetch, poll |
 | [`m.reference.ticker_types`](reference.ticker_types.md) | The ticker type codes Massive uses, such as `CS` for common stock, with their names. | fetch, poll |
 | [`m.reference.ticker_events`](reference.ticker_events.md) | The timeline of a ticker's events, such as ticker changes, one row per event. | fetch, poll |

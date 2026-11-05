@@ -190,13 +190,11 @@ class _Indices(Namespace):
         """Index levels, tick by tick, as computed by the index providers.
 
         Each row holds one index's level at one instant. Massive has no REST history of index
-        values. So `history()` reads only the flat files, which need S3 keys. For each index's
-        current level, poll `snapshots()`. A stream host that refuses index values fails the stream
-        with `EntitlementError`. Its message names `MassiveConfig.websocket_hosts` and
-        `business.massive.com`, the host Massive documents for index values.
+        values, so `history()` reads only the flat files, which need S3 keys. For each index's
+        current level, poll `snapshots()`.
 
         Args:
-            symbols: Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL`.
+            symbols: Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -204,8 +202,10 @@ class _Indices(Namespace):
 
         Raises:
             TypeError: If `symbols` has another type.
-            ValueError: If a symbol isn't an index symbol, or `symbols` is None or empty. It's also
-                raised when a table has no `Symbol` column.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of an index;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -232,26 +232,27 @@ class _Indices(Namespace):
 
         Each row is one bar of one index. Index bars come from index levels, so they have no volume
         and no `adjusted` argument. A window in which the index didn't change has no bar. A bar of a
-        day or longer ends at 01:00 New York time after its last day. A bar of a week or longer
-        covers its whole calendar period, weekends included. `history()` of `dm.ALL` reads the
-        minute and day flat files.
+        day or longer ends at 01:00 New York time after its last day.
 
         Args:
-            symbols: Indices with the `I:` prefix, or `dm.ALL`.
+            symbols: Indices with the `I:` prefix, or `dm.ALL` for every index. `history()` reads
+                `dm.ALL` from the minute and day flat files.
             timespan: The bar's unit, any but `dm.Timespan.SESSION`.
             multiplier: Units per bar.
 
         Returns:
-            A query: a `StreamHistoryQuery`, which also streams, for one-second and one-minute bars
-            with `multiplier=1`. Otherwise it's a `HistoryQuery`, for history only. Its columns,
-            plans, and methods:
+            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
+            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
+            history only. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION` or `multiplier` is below 1. It's also raised when
-                a symbol isn't an index symbol, or `symbols` is None or empty. A table with no
-                `Symbol` column raises it too.
+            ValueError: If:
+                - `timespan` is `SESSION`, or `multiplier` is below 1;
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of an index;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -270,12 +271,11 @@ class _Indices(Namespace):
         """The previous trading day's open, high, low, and close of each index.
 
         Each row holds one index's bar of the previous complete session. Its volume columns are
-        always null. The bar ends at 01:00 New York time the next day, as index day bars do. An
-        index with no bar is left out, with a WARNING.
+        always null. An index with no bar gets no row, and the library logs a WARNING.
 
         Args:
-            symbols: Indices with the `I:` prefix. `dm.ALL` is refused; use
-                `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` instead.
+            symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
+                day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -283,8 +283,10 @@ class _Indices(Namespace):
 
         Raises:
             TypeError: If `symbols` has another type.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or a symbol isn't an index symbol.
-                It's also raised when a table has no `Symbol` column.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of an index;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -317,12 +319,12 @@ class _Indices(Namespace):
 
         Each row holds one index's level and its session's open, high, low, close, and change. It
         also holds the market status and the index's name. An index Massive doesn't know, or your
-        plan lacks, keeps its row. Its `Error` and `Message` give the reason. Indices Basic doesn't
-        include this dataset. On that plan, use `previous_day_bar()` or `daily_open_close()`
-        instead.
+        plan lacks, keeps its row, and its `Error` and `Message` give the reason. Indices Basic
+        doesn't include this dataset; on that plan, use `previous_day_bar()` or
+        `daily_open_close()`.
 
         Args:
-            symbols: Indices with the `I:` prefix, or `dm.ALL`.
+            symbols: Indices with the `I:` prefix, or `dm.ALL` for every index.
             sort: `"ticker"`, the one field Massive sorts by.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -334,12 +336,14 @@ class _Indices(Namespace):
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.snapshots.md.
 
         Raises:
-            TypeError: If `symbols` has another type, `sort` isn't a `str`, or `order` isn't a
-                `dm.Order`. It's also raised when `limit` isn't an `int`, or `filters` isn't a
-                mapping.
-            ValueError: If `limit` isn't positive, or a filter isn't one the dataset takes or its
-                value doesn't fit. It's also raised when a symbol isn't an index symbol, or
-                `symbols` is None or empty. A table with no `Symbol` column raises it too.
+            TypeError: If `symbols` has another type, `sort` isn't a `str`, `order` isn't a
+                `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of an index;
+                - a table has no `Symbol` column;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -366,8 +370,8 @@ class _Indices(Namespace):
         holds the pre-market and after-hours levels where Massive has them.
 
         Args:
-            symbols: Indices with the `I:` prefix. `dm.ALL` is refused; use
-                `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` instead.
+            symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
+                day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             date: The day, as a date. A `datetime` raises.
 
         Returns:
@@ -376,9 +380,11 @@ class _Indices(Namespace):
 
         Raises:
             TypeError: If `date` isn't a date type, or `symbols` has another type.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty, or a symbol isn't an index symbol.
-                It's also raised when `date` is a `datetime` or isn't a date. A table with no
-                `Symbol` column raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of an index;
+                - a table has no `Symbol` column;
+                - `date` is a `datetime`, or isn't a date.
 
         Example:
             ::

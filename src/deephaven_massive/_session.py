@@ -260,13 +260,12 @@ class MassiveSession:
         Raises:
             TypeError: If `config` isn't a `dm.MassiveConfig`.
             AuthenticationError: If `config` is left out and `MASSIVE_API_KEY` isn't set.
-            ValueError: If called on a Deephaven update-graph thread, such as inside a table
-                listener. With `config` left out, it's also raised for an environment variable that
-                isn't valid. A key with spaces around it is one example. Setting only one of the two
-                `MASSIVE_S3_*` variables is another.
-            MassiveError: If called on a thread with no Deephaven execution context. It's also
-                raised in a context made by `make_user_exec_ctx(freeze_vars=...)`, which the library
-                can't use.
+            ValueError: If:
+                - it runs on a Deephaven update-graph thread, such as inside a table listener;
+                - `config` is left out and an environment variable isn't valid, such as a key with
+                  spaces around it, or only one of the two `MASSIVE_S3_*` variables set.
+            MassiveError: If it runs on a thread with no Deephaven execution context, or in one made
+                by `make_user_exec_ctx(freeze_vars=...)`, which the library can't use.
         """
         if config is None:
             config = MassiveConfig()
@@ -410,10 +409,12 @@ class MassiveSession:
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None, `dm.ALL`, or empty, or holds a ticker that isn't
-                Massive's exact ticker. It's also raised when a table has no `Symbol` column,
-                `limit` isn't positive, or `filters` holds `type`. A filter the endpoint doesn't
-                take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None, `dm.ALL`, or empty;
+                - a ticker isn't Massive's exact ticker, or a table has no `Symbol` column;
+                - `limit` isn't positive;
+                - `filters` holds `type`, a key the endpoint doesn't take, or a value that doesn't
+                  fit.
 
         Example:
             ::
@@ -504,7 +505,7 @@ class MassiveSession:
               read and for reference, economy, and partner data.
             - `RowsPublished`: how many rows it has delivered.
             - `Loading`: how many symbols a watchlist's read has yet to read.
-            - `RequestsPerCycle`: the REST requests of a poll's latest cycle.
+            - `RequestsPerCycle`: the REST requests of the latest poll.
             - `State`: `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or `CLOSED`.
             - `Error`: why it failed, or the warnings that leave it running. A connection that is
               down is one such warning.

@@ -449,8 +449,9 @@ class _StockFilings(Namespace):
     return the taxonomies that classify risk factors and disclosures.
 
     A `poll()` of a filings dataset adds only rows it hasn't seen, and it needs a `start` or a
-    `limit`. The two insider summaries and the two taxonomies replace their rows each cycle instead.
-    Each method only builds a query, so it never blocks, and you can call it from any thread.
+    `limit`. The two insider summaries and the two taxonomies replace their rows at each poll
+    instead. Each method only builds a query, so it never blocks, and you can call it from any
+    thread.
 
     Example:
         ::
@@ -484,11 +485,11 @@ class _StockFilings(Namespace):
         filing whose company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; leave it out for every filer.
+            symbols: Stock tickers; leave it out for every filer. `dm.ALL` is refused.
             form_type: The SEC form type, such as `"10-K"`; leave it out for every form.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"form_type"`.
+            sort: Any of Massive's field names, such as `"form_type"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -500,10 +501,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as a form type that isn't a `str`.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -543,10 +546,10 @@ class _StockFilings(Namespace):
         company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; leave it out for every filer.
+            symbols: Stock tickers; leave it out for every filer. `dm.ALL` is refused.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"period_end"`.
+            sort: Any of Massive's field names, such as `"period_end"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -558,10 +561,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -603,10 +608,10 @@ class _StockFilings(Namespace):
         ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; leave it out for every filer.
+            symbols: Stock tickers; leave it out for every filer. `dm.ALL` is refused.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"form_type"`.
+            sort: Any of Massive's field names, such as `"form_type"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -618,10 +623,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -657,15 +664,15 @@ class _StockFilings(Namespace):
 
         Each row holds one disclosure of an 8-K: its primary, secondary, and tertiary categories,
         the supporting text, and the filing's accession number and date. The categories come from
-        `disclosure_taxonomy()`. A filing can name several share classes, and `Tickers` holds them
-        all. `symbols` selects the filings that list any of your tickers. A filing appears once for
-        each of your tickers it lists, named in `Symbol`.
+        `disclosure_taxonomy()`. A filing that lists several of your tickers appears once for each,
+        named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"primary_category"`.
+            sort: Any of Massive's field names, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -677,9 +684,11 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty. It's also raised when a bound isn't a
-                date, `end` is before `start`, or `order` is given without `sort`. A filter the
-                dataset doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -720,10 +729,10 @@ class _StockFilings(Namespace):
         `risk_factor_taxonomy()`. A filing whose company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; leave it out for every filer.
+            symbols: Stock tickers; leave it out for every filer. `dm.ALL` is refused.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"primary_category"`.
+            sort: Any of Massive's field names, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -735,10 +744,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date, `end` is before `start`,
-                or `order` is given without `sort`. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -783,7 +794,7 @@ class _StockFilings(Namespace):
                 `"0001067983"`, or a sequence of them; leave it out for every manager.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"market_value"`.
+            sort: Any of Massive's field names, such as `"market_value"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
@@ -794,9 +805,11 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If a sequence of CIKs is empty. It's also raised when a bound isn't a date,
-                `end` is before `start`, or `order` is given without `sort`. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - a sequence of CIKs is empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -834,18 +847,18 @@ class _StockFilings(Namespace):
 
         Each row holds a security that an officer, director, or 10% owner held on becoming an
         insider. It has the issuer and owner CIKs and names, the owner's role, the security, and the
-        shares owned. A filing can name several share classes, and `Tickers` holds them all.
-        `symbols` selects the filings that list any of your tickers. A filing appears once for each
-        of your tickers it lists, named in `Symbol`.
+        shares owned. A filing that lists several of your tickers appears once for each, named in
+        `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
                 them; leave it out for every company.
             owner_cik: The insider's SEC CIK, or a sequence of them; leave it out for every insider.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"owner_name"`.
+            sort: Any of Massive's field names, such as `"owner_name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -857,10 +870,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, or a sequence of CIKs is empty. It's also
-                raised when a bound isn't a date, `end` is before `start`, or `order` is given
-                without `sort`. A filter the dataset doesn't take, or a value that doesn't fit it,
-                raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a sequence of CIKs is empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -901,18 +916,18 @@ class _StockFilings(Namespace):
 
         Each row holds a purchase, sale, grant, or exercise that an officer, director, or 10% owner
         reported, or a holding reported beside them. It has the transaction code, date, shares, and
-        price, the shares owned afterward, and the issuer and owner. A filing can name several share
-        classes, and `Tickers` holds them all. `symbols` selects the filings that list any of your
-        tickers. A filing appears once for each of your tickers it lists, named in `Symbol`.
+        price, the shares owned afterward, and the issuer and owner. A filing that lists several of
+        your tickers appears once for each, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; leave it out for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing. `dm.ALL` is
+                refused.
             issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
                 them; leave it out for every company.
             owner_cik: The insider's SEC CIK, or a sequence of them; leave it out for every insider.
             start: The first filing date.
             end: The last filing date.
-            sort: Any field of the rows, such as `"transaction_date"`.
+            sort: Any of Massive's field names, such as `"transaction_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -925,10 +940,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, or a sequence of CIKs is empty. It's also
-                raised when a bound isn't a date, `end` is before `start`, or `order` is given
-                without `sort`. A filter the dataset doesn't take, or a value that doesn't fit it,
-                raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a sequence of CIKs is empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -968,19 +985,19 @@ class _StockFilings(Namespace):
         Form 4 or 5. Massive sums one company's insider buys and sells of one day into one row. The
         row holds counts, shares, and dollar values, and the part traded under a prearranged Rule
         10b5-1 plan. `NetShares` and `NetValue` hold the net, which is negative for net selling. The
-        totals cover the company, not each share class. A company can have several share classes,
-        and `Tickers` holds them all. A row appears once for each of your tickers it lists, named in
-        `Symbol`. A `poll()` revises a day in place when a late filing changes it.
-        `insider_transactions()` returns the Form 4 lines themselves.
+        totals cover the company, not each share class. A row that lists several of your tickers
+        appears once for each, named in `Symbol`. A `poll()` revises a day in place when a late
+        filing changes it. `insider_transactions()` returns the Form 4 lines themselves.
 
         Args:
-            symbols: Tickers whose companies to return; leave it out for every company.
+            symbols: Tickers whose companies to return; leave it out for every company. `dm.ALL` is
+                refused.
             issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
                 them; leave it out for every company.
             start: The first transaction date.
             end: The last transaction date.
-            sort: Any field of the rows, such as `"net_value"`. Massive's default is the newest
-                transaction date first.
+            sort: Any of Massive's field names, such as `"net_value"`. Massive's default is the
+                newest transaction date first.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -993,10 +1010,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, or a sequence of CIKs is empty. It's also
-                raised when a bound isn't a date, `end` is before `start`, or `order` is given
-                without `sort`. A filter the dataset doesn't take, or a value that doesn't fit it,
-                raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a sequence of CIKs is empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1038,21 +1057,21 @@ class _StockFilings(Namespace):
         row. The row holds the owner, roles, and title, and the first and latest filing dates. It
         also holds the shares owned directly, indirectly, and in total, as filed, without split
         adjustment or derivatives. `OwnershipPct` is in percent, so 0.0198 means 0.0198%. An
-        `OldestPositionDate` far behind `LastFilingDate` warns that a position may be stale. A
-        company can have several share classes, and `Tickers` holds them all. A row appears once for
-        each of your tickers it lists, named in `Symbol`. A `poll()` updates an insider's row in
-        place when a new filing arrives.
+        `OldestPositionDate` far behind `LastFilingDate` warns that a position may be stale. A row
+        that lists several of your tickers appears once for each, named in `Symbol`. A `poll()`
+        updates an insider's row in place when a new filing arrives.
 
         Args:
             symbols: Tickers whose companies' insiders to return; leave it out for every company.
+                `dm.ALL` is refused.
             issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
                 them; leave it out for every company.
             owner_cik: The insider's SEC CIK, or a sequence of them; leave it out for every insider.
                 One insider's CIK lists every company where that person is an insider.
             start: The first `LastFilingDate`. An insider who hasn't filed since then is left out.
             end: The last `LastFilingDate`.
-            sort: Any field of the rows, such as `"shares_owned"`. Massive's default is the most
-                recent `LastFilingDate` first.
+            sort: Any of Massive's field names, such as `"shares_owned"`. Massive's default is the
+                most recent `LastFilingDate` first.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
@@ -1065,10 +1084,12 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, or a sequence of CIKs is empty. It's also
-                raised when a bound isn't a date, `end` is before `start`, or `order` is given
-                without `sort`. A filter the dataset doesn't take, or a value that doesn't fit it,
-                raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a sequence of CIKs is empty;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1106,7 +1127,7 @@ class _StockFilings(Namespace):
         `risk_factors()` takes its categories from this taxonomy. The dataset takes no `symbols`.
 
         Args:
-            sort: Any field of the rows, such as `"primary_category"`.
+            sort: Any of Massive's field names, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`.
@@ -1117,8 +1138,9 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `order` is given without `sort`. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1151,7 +1173,7 @@ class _StockFilings(Namespace):
         `disclosures_8k()` takes its categories from this taxonomy. The dataset takes no `symbols`.
 
         Args:
-            sort: Any field of the rows, such as `"primary_category"`.
+            sort: Any of Massive's field names, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`.
@@ -1162,8 +1184,9 @@ class _StockFilings(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `order` is given without `sort`. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

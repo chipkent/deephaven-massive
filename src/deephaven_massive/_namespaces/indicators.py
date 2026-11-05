@@ -284,17 +284,17 @@ class _Indicators(Namespace):
         """The simple moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
-        day, in UTC for crypto and forex and in New York time for the rest. Without `start`, the
-        call reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
+        day, in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a
+        `limit` with the default newest-first order; without either, the call reads the whole
+        series.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
-        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
-        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
-        never the finished one. On a delayed plan, reading through today raises
-        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. On a delayed plan,
+        reading through today raises `dm.EntitlementError` unless the subscription is in
+        `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset class.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
             window: The number of bars averaged.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
@@ -312,16 +312,18 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
-                It's also raised when a window isn't positive, a bound is a time without a time
-                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                pairs = ["AAPL", "X:BTCUSD"]
-                sma = m.indicators.sma(pairs, start="2026-01-02", end="2026-06-30").fetch()
+                sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2026-01-02").fetch()
         """
         return self._query(
             SMA,
@@ -355,17 +357,17 @@ class _Indicators(Namespace):
         """The exponential moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
-        day, in UTC for crypto and forex and in New York time for the rest. Without `start`, the
-        call reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
+        day, in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a
+        `limit` with the default newest-first order; without either, the call reads the whole
+        series.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
-        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
-        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
-        never the finished one. On a delayed plan, reading through today raises
-        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. On a delayed plan,
+        reading through today raises `dm.EntitlementError` unless the subscription is in
+        `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset class.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
             window: The number of bars the average spans.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
@@ -383,10 +385,13 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
-                It's also raised when a window isn't positive, a bound is a time without a time
-                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -425,17 +430,16 @@ class _Indicators(Namespace):
         """The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 
         Each row holds the index for one bar, with the bar's start and end. `Date` is the bar's day,
-        in UTC for crypto and forex and in New York time for the rest. Without `start`, the call
-        reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
+        in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a `limit`
+        with the default newest-first order; without either, the call reads the whole series.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
-        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
-        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
-        never the finished one. On a delayed plan, reading through today raises
-        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. On a delayed plan,
+        reading through today raises `dm.EntitlementError` unless the subscription is in
+        `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset class.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
             window: The number of bars looked back over.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
@@ -453,10 +457,13 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
-                It's also raised when a window isn't positive, a bound is a time without a time
-                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -498,17 +505,16 @@ class _Indicators(Namespace):
 
         Each row holds one bar's MACD line in `Value`, its signal line in `Signal`, and their
         difference in `Histogram`, with the bar's start and end. `Date` is the bar's day, in UTC for
-        crypto and forex and in New York time for the rest. Without `start`, the call reads the
-        whole series. Pass `start`, or a `limit` with the default newest-first order.
+        crypto and forex and in New York time for the rest. Pass `start`, or a `limit` with the
+        default newest-first order; without either, the call reads the whole series.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
-        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
-        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
-        never the finished one. On a delayed plan, reading through today raises
-        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. On a delayed plan,
+        reading through today raises `dm.EntitlementError` unless the subscription is in
+        `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset class.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
             short_window: The bars of the fast exponential average.
             long_window: The bars of the slow exponential average.
             signal_window: The bars of the signal line's average.
@@ -528,10 +534,13 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
-                It's also raised when a window isn't positive, a bound is a time without a time
-                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
-                value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

@@ -12,7 +12,8 @@ Partner datasets stay nested by vendor, one class each:
 Every partner dataset is a REST list endpoint, so every factory returns a `Query`: `fetch()`
 reads every page once into a static table, and `poll()` re-reads it on an interval into a live
 one. Nothing streams over the WebSocket and nothing has flat files. Each factory validates its
-arguments synchronously and touches no network; the request runs only when a verb is called.
+arguments synchronously and touches no network; the request runs only when a query method is
+called.
 
 This module owns the partners' `DatasetSpec`s, exported as `DATASETS` and composed into the
 dataset catalog (`CATALOG` in `_session.py`). A spec names its REST path and the facts the
@@ -409,8 +410,9 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` isn't positive. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -447,7 +449,7 @@ class _Benzinga(Namespace):
         `date_gte`.
 
         Args:
-            symbols: US stock tickers; leave it out for every ticker.
+            symbols: US stock tickers. Leave it out for every ticker; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -460,9 +462,11 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -498,7 +502,7 @@ class _Benzinga(Namespace):
         `start` or `end`, so narrow the dates with `filters`, such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; leave it out for every ticker.
+            symbols: US stock tickers. Leave it out for every ticker; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -511,9 +515,11 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -543,7 +549,7 @@ class _Benzinga(Namespace):
         dataset has no `limit`.
 
         Args:
-            symbols: US stock tickers; required.
+            symbols: US stock tickers. `dm.ALL` is refused; pass a list of tickers.
             filters: The range of the ratings to count, such as `{"date_gte": "2026-01-01"}`; leave
                 it out to count every rating.
 
@@ -553,9 +559,10 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None, `dm.ALL`, or empty, or holds a ticker that isn't
-                Massive's exact ticker. A filter the dataset doesn't take, or a value that doesn't
-                fit it, raises it too.
+            ValueError: If:
+                - `symbols` is None, `dm.ALL`, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -588,7 +595,7 @@ class _Benzinga(Namespace):
         changed. `Symbol` is null on a row Benzinga sends without a ticker.
 
         Args:
-            symbols: US stock tickers; leave it out for every ticker.
+            symbols: US stock tickers. Leave it out for every ticker; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"last_updated"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -601,9 +608,11 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -639,7 +648,7 @@ class _Benzinga(Namespace):
         has no `start` or `end`, so narrow the dates with `filters`, such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; leave it out for every ticker.
+            symbols: US stock tickers. Leave it out for every ticker; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -652,9 +661,11 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -691,7 +702,7 @@ class _Benzinga(Namespace):
         such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; leave it out for every ticker.
+            symbols: US stock tickers. Leave it out for every ticker; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -704,9 +715,11 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -752,8 +765,9 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` isn't positive. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -790,7 +804,7 @@ class _Benzinga(Namespace):
         articles it hasn't seen, so it needs a `start` or a `limit`.
 
         Args:
-            symbols: US stock tickers; leave it out for every article.
+            symbols: US stock tickers. Leave it out for every article; `dm.ALL` is refused.
             start: The earliest publication time.
             end: The end of the range.
             sort: Any field of the rows, such as `"published"`.
@@ -805,10 +819,13 @@ class _Benzinga(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when a bound isn't a date or a time with a time zone,
-                the range ends before it starts, or `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date or a time with a time zone;
+                - the range ends before it starts;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -869,7 +886,7 @@ class _EtfGlobal(Namespace):
         components, on one `EffectiveDate`.
 
         Args:
-            symbols: ETF tickers; leave it out for every fund.
+            symbols: ETF tickers. Leave it out for every fund; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -882,9 +899,11 @@ class _EtfGlobal(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -919,7 +938,7 @@ class _EtfGlobal(Namespace):
         value, and shares. A fund holds hundreds of securities on many dates, so filter by date.
 
         Args:
-            symbols: ETF tickers; leave it out for every fund.
+            symbols: ETF tickers. Leave it out for every fund; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"weight"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -932,9 +951,11 @@ class _EtfGlobal(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -970,7 +991,7 @@ class _EtfGlobal(Namespace):
         holds the fund's net asset value and shares outstanding that day.
 
         Args:
-            symbols: ETF tickers; leave it out for every fund.
+            symbols: ETF tickers. Leave it out for every fund; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -983,9 +1004,11 @@ class _EtfGlobal(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1020,7 +1043,7 @@ class _EtfGlobal(Namespace):
         currency, is a column of JSON text.
 
         Args:
-            symbols: ETF tickers; leave it out for every fund.
+            symbols: ETF tickers. Leave it out for every fund; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -1033,9 +1056,11 @@ class _EtfGlobal(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1069,7 +1094,7 @@ class _EtfGlobal(Namespace):
         weighting methods, leverage, rebalancing, ESG, and tax classification on an `EffectiveDate`.
 
         Args:
-            symbols: ETF tickers; leave it out for every fund.
+            symbols: ETF tickers. Leave it out for every fund; `dm.ALL` is refused.
             sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
@@ -1082,9 +1107,11 @@ class _EtfGlobal(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
-                exact ticker. It's also raised when `limit` isn't positive. A filter the dataset
-                doesn't take, or a value that doesn't fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1145,7 +1172,7 @@ class _Tmx(Namespace):
         has a null `Symbol` and keeps its `Isin`.
 
         Args:
-            symbols: Tickers as TMX writes them; leave it out for every event.
+            symbols: Tickers as TMX writes them. Leave it out for every event; `dm.ALL` is refused.
             start: The first event day.
             end: The last event day.
             sort: Any field of the rows, such as `"type"`.
@@ -1160,10 +1187,13 @@ class _Tmx(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, or holds text that can't be a ticker.
-                It's also raised when a bound isn't a date, the range ends before it starts, or
-                `limit` isn't positive. A filter the dataset doesn't take, or a value that doesn't
-                fit it, raises it too.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a symbol is text that can't be a ticker;
+                - a bound isn't a date;
+                - the range ends before it starts;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1241,9 +1271,11 @@ class _Fable(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound isn't a date, the range ends before it starts, or `limit` isn't
-                positive. A filter the dataset doesn't take, or a value that doesn't fit it, raises
-                it too.
+            ValueError: If:
+                - a bound isn't a date;
+                - the range ends before it starts;
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1292,8 +1324,9 @@ class _Fable(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` isn't positive. A filter the dataset doesn't take, or a value
-                that doesn't fit it, raises it too.
+            ValueError: If:
+                - `limit` isn't positive;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::

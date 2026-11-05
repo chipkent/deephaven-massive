@@ -270,13 +270,13 @@ class _Forex(Namespace):
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
 
-        Each row holds one quote of Massive's feed. The feed combines prices from banks and trading
+        Each row holds one quote of Massive's feed, which combines prices from banks and trading
         venues. `Date` is the UTC date of `Timestamp`. For each pair's latest quote alone, use
         `last_quote()`.
 
         Args:
-            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL`. `dm.canonical_symbol_forex`
-                converts `EUR/USD`.
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
+                `dm.canonical_symbol_forex` converts `EUR/USD`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -284,8 +284,10 @@ class _Forex(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a pair isn't two three-letter currency codes, or `symbols` is None. It's
-                also raised when the sequence is empty or a table has no `Symbol` column.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -299,14 +301,13 @@ class _Forex(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest best bid and ask of each currency pair.
 
-        Each row holds one pair's latest quote. A pair with no quote is left out, with a WARNING. A
-        `poll()` sees only the quote that is latest at each cycle. To see every quote, use
-        `quotes()`. Currencies Basic doesn't include this dataset. `snapshots()` also carries each
-        pair's last quote.
+        Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
+        logs a WARNING. Each poll sees only the quote that is latest at that moment; `quotes()`
+        streams every quote. Currencies Basic doesn't include this dataset.
 
         Args:
-            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; use
-                `m.forex.snapshots(dm.ALL)` instead.
+            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use
+                `m.forex.snapshots(dm.ALL)`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -314,9 +315,10 @@ class _Forex(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL` or None, or a pair isn't two three-letter currency
-                codes. It's also raised when the sequence is empty or a table has no `Symbol`
-                column.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -363,22 +365,23 @@ class _Forex(Namespace):
         `previous_day_bar()`.
 
         Args:
-            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL`. `history()` takes `dm.ALL` for
-                one-minute and one-day bars.
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()`
+                takes `dm.ALL` for one-minute and one-day bars.
             timespan: The bar's unit, any but `dm.Timespan.SESSION`.
             multiplier: Units per bar.
 
         Returns:
-            A query: a `StreamHistoryQuery`, which also streams, for one-second and one-minute bars
-            with `multiplier=1`. Otherwise it's a `HistoryQuery`, for history only. Its columns,
-            plans, and methods:
+            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
+            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
+            history only. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION` or `multiplier` is below 1. It's also raised when
-                `symbols` is empty or None, or holds a pair that isn't two three-letter currency
-                codes.
+            ValueError: If:
+                - `timespan` is `SESSION`, or `multiplier` is below 1;
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair.
 
         Example:
             ::
@@ -400,14 +403,12 @@ class _Forex(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
-        Each row holds one pair's bar of the previous complete UTC day. Massive stamps the bar at
-        23:59:59.999 UTC, and the library moves it to the day's start. A bar with another stamp
-        keeps it, ends a day later, and has no `Date`, and the library logs a WARNING. A pair with
-        no bar is left out, with a WARNING.
+        Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
+        row, and the library logs a WARNING.
 
         Args:
-            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; use
-                `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` instead.
+            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair's bar
+                of one day, use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -415,9 +416,10 @@ class _Forex(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL` or None, or a pair isn't two three-letter currency
-                codes. It's also raised when the sequence is empty or a table has no `Symbol`
-                column.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -444,7 +446,7 @@ class _Forex(Namespace):
         Business includes it. It streams only, with no history.
 
         Args:
-            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL`.
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -452,8 +454,10 @@ class _Forex(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a pair isn't two three-letter currency codes, or `symbols` is None. It's
-                also raised when the sequence is empty or a table has no `Symbol` column.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -478,8 +482,10 @@ class _Forex(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a pair isn't two three-letter currency codes, or `symbols` is None. It's
-                also raised when the sequence is empty or a table has no `Symbol` column.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -494,7 +500,7 @@ class _Forex(Namespace):
 
         Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
         change. Massive clears the list daily at midnight Eastern time and refills it as quotes
-        arrive. So the list can be empty just after midnight. A `poll()` table keeps one row per
+        arrive, so the list can be empty just after midnight. A `poll()` table keeps one row per
         pair, so pairs come and go as the ranking changes.
 
         Args:
@@ -539,9 +545,10 @@ class _Forex(Namespace):
         Raises:
             TypeError: If a currency isn't a `str`, `amount` isn't an `int` or `float`, or
                 `precision` isn't an `int`. A `bool` is neither number.
-            ValueError: If a currency isn't exactly three upper-case letters, so `"usd"` is refused.
-                It's also raised when `amount` isn't positive and finite, or `precision` isn't one
-                Massive accepts.
+            ValueError: If:
+                - a currency isn't exactly three upper-case letters, so `"usd"` is refused;
+                - `amount` isn't positive and finite;
+                - `precision` isn't 0 to 4.
 
         Example:
             ::
