@@ -57,9 +57,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol for the asset." |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker symbol for the asset." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. Null on a row of any other class. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Value` | double | Value of Index. |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
@@ -131,10 +131,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `Underlying` | String | The instrument Massive links the row to, in the library's canonical symbol form; for an option, the linked instrument, not what the contract delivers. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
+| `Underlying` | String | The instrument Massive links the row to, as Massive's ticker. For an option, it's the linked instrument, not what the contract delivers. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `Type` | String | The asset class for this ticker. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

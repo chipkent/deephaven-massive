@@ -41,8 +41,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company issuing guidance." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The stock symbol of the company issuing guidance." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `BenzingaId` | String | A unique identifier assigned by Benzinga to the guidance record. |
 | `CompanyName` | String | The name of the company issuing guidance. |
 | `Currency` | String | The ISO 4217 code representing the currency in which the company issued its guidance figures. |
@@ -67,7 +67,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ReleaseType` | String | Indicates whether the guidance was issued as part of a scheduled earnings release ('official') or as an unscheduled update ('preliminary'). |
 | `RevenueMethod` | String | The methodology of the revenue figure. Possible values are gaap (standardized financials under Generally Accepted Accounting Principles) and adj (adjusted, non-GAAP). |
 | `Time` | String | The time of day the guidance was announced, in HH:mm:ss format. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

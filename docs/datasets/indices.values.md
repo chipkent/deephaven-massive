@@ -38,12 +38,12 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description | Read from |
 | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `T`: "The assigned ticker of the index." | flat files, WebSocket |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `T`: "The assigned ticker of the index." | flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | flat files, WebSocket |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From flat files `timestamp`: "The timestamp in Unix MS."; WebSocket `t`: "The Timestamp in Unix MS." | flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | flat files, WebSocket |
 | `Value` | double | The value of the index. | flat files, WebSocket |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one flat-file block or WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | flat files, WebSocket |
 
 <a id="massive-fields"></a>
 

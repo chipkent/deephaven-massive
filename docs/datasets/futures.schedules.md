@@ -55,7 +55,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ProductName` | String | The name of the futures product to which this schedule applies. |
 | `SessionEndDate` | String | The session end date (also known as the trading date) of the session the event belongs to. Trading sessions end at 5 PM Central Time, so a session ending at 5 PM CT on January 1st has a session_end_date of 2025-01-01. |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this schedule's product trades. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

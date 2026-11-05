@@ -41,8 +41,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company reporting earnings." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The stock symbol of the company reporting earnings." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `ActualEps` | double | The actual earnings per share (EPS) reported by the company for the given period. |
 | `ActualRevenue` | double | The actual revenue reported by the company for the given fiscal period. |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. |
@@ -66,7 +66,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `RevenueSurprise` | double | The difference between the actual and estimated revenue. |
 | `RevenueSurprisePercent` | double | The revenue surprise relative to the estimate, as a decimal fraction (0.126 = 12.6%), calculated as revenue_surprise divided by the absolute value of estimated_revenue. Positive is a beat and negative a miss. |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS EST) when the earnings are scheduled or were reported. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

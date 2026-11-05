@@ -56,7 +56,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Tickers` | String[] | A list of stock or crypto tickers mentioned in the article. |
 | `Title` | String | The headline of the news article. |
 | `Url` | String | The direct link to the source of the news article. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

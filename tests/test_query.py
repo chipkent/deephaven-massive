@@ -1477,7 +1477,7 @@ def test_columns_lists_the_schema_without_any_request(
     listed = dh_to_pylist(table)
     assert listed == expected_columns(massive_session, TRADES_SPEC)
     assert listed[0]["Name"] == "Symbol"
-    assert listed[0]["Description"].startswith("The instrument")
+    assert listed[0]["Description"].startswith("The row's instrument")
     assert listed[0]["SuppliedBy"] == "REST, WebSocket"
     # The arguments choose rows, never columns.
     assert dh_to_pylist(trades(massive_session, ["MSFT", "IBM"]).columns()) == listed

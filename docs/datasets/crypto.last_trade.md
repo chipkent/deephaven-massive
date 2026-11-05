@@ -39,14 +39,14 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter. |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `from` parameter. |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp." |
 | `Price` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). |
 | `Size` | double | The size of a trade (also known as volume). |
 | `Conditions` | long[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. |
 | `Exchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

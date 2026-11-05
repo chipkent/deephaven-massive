@@ -41,10 +41,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From WebSocket `T`: "The ticker symbol for the given stock." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `AuctionTime` | long | The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST. |
 | `AuctionType` | String | The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only) |
 | `SymbolSequence` | long | The symbol sequence. |
@@ -52,7 +52,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ImbalanceQuantity` | long | The imbalance quantity. |
 | `PairedQuantity` | long | The paired quantity. |
 | `BookClearingPrice` | double | The book clearing price. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one WebSocket frame shares it. It isn't Massive's time, and it isn't monotonic. |
 
 <a id="massive-fields"></a>
 

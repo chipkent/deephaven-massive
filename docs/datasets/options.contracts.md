@@ -48,9 +48,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the option contract." |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker for the option contract." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. The column holds Massive's value as JSON text. |
 | `Cfi` | String | The 6 letter CFI code of the contract (defined in ISO 10962 (https://en.wikipedia.org/wiki/ISO_10962)) |
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". |
@@ -60,8 +60,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. |
 | `SharesPerContract` | double | The number of shares per contract for this contract. |
 | `StrikePrice` | double | The strike price of the option contract. |
-| `Underlying` | String | The instrument Massive links the row to, in the library's canonical symbol form; for an option, the linked instrument, not what the contract delivers. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `Underlying` | String | The instrument Massive links the row to, as Massive's ticker. For an option, it's the linked instrument, not what the contract delivers. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

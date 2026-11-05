@@ -41,8 +41,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
+| `Symbol` | String | The row's instrument, as Massive's ticker. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. |
 | `Administrator` | String | The administrator of the ETF. |
 | `Advisor` | String | The investment advisor of the ETF. |
 | `AssetClass` | String | The primary type of assets held by the ETF, such as equities, bonds, commodities, or other securities. |
@@ -98,7 +98,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TotalExpenses` | double | The total annual expense ratio of the ETF, including all fees and costs passed on to investors. |
 | `TransferAgent` | String | The transfer agent for the ETF. |
 | `Trustee` | String | The trustee of the ETF. |
-| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant, by the local clock. Every row of one REST page shares it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the latest poll's time. |
 
 <a id="massive-fields"></a>
 

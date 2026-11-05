@@ -76,11 +76,11 @@ SYMBOL: Final = "Symbol"
 tickers (`DatasetSpec.ticker_list`), a column the library fills from the request."""
 
 KEY_SENTENCES: Final[Mapping[str, str]] = {
-    "Symbol": "The instrument, in the library's canonical symbol form.",
+    "Symbol": "The row's instrument, as Massive's ticker.",
     TIMESTAMP: "The row's primary time, as an Instant.",
     "Underlying": (
-        "The instrument Massive links the row to, in the library's canonical symbol form; for "
-        "an option, the linked instrument, not what the contract delivers."
+        "The instrument Massive links the row to, as Massive's ticker. For an option, it's the "
+        "linked instrument, not what the contract delivers."
     ),
 }
 """The library's own sentence for each renamed key column of every dataset; its description
@@ -102,10 +102,10 @@ DERIVED_SENTENCES: Final[Mapping[str, str]] = {
         "keeps its own root, such as `AAPL1`."
     ),
     RAW_SYMBOL: (
-        "The symbol exactly as Massive sent it, on a row whose spelling the library cannot "
-        "read as the dataset's class (its `Symbol` is then null); null on every other row. "
-        "Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails "
-        "on such a row instead."
+        "The symbol exactly as Massive sent it, on a row whose symbol the library can't read "
+        "for the dataset's asset class. That row's `Symbol` is null. Null on every other row. "
+        "The column is absent when the session's `unreadable_symbols` is `dm.OnError.RAISE`, "
+        "which fails on such a row instead."
     ),
 }
 """The library's description of each derived column."""
@@ -176,12 +176,24 @@ _NULL_DATE: Final = (
 """The join caveat every bars dataset's `Date` ends with."""
 
 _INSERT_SENTENCE: Final = (
-    "When the library received the row, as an Instant: the local clock when the REST page, "
-    "flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. "
-    "It is not monotonic and is not Massive's own receive time; on history() rows it is the "
-    "download time, and in a poll() table the latest poll's."
+    "When the library received the row, as an Instant, by the local clock. Every row of one "
+    "{carriers} shares it. It isn't Massive's time, and it isn't monotonic."
 )
-"""The description of every dataset's `TimestampInsert`."""
+"""The first sentences of every dataset's `TimestampInsert`, formatted with what carries rows
+on the dataset's transports (`_CARRIERS`)."""
+
+_CARRIERS: Final[Mapping[Transport, str]] = {
+    Transport.REST: "REST page",
+    Transport.FLAT_FILES: "flat-file block",
+    Transport.WS: "WebSocket frame",
+}
+"""What carries rows on each transport, as `TimestampInsert` names it."""
+
+_HISTORY_INSERT: Final = "On `history()` rows, it's the download time."
+"""The sentence `TimestampInsert` adds on a dataset with `history()`."""
+
+_POLL_INSERT: Final = "In a `poll()` table, it's the latest poll's time."
+"""The sentence `TimestampInsert` adds on a dataset with `fetch()`, and so `poll()`."""
 
 _FROM_PARTS: Final = frozenset({"Symbol", "Underlying", TIMESTAMP, START, DATE})
 """The library's columns whose description goes on to quote the wire key behind each source;
@@ -332,6 +344,27 @@ def _end_sentence(spec: DatasetSpec) -> str:
     )
 
 
+def _insert_sentence(spec: DatasetSpec) -> str:
+    """Return a dataset's `TimestampInsert` description, naming only what applies to it.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        `_INSERT_SENTENCE` with the row carriers of the dataset's transports, then
+        `_HISTORY_INSERT` for a dataset with `history()` and `_POLL_INSERT` for one with
+        `fetch()`.
+    """
+    used = {transport for transport, _ in spec.sources}
+    carriers = [_CARRIERS[t] for t in TRANSPORT_ORDER if t in used]
+    joined = ", ".join(carriers[:-1]) + (" or " if carriers[1:] else "") + carriers[-1]
+    text = _INSERT_SENTENCE.format(carriers=joined)
+    for sentence, applies in ((_HISTORY_INSERT, spec.has_history), (_POLL_INSERT, spec.has_fetch)):
+        if applies:
+            text = f"{text} {sentence}"
+    return text
+
+
 def _library_sentence(spec: DatasetSpec, name: str) -> str:
     """Return the library's own sentence for one of a dataset's library columns.
 
@@ -351,7 +384,7 @@ def _library_sentence(spec: DatasetSpec, name: str) -> str:
     if name == END:
         return _end_sentence(spec)
     if name == INSERT:
-        return _INSERT_SENTENCE
+        return _insert_sentence(spec)
     if name == SYMBOL and spec.ticker_list is not None:
         return (
             f"The ticker the request named that the row lists in `{spec.ticker_list}`: a row "
