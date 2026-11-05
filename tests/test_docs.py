@@ -349,7 +349,7 @@ _PROMISED: dict[str, tuple[str, ...]] = {
         "since_start",
         "spy",
     ),
-    "docs/troubleshooting.md": ("kept", "streams"),
+    "docs/troubleshooting.md": ("streams",),
 }
 
 
