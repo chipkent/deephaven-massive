@@ -220,8 +220,9 @@ class MassiveSession:
     them all. In a `with` block, the session closes when the block ends. See
     https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
-    Use one session per API key. Massive allows one streaming connection per asset class by default,
-    so two sessions with the same key and different settings compete for it. A WARNING says so when
+    Use one session per API key. Massive allows one streaming connection per asset class by default.
+    Two sessions with the same key share it only when their streaming settings match, such as
+    `websocket_hosts` and `max_outage`. Otherwise they compete for it, and a WARNING says so when
     you create the second one.
 
     Example:
@@ -249,7 +250,9 @@ class MassiveSession:
         "_stocks",
     )
 
-    @raises_through(MassiveConfig.__post_init__, configure_from_environment)
+    @raises_through(
+        MassiveConfig.__post_init__, configure_from_environment, refuse_update_graph_thread
+    )
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Create a session.
 
@@ -262,10 +265,12 @@ class MassiveSession:
             AuthenticationError: If `config` is left out and `MASSIVE_API_KEY` isn't set.
             ValueError: If:
                 - it runs on a Deephaven update-graph thread, such as inside a table listener;
-                - `DEEPHAVEN_MASSIVE_LOG` isn't a log level name;
+                - for the first session of the process, `DEEPHAVEN_MASSIVE_LOG` isn't a log level
+                  name, or either log variable has spaces around it;
                 - `config` is left out and an environment variable isn't valid, such as a key with
                   spaces around it, or only one of the two `MASSIVE_S3_*` variables set.
-            OSError: If `DEEPHAVEN_MASSIVE_LOG_FILE` names a file that can't be opened.
+            OSError: For the first session of the process, if `DEEPHAVEN_MASSIVE_LOG_FILE` names a
+                file that can't be opened.
             MassiveError: If it runs on a thread with no Deephaven execution context, or in one made
                 by `make_user_exec_ctx(freeze_vars=...)`, which the library can't use.
         """

@@ -290,9 +290,9 @@ class _Indicators(Namespace):
 
         A read through today includes the current bar's value, which changes until the bar ends.
         `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
-        `APPEND` mode keeps each bar's first, unfinished value and never its finished one. On a
-        delayed plan, reading through today raises `dm.EntitlementError` unless the subscription is
-        in `MassiveConfig.delayed_subscriptions`.
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class. `dm.ALL` is refused.
@@ -364,9 +364,9 @@ class _Indicators(Namespace):
 
         A read through today includes the current bar's value, which changes until the bar ends.
         `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
-        `APPEND` mode keeps each bar's first, unfinished value and never its finished one. On a
-        delayed plan, reading through today raises `dm.EntitlementError` unless the subscription is
-        in `MassiveConfig.delayed_subscriptions`.
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class. `dm.ALL` is refused.
@@ -437,9 +437,9 @@ class _Indicators(Namespace):
 
         A read through today includes the current bar's value, which changes until the bar ends.
         `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
-        `APPEND` mode keeps each bar's first, unfinished value and never its finished one. On a
-        delayed plan, reading through today raises `dm.EntitlementError` unless the subscription is
-        in `MassiveConfig.delayed_subscriptions`.
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class. `dm.ALL` is refused.
@@ -513,9 +513,9 @@ class _Indicators(Namespace):
 
         A read through today includes the current bar's value, which changes until the bar ends.
         `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
-        `APPEND` mode keeps each bar's first, unfinished value and never its finished one. On a
-        delayed plan, reading through today raises `dm.EntitlementError` unless the subscription is
-        in `MassiveConfig.delayed_subscriptions`.
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class. `dm.ALL` is refused.

@@ -231,8 +231,8 @@ class EntitlementError(MassiveError):
     isn't in `MassiveConfig.delayed_subscriptions`. The message then names the setting to change.
     Only the table that asked fails. Other tables on the same connection keep running.
 
-    The message says what Massive refused, in Massive's own words, and names another source when one
-    can serve the same data.
+    The message says what Massive refused, in Massive's own words. A refused flat-file `history()`
+    also names `source=dm.HistorySource.REST` when REST can serve the read.
 
     Example:
         Read a day of trades, and report it when your plan lacks them::
